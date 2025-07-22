@@ -6,7 +6,7 @@
 
 import { promises as fs } from 'fs';
 import { join } from 'path';
-import { getProjectTempDir } from '@qwen/qwen-code-core';
+import { getProjectTempDir } from '@qwen-code/qwen-code-core';
 
 const cleanupFunctions: Array<() => void> = [];
 

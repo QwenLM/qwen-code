@@ -15,7 +15,7 @@ import {
   BugCommandSettings,
   TelemetrySettings,
   AuthType,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
 import { DefaultDark } from '../ui/themes/default.js';

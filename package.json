@@ -1,5 +1,5 @@
 {
-  "name": "@qwen/qwen-code",
+  "name": "@qwen-code/qwen-code",
   "version": "0.0.1-alpha.7",
   "engines": {
     "node": ">=20"

@@ -1,5 +1,5 @@
 {
-  "name": "@qwen/qwen-code-vscode-ide-companion",
+  "name": "@qwen-code/qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code VSCode IDE Companion",
   "description": "",
   "version": "0.0.1-alpha.7",

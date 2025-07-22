@@ -7,7 +7,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { vi } from 'vitest';
 import { useShellCommandProcessor } from './shellCommandProcessor';
-import { Config, GeminiClient } from '@qwen/qwen-code-core';
+import { Config, GeminiClient } from '@qwen-code/qwen-code-core';
 import * as fs from 'fs';
 import EventEmitter from 'events';
 
@@ -22,7 +22,7 @@ vi.mock('os', () => ({
   platform: () => 'linux',
   tmpdir: () => '/tmp',
 }));
-vi.mock('@qwen/qwen-code-core');
+vi.mock('@qwen-code/qwen-code-core');
 vi.mock('../utils/textUtils.js', () => ({
   isBinary: vi.fn(),
 }));

@@ -14,7 +14,7 @@ import {
   SessionMetrics,
 } from './SessionContext.js';
 import { describe, it, expect, vi } from 'vitest';
-import { uiTelemetryService } from '@qwen/qwen-code-core';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 /**
  * A test harness component that uses the hook and exposes the context value

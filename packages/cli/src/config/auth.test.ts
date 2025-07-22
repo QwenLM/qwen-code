@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import { vi } from 'vitest';
 import { validateAuthMethod } from './auth.js';
 

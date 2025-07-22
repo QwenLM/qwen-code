@@ -11,7 +11,7 @@ import {
   allowEditorTypeInSandbox,
   checkHasEditorType,
   EditorType,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 
 interface UseEditorSettingsReturn {
   isEditorDialogOpen: boolean;

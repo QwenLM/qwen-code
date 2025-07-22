@@ -21,7 +21,7 @@ import {
   ToolCall,
   Status as CoreStatus,
   EditorType,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import { useCallback, useState, useMemo } from 'react';
 import {
   HistoryItemToolGroup,

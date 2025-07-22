@@ -12,7 +12,7 @@ import {
   getErrorMessage,
   isNodeError,
   unescapePath,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import {
   HistoryItem,
   IndividualToolCallDisplay,

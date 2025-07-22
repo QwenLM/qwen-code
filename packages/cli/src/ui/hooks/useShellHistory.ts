@@ -7,7 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { isNodeError, getProjectTempDir } from '@qwen/qwen-code-core';
+import { isNodeError, getProjectTempDir } from '@qwen-code/qwen-code-core';
 
 const HISTORY_FILE = 'shell_history';
 const MAX_HISTORY_LENGTH = 100;

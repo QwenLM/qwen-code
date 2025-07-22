@@ -15,7 +15,7 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../config/settings.js';
 import { promisify } from 'util';
-import { SandboxConfig } from '@qwen/qwen-code-core';
+import { SandboxConfig } from '@qwen-code/qwen-code-core';
 
 const execAsync = promisify(exec);
 

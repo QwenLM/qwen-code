@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Config, GitService, Logger } from '@qwen/qwen-code-core';
+import { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
 import { LoadedSettings } from '../../config/settings.js';
 import { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { SessionStatsState } from '../contexts/SessionContext.js';

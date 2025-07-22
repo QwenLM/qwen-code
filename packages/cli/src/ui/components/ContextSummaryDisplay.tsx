@@ -7,7 +7,7 @@
 import React from 'react';
 import { Text } from 'ink';
 import { Colors } from '../colors.js';
-import { type MCPServerConfig } from '@qwen/qwen-code-core';
+import { type MCPServerConfig } from '@qwen-code/qwen-code-core';
 
 interface ContextSummaryDisplayProps {
   geminiMdFileCount: number;

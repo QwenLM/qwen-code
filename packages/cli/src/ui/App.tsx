@@ -57,7 +57,7 @@ import {
   EditorType,
   FlashFallbackEvent,
   logFlashFallback,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import { validateAuthMethod } from '../config/auth.js';
 import { useLogger } from './hooks/useLogger.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
@@ -74,7 +74,7 @@ import {
   isProQuotaExceededError,
   isGenericQuotaExceededError,
   UserTierId,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 import { checkForUpdates } from './utils/updateCheck.js';
 import ansiEscapes from 'ansi-escapes';
 import { OverflowProvider } from './contexts/OverflowContext.js';

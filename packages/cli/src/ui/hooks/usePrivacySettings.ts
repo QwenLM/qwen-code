@@ -6,7 +6,11 @@
 
 import { GaxiosError } from 'gaxios';
 import { useState, useEffect, useCallback } from 'react';
-import { Config, CodeAssistServer, UserTierId } from '@qwen/qwen-code-core';
+import {
+  Config,
+  CodeAssistServer,
+  UserTierId,
+} from '@qwen-code/qwen-code-core';
 
 export interface PrivacyState {
   isLoading: boolean;

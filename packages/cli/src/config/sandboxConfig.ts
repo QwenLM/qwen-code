@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SandboxConfig } from '@qwen/qwen-code-core';
+import { SandboxConfig } from '@qwen-code/qwen-code-core';
 import commandExists from 'command-exists';
 import * as os from 'node:os';
 import { getPackageJson } from '../utils/package.js';

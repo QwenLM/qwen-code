@@ -8,7 +8,7 @@ import { Box, Newline, Text, useInput } from 'ink';
 import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
 import { usePrivacySettings } from '../hooks/usePrivacySettings.js';
 import { CloudPaidPrivacyNotice } from './CloudPaidPrivacyNotice.js';
-import { Config } from '@qwen/qwen-code-core';
+import { Config } from '@qwen-code/qwen-code-core';
 import { Colors } from '../colors.js';
 
 interface CloudFreePrivacyNoticeProps {

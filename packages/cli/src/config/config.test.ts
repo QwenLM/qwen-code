@@ -9,12 +9,12 @@ import * as os from 'os';
 import { loadCliConfig, parseArguments } from './config.js';
 import { Settings } from './settings.js';
 import { Extension } from './extension.js';
-import * as ServerConfig from '@qwen/qwen-code-core';
+import * as ServerConfig from '@qwen-code/qwen-code-core';
 import {
   TelemetryTarget,
   ConfigParameters,
   DEFAULT_TELEMETRY_TARGET,
-} from '@qwen/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 
 vi.mock('os', async (importOriginal) => {
   const actualOs = await importOriginal<typeof os>();
@@ -34,9 +34,9 @@ vi.mock('read-package-up', () => ({
   ),
 }));
 
-vi.mock('@qwen/qwen-code-core', async () => {
+vi.mock('@qwen-code/qwen-code-core', async () => {
   const actualServer = await vi.importActual<typeof ServerConfig>(
-    '@qwen/qwen-code-core',
+    '@qwen-code/qwen-code-core',
   );
   return {
     ...actualServer,

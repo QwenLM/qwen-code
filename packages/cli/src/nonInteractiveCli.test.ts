@@ -7,14 +7,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { runNonInteractive } from './nonInteractiveCli.js';
-import { Config, GeminiClient, ToolRegistry } from '@qwen/qwen-code-core';
+import { Config, GeminiClient, ToolRegistry } from '@qwen-code/qwen-code-core';
 import { GenerateContentResponse, Part, FunctionCall } from '@google/genai';
 
 // Mock dependencies
-vi.mock('@qwen/qwen-code-core', async () => {
+vi.mock('@qwen-code/qwen-code-core', async () => {
   const actualCore = await vi.importActual<
-    typeof import('@qwen/qwen-code-core')
-  >('@qwen/qwen-code-core');
+    typeof import('@qwen-code/qwen-code-core')
+  >('@qwen-code/qwen-code-core');
   return {
     ...actualCore,
     GeminiClient: vi.fn(),
@@ -114,7 +114,7 @@ describe('runNonInteractive', () => {
     };
 
     const { executeToolCall: mockCoreExecuteToolCall } = await import(
-      '@qwen/qwen-code-core'
+      '@qwen-code/qwen-code-core'
     );
     vi.mocked(mockCoreExecuteToolCall).mockResolvedValue({
       callId: 'fc1',
@@ -168,7 +168,7 @@ describe('runNonInteractive', () => {
     };
 
     const { executeToolCall: mockCoreExecuteToolCall } = await import(
-      '@qwen/qwen-code-core'
+      '@qwen-code/qwen-code-core'
     );
     vi.mocked(mockCoreExecuteToolCall).mockResolvedValue({
       callId: 'fcError',
@@ -241,7 +241,7 @@ describe('runNonInteractive', () => {
     };
 
     const { executeToolCall: mockCoreExecuteToolCall } = await import(
-      '@qwen/qwen-code-core'
+      '@qwen-code/qwen-code-core'
     );
     vi.mocked(mockCoreExecuteToolCall).mockResolvedValue({
       callId: 'fcNotFound',
@@ -314,7 +314,7 @@ describe('runNonInteractive', () => {
     vi.mocked(mockConfig.getMaxSessionTurns).mockReturnValue(1);
 
     const { executeToolCall: mockCoreExecuteToolCall } = await import(
-      '@qwen/qwen-code-core'
+      '@qwen-code/qwen-code-core'
     );
     vi.mocked(mockCoreExecuteToolCall).mockResolvedValue({
       callId: 'fcLoop',

@@ -9,7 +9,7 @@ import { Box, Text, useInput } from 'ink';
 import { Colors } from '../colors.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
-import { AuthType } from '@qwen/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   validateAuthMethod,
   setOpenAIApiKey,
