@@ -16,7 +16,7 @@ Qwen Code is a command-line AI workflow tool adapted from [**Gemini CLI**](https
 
 Ensure you have [Node.js version 20](https://nodejs.org/en/download) or higher installed.
 
-```bash 
+```bash
 curl -qL https://www.npmjs.com/install.sh | sh
 ```
 

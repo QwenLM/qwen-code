@@ -12,7 +12,8 @@ import { MessageType } from '../types.js';
 import { getErrorMessage } from '@qwen/qwen-code-core';
 
 vi.mock('@qwen/qwen-code-core', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@qwen/qwen-code-core')>();
+  const original =
+    await importOriginal<typeof import('@qwen/qwen-code-core')>();
   return {
     ...original,
     getErrorMessage: vi.fn((error: unknown) => {
