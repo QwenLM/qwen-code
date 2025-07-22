@@ -36,7 +36,7 @@ qwen
 Or you can install it from source:
 
 ```bash
-git clone https://github.com/qwen-code/qwen-code.git
+git clone https://github.com/QwenLM/qwen-code.git
 cd qwen-code
 npm install
 npm install -g .
