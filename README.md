@@ -47,9 +47,9 @@ npm install -g .
 Set your Qwen API key (In Qwen Code project, you can also set your API key in `.env` file):
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="your_api_base_url_here"
-export OPENAI_MODEL="your_api_model_here"
+export QWEN_API_KEY="your_api_key_here"
+export QWEN_BASE_URL="your_api_base_url_here"
+export QWEN_MODEL="your_api_model_here"
 ```
 
 ## Usage Examples
