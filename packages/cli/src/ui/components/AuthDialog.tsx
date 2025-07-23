@@ -47,24 +47,27 @@ export function AuthDialog({
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
   const items = [{ label: 'OpenAI', value: AuthType.USE_OPENAI }];
 
-  const initialAuthIndex = items.findIndex((item) => {
-    if (settings.merged.selectedAuthType) {
-      return item.value === settings.merged.selectedAuthType;
-    }
+  const initialAuthIndex = Math.max(
+    0,
+    items.findIndex((item) => {
+      if (settings.merged.selectedAuthType) {
+        return item.value === settings.merged.selectedAuthType;
+      }
 
-    const defaultAuthType = parseDefaultAuthType(
-      process.env.GEMINI_DEFAULT_AUTH_TYPE,
-    );
-    if (defaultAuthType) {
-      return item.value === defaultAuthType;
-    }
+      const defaultAuthType = parseDefaultAuthType(
+        process.env.GEMINI_DEFAULT_AUTH_TYPE,
+      );
+      if (defaultAuthType) {
+        return item.value === defaultAuthType;
+      }
 
-    if (process.env.GEMINI_API_KEY) {
-      return item.value === AuthType.USE_GEMINI;
-    }
+      if (process.env.GEMINI_API_KEY) {
+        return item.value === AuthType.USE_GEMINI;
+      }
 
-    return item.value === AuthType.LOGIN_WITH_GOOGLE;
-  });
+      return item.value === AuthType.LOGIN_WITH_GOOGLE;
+    }),
+  );
 
   const handleAuthSelect = (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);

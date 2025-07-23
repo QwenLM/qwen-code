@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.0.1-alpha.7",
+  "version": "0.0.1-alpha.8",
   "engines": {
     "node": ">=20"
   },
@@ -8,13 +8,12 @@
   "workspaces": [
     "packages/*"
   ],
-  "private": "true",
   "repository": {
     "type": "git",
     "url": "git+http://gitlab.alibaba-inc.com/Qwen-Coder/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "us-docker.pkg.dev/gemini-code-dev/gemini-cli/sandbox:0.0.1-alpha.7"
+    "sandboxImageUri": "us-docker.pkg.dev/gemini-code-dev/gemini-cli/sandbox:0.0.1-alpha.8"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -82,5 +81,8 @@
     "typescript-eslint": "^8.30.1",
     "vitest": "^3.2.4",
     "yargs": "^18.0.0"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code": "^0.0.1-alpha.8"
   }
 }

@@ -2,7 +2,7 @@
   "name": "@qwen-code/qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code VSCode IDE Companion",
   "description": "",
-  "version": "0.0.1-alpha.7",
+  "version": "0.0.1-alpha.8",
   "engines": {
     "vscode": "^1.101.0"
   },

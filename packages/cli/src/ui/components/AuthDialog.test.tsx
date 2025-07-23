@@ -165,7 +165,7 @@ describe('AuthDialog', () => {
       );
 
       // Since only OpenAI is available, it should be selected by default
-      expect(lastFrame()).toContain('○ OpenAI');
+      expect(lastFrame()).toContain('● OpenAI');
     });
 
     it('should fall back to default if GEMINI_DEFAULT_AUTH_TYPE is not set', () => {
@@ -188,7 +188,7 @@ describe('AuthDialog', () => {
       );
 
       // Default is OpenAI (the only option)
-      expect(lastFrame()).toContain('○ OpenAI');
+      expect(lastFrame()).toContain('● OpenAI');
     });
 
     it('should show an error and fall back to default if GEMINI_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -214,7 +214,7 @@ describe('AuthDialog', () => {
 
       // Since the auth dialog doesn't show GEMINI_DEFAULT_AUTH_TYPE errors anymore,
       // it will just show the default OpenAI option
-      expect(lastFrame()).toContain('○ OpenAI');
+      expect(lastFrame()).toContain('● OpenAI');
     });
   });
 

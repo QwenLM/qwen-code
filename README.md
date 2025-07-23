@@ -109,7 +109,7 @@ qwen
 ### Terminal-Bench
 
 | Agent     | Model              | Accuracy |
-|-----------|--------------------|----------|
+| --------- | ------------------ | -------- |
 | Qwen Code | Qwen3-Coder-480A35 | 37.5     |
 
 ## Project Structure
