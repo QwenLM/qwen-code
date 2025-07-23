@@ -56,8 +56,19 @@ export function RadioButtonSelect<T>({
   showScrollArrows = false,
   maxItemsToShow = 10,
 }: RadioButtonSelectProps<T>): React.JSX.Element {
-  const [activeIndex, setActiveIndex] = useState(initialIndex);
+  // Ensure initialIndex is within bounds
+  const safeInitialIndex = items.length > 0 ? Math.max(0, Math.min(initialIndex, items.length - 1)) : 0;
+  const [activeIndex, setActiveIndex] = useState(safeInitialIndex);
   const [scrollOffset, setScrollOffset] = useState(0);
+
+  // Ensure activeIndex stays within bounds when items change
+  useEffect(() => {
+    if (items.length === 0) {
+      setActiveIndex(0);
+    } else if (activeIndex >= items.length) {
+      setActiveIndex(items.length - 1);
+    }
+  }, [items.length, activeIndex]);
 
   useEffect(() => {
     const newScrollOffset = Math.max(
@@ -73,18 +84,21 @@ export function RadioButtonSelect<T>({
 
   useInput(
     (input, key) => {
-      if (input === 'k' || key.upArrow) {
+      if ((input === 'k' || key.upArrow) && items.length > 0) {
         const newIndex = activeIndex > 0 ? activeIndex - 1 : items.length - 1;
         setActiveIndex(newIndex);
         onHighlight?.(items[newIndex]!.value);
       }
-      if (input === 'j' || key.downArrow) {
+      if ((input === 'j' || key.downArrow) && items.length > 0) {
         const newIndex = activeIndex < items.length - 1 ? activeIndex + 1 : 0;
         setActiveIndex(newIndex);
         onHighlight?.(items[newIndex]!.value);
       }
       if (key.return) {
-        onSelect(items[activeIndex]!.value);
+        // Add boundary check before accessing items[activeIndex]
+        if (activeIndex >= 0 && activeIndex < items.length && items[activeIndex]) {
+          onSelect(items[activeIndex]!.value);
+        }
       }
 
       // Enable selection directly from number keys.
