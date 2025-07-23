@@ -53,6 +53,7 @@ export function ThemeDialog({
   const initialThemeIndex = themeItems.findIndex(
     (item) => item.value === (settings.merged.theme || DEFAULT_THEME.name),
   );
+  const validInitialThemeIndex = initialThemeIndex >= 0 ? initialThemeIndex : 0;
 
   const scopeItems = [
     { label: 'User Settings', value: SettingScope.User },
@@ -198,7 +199,7 @@ export function ThemeDialog({
           <RadioButtonSelect
             key={selectInputKey}
             items={themeItems}
-            initialIndex={initialThemeIndex}
+            initialIndex={validInitialThemeIndex}
             onSelect={handleThemeSelect}
             onHighlight={onHighlight}
             isFocused={currenFocusedSection === 'theme'}
