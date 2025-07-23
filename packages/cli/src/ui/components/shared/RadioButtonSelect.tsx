@@ -64,12 +64,12 @@ export function RadioButtonSelect<T>({
   const [activeIndex, setActiveIndex] = useState(safeInitialIndex);
   const [scrollOffset, setScrollOffset] = useState(0);
 
-  // Ensure activeIndex stays within bounds when items change
+  // Ensure activeIndex is always within bounds when items change
   useEffect(() => {
     if (items.length === 0) {
       setActiveIndex(0);
     } else if (activeIndex >= items.length) {
-      setActiveIndex(items.length - 1);
+      setActiveIndex(Math.max(0, items.length - 1));
     }
   }, [items.length, activeIndex]);
 
@@ -87,15 +87,23 @@ export function RadioButtonSelect<T>({
 
   useInput(
     (input, key) => {
-      if ((input === 'k' || key.upArrow) && items.length > 0) {
-        const newIndex = activeIndex > 0 ? activeIndex - 1 : items.length - 1;
-        setActiveIndex(newIndex);
-        onHighlight?.(items[newIndex]!.value);
+      if (input === 'k' || key.upArrow) {
+        if (items.length > 0) {
+          const newIndex = activeIndex > 0 ? activeIndex - 1 : items.length - 1;
+          setActiveIndex(newIndex);
+          if (items[newIndex]) {
+            onHighlight?.(items[newIndex].value);
+          }
+        }
       }
-      if ((input === 'j' || key.downArrow) && items.length > 0) {
-        const newIndex = activeIndex < items.length - 1 ? activeIndex + 1 : 0;
-        setActiveIndex(newIndex);
-        onHighlight?.(items[newIndex]!.value);
+      if (input === 'j' || key.downArrow) {
+        if (items.length > 0) {
+          const newIndex = activeIndex < items.length - 1 ? activeIndex + 1 : 0;
+          setActiveIndex(newIndex);
+          if (items[newIndex]) {
+            onHighlight?.(items[newIndex].value);
+          }
+        }
       }
       if (key.return) {
         // Add bounds check before accessing items[activeIndex]
