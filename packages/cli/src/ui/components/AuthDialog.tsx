@@ -47,7 +47,7 @@ export function AuthDialog({
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
   const items = [{ label: 'OpenAI', value: AuthType.USE_OPENAI }];
 
-  const initialAuthIndex = items.findIndex((item) => {
+  const initialAuthIndex = Math.max(0, items.findIndex((item) => {
     if (settings.merged.selectedAuthType) {
       return item.value === settings.merged.selectedAuthType;
     }
@@ -64,7 +64,7 @@ export function AuthDialog({
     }
 
     return item.value === AuthType.LOGIN_WITH_GOOGLE;
-  });
+  }));
 
   const handleAuthSelect = (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);
