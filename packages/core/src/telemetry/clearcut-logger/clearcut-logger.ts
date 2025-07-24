@@ -166,10 +166,9 @@ export class ClearcutLogger {
   }
 
   // Visible for testing. Decodes protobuf-encoded response from Clearcut server.
-  decodeLogResponse(buf: Buffer): LogResponse | undefined {
-    // TODO(obrienowen): return specific errors to facilitate debugging.
+  decodeLogResponse(buf: Buffer): LogResponse {
     if (buf.length < 1) {
-      return undefined;
+      throw new Error('Invalid clearcut response: empty buffer received');
     }
 
     // The first byte of the buffer is `field<<3 | type`. We're looking for field
@@ -177,7 +176,10 @@ export class ClearcutLogger {
     // means field 1 is missing or the message is corrupted. Either way, we return
     // undefined.
     if (buf.readUInt8(0) !== 8) {
-      return undefined;
+      throw new Error(
+        `Invalid clearcut response: expected first byte to be 8, got ${buf.readUInt8(0)}. ` +
+        'Message field 1 is missing or corrupted.'
+      );
     }
 
     let ms = BigInt(0);
@@ -195,7 +197,10 @@ export class ClearcutLogger {
     if (cont) {
       // We have fallen off the buffer without seeing a terminating byte. The
       // message is corrupted.
-      return undefined;
+      throw new Error(
+        'Invalid clearcut response: corrupted protobuf message. ' +
+        'Reached end of buffer without finding terminating byte.'
+      );
     }
 
     const returnVal = {
