@@ -152,4 +152,3 @@ This project is based on [Google Gemini CLI](https://github.com/google-gemini/ge
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=QwenLM/qwen-code&type=Date)](https://www.star-history.com/#QwenLM/qwen-code&Date)
-
