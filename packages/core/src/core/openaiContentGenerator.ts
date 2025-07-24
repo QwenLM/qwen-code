@@ -880,10 +880,17 @@ export class OpenAIContentGenerator implements ContentGenerator {
           }
           // Handle regular text messages
           else {
-            const role =
-              content.role === 'model'
-                ? ('assistant' as const)
-                : ('user' as const);
+            // Only assign user role to genuine user content, not tool responses
+            let role: 'assistant' | 'user' | 'system';
+            if (content.role === 'model') {
+              role = 'assistant' as const;
+            } else if (content.role === 'user') {
+              role = 'user' as const;
+            } else {
+              // For any other role (e.g., system, unknown), use system to avoid confusion
+              role = 'system' as const;
+            }
+            
             const text = textParts.join('\n');
             if (text) {
               messages.push({ role, content: text });
@@ -1521,7 +1528,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
         messages.push({ role: 'user', content: request.contents });
       } else if ('role' in request.contents && 'parts' in request.contents) {
         const content = request.contents;
-        const role = content.role === 'model' ? 'assistant' : 'user';
+        // Only assign user role to genuine user content
+        const role = content.role === 'model' ? 'assistant' : 
+                    content.role === 'user' ? 'user' : 'system';
         const text =
           content.parts
             ?.map((p: Part) =>
