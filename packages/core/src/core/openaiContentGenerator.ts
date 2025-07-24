@@ -162,6 +162,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
+    // Debug: dump messages if QC_DUMP_PRE_INFER is set
+    if (process.env.QC_DUMP_PRE_INFER === '1') {
+      const fs = await import('fs');
+      try {
+        await fs.promises.mkdir('.debug', { recursive: true });
+        await fs.promises.writeFile(
+          `.debug/turn-${Date.now()}-pre-infer.json`,
+          JSON.stringify({ messages, model: this.model, request }, null, 2)
+        );
+        console.log('🐛 Debug: Pre-inference messages dumped to .debug/');
+      } catch (error) {
+        console.error('Debug dump failed:', error);
+      }
+    }
+
     try {
       // Build sampling parameters with clear priority:
       // 1. Request-level parameters (highest priority)
@@ -288,6 +303,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
+
+    // Debug: dump messages if QC_DUMP_PRE_INFER is set
+    if (process.env.QC_DUMP_PRE_INFER === '1') {
+      const fs = await import('fs');
+      try {
+        await fs.promises.mkdir('.debug', { recursive: true });
+        await fs.promises.writeFile(
+          `.debug/turn-stream-${Date.now()}-pre-infer.json`,
+          JSON.stringify({ messages, model: this.model, request }, null, 2)
+        );
+        console.log('🐛 Debug: Pre-inference streaming messages dumped to .debug/');
+      } catch (error) {
+        console.error('Debug dump failed:', error);
+      }
+    }
 
     try {
       // Build sampling parameters with clear priority
