@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { OpenAIContentGenerator } from '../openaiContentGenerator';
+import { OpenAIContentGenerator } from '../openaiContentGenerator.js';
 import { Config } from '../../config/config.js';
 
 // Mock OpenAI client
