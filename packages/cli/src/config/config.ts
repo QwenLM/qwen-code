@@ -59,6 +59,7 @@ export interface CliArgs {
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
+  excludePatterns: string | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -196,6 +197,10 @@ export async function parseArguments(): Promise<CliArgs> {
     .option('openai-base-url', {
       type: 'string',
       description: 'OpenAI base URL (for custom endpoints)',
+    })
+    .option('exclude-patterns', {
+      type: 'string',
+      description: 'Comma-separated list of exclude patterns (e.g., "*.log,temp/**")',
     })
 
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -394,6 +399,9 @@ export async function loadCliConfig(
         ? settings.enableOpenAILogging
         : argv.openaiLogging) ?? false,
     sampling_params: settings.sampling_params,
+    excludePatterns: argv.excludePatterns
+      ? argv.excludePatterns.split(',').map(p => p.trim())
+      : undefined,
   });
 }
 

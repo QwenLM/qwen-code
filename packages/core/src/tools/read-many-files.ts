@@ -68,12 +68,12 @@ export interface ReadManyFilesParams {
 }
 
 /**
- * Default exclusion patterns for commonly ignored directories and binary file types.
+ * Built-in default exclusion patterns for commonly ignored directories and binary file types.
  * These are compatible with glob ignore patterns.
- * TODO(adh): Consider making this configurable or extendable through a command line argument.
+ * Can be overridden via --exclude-patterns CLI argument.
  * TODO(adh): Look into sharing this list with the glob tool.
  */
-const DEFAULT_EXCLUDES: string[] = [
+const BUILTIN_DEFAULT_EXCLUDES: string[] = [
   '**/node_modules/**',
   '**/.git/**',
   '**/.vscode/**',
@@ -111,6 +111,19 @@ const DEFAULT_EXCLUDES: string[] = [
   '**/.env',
   `**/${getCurrentGeminiMdFilename()}`,
 ];
+
+/**
+ * Simple function to get effective exclude patterns.
+ * Uses custom patterns from CLI if provided, otherwise built-in defaults.
+ */
+function getEffectiveExcludePatterns(config: Config): string[] {
+  if (config.excludePatterns && config.excludePatterns.length > 0) {
+    // Use custom patterns from --exclude-patterns, but always add current Gemini MD filename
+    return [...config.excludePatterns, `**/${getCurrentGeminiMdFilename()}`];
+  }
+  // Fall back to built-in defaults
+  return BUILTIN_DEFAULT_EXCLUDES;
+}
 
 const DEFAULT_OUTPUT_SEPARATOR_FORMAT = '--- {filePath} ---';
 
@@ -219,9 +232,10 @@ Use this tool when the user's query implies needing the content of several files
     const paramExcludes = params.exclude || [];
     const paramUseDefaultExcludes = params.useDefaultExcludes !== false;
 
+    const effectiveExcludes = getEffectiveExcludePatterns(this.config);
     const finalExclusionPatternsForDescription: string[] =
       paramUseDefaultExcludes
-        ? [...DEFAULT_EXCLUDES, ...paramExcludes, ...this.geminiIgnorePatterns]
+        ? [...effectiveExcludes, ...paramExcludes, ...this.geminiIgnorePatterns]
         : [...paramExcludes, ...this.geminiIgnorePatterns];
 
     let excludeDesc = `Excluding: ${finalExclusionPatternsForDescription.length > 0 ? `patterns like \`${finalExclusionPatternsForDescription.slice(0, 2).join('`, `')}${finalExclusionPatternsForDescription.length > 2 ? '...`' : '`'}` : 'none specified'}`;
@@ -270,8 +284,9 @@ Use this tool when the user's query implies needing the content of several files
     const processedFilesRelativePaths: string[] = [];
     const contentParts: PartListUnion = [];
 
+    const effectiveDefaultExcludes = getEffectiveExcludePatterns(this.config);
     const effectiveExcludes = useDefaultExcludes
-      ? [...DEFAULT_EXCLUDES, ...exclude, ...this.geminiIgnorePatterns]
+      ? [...effectiveDefaultExcludes, ...exclude, ...this.geminiIgnorePatterns]
       : [...exclude, ...this.geminiIgnorePatterns];
 
     const searchPatterns = [...inputPatterns, ...include];
