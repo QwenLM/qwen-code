@@ -69,10 +69,19 @@ export interface OpenDialogActionReturn {
   dialog: 'help' | 'auth' | 'theme' | 'privacy';
 }
 
+/**
+ * The return type for a command action that needs to submit a query to the AI.
+ */
+export interface SubmitQueryActionReturn {
+  type: 'query';
+  query: string;
+}
+
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
-  | OpenDialogActionReturn;
+  | OpenDialogActionReturn
+  | SubmitQueryActionReturn;
 // The standardized contract for any command in the system.
 export interface SlashCommand {
   name: string;
