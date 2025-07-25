@@ -725,7 +725,7 @@ export const useGeminiStream = (
             }
           }
           geminiClient.addHistory({
-            role: 'user',
+            role: 'function',
             parts: combinedParts,
           });
         }
