@@ -154,6 +154,7 @@ export interface ConfigParameters {
     temperature?: number;
     max_tokens?: number;
   };
+  excludePatterns?: string[];
 }
 
 export class Config {
@@ -204,6 +205,7 @@ export class Config {
     temperature?: number;
     max_tokens?: number;
   };
+  readonly excludePatterns: string[];
   private modelSwitchedDuringSession: boolean = false;
   private readonly maxSessionTurns: number;
   private readonly listExtensions: boolean;
@@ -258,6 +260,7 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
     this.sampling_params = params.sampling_params;
+    this.excludePatterns = params.excludePatterns ?? [];
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
