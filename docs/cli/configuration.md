@@ -215,6 +215,38 @@ In addition to a project settings file, a project's `.gemini` directory can cont
     "enableOpenAILogging": true
     ```
 
+- **`systemPromptMappings`** (array):
+  - **Description:** Configures custom system prompt templates for specific model names and base URLs. This allows you to use different system prompts for different AI models or API endpoints.
+  - **Default:** `undefined` (uses default system prompt)
+  - **Properties:**
+    - **`baseUrls`** (array of strings, optional): Array of base URLs to exactly match against `OPENAI_BASE_URL` environment variable. If not specified, matches any base URL.
+    - **`modelNames`** (array of strings, optional): Array of model names to exactly match against `OPENAI_MODEL` environment variable. If not specified, matches any model.
+    - **`template`** (string): The system prompt template to use when both baseUrl and modelNames match. Supports placeholders:
+      - `{RUNTIME_VARS_IS_GIT_REPO}`: Replaced with `true` or `false` based on whether the current directory is a git repository
+      - `{RUNTIME_VARS_SANDBOX}`: Replaced with the sandbox type (e.g., `"sandbox-exec"`, `"docker"`, or empty string)
+  - **Example:**
+
+    ```json
+    "systemPromptMappings": [
+      {
+        "baseUrls":  [
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+      ],
+        "modelNames": ["qwen3-coder-plus"],
+        "template": "SYSTEM_TEMPLATE:{\"name\":\"qwen3_coder\",\"params\":{\"is_git_repository\":{RUNTIME_VARS_IS_GIT_REPO},\"sandbox\":\"{RUNTIME_VARS_SANDBOX}\"}}"
+      },
+      {
+        "modelNames": ["gpt-4"],
+        "template": "You are a helpful AI assistant specialized in coding tasks. Current sandbox: {RUNTIME_VARS_SANDBOX}"
+      },
+      {
+        "baseUrls": ["api.openai.com"],
+        "template": "You are an AI coding assistant. Working in git repository: {RUNTIME_VARS_IS_GIT_REPO}"
+      }
+    ]
+    ```
+
 ### Example `settings.json`:
 
 ```json
@@ -242,7 +274,22 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   "hideTips": false,
   "hideBanner": false,
   "maxSessionTurns": 10,
-  "enableOpenAILogging": true
+  "enableOpenAILogging": true,
+  "systemPromptMappings": [
+    {
+      "baseUrl": "dashscope",
+      "modelNames": ["qwen3"],
+      "template": "SYSTEM_TEMPLATE:{\"name\":\"qwen3_coder\",\"params\":{\"VARS_IS_GIT_REPO\":{VARS_IS_GIT_REPO},\"sandbox\":\"{sandbox}\"}}"
+    },
+    {
+      "modelNames": ["gpt-4"],
+      "template": "You are a helpful AI assistant specialized in coding tasks. Current sandbox: {sandbox}"
+    },
+    {
+      "baseUrl": "api.openai.com",
+      "template": "You are an AI coding assistant. Working in git repository: {VARS_IS_GIT_REPO}"
+    }
+  ]
 }
 ```
 

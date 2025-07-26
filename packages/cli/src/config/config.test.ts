@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'os';
-import { loadCliConfig, parseArguments } from './config.js';
+import { loadCliConfig, parseArguments, CliArgs } from './config.js';
 import { Settings } from './settings.js';
 import { Extension } from './extension.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
@@ -1001,9 +1001,73 @@ describe('loadCliConfig ideMode', () => {
     const config = await loadCliConfig(settings, [], 'test-session', argv);
     expect(config.getIdeMode()).toBe(true);
     const mcpServers = config.getMcpServers();
-    expect(mcpServers['_ide_server']).toBeDefined();
-    expect(mcpServers['_ide_server'].httpUrl).toBe('http://localhost:3000/mcp');
-    expect(mcpServers['_ide_server'].description).toBe('IDE connection');
-    expect(mcpServers['_ide_server'].trust).toBe(false);
+    expect(mcpServers?.['_ide_server']).toBeDefined();
+    expect(mcpServers?.['_ide_server']?.httpUrl).toBe(
+      'http://localhost:3000/mcp',
+    );
+    expect(mcpServers?.['_ide_server']?.description).toBe('IDE connection');
+    expect(mcpServers?.['_ide_server']?.trust).toBe(false);
+  });
+});
+
+describe('loadCliConfig systemPromptMappings', () => {
+  it('should use default systemPromptMappings when not provided in settings', async () => {
+    const mockSettings: Settings = {
+      theme: 'dark',
+    };
+    const mockExtensions: Extension[] = [];
+    const mockSessionId = 'test-session';
+    const mockArgv: CliArgs = {
+      model: 'test-model',
+    } as CliArgs;
+
+    const config = await loadCliConfig(
+      mockSettings,
+      mockExtensions,
+      mockSessionId,
+      mockArgv,
+    );
+
+    expect(config.getSystemPromptMappings()).toEqual([
+      {
+        baseUrls: [
+          'https://dashscope.aliyuncs.com/compatible-mode/v1/',
+          'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/',
+        ],
+        modelNames: ['qwen3-coder-plus'],
+        template:
+          'SYSTEM_TEMPLATE:{"name":"qwen3_coder","params":{"is_git_repository":{RUNTIME_VARS_IS_GIT_REPO},"sandbox":"{RUNTIME_VARS_SANDBOX}"}}',
+      },
+    ]);
+  });
+
+  it('should use custom systemPromptMappings when provided in settings', async () => {
+    const customSystemPromptMappings = [
+      {
+        baseUrls: ['https://custom-api.com'],
+        modelNames: ['custom-model'],
+        template: 'Custom template',
+      },
+    ];
+    const mockSettings: Settings = {
+      theme: 'dark',
+      systemPromptMappings: customSystemPromptMappings,
+    };
+    const mockExtensions: Extension[] = [];
+    const mockSessionId = 'test-session';
+    const mockArgv: CliArgs = {
+      model: 'test-model',
+    } as CliArgs;
+
+    const config = await loadCliConfig(
+      mockSettings,
+      mockExtensions,
+      mockSessionId,
+      mockArgv,
+    );
+
+    expect(config.getSystemPromptMappings()).toEqual(
+      customSystemPromptMappings,
+    );
   });
 });

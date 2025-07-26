@@ -96,6 +96,13 @@ export interface Settings {
     max_tokens?: number;
   };
 
+  // System prompt mappings for different base URLs and model names
+  systemPromptMappings?: Array<{
+    baseUrls?: string[];
+    modelNames?: string[];
+    template?: string;
+  }>;
+
   // Add other settings here.
   ideMode?: boolean;
 }

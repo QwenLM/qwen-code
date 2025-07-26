@@ -33,6 +33,9 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
     // Reset mocks
     vi.clearAllMocks();
 
+    // Mock environment variables
+    vi.stubEnv('OPENAI_BASE_URL', '');
+
     // Mock config
     mockConfig = {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -55,7 +58,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
     vi.mocked(OpenAI).mockImplementation(() => mockOpenAIClient);
 
     // Create generator instance
-    generator = new OpenAIContentGenerator('test-api-key', 'gpt-4', mockConfig);
+    generator = new OpenAIContentGenerator('test-key', 'gpt-4', mockConfig);
   });
 
   afterEach(() => {
