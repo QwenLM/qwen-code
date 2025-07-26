@@ -262,14 +262,25 @@ export async function loadCliConfig(
     argv.extensions || [],
   );
 
-  // Handle OpenAI API key from command line
+  // Handle OpenAI API key from settings or command line
+  if (settings.openaiApiKey && !process.env.OPENAI_API_KEY) {
+    process.env.OPENAI_API_KEY = settings.openaiApiKey;
+  }
   if (argv.openaiApiKey) {
     process.env.OPENAI_API_KEY = argv.openaiApiKey;
   }
 
-  // Handle OpenAI base URL from command line
+  // Handle OpenAI base URL from settings or command line
+  if (settings.openaiBaseUrl && !process.env.OPENAI_BASE_URL) {
+    process.env.OPENAI_BASE_URL = settings.openaiBaseUrl;
+  }
   if (argv.openaiBaseUrl) {
     process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
+  }
+
+  // Handle OpenAI model from settings or command line
+  if (settings.openaiModel && !argv.model) {
+    argv.model = settings.openaiModel;
   }
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory

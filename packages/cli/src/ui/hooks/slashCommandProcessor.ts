@@ -824,6 +824,12 @@ export const useSlashCommandProcessor = (
             });
             return;
           }
+          // Add a visible message to indicate the command is running
+          addMessage({
+            type: MessageType.INFO,
+            content: 'Starting chat compression...',
+            timestamp: new Date(),
+          });
           setPendingCompressionItem({
             type: MessageType.COMPRESSION,
             compression: {

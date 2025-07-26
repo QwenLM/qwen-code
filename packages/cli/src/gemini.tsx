@@ -40,6 +40,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { validateAuthMethod } from './config/auth.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
+import { handleFirstRunSetup } from './config/firstRunSetup.js';
 
 function getNodeMemoryArgs(config: Config): string[] {
   const totalMemoryMB = os.totalmem() / (1024 * 1024);
@@ -88,6 +89,9 @@ async function relaunchWithAdditionalArgs(additionalArgs: string[]) {
 export async function main() {
   const workspaceRoot = process.cwd();
   const settings = loadSettings(workspaceRoot);
+
+  // Handle first-run setup before any other initialization
+  await handleFirstRunSetup(settings);
 
   await cleanupCheckpoints();
   if (settings.errors.length > 0) {
