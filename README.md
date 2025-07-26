@@ -61,7 +61,7 @@ export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
 export OPENAI_MODEL="qwen3-coder-plus"
 ```
 
-If you are in mainland China, ModelScope offers 2,000 free model inference API calls per day:
+If you are in mainland China, ModelScope offers 2,000 free model inference API calls per day.Please make sure you connect your aliyun account to ModelScope so that you won't receive the API error like `API Error: OpenAI API error`.
 
 ```bash
 export OPENAI_API_KEY="your_api_key_here"
