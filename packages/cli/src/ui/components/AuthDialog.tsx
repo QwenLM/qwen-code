@@ -92,6 +92,12 @@ export function AuthDialog({
     setOpenAIApiKey(apiKey);
     setOpenAIBaseUrl(baseUrl);
     setOpenAIModel(model);
+    
+    // Save to user settings for persistence
+    settings.setValue(SettingScope.User, 'openaiApiKey', apiKey);
+    settings.setValue(SettingScope.User, 'openaiBaseUrl', baseUrl);
+    settings.setValue(SettingScope.User, 'openaiModel', model);
+    
     setShowOpenAIKeyPrompt(false);
     onSelect(AuthType.USE_OPENAI, SettingScope.User);
   };

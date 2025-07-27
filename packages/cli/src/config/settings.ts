@@ -96,6 +96,11 @@ export interface Settings {
     max_tokens?: number;
   };
 
+  // OpenAI API configuration
+  openaiApiKey?: string;
+  openaiBaseUrl?: string;
+  openaiModel?: string;
+
   // Add other settings here.
   ideMode?: boolean;
 }
