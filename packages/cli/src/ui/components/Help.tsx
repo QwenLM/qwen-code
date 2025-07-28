@@ -58,7 +58,19 @@ export const Help = ({ commands }: HelpProps) => {
       <Text bold color={Colors.Foreground}>
         {t('help.commands')}
       </Text>
-      {commands}
+      {commands.map((command, index) => (
+        <Box key={index} marginLeft={2}>
+          <Text color={Colors.AccentBlue}>
+            <Text bold>/{command.name}</Text>
+            {command.altName && (
+              <Text color={Colors.Gray}> (or /{command.altName})</Text>
+            )}
+          </Text>
+          {command.description && (
+            <Text color={Colors.Foreground}> - {command.description}</Text>
+          )}
+        </Box>
+      ))}
     </Box>
   );
 };

@@ -39,7 +39,7 @@ export function getCurrentLanguage(settings: any): LanguageConfig {
 // 添加一个全局变量来存储语言更新回调
 let globalLanguageUpdateCallback: ((languageCode: string) => boolean) | null = null;
 
-export function setGlobalLanguageUpdateCallback(callback: (languageCode: string) => boolean) {
+export function setGlobalLanguageUpdateCallback(callback: ((languageCode: string) => boolean) | null) {
   globalLanguageUpdateCallback = callback;
 }
 
