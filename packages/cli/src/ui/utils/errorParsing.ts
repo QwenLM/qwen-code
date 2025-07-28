@@ -13,7 +13,7 @@ import {
   isGenericQuotaExceededError,
   isApiError,
   isStructuredError,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 // Free Tier message functions
 const getRateLimitErrorMessageGoogleFree = (
   fallbackModel: string = DEFAULT_GEMINI_FLASH_MODEL,

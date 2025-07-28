@@ -14,7 +14,7 @@ import {
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
   Config,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import {
   RadioButtonSelect,
   RadioSelectItem,

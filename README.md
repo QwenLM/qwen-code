@@ -4,7 +4,7 @@
 
 MINE-AI Code is a command-line AI workflow tool adapted from [**Gemini CLI**](https://github.com/google-gemini/gemini-cli) (Please refer to [this document](./README.gemini.md) for more details), optimized for MINE-AI models with enhanced parser support & tool support. Visit [MINE-AI](https://mine-ai.xyz/) for more information.
 
-**NodeX Address**: $NodeX：4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
+**NodeX CA**: 4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
 
 > [!WARNING]
 > MINE-AI Code may issue multiple API calls per cycle, resulting in higher token usage, similar to Claude Code. We're actively working to enhance API efficiency and improve the overall developer experience. Visit [MINE-AI](https://mine-ai.xyz/) for the latest API configuration and pricing details.
@@ -28,7 +28,7 @@ curl -qL https://www.npmjs.com/install.sh | sh
 ### Installation
 
 ```bash
-npm install -g @mine-ai-code/mine-ai-code
+npm install -g mine-ai-cli
 mine-ai --version
 ```
 
@@ -53,7 +53,7 @@ Set your MINE-AI API key (In MINE-AI Code project, you can also set your API key
 
 > ⚠️ **Notice:** <br>
 > **Visit [MINE-AI](https://mine-ai.xyz/) for API key configuration and documentation** <br>
-> **NodeX Address**: $NodeX：4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
+> **NodeX CA**: 4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
 
 Configure your MINE-AI API settings:
 
@@ -168,4 +168,4 @@ This project is based on [Google Gemini CLI](https://github.com/google-gemini/ge
 ## Links
 
 - [MINE-AI Official Website](https://mine-ai.xyz/)
-- **NodeX Address**: $NodeX：4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
+- **NodeX CA**: 4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk

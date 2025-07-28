@@ -12,7 +12,7 @@ import {
   Config,
   ConfigParameters,
   ContentGeneratorConfig,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 
 const TEST_CONTENT_GENERATOR_CONFIG: ContentGeneratorConfig = {
   apiKey: 'test-key',
@@ -21,8 +21,8 @@ const TEST_CONTENT_GENERATOR_CONFIG: ContentGeneratorConfig = {
 };
 
 // Mock file discovery service and tool registry
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+vi.mock('mine-ai-core', async () => {
+  const actual = await vi.importActual('mine-ai-core');
   return {
     ...actual,
     FileDiscoveryService: vi.fn().mockImplementation(() => ({

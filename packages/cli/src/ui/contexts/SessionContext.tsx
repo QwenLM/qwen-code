@@ -17,7 +17,7 @@ import {
   uiTelemetryService,
   SessionMetrics,
   ModelMetrics,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 
 // --- Interface Definitions ---
 

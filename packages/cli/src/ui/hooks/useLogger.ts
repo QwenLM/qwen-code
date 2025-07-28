@@ -5,7 +5,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { sessionId, Logger } from '@qwen-code/qwen-code-core';
+import { sessionId, Logger } from 'mine-ai-core';
 
 /**
  * Hook to manage the logger instance.

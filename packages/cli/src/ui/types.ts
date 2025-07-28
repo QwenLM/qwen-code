@@ -7,7 +7,7 @@
 import {
   ToolCallConfirmationDetails,
   ToolResultDisplay,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 
 // Only defining the state enum needed by the UI
 export enum StreamingState {

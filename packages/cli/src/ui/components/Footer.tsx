@@ -11,7 +11,7 @@ import {
   shortenPath,
   tildeifyPath,
   tokenLimit,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import { ConsoleSummaryDisplay } from './ConsoleSummaryDisplay.js';
 import process from 'node:process';
 import Gradient from 'ink-gradient';

@@ -18,7 +18,7 @@ import {
   MCPServerStatus,
   getMCPDiscoveryState,
   getMCPServerStatus,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import {
   Message,
