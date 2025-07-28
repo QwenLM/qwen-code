@@ -1,6 +1,6 @@
 # MINE-AI Code
 
-![MINE-AI Code Screenshot](./docs/assets/qwen-screenshot.png)
+![MINE-AI Code Screenshot](./docs/assets/mine-ai-screenshot.png)
 
 MINE-AI Code is a command-line AI workflow tool adapted from [**Gemini CLI**](https://github.com/google-gemini/gemini-cli) (Please refer to [this document](./README.gemini.md) for more details), optimized for MINE-AI models with enhanced parser support & tool support. Visit [MINE-AI](https://mine-ai.xyz/) for more information.
 
@@ -28,7 +28,7 @@ curl -qL https://www.npmjs.com/install.sh | sh
 ### Installation
 
 ```bash
-npm install -g @qwen-code/qwen-code
+npm install -g @mine-ai-code/mine-ai-code
 mine-ai --version
 ```
 
@@ -85,7 +85,7 @@ export OPENAI_MODEL="mine-ai-coder-max"
 
 ```sh
 cd your-project/
-qwen
+mine-ai
 > Describe the main pieces of this system's architecture
 ```
 
