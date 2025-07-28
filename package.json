@@ -48,7 +48,7 @@
     "clean": "node scripts/clean.js"
   },
   "bin": {
-    "qwen": "bundle/gemini.js"
+    "mine-ai": "bundle/gemini.js"
   },
   "files": [
     "bundle/",

@@ -1,17 +1,19 @@
-# Qwen Code
+# MINE-AI Code
 
-![Qwen Code Screenshot](./docs/assets/qwen-screenshot.png)
+![MINE-AI Code Screenshot](./docs/assets/qwen-screenshot.png)
 
-Qwen Code is a command-line AI workflow tool adapted from [**Gemini CLI**](https://github.com/google-gemini/gemini-cli) (Please refer to [this document](./README.gemini.md) for more details), optimized for [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder) models with enhanced parser support & tool support.
+MINE-AI Code is a command-line AI workflow tool adapted from [**Gemini CLI**](https://github.com/google-gemini/gemini-cli) (Please refer to [this document](./README.gemini.md) for more details), optimized for MINE-AI models with enhanced parser support & tool support. Visit [MINE-AI](https://mine-ai.xyz/) for more information.
+
+**NodeX Address**: $NodeX：4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
 
 > [!WARNING]
-> Qwen Code may issue multiple API calls per cycle, resulting in higher token usage, similar to Claude Code. We’re actively working to enhance API efficiency and improve the overall developer experience. ModelScope offers 2,000 free API calls if you are in China mainland. Please check [API config section](#api-configuration) for more details.
+> MINE-AI Code may issue multiple API calls per cycle, resulting in higher token usage, similar to Claude Code. We're actively working to enhance API efficiency and improve the overall developer experience. Visit [MINE-AI](https://mine-ai.xyz/) for the latest API configuration and pricing details.
 
 ## Key Features
 
 - **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits
 - **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
-- **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
+- **Enhanced Parser** - Adapted parser specifically optimized for MINE-AI models
 
 ## Quick Start
 
@@ -27,54 +29,54 @@ curl -qL https://www.npmjs.com/install.sh | sh
 
 ```bash
 npm install -g @qwen-code/qwen-code
-qwen --version
+mine-ai --version
 ```
 
 Then run from anywhere:
 
 ```bash
-qwen
+mine-ai
 ```
 
 Or you can install it from source:
 
 ```bash
-git clone https://github.com/QwenLM/qwen-code.git
-cd qwen-code
+git clone https://github.com/0xfffCrypto/cli.git
+cd cli
 npm install
 npm install -g .
 ```
 
 ### API Configuration
 
-Set your Qwen API key (In Qwen Code project, you can also set your API key in `.env` file). the `.env` file should be placed in the root directory of your current project.
+Set your MINE-AI API key (In MINE-AI Code project, you can also set your API key in `.env` file). the `.env` file should be placed in the root directory of your current project.
 
 > ⚠️ **Notice:** <br>
-> **If you are in mainland China, please go to https://bailian.console.aliyun.com/ or https://modelscope.cn/docs/model-service/API-Inference/intro to apply for your API key** <br>
-> **If you are not in mainland China, please go to https://modelstudio.console.alibabacloud.com/ to apply for your API key**
+> **Visit [MINE-AI](https://mine-ai.xyz/) for API key configuration and documentation** <br>
+> **NodeX Address**: $NodeX：4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk
 
-If you are in mainland China, you can use Qwen3-Coder through the Alibaba Cloud bailian platform.
+Configure your MINE-AI API settings:
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-coder-plus"
+export OPENAI_API_KEY="your_mine_ai_api_key_here"
+export OPENAI_BASE_URL="https://api.mine-ai.xyz/v1"
+export OPENAI_MODEL="mine-ai-coder-plus"
 ```
 
-If you are in mainland China, ModelScope offers 2,000 free model inference API calls per day:
+Alternative configuration options:
 
 ```bash
 export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
-export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+export OPENAI_BASE_URL="https://api.mine-ai.xyz/v1"
+export OPENAI_MODEL="MINE-AI/MINE-AI-Coder-480B-Instruct"
 ```
 
-If you are not in mainland China, you can use Qwen3-Coder through the Alibaba Cloud modelstuido platform.
+For more configuration options and latest models:
 
 ```bash
 export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-coder-plus"
+export OPENAI_BASE_URL="https://api.mine-ai.xyz/v1"
+export OPENAI_MODEL="mine-ai-coder-max"
 ```
 
 ## Usage Examples
@@ -135,12 +137,12 @@ qwen
 
 | Agent     | Model              | Accuracy |
 | --------- | ------------------ | -------- |
-| Qwen Code | Qwen3-Coder-480A35 | 37.5     |
+| MINE-AI Code | MINE-AI-480A35 | 37.5     |
 
 ## Project Structure
 
 ```
-qwen-code/
+mine-ai-code/
 ├── packages/           # Core packages
 ├── docs/              # Documentation
 ├── examples/          # Example code
@@ -157,12 +159,13 @@ If you encounter issues, check the [troubleshooting guide](docs/troubleshooting.
 
 ## Acknowledgments
 
-This project is based on [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). We acknowledge and appreciate the excellent work of the Gemini CLI team. Our main contribution focuses on parser-level adaptations to better support Qwen-Coder models.
+This project is based on [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). We acknowledge and appreciate the excellent work of the Gemini CLI team. Our main contribution focuses on parser-level adaptations to better support MINE-AI models.
 
 ## License
 
 [LICENSE](./LICENSE)
 
-## Star History
+## Links
 
-[![Star History Chart](https://api.star-history.com/svg?repos=QwenLM/qwen-code&type=Date)](https://www.star-history.com/#QwenLM/qwen-code&Date)
+- [MINE-AI Official Website](https://mine-ai.xyz/)
+- **NodeX Address**: $NodeX：4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk

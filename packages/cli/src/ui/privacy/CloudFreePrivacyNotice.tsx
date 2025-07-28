@@ -66,7 +66,7 @@ export const CloudFreePrivacyNotice = ({
       </Text>
       <Newline />
       <Text>
-        When you use Gemini Code Assist for individuals with Gemini CLI, Google
+        When you use MINE-AI Code Assist for individuals with MINE-AI CLI, Google
         collects your prompts, related code, generated output, code edits,
         related feature usage information, and your feedback to provide,
         improve, and develop Google products and services and machine learning

@@ -63,10 +63,10 @@ export interface CliArgs {
 
 export async function parseArguments(): Promise<CliArgs> {
   const yargsInstance = yargs(hideBin(process.argv))
-    .scriptName('qwen')
+    .scriptName('mine-ai')
     .usage(
       '$0 [options]',
-      'Qwen Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode',
+      'MINE-AI Code - Launch an interactive CLI, use -p/--prompt for non-interactive mode',
     )
     .option('model', {
       alias: 'm',

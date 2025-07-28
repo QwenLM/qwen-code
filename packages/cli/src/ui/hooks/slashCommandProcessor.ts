@@ -223,10 +223,10 @@ export const useSlashCommandProcessor = (
       // `/help` and `/clear` have been migrated and REMOVED from this list.
       {
         name: 'docs',
-        description: 'open full Qwen Code documentation in your browser',
+        description: 'open full MINE-AI Code documentation in your browser',
         action: async (_mainCommand, _subCommand, _args) => {
           const docsUrl =
-            'https://github.com/QwenLM/Qwen3-Coder/blob/main/README.md';
+                          'https://mine-ai.xyz/';
           if (process.env.SANDBOX && process.env.SANDBOX !== 'sandbox-exec') {
             addMessage({
               type: MessageType.INFO,
@@ -507,7 +507,7 @@ export const useSlashCommandProcessor = (
       },
       {
         name: 'tools',
-        description: 'list available Qwen Code tools',
+        description: 'list available MINE-AI Code tools',
         action: async (_mainCommand, _subCommand, _args) => {
           // Check if the _subCommand includes a specific flag to control description visibility
           let useShowDescriptions = showToolDescriptions;
@@ -538,7 +538,7 @@ export const useSlashCommandProcessor = (
           // Filter out MCP tools by checking if they have a serverName property
           const geminiTools = tools.filter((tool) => !('serverName' in tool));
 
-          let message = 'Available Gemini CLI tools:\n\n';
+                      let message = 'Available MINE-AI CLI tools:\n\n';
 
           if (geminiTools.length > 0) {
             geminiTools.forEach((tool) => {
