@@ -71,6 +71,9 @@ export interface Settings {
   autoConfigureMaxOldSpaceSize?: boolean;
   enableOpenAILogging?: boolean;
 
+  // Language configuration
+  language?: string;
+
   // Git-aware file filtering settings
   fileFiltering?: {
     respectGitIgnore?: boolean;

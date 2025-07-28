@@ -37,6 +37,18 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/help`** (or **`/?`**)
   - **Description:** Display help information about the Gemini CLI, including available commands and their usage.
 
+- **`/lang`**
+  - **Description:** Change interface language / 更改界面语言. Configure the display language for the CLI interface.
+  - **Usage:** 
+    - `/lang` - Show current language and available options
+    - `/lang <code>` - Set language to the specified language code
+  - **Examples:**
+    - `/lang zh` - Switch to Chinese / 切换到中文
+    - `/lang en` - Switch to English / 切换到英文
+    - `/lang ja` - Switch to Japanese / 切换到日文
+  - **Supported Languages:** English (en), Chinese (zh, zh-CN, zh-TW), Japanese (ja), Korean (ko), Spanish (es), French (fr), German (de), Russian (ru)
+  - **Note:** Language settings are saved to user configuration and can also be set via the `MINE_AI_LANGUAGE` environment variable. Restart required for changes to take effect.
+
 - **`/mcp`**
   - **Description:** List configured Model Context Protocol (MCP) servers, their connection status, server details, and available tools.
   - **Sub-commands:**
