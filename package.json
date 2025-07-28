@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/qwen-code",
+  "name": "mine-ai-cli",
   "version": "0.0.1-alpha.8",
   "engines": {
     "node": ">=20"
@@ -10,7 +10,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+http://gitlab.alibaba-inc.com/Qwen-Coder/qwen-code.git"
+    "url": "git+https://github.com/0xfffCrypto/cli.git"
   },
   "config": {
     "sandboxImageUri": "us-docker.pkg.dev/gemini-code-dev/gemini-cli/sandbox:0.0.1-alpha.8"
@@ -48,7 +48,7 @@
     "clean": "node scripts/clean.js"
   },
   "bin": {
-    "qwen": "bundle/gemini.js"
+    "mine-ai": "bundle/gemini.js"
   },
   "files": [
     "bundle/",
@@ -83,6 +83,6 @@
     "yargs": "^18.0.0"
   },
   "dependencies": {
-    "@qwen-code/qwen-code": "^0.0.1-alpha.8"
+    "mine-ai-cli": "^0.0.1-alpha.8"
   }
 }

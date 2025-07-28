@@ -1,10 +1,10 @@
 {
-  "name": "@qwen-code/qwen-code-core",
+  "name": "mine-ai-core",
   "version": "0.0.1-alpha.8",
-  "description": "Qwen Code Core",
+  "description": "MINE-AI Core",
   "repository": {
     "type": "git",
-    "url": "git+http://gitlab.alibaba-inc.com/Qwen-Coder/qwen-code.git"
+    "url": "git+https://github.com/0xfffCrypto/cli.git"
   },
   "type": "module",
   "main": "dist/index.js",

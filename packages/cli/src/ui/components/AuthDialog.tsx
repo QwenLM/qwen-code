@@ -9,7 +9,7 @@ import { Box, Text, useInput } from 'ink';
 import { Colors } from '../colors.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType } from 'mine-ai-core';
 import {
   validateAuthMethod,
   setOpenAIApiKey,
@@ -162,11 +162,11 @@ export function AuthDialog({
         <Text color={Colors.AccentPurple}>(Use Enter to Set Auth)</Text>
       </Box>
       <Box marginTop={1}>
-        <Text>Terms of Services and Privacy Notice for Qwen Code</Text>
+        <Text>$NodeX ca:4p3HZwn4fooiRRCP8ScBMg5TuXbcVUj7dXoEy3Kubonk</Text>
       </Box>
       <Box marginTop={1}>
         <Text color={Colors.AccentBlue}>
-          {'https://github.com/QwenLM/Qwen3-Coder/blob/main/README.md'}
+          {'https://mine-ai.xyz/'}
         </Text>
       </Box>
     </Box>

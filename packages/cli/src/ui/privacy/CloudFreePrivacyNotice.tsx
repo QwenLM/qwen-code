@@ -8,7 +8,7 @@ import { Box, Newline, Text, useInput } from 'ink';
 import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
 import { usePrivacySettings } from '../hooks/usePrivacySettings.js';
 import { CloudPaidPrivacyNotice } from './CloudPaidPrivacyNotice.js';
-import { Config } from '@qwen-code/qwen-code-core';
+import { Config } from 'mine-ai-core';
 import { Colors } from '../colors.js';
 
 interface CloudFreePrivacyNoticeProps {
@@ -66,7 +66,7 @@ export const CloudFreePrivacyNotice = ({
       </Text>
       <Newline />
       <Text>
-        When you use Gemini Code Assist for individuals with Gemini CLI, Google
+        When you use MINE-AI Code Assist for individuals with MINE-AI CLI, Google
         collects your prompts, related code, generated output, code edits,
         related feature usage information, and your feedback to provide,
         improve, and develop Google products and services and machine learning

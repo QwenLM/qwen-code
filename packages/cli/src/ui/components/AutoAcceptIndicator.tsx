@@ -7,7 +7,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from 'mine-ai-core';
 
 interface AutoAcceptIndicatorProps {
   approvalMode: ApprovalMode;

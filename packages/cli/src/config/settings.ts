@@ -15,7 +15,7 @@ import {
   BugCommandSettings,
   TelemetrySettings,
   AuthType,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
 import { DefaultDark } from '../ui/themes/default.js';
@@ -70,6 +70,9 @@ export interface Settings {
   checkpointing?: CheckpointingSettings;
   autoConfigureMaxOldSpaceSize?: boolean;
   enableOpenAILogging?: boolean;
+
+  // Language configuration
+  language?: string;
 
   // Git-aware file filtering settings
   fileFiltering?: {

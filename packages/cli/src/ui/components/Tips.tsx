@@ -7,7 +7,7 @@
 import React from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
-import { type Config } from '@qwen-code/qwen-code-core';
+import { type Config } from 'mine-ai-core';
 
 interface TipsProps {
   config: Config;
@@ -30,7 +30,7 @@ export const Tips: React.FC<TipsProps> = ({ config }) => {
           <Text bold color={Colors.AccentPurple}>
             QWEN.md
           </Text>{' '}
-          files to customize your interactions with Qwen Code.
+                      files to customize your interactions with MINE-AI Code.
         </Text>
       )}
       <Text color={Colors.Foreground}>

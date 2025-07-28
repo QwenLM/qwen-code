@@ -57,7 +57,7 @@ import {
   EditorType,
   FlashFallbackEvent,
   logFlashFallback,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import { validateAuthMethod } from '../config/auth.js';
 import { useLogger } from './hooks/useLogger.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
@@ -74,12 +74,13 @@ import {
   isProQuotaExceededError,
   isGenericQuotaExceededError,
   UserTierId,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import { checkForUpdates } from './utils/updateCheck.js';
 import ansiEscapes from 'ansi-escapes';
 import { OverflowProvider } from './contexts/OverflowContext.js';
 import { ShowMoreLines } from './components/ShowMoreLines.js';
 import { PrivacyNotice } from './privacy/PrivacyNotice.js';
+import { LanguageProvider } from './contexts/LanguageContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -92,7 +93,9 @@ interface AppProps {
 
 export const AppWrapper = (props: AppProps) => (
   <SessionStatsProvider>
-    <App {...props} />
+    <LanguageProvider settings={props.settings}>
+      <App {...props} />
+    </LanguageProvider>
   </SessionStatsProvider>
 );
 

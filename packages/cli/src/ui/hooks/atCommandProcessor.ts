@@ -12,7 +12,7 @@ import {
   getErrorMessage,
   isNodeError,
   unescapePath,
-} from '@qwen-code/qwen-code-core';
+} from 'mine-ai-core';
 import {
   HistoryItem,
   IndividualToolCallDisplay,
