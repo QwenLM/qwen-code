@@ -17,6 +17,7 @@ import {
   setOpenAIModel,
 } from '../../config/auth.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
+import { RAGEndpointPrompt } from './RAGEndpointPrompt.js';
 
 interface AuthDialogProps {
   onSelect: (authMethod: AuthType | undefined, scope: SettingScope) => void;
@@ -45,6 +46,7 @@ export function AuthDialog({
     initialErrorMessage || null,
   );
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
+  const [showRAGEndpointPrompt, setShowRAGEndpointPrompt] = useState(false);
   const items = [{ label: 'OpenAI', value: AuthType.USE_OPENAI }];
 
   const initialAuthIndex = Math.max(
@@ -93,7 +95,13 @@ export function AuthDialog({
     setOpenAIBaseUrl(baseUrl);
     setOpenAIModel(model);
     setShowOpenAIKeyPrompt(false);
-    onSelect(AuthType.USE_OPENAI, SettingScope.User);
+    
+    // Check if RAG endpoint is configured, if not show RAG prompt
+    if (!settings.merged.ragEndpoint && !process.env.RAG_ENDPOINT) {
+      setShowRAGEndpointPrompt(true);
+    } else {
+      onSelect(AuthType.USE_OPENAI, SettingScope.User);
+    }
   };
 
   const handleOpenAIKeyCancel = () => {
@@ -101,9 +109,26 @@ export function AuthDialog({
     setErrorMessage('OpenAI API key is required to use OpenAI authentication.');
   };
 
+  const handleRAGEndpointSubmit = (endpoint: string) => {
+    // Save RAG endpoint to user settings
+    settings.setValue(SettingScope.User, 'ragEndpoint', endpoint);
+    setShowRAGEndpointPrompt(false);
+    onSelect(AuthType.USE_OPENAI, SettingScope.User);
+  };
+
+  const handleRAGEndpointCancel = () => {
+    setShowRAGEndpointPrompt(false);
+    onSelect(AuthType.USE_OPENAI, SettingScope.User);
+  };
+
+  const handleRAGEndpointSkip = () => {
+    setShowRAGEndpointPrompt(false);
+    onSelect(AuthType.USE_OPENAI, SettingScope.User);
+  };
+
   useInput((_input, key) => {
-    // 当显示 OpenAIKeyPrompt 时，不处理输入事件
-    if (showOpenAIKeyPrompt) {
+    // 当显示 OpenAIKeyPrompt 或 RAGEndpointPrompt 时，不处理输入事件
+    if (showOpenAIKeyPrompt || showRAGEndpointPrompt) {
       return;
     }
 
@@ -129,6 +154,16 @@ export function AuthDialog({
       <OpenAIKeyPrompt
         onSubmit={handleOpenAIKeySubmit}
         onCancel={handleOpenAIKeyCancel}
+      />
+    );
+  }
+
+  if (showRAGEndpointPrompt) {
+    return (
+      <RAGEndpointPrompt
+        onSubmit={handleRAGEndpointSubmit}
+        onCancel={handleRAGEndpointCancel}
+        onSkip={handleRAGEndpointSkip}
       />
     );
   }

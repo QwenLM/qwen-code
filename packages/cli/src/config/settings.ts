@@ -99,6 +99,9 @@ export interface Settings {
     max_tokens?: number;
   };
 
+  // RAG service configuration
+  ragEndpoint?: string;
+
   // Add other settings here.
   ideMode?: boolean;
 }

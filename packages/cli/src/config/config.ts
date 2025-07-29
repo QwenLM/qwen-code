@@ -59,6 +59,7 @@ export interface CliArgs {
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
+  ragEndpoint: string | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -197,6 +198,10 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'string',
       description: 'OpenAI base URL (for custom endpoints)',
     })
+    .option('rag-endpoint', {
+      type: 'string',
+      description: 'RAG service endpoint URL',
+    })
 
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
     .alias('v', 'version')
@@ -271,6 +276,9 @@ export async function loadCliConfig(
   if (argv.openaiBaseUrl) {
     process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
   }
+
+  // Handle RAG endpoint from command line or settings
+  const ragEndpoint = argv.ragEndpoint || settings.ragEndpoint || process.env.RAG_ENDPOINT;
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
@@ -393,6 +401,7 @@ export async function loadCliConfig(
       (typeof argv.openaiLogging === 'undefined'
         ? settings.enableOpenAILogging
         : argv.openaiLogging) ?? false,
+    ragEndpoint,
     sampling_params: settings.sampling_params,
   });
 }

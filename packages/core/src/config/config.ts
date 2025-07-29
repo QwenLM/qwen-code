@@ -22,6 +22,7 @@ import { ShellTool } from '../tools/shell.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
+import { RAGTool } from '../tools/rag.js';
 import {
   MemoryTool,
   setGeminiMdFilename,
@@ -145,6 +146,7 @@ export interface ConfigParameters {
   noBrowser?: boolean;
   ideMode?: boolean;
   enableOpenAILogging?: boolean;
+  ragEndpoint?: string;
   sampling_params?: {
     top_p?: number;
     top_k?: number;
@@ -195,6 +197,7 @@ export class Config {
   private readonly noBrowser: boolean;
   private readonly ideMode: boolean;
   private readonly enableOpenAILogging: boolean;
+  private readonly ragEndpoint: string | undefined;
   private readonly sampling_params?: {
     top_p?: number;
     top_k?: number;
@@ -257,6 +260,7 @@ export class Config {
     this.noBrowser = params.noBrowser ?? false;
     this.ideMode = params.ideMode ?? false;
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
+    this.ragEndpoint = params.ragEndpoint;
     this.sampling_params = params.sampling_params;
 
     if (params.contextFileName) {
@@ -540,6 +544,10 @@ export class Config {
     return this.enableOpenAILogging;
   }
 
+  getRagEndpoint(): string | undefined {
+    return this.ragEndpoint;
+  }
+
   async refreshMemory(): Promise<{ memoryContent: string; fileCount: number }> {
     const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
       this.getWorkingDir(),
@@ -600,6 +608,7 @@ export class Config {
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
+    registerCoreTool(RAGTool, this);
     // registerCoreTool(WebSearchTool, this); // Temporarily disabled
 
     await registry.discoverTools();

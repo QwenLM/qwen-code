@@ -47,7 +47,7 @@ Do NOT use this tool:
 `;
 
 export const GEMINI_CONFIG_DIR = '.qwen';
-export const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
+export const DEFAULT_CONTEXT_FILENAME = 'MINEAI.md';
 export const MEMORY_SECTION_HEADER = '## Gemini Added Memories';
 
 // This variable will hold the currently configured filename for GEMINI.md context files.
