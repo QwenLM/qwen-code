@@ -125,6 +125,13 @@ export class RAGTool extends BaseTool<RAGToolParams, ToolResult> {
     if (!params.query || params.query.trim() === '') {
       return "The 'query' parameter cannot be empty.";
     }
+    
+    // Check for potential JSON-breaking characters
+    try {
+      JSON.stringify({ query: params.query });
+    } catch (jsonError) {
+      return "The 'query' parameter contains characters that cannot be JSON serialized.";
+    }
     if (params.limit !== undefined && (params.limit < 1 || params.limit > 20)) {
       return "The 'limit' parameter must be between 1 and 20.";
     }
@@ -195,9 +202,12 @@ export class RAGTool extends BaseTool<RAGToolParams, ToolResult> {
         generate_answer: params.generate_answer !== false,
       };
 
+      const requestBodyString = JSON.stringify(requestBody);
+      
       if (this.config.getDebugMode()) {
         console.debug(`[RAGTool] Querying RAG endpoint: ${ragEndpoint}`);
-        console.debug(`[RAGTool] Request body:`, JSON.stringify(requestBody, null, 2));
+        console.debug(`[RAGTool] Request body:`, requestBodyString);
+        console.debug(`[RAGTool] Request body length:`, requestBodyString.length);
       }
 
       const controller = new AbortController();
@@ -216,17 +226,30 @@ export class RAGTool extends BaseTool<RAGToolParams, ToolResult> {
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(requestBody),
+          body: requestBodyString,
           signal: controller.signal,
         });
         
         clearTimeout(timeoutId);
 
+        const responseText = await response.text();
+        
         if (!response.ok) {
-          throw new Error(`RAG service responded with status ${response.status}: ${response.statusText}`);
+          if (this.config.getDebugMode()) {
+            console.debug(`[RAGTool] Error response body:`, responseText);
+          }
+          throw new Error(`RAG service responded with status ${response.status}: ${response.statusText}. Body: ${responseText}`);
         }
 
-        ragResponse = await response.json();
+        try {
+          ragResponse = JSON.parse(responseText);
+        } catch (jsonError) {
+          if (this.config.getDebugMode()) {
+            console.debug(`[RAGTool] Invalid JSON response:`, responseText);
+            console.debug(`[RAGTool] JSON parse error:`, jsonError);
+          }
+          throw new Error(`RAG service returned invalid JSON. Response: ${responseText.substring(0, 200)}...`);
+        }
       } catch (fetchError) {
         clearTimeout(timeoutId);
         throw fetchError;
