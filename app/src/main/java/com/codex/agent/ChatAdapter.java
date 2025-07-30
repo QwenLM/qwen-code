@@ -90,11 +90,11 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
     }
 
-    // ViewHolder for error messages
-    private static class ErrorViewHolder extends RecyclerView.ViewHolder {
+    // ViewHolder for bot messages
+    private static class BotMessageViewHolder extends RecyclerView.ViewHolder {
         TextView messageTextView;
 
-        ErrorViewHolder(View itemView) {
+        BotMessageViewHolder(View itemView) {
             super(itemView);
             messageTextView = itemView.findViewById(R.id.messageTextView);
         }
@@ -104,11 +104,11 @@ public class ChatAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         }
     }
 
-    // ViewHolder for bot messages
-    private static class BotMessageViewHolder extends RecyclerView.ViewHolder {
+    // ViewHolder for error messages
+    private static class ErrorViewHolder extends RecyclerView.ViewHolder {
         TextView messageTextView;
 
-        BotMessageViewHolder(View itemView) {
+        ErrorViewHolder(View itemView) {
             super(itemView);
             messageTextView = itemView.findViewById(R.id.messageTextView);
         }
