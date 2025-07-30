@@ -1,13 +1,13 @@
 # CLI Commands
 
-Gemini CLI supports several built-in commands to help you manage your session, customize the interface, and control its behavior. These commands are prefixed with a forward slash (`/`), an at symbol (`@`), or an exclamation mark (`!`).
+Qwen Code supports several built-in commands to help you manage your session, customize the interface, and control its behavior. These commands are prefixed with a forward slash (`/`), an at symbol (`@`), or an exclamation mark (`!`).
 
 ## Slash commands (`/`)
 
 Slash commands provide meta-level control over the CLI itself.
 
 - **`/bug`**
-  - **Description:** File an issue about Gemini CLI. By default, the issue is filed within the GitHub repository for Gemini CLI. The string you enter after `/bug` will become the headline for the bug being filed. The default `/bug` behavior can be modified using the `bugCommand` setting in your `.qwen/settings.json` files.
+  - **Description:** File an issue about Qwen Code. By default, the issue is filed within the GitHub repository for Qwen Code. The string you enter after `/bug` will become the headline for the bug being filed. The default `/bug` behavior can be modified using the `bugCommand` setting in your `.qwen/settings.json` files.
 
 - **`/chat`**
   - **Description:** Save and resume conversation history for branching conversation state interactively, or resuming a previous state from a later session.
@@ -32,10 +32,10 @@ Slash commands provide meta-level control over the CLI itself.
   - **Description:** Open a dialog for selecting supported editors.
 
 - **`/extensions`**
-  - **Description:** Lists all active extensions in the current Gemini CLI session. See [Gemini CLI Extensions](../extension.md).
+  - **Description:** Lists all active extensions in the current Qwen Code session. See [Qwen Code Extensions](../extension.md).
 
 - **`/help`** (or **`/?`**)
-  - **Description:** Display help information about the Gemini CLI, including available commands and their usage.
+  - **Description:** Display help information about the Qwen Code, including available commands and their usage.
 
 - **`/mcp`**
   - **Description:** List configured Model Context Protocol (MCP) servers, their connection status, server details, and available tools.
@@ -65,10 +65,10 @@ Slash commands provide meta-level control over the CLI itself.
   - **Note:** Only available if the CLI is invoked with the `--checkpointing` option or configured via [settings](./configuration.md). See [Checkpointing documentation](../checkpointing.md) for more details.
 
 - **`/stats`**
-  - **Description:** Display detailed statistics for the current Gemini CLI session, including token usage, cached token savings (when available), and session duration. Note: Cached token information is only displayed when cached tokens are being used, which occurs with API key authentication but not with OAuth authentication at this time.
+  - **Description:** Display detailed statistics for the current Qwen Code session, including token usage, cached token savings (when available), and session duration. Note: Cached token information is only displayed when cached tokens are being used, which occurs with API key authentication but not with OAuth authentication at this time.
 
 - [**`/theme`**](./themes.md)
-  - **Description:** Open a dialog that lets you change the visual theme of Gemini CLI.
+  - **Description:** Open a dialog that lets you change the visual theme of Qwen Code.
 
 - **`/auth`**
   - **Description:** Open a dialog that lets you change the authentication method.
@@ -77,7 +77,7 @@ Slash commands provide meta-level control over the CLI itself.
   - **Description:** Show version info. Please share this information when filing issues.
 
 - [**`/tools`**](../tools/index.md)
-  - **Description:** Display a list of tools that are currently available within Gemini CLI.
+  - **Description:** Display a list of tools that are currently available within Qwen Code.
   - **Sub-commands:**
     - **`desc`** or **`descriptions`**:
       - **Description:** Show detailed descriptions of each tool, including each tool's name with its full description as provided to the model.
@@ -88,7 +88,7 @@ Slash commands provide meta-level control over the CLI itself.
   - **Description:** Display the Privacy Notice and allow users to select whether they consent to the collection of their data for service improvement purposes.
 
 - **`/quit`** (or **`/exit`**)
-  - **Description:** Exit Gemini CLI.
+  - **Description:** Exit Qwen Code.
 
 ## At commands (`@`)
 
@@ -119,13 +119,13 @@ At commands are used to include the content of files or directories as part of y
 
 ## Shell mode & passthrough commands (`!`)
 
-The `!` prefix lets you interact with your system's shell directly from within Gemini CLI.
+The `!` prefix lets you interact with your system's shell directly from within Qwen Code.
 
 - **`!<shell_command>`**
   - **Description:** Execute the given `<shell_command>` in your system's default shell. Any output or errors from the command are displayed in the terminal.
   - **Examples:**
-    - `!ls -la` (executes `ls -la` and returns to Gemini CLI)
-    - `!git status` (executes `git status` and returns to Gemini CLI)
+    - `!ls -la` (executes `ls -la` and returns to Qwen Code)
+    - `!git status` (executes `git status` and returns to Qwen Code)
 
 - **`!` (Toggle shell mode)**
   - **Description:** Typing `!` on its own toggles shell mode.
@@ -133,6 +133,6 @@ The `!` prefix lets you interact with your system's shell directly from within G
       - When active, shell mode uses a different coloring and a "Shell Mode Indicator".
       - While in shell mode, text you type is interpreted directly as a shell command.
     - **Exiting shell mode:**
-      - When exited, the UI reverts to its standard appearance and normal Gemini CLI behavior resumes.
+      - When exited, the UI reverts to its standard appearance and normal Qwen Code behavior resumes.
 
 - **Caution for all `!` usage:** Commands you execute in shell mode have the same permissions and impact as if you ran them directly in your terminal.

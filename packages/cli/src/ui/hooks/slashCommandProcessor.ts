@@ -620,7 +620,7 @@ export const useSlashCommandProcessor = (
 `;
 
           let bugReportUrl =
-            'https://github.com/google-gemini/gemini-cli/issues/new?template=bug_report.yml&title={title}&info={info}';
+            'https://github.com/QwenLM/Qwen-Code/issues/new?template=bug_report.yml&title={title}&info={info}';
           const bugCommand = config?.getBugCommand();
           if (bugCommand?.urlTemplate) {
             bugReportUrl = bugCommand.urlTemplate;
