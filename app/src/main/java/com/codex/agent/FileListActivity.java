@@ -1,4 +1,4 @@
-package com.example.qwencode;
+package com.codex.agent;
 
 import android.Manifest;
 import android.content.Intent;
@@ -109,6 +109,7 @@ public class FileListActivity extends AppCompatActivity implements FileAdapter.O
                 Intent intent = new Intent(this, CodeEditorActivity.class);
                 intent.putExtra(CodeEditorActivity.EXTRA_CODE, content);
                 intent.putExtra(CodeEditorActivity.EXTRA_LANGUAGE, getLanguageFromFile(file));
+                intent.putExtra(CodeEditorActivity.EXTRA_FILE_PATH, file.getAbsolutePath());
                 startActivity(intent);
             } catch (IOException e) {
                 e.printStackTrace();

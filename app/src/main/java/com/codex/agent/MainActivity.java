@@ -1,6 +1,7 @@
-package com.example.qwencode;
+package com.codex.agent;
 
 import android.content.ContentResolver;
+import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
@@ -9,10 +10,12 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
@@ -130,7 +133,13 @@ public class MainActivity extends AppCompatActivity {
                     @Override
                     public void onError(Exception e) {
                         e.printStackTrace();
-                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                        runOnUiThread(() -> {
+                            // Add an error message to the chat
+                            String errorMessage = "Error: " + e.getMessage();
+                            chatMessages.add(new ChatMessage(errorMessage, ChatMessage.Type.ERROR));
+                            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+                            recyclerView.scrollToPosition(chatMessages.size() - 1);
+                        });
                     }
 
                     @Override
@@ -141,7 +150,12 @@ public class MainActivity extends AppCompatActivity {
 
             } catch (IOException e) {
                 e.printStackTrace();
-                runOnUiThread(() -> Toast.makeText(MainActivity.this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                runOnUiThread(() -> {
+                    String errorMessage = "Error: " + e.getMessage();
+                    chatMessages.add(new ChatMessage(errorMessage, ChatMessage.Type.ERROR));
+                    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+                    recyclerView.scrollToPosition(chatMessages.size() - 1);
+                });
             }
         });
     }

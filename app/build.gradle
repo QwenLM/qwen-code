@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'com.example.qwencode'
+    namespace 'com.codex.agent'
     compileSdk 33
 
     defaultConfig {
-        applicationId "com.example.qwencode"
+        applicationId "com.codex.agent"
         minSdk 24
         targetSdk 33
         versionCode 1
@@ -16,12 +16,23 @@ android {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        release {
+            storeFile file('keystore.jks')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8

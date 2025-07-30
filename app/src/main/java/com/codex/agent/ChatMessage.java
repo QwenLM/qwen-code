@@ -1,9 +1,10 @@
-package com.example.qwencode;
+package com.codex.agent;
 
 public class ChatMessage {
     public enum Type {
         USER,
-        BOT
+        BOT,
+        ERROR
     }
 
     private String message;

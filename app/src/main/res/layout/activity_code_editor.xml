@@ -8,11 +8,36 @@
         android:id="@+id/code_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
+        android:layout_above="@+id/buttonLayout"
         app:showLineNumber="true"
         app:lineHighlightColor="@color/purple_200"
         app:lineHighlightTextColor="@color/white"
         app:lineNumberTextColor="@color/purple_700"
         app:textColor="@color/black"
         app:textSize="14sp" />
+
+    <LinearLayout
+        android:id="@+id/buttonLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/editButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Edit" />
+
+        <Button
+            android:id="@+id/saveButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Save"
+            android:visibility="gone"/>
+
+    </LinearLayout>
 
 </RelativeLayout>

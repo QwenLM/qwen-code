@@ -1,4 +1,4 @@
-package com.example.qwencode;
+package com.codex.agent;
 
 import android.view.LayoutInflater;
 import android.view.View;
