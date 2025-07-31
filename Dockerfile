@@ -1,6 +1,6 @@
 FROM docker.io/library/node:20-slim
 
-ARG SANDBOX_NAME="gemini-cli-sandbox"
+ARG SANDBOX_NAME="qwen-code-sandbox"
 ARG CLI_VERSION_ARG
 ENV SANDBOX="$SANDBOX_NAME"
 ENV CLI_VERSION=$CLI_VERSION_ARG
@@ -39,12 +39,12 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 # switch to non-root user node
 USER node
 
-# install gemini-cli and clean up
-COPY packages/cli/dist/google-gemini-cli-*.tgz /usr/local/share/npm-global/gemini-cli.tgz
-COPY packages/core/dist/google-gemini-cli-core-*.tgz /usr/local/share/npm-global/gemini-core.tgz
-RUN npm install -g /usr/local/share/npm-global/gemini-cli.tgz /usr/local/share/npm-global/gemini-core.tgz \
+# install qwen-code and clean up
+COPY packages/cli/dist/qwen-code-*.tgz /usr/local/share/npm-global/qwen-code.tgz
+COPY packages/core/dist/qwen-code-qwen-code-core-*.tgz /usr/local/share/npm-global/qwen-code-core.tgz
+RUN npm install -g /usr/local/share/npm-global/qwen-code.tgz /usr/local/share/npm-global/qwen-code-core.tgz \
   && npm cache clean --force \
-  && rm -f /usr/local/share/npm-global/gemini-{cli,core}.tgz
+  && rm -f /usr/local/share/npm-global/qwen-{code,code-core}.tgz
 
 # default entrypoint when none specified
-CMD ["gemini"]
+CMD ["qwen"]

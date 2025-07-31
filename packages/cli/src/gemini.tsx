@@ -323,16 +323,34 @@ async function validateNonInterActiveAuth(
   nonInteractiveConfig: Config,
 ) {
   // making a special case for the cli. many headless environments might not have a settings.json set
-  // so if GEMINI_API_KEY is set, we'll use that. However since the oauth things are interactive anyway, we'll
+  // so if GEMINI_API_KEY or OPENAI_API_KEY is set, we'll use that. However since the oauth things are interactive anyway, we'll
   // still expect that exists
-  if (!selectedAuthType && !process.env.GEMINI_API_KEY) {
+  if (
+    !selectedAuthType &&
+    !process.env.GEMINI_API_KEY &&
+    !process.env.OPENAI_API_KEY
+  ) {
     console.error(
-      `Please set an Auth method in your ${USER_SETTINGS_PATH} OR specify GEMINI_API_KEY env variable file before running`,
+      `Please set an Auth method in your ${USER_SETTINGS_PATH} OR specify GEMINI_API_KEY or OPENAI_API_KEY env variable before running`,
     );
     process.exit(1);
   }
 
-  selectedAuthType = selectedAuthType || AuthType.USE_GEMINI;
+  // Determine auth type based on available environment variables
+  if (!selectedAuthType) {
+    if (process.env.OPENAI_API_KEY) {
+      selectedAuthType = AuthType.USE_OPENAI;
+    } else if (process.env.GEMINI_API_KEY) {
+      selectedAuthType = AuthType.USE_GEMINI;
+    }
+  }
+
+  // This should never happen due to the check above, but TypeScript needs assurance
+  if (!selectedAuthType) {
+    console.error('No valid authentication method found');
+    process.exit(1);
+  }
+
   const err = validateAuthMethod(selectedAuthType);
   if (err != null) {
     console.error(err);

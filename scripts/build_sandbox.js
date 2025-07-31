@@ -77,23 +77,23 @@ if (!argv.s) {
   execSync('npm run build --workspaces', { stdio: 'inherit' });
 }
 
-console.log('packing @google/gemini-cli ...');
+console.log('packing @qwen-code/qwen-code ...');
 const cliPackageDir = join('packages', 'cli');
-rmSync(join(cliPackageDir, 'dist', 'google-gemini-cli-*.tgz'), { force: true });
+rmSync(join(cliPackageDir, 'dist', 'qwen-code-*.tgz'), { force: true });
 execSync(
-  `npm pack -w @google/gemini-cli --pack-destination ./packages/cli/dist`,
+  `npm pack -w @qwen-code/qwen-code --pack-destination ./packages/cli/dist`,
   {
     stdio: 'ignore',
   },
 );
 
-console.log('packing @google/gemini-cli-core ...');
+console.log('packing @qwen-code/qwen-code-core ...');
 const corePackageDir = join('packages', 'core');
-rmSync(join(corePackageDir, 'dist', 'google-gemini-cli-core-*.tgz'), {
+rmSync(join(corePackageDir, 'dist', 'qwen-code-core-*.tgz'), {
   force: true,
 });
 execSync(
-  `npm pack -w @google/gemini-cli-core --pack-destination ./packages/core/dist`,
+  `npm pack -w @qwen-code/qwen-code-core --pack-destination ./packages/core/dist`,
   { stdio: 'ignore' },
 );
 
@@ -102,11 +102,15 @@ const packageVersion = JSON.parse(
 ).version;
 
 chmodSync(
-  join(cliPackageDir, 'dist', `google-gemini-cli-${packageVersion}.tgz`),
+  join(cliPackageDir, 'dist', `qwen-code-qwen-code-${packageVersion}.tgz`),
   0o755,
 );
 chmodSync(
-  join(corePackageDir, 'dist', `google-gemini-cli-core-${packageVersion}.tgz`),
+  join(
+    corePackageDir,
+    'dist',
+    `qwen-code-qwen-code-core-${packageVersion}.tgz`,
+  ),
   0o755,
 );
 
@@ -134,14 +138,21 @@ function buildImage(imageName, dockerfile) {
     { stdio: buildStdout, shell: '/bin/bash' },
   );
   console.log(`built ${finalImageName}`);
-  if (existsSync('/workspace/final_image_uri.txt')) {
-    // The publish step only supports one image. If we build multiple, only the last one
-    // will be published. Throw an error to make this failure explicit.
-    throw new Error(
-      'CI artifact file /workspace/final_image_uri.txt already exists. Refusing to overwrite.',
+
+  // If an output file path was provided via command-line, write the final image URI to it.
+  if (argv.outputFile) {
+    console.log(
+      `Writing final image URI for CI artifact to: ${argv.outputFile}`,
     );
+    // The publish step only supports one image. If we build multiple, only the last one
+    // will be published. Throw an error to make this failure explicit if the file already exists.
+    if (existsSync(argv.outputFile)) {
+      throw new Error(
+        `CI artifact file ${argv.outputFile} already exists. Refusing to overwrite.`,
+      );
+    }
+    writeFileSync(argv.outputFile, finalImageName);
   }
-  writeFileSync('/workspace/final_image_uri.txt', finalImageName);
 }
 
 if (baseImage && baseDockerfile) {

@@ -44,5 +44,7 @@ jobs:
 
       - name: Run E2E tests
         env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
         run: npm run test:integration:${{ matrix.sandbox }} -- --verbose --keep-output
