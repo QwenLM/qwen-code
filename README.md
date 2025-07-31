@@ -96,6 +96,22 @@ export OPENAI_BASE_URL=https://openrouter.ai/api/v1
 export OPENAI_MODEL="qwen/qwen3-coder:free"
 ```
 
+#### Using Hugging Face Inference Providers
+
+You can also use Qwen Code with [Hugging Face Inference Providers](https://huggingface.co/docs/inference-providers/en/index). 
+
+To do that, grab your [Hugging Face Token](https://huggingface.co/settings/tokens) and create the environment variables below (or add them to your `.env` file).
+
+```bash
+export OPENAI_API_KEY="your_huggingface_api_key" 
+export OPENAI_BASE_URL="https://router.huggingface.co/v1"
+export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+```
+
+You can check which providers are compatible with this model at https://huggingface.co/inference/models
+
+
+
 ## Usage Examples
 
 ### Explore Codebases
