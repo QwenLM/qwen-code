@@ -234,11 +234,11 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(false);
   });
 
-  it('Config constructor should default telemetry to default value if not provided', () => {
+  it('Config constructor should default telemetry to false if not provided', () => {
     const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
     delete paramsWithoutTelemetry.telemetry;
     const config = new Config(paramsWithoutTelemetry);
-    expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('should have a getFileService method that returns FileDiscoveryService', () => {
@@ -285,20 +285,20 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
     });
 
-    it('should return default logPrompts setting (true) if not provided', () => {
+    it('should return default logPrompts setting (false) if not provided', () => {
       const params: ConfigParameters = {
         ...baseParams,
         telemetry: { enabled: true },
       };
       const config = new Config(params);
-      expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+      expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
     });
 
-    it('should return default logPrompts setting (true) if telemetry object is not provided', () => {
+    it('should return default logPrompts setting (false) if telemetry object is not provided', () => {
       const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
-      expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+      expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {

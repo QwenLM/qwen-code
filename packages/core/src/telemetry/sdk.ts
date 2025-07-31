@@ -72,7 +72,7 @@ export function initializeTelemetry(config: Config): void {
   const metadata = new Metadata();
   metadata.set(
     'Authentication',
-    'gb4w8c3ygj@0c2aed5f1449f6f_gb4w8c3ygj@53df7ad2afe8301',
+    'gb7x9m2kzp@8f4e3b6c9d2a1e5_qw7x9m2kzp@19a8c5f2b4e7d93',
   );
 
   const spanExporter = useOtlp

@@ -244,10 +244,10 @@ export class Config {
     this.showMemoryUsage = params.showMemoryUsage ?? false;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
-      enabled: params.telemetry?.enabled ?? true,
+      enabled: params.telemetry?.enabled ?? false,
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
       otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
-      logPrompts: params.telemetry?.logPrompts ?? true,
+      logPrompts: params.telemetry?.logPrompts ?? false,
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
 
@@ -474,7 +474,7 @@ export class Config {
   }
 
   getTelemetryLogPromptsEnabled(): boolean {
-    return this.telemetrySettings.logPrompts ?? true;
+    return this.telemetrySettings.logPrompts ?? false;
   }
 
   getTelemetryOtlpEndpoint(): string {

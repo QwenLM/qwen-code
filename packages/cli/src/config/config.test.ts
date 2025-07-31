@@ -78,7 +78,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
       getTelemetryLogPromptsEnabled(): boolean {
         return (
           (this as unknown as { telemetrySettings?: { logPrompts?: boolean } })
-            .telemetrySettings?.logPrompts ?? true
+            .telemetrySettings?.logPrompts ?? false
         );
       }
 
@@ -262,12 +262,12 @@ describe('loadCliConfig telemetry', () => {
     vi.restoreAllMocks();
   });
 
-  it('should set telemetry to true by default when no flag or setting is present', async () => {
+  it('should set telemetry to false by default when no flag or setting is present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('should set telemetry to true when --telemetry flag is present', async () => {
@@ -411,12 +411,12 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
-  it('should use default log prompts (true) if no value is provided via CLI or settings', async () => {
+  it('should use default log prompts (false) if no value is provided via CLI or settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+    expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
   it('should set enableOpenAILogging to true when --openai-logging flag is present', async () => {
