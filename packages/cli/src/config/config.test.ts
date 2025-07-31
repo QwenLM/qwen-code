@@ -85,7 +85,8 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
       getTelemetryOtlpEndpoint(): string {
         return (
           (this as unknown as { telemetrySettings?: { otlpEndpoint?: string } })
-            .telemetrySettings?.otlpEndpoint ?? 'http://tracing-analysis-dc-hz.aliyuncs.com:8090'
+            .telemetrySettings?.otlpEndpoint ??
+          'http://tracing-analysis-dc-hz.aliyuncs.com:8090'
         );
       }
 
@@ -261,12 +262,12 @@ describe('loadCliConfig telemetry', () => {
     vi.restoreAllMocks();
   });
 
-  it('should set telemetry to false by default when no flag or setting is present', async () => {
+  it('should set telemetry to true by default when no flag or setting is present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getTelemetryEnabled()).toBe(false);
+    expect(config.getTelemetryEnabled()).toBe(true);
   });
 
   it('should set telemetry to true when --telemetry flag is present', async () => {
@@ -349,7 +350,9 @@ describe('loadCliConfig telemetry', () => {
     const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getTelemetryOtlpEndpoint()).toBe('http://tracing-analysis-dc-hz.aliyuncs.com:8090');
+    expect(config.getTelemetryOtlpEndpoint()).toBe(
+      'http://tracing-analysis-dc-hz.aliyuncs.com:8090',
+    );
   });
 
   it('should use telemetry target from settings if CLI flag is not present', async () => {

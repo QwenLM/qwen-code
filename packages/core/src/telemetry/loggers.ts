@@ -5,6 +5,7 @@
  */
 
 import { logs, LogRecord, LogAttributes } from '@opentelemetry/api-logs';
+import { trace, context } from '@opentelemetry/api';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import { Config } from '../config/config.js';
 import {
@@ -35,7 +36,7 @@ import {
 } from './metrics.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { uiTelemetryService, UiEvent } from './uiTelemetry.js';
-import { ClearcutLogger } from './clearcut-logger/clearcut-logger.js';
+// import { ClearcutLogger } from './clearcut-logger/clearcut-logger.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
@@ -47,11 +48,32 @@ function getCommonAttributes(config: Config): LogAttributes {
   };
 }
 
+// Helper function to create spans and emit logs within span context
+function logWithSpan(
+  spanName: string,
+  logBody: string,
+  attributes: LogAttributes,
+): void {
+  const tracer = trace.getTracer(SERVICE_NAME);
+  const span = tracer.startSpan(spanName);
+
+  context.with(trace.setSpan(context.active(), span), () => {
+    const logger = logs.getLogger(SERVICE_NAME);
+    const logRecord: LogRecord = {
+      body: logBody,
+      attributes,
+    };
+    logger.emit(logRecord);
+  });
+
+  span.end();
+}
+
 export function logCliConfiguration(
   config: Config,
   event: StartSessionEvent,
 ): void {
-  ClearcutLogger.getInstance(config)?.logStartSessionEvent(event);
+  // ClearcutLogger.getInstance(config)?.logStartSessionEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -71,16 +93,11 @@ export function logCliConfiguration(
     mcp_servers: event.mcp_servers,
   };
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: 'CLI configuration loaded.',
-    attributes,
-  };
-  logger.emit(logRecord);
+  logWithSpan('cli.configuration', 'CLI configuration loaded.', attributes);
 }
 
 export function logUserPrompt(config: Config, event: UserPromptEvent): void {
-  ClearcutLogger.getInstance(config)?.logNewPromptEvent(event);
+  // ClearcutLogger.getInstance(config)?.logNewPromptEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -94,12 +111,11 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
     attributes.prompt = event.prompt;
   }
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `User prompt. Length: ${event.prompt_length}.`,
+  logWithSpan(
+    'user.prompt',
+    `User prompt. Length: ${event.prompt_length}.`,
     attributes,
-  };
-  logger.emit(logRecord);
+  );
 }
 
 export function logToolCall(config: Config, event: ToolCallEvent): void {
@@ -109,7 +125,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  ClearcutLogger.getInstance(config)?.logToolCallEvent(event);
+  // ClearcutLogger.getInstance(config)?.logToolCallEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -126,12 +142,11 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     }
   }
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `Tool call: ${event.function_name}${event.decision ? `. Decision: ${event.decision}` : ''}. Success: ${event.success}. Duration: ${event.duration_ms}ms.`,
+  logWithSpan(
+    `tool.${event.function_name}`,
+    `Tool call: ${event.function_name}${event.decision ? `. Decision: ${event.decision}` : ''}. Success: ${event.success}. Duration: ${event.duration_ms}ms.`,
     attributes,
-  };
-  logger.emit(logRecord);
+  );
   recordToolCallMetrics(
     config,
     event.function_name,
@@ -142,7 +157,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
 }
 
 export function logApiRequest(config: Config, event: ApiRequestEvent): void {
-  ClearcutLogger.getInstance(config)?.logApiRequestEvent(event);
+  // ClearcutLogger.getInstance(config)?.logApiRequestEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -152,19 +167,18 @@ export function logApiRequest(config: Config, event: ApiRequestEvent): void {
     'event.timestamp': new Date().toISOString(),
   };
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `API request to ${event.model}.`,
+  logWithSpan(
+    `api.request.${event.model}`,
+    `API request to ${event.model}.`,
     attributes,
-  };
-  logger.emit(logRecord);
+  );
 }
 
 export function logFlashFallback(
   config: Config,
   event: FlashFallbackEvent,
 ): void {
-  ClearcutLogger.getInstance(config)?.logFlashFallbackEvent(event);
+  // ClearcutLogger.getInstance(config)?.logFlashFallbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -174,12 +188,11 @@ export function logFlashFallback(
     'event.timestamp': new Date().toISOString(),
   };
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `Switching to flash as Fallback.`,
+  logWithSpan(
+    'api.flash_fallback',
+    'Switching to flash as Fallback.',
     attributes,
-  };
-  logger.emit(logRecord);
+  );
 }
 
 export function logApiError(config: Config, event: ApiErrorEvent): void {
@@ -189,7 +202,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  ClearcutLogger.getInstance(config)?.logApiErrorEvent(event);
+  // ClearcutLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -209,12 +222,11 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     attributes[SemanticAttributes.HTTP_STATUS_CODE] = event.status_code;
   }
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `API error for ${event.model}. Error: ${event.error}. Duration: ${event.duration_ms}ms.`,
+  logWithSpan(
+    `api.error.${event.model}`,
+    `API error for ${event.model}. Error: ${event.error}. Duration: ${event.duration_ms}ms.`,
     attributes,
-  };
-  logger.emit(logRecord);
+  );
   recordApiErrorMetrics(
     config,
     event.model,
@@ -231,7 +243,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  ClearcutLogger.getInstance(config)?.logApiResponseEvent(event);
+  // ClearcutLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),
@@ -250,12 +262,11 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     }
   }
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `API response from ${event.model}. Status: ${event.status_code || 'N/A'}. Duration: ${event.duration_ms}ms.`,
+  logWithSpan(
+    `api.response.${event.model}`,
+    `API response from ${event.model}. Status: ${event.status_code || 'N/A'}. Duration: ${event.duration_ms}ms.`,
     attributes,
-  };
-  logger.emit(logRecord);
+  );
   recordApiResponseMetrics(
     config,
     event.model,
@@ -294,7 +305,7 @@ export function logLoopDetected(
   config: Config,
   event: LoopDetectedEvent,
 ): void {
-  ClearcutLogger.getInstance(config)?.logLoopDetectedEvent(event);
+  // ClearcutLogger.getInstance(config)?.logLoopDetectedEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -302,10 +313,9 @@ export function logLoopDetected(
     ...event,
   };
 
-  const logger = logs.getLogger(SERVICE_NAME);
-  const logRecord: LogRecord = {
-    body: `Loop detected. Type: ${event.loop_type}.`,
+  logWithSpan(
+    'loop.detected',
+    `Loop detected. Type: ${event.loop_type}.`,
     attributes,
-  };
-  logger.emit(logRecord);
+  );
 }
