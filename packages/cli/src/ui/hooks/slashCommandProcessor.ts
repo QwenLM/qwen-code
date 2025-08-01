@@ -1102,6 +1102,11 @@ export const useSlashCommandProcessor = (
                     );
                   }
                 }
+              case 'query':
+                return {
+                  type: 'submit_query',
+                  query: result.query,
+                };
               default: {
                 const unhandled: never = result;
                 throw new Error(`Unhandled slash command result: ${unhandled}`);
