@@ -624,32 +624,40 @@ export class OpenAIContentGenerator implements ContentGenerator {
         const fs = await import('fs');
         const path = await import('path');
         const { fileURLToPath } = await import('url');
-        
+
         // Get the directory of the current bundle
         const currentDir = path.dirname(fileURLToPath(import.meta.url));
         const wasmPath = path.join(currentDir, 'tiktoken_bg.wasm');
-        
+
         // Check if WASM file exists in bundle directory
         if (fs.existsSync(wasmPath)) {
           // Load WASM file manually
           const wasmBuffer = fs.readFileSync(wasmPath);
           const wasmModule = await WebAssembly.instantiate(wasmBuffer);
-          
+
           // Try to manually initialize tiktoken with the WASM
           // This is a fallback approach for bundled environments
           const tiktoken = await import('tiktoken');
-          
+
           // Access the internal WASM setter if available
-          const tiktokenModule = tiktoken as any;
-          if (tiktokenModule.__wbg_set_wasm) {
-            tiktokenModule.__wbg_set_wasm(wasmModule.instance.exports);
+          const tiktokenModule = tiktoken as unknown;
+          if (
+            typeof tiktokenModule === 'object' &&
+            tiktokenModule !== null &&
+            '__wbg_set_wasm' in tiktokenModule &&
+            typeof (tiktokenModule as { __wbg_set_wasm: unknown })
+              .__wbg_set_wasm === 'function'
+          ) {
+            (
+              tiktokenModule as { __wbg_set_wasm: (exports: unknown) => void }
+            ).__wbg_set_wasm(wasmModule.instance.exports);
           }
-          
+
           return tiktoken;
         } else {
           throw new Error(`WASM file not found at ${wasmPath}`);
         }
-      } catch (bundleError) {
+      } catch (_bundleError) {
         // If bundled loading also fails, throw the original error
         throw error;
       }
