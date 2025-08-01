@@ -253,7 +253,7 @@ export async function runNonInteractive(
             }
           }
         }
-        currentMessages = [{ role: 'user', parts: toolResponseParts }];
+        currentMessages = [{ role: 'function', parts: toolResponseParts }];
       } else {
         process.stdout.write('\n'); // Ensure a final newline
         return;
