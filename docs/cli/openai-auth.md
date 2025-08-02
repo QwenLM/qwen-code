@@ -40,9 +40,9 @@ qwen-code --openai-api-key "your-api-key-here" --model "gpt-4-turbo"
 Set the following environment variables in your shell or `.env` file:
 
 ```bash
-export OPENAI_API_KEY="your-api-key-here"
-export OPENAI_BASE_URL="https://api.openai.com/v1"  # Optional, defaults to this value
-export OPENAI_MODEL="gpt-4o"  # Optional, defaults to gpt-4o
+export QWEN_CODE_API_KEY="your-api-key-here"
+export QWEN_CODE_BASE_URL="https://api.openai.com/v1"  # Optional, defaults to this value
+export QWEN_CODE_MODEL="gpt-4o"  # Optional, defaults to gpt-4o
 ```
 
 ## Supported Models
@@ -58,7 +58,7 @@ The CLI supports all OpenAI models that are available through the OpenAI API, in
 
 ## Custom Endpoints
 
-You can use custom endpoints by setting the `OPENAI_BASE_URL` environment variable or using the `--openai-base-url` command line argument. This is useful for:
+You can use custom endpoints by setting the `QWEN_CODE_BASE_URL` environment variable or using the `--openai-base-url` command line argument. This is useful for:
 
 - Using Azure OpenAI
 - Using other OpenAI-compatible APIs

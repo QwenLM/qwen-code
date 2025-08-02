@@ -1173,7 +1173,7 @@ describe('useGeminiStream', () => {
           mockAuthType,
           undefined,
           'gemini-2.5-pro',
-          'gemini-2.5-flash',
+          'qwen3-coder-flash',
         );
       });
     });

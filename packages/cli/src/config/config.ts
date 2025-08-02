@@ -264,12 +264,12 @@ export async function loadCliConfig(
 
   // Handle OpenAI API key from command line
   if (argv.openaiApiKey) {
-    process.env.OPENAI_API_KEY = argv.openaiApiKey;
+    process.env.QWEN_CODE_API_KEY = argv.openaiApiKey;
   }
 
   // Handle OpenAI base URL from command line
   if (argv.openaiBaseUrl) {
-    process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
+    process.env.QWEN_CODE_BASE_URL = argv.openaiBaseUrl;
   }
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory

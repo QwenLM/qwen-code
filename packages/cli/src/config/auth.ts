@@ -39,8 +39,8 @@ export const validateAuthMethod = (authMethod: string): string | null => {
   }
 
   if (authMethod === AuthType.USE_OPENAI) {
-    if (!process.env.OPENAI_API_KEY) {
-      return 'OPENAI_API_KEY environment variable not found. You can enter it interactively or add it to your .env file.';
+    if (!process.env.QWEN_CODE_API_KEY) {
+      return 'QWEN_CODE_API_KEY environment variable not found. You can enter it interactively or add it to your .env file.';
     }
     return null;
   }
@@ -49,13 +49,13 @@ export const validateAuthMethod = (authMethod: string): string | null => {
 };
 
 export const setOpenAIApiKey = (apiKey: string): void => {
-  process.env.OPENAI_API_KEY = apiKey;
+  process.env.QWEN_CODE_API_KEY = apiKey;
 };
 
 export const setOpenAIBaseUrl = (baseUrl: string): void => {
-  process.env.OPENAI_BASE_URL = baseUrl;
+  process.env.QWEN_CODE_BASE_URL = baseUrl;
 };
 
 export const setOpenAIModel = (model: string): void => {
-  process.env.OPENAI_MODEL = model;
+  process.env.QWEN_CODE_MODEL = model;
 };

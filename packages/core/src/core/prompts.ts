@@ -65,8 +65,8 @@ export function getCoreSystemPrompt(
 
   // Check for system prompt mappings from global config
   if (config?.systemPromptMappings) {
-    const currentModel = process.env.OPENAI_MODEL || DEFAULT_GEMINI_MODEL;
-    const currentBaseUrl = process.env.OPENAI_BASE_URL || '';
+    const currentModel = process.env.QWEN_CODE_MODEL || DEFAULT_GEMINI_MODEL;
+    const currentBaseUrl = process.env.QWEN_CODE_BASE_URL || '';
 
     const matchedMapping = config.systemPromptMappings.find((mapping) => {
       const { baseUrls, modelNames } = mapping;

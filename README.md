@@ -97,17 +97,17 @@ Qwen Code supports multiple API providers. You can configure your API key throug
 1. **Environment Variables**
 
    ```bash
-   export OPENAI_API_KEY="your_api_key_here"
-   export OPENAI_BASE_URL="your_api_endpoint"
-   export OPENAI_MODEL="your_model_choice"
+   export QWEN_CODE_API_KEY="your_api_key_here"
+   export QWEN_CODE_BASE_URL="your_api_endpoint"
+   export QWEN_CODE_MODEL="your_model_choice"
    ```
 
 2. **Project `.env` File**
    Create a `.env` file in your project root:
    ```env
-   OPENAI_API_KEY=your_api_key_here
-   OPENAI_BASE_URL=your_api_endpoint
-   OPENAI_MODEL=your_model_choice
+   QWEN_CODE_API_KEY=your_api_key_here
+   QWEN_CODE_BASE_URL=your_api_endpoint
+   QWEN_CODE_MODEL=your_model_choice
    ```
 
 #### API Provider Options
@@ -123,9 +123,9 @@ Qwen Code supports multiple API providers. You can configure your API key throug
 **Option 1: Alibaba Cloud Bailian** ([Apply for API Key](https://bailian.console.aliyun.com/))
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-coder-plus"
+export QWEN_CODE_API_KEY="your_api_key_here"
+export QWEN_CODE_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+export QWEN_CODE_MODEL="qwen3-coder-plus"
 ```
 
 **Option 2: ModelScope (Free Tier)** ([Apply for API Key](https://modelscope.cn/docs/model-service/API-Inference/intro))
@@ -134,9 +134,9 @@ export OPENAI_MODEL="qwen3-coder-plus"
 - ⚠️ Connect your Aliyun account to avoid authentication errors
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
-export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+export QWEN_CODE_API_KEY="your_api_key_here"
+export QWEN_CODE_BASE_URL="https://api-inference.modelscope.cn/v1"
+export QWEN_CODE_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
 ```
 
 </details>
@@ -147,17 +147,17 @@ export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
 **Option 1: Alibaba Cloud ModelStudio** ([Apply for API Key](https://modelstudio.console.alibabacloud.com/))
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-coder-plus"
+export QWEN_CODE_API_KEY="your_api_key_here"
+export QWEN_CODE_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+export QWEN_CODE_MODEL="qwen3-coder-plus"
 ```
 
 **Option 2: OpenRouter (Free Tier Available)** ([Apply for API Key](https://openrouter.ai/))
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-export OPENAI_MODEL="qwen/qwen3-coder:free"
+export QWEN_CODE_API_KEY="your_api_key_here"
+export QWEN_CODE_BASE_URL="https://openrouter.ai/api/v1"
+export QWEN_CODE_MODEL="qwen/qwen3-coder:free"
 ```
 
 </details>

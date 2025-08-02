@@ -219,8 +219,8 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   - **Description:** Configures custom system prompt templates for specific model names and base URLs. This allows you to use different system prompts for different AI models or API endpoints.
   - **Default:** `undefined` (uses default system prompt)
   - **Properties:**
-    - **`baseUrls`** (array of strings, optional): Array of base URLs to exactly match against `OPENAI_BASE_URL` environment variable. If not specified, matches any base URL.
-    - **`modelNames`** (array of strings, optional): Array of model names to exactly match against `OPENAI_MODEL` environment variable. If not specified, matches any model.
+    - **`baseUrls`** (array of strings, optional): Array of base URLs to exactly match against `QWEN_CODE_BASE_URL` environment variable. If not specified, matches any base URL.
+    - **`modelNames`** (array of strings, optional): Array of model names to exactly match against `QWEN_CODE_MODEL` environment variable. If not specified, matches any model.
     - **`template`** (string): The system prompt template to use when both baseUrl and modelNames match. Supports placeholders:
       - `{RUNTIME_VARS_IS_GIT_REPO}`: Replaced with `true` or `false` based on whether the current directory is a git repository
       - `{RUNTIME_VARS_SANDBOX}`: Replaced with the sandbox type (e.g., `"sandbox-exec"`, `"docker"`, or empty string)

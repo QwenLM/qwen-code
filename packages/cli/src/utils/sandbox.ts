@@ -517,15 +517,15 @@ export async function start_sandbox(
     args.push('--env', `GOOGLE_API_KEY=${process.env.GOOGLE_API_KEY}`);
   }
 
-  // copy OPENAI_API_KEY and related env vars for Qwen
-  if (process.env.OPENAI_API_KEY) {
-    args.push('--env', `OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`);
+  // copy QWEN_CODE_API_KEY and related env vars for Qwen
+  if (process.env.QWEN_CODE_API_KEY) {
+    args.push('--env', `QWEN_CODE_API_KEY=${process.env.QWEN_CODE_API_KEY}`);
   }
-  if (process.env.OPENAI_BASE_URL) {
-    args.push('--env', `OPENAI_BASE_URL=${process.env.OPENAI_BASE_URL}`);
+  if (process.env.QWEN_CODE_BASE_URL) {
+    args.push('--env', `QWEN_CODE_BASE_URL=${process.env.QWEN_CODE_BASE_URL}`);
   }
-  if (process.env.OPENAI_MODEL) {
-    args.push('--env', `OPENAI_MODEL=${process.env.OPENAI_MODEL}`);
+  if (process.env.QWEN_CODE_MODEL) {
+    args.push('--env', `QWEN_CODE_MODEL=${process.env.QWEN_CODE_MODEL}`);
   }
 
   // copy GOOGLE_GENAI_USE_VERTEXAI

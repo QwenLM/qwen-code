@@ -130,8 +130,8 @@ describe('URL matching with trailing slash compatibility', () => {
     // Test case 1: No trailing slash in config, actual URL has trailing slash
     process.env = {
       ...originalEnv,
-      OPENAI_BASE_URL: 'https://api.example.com/',
-      OPENAI_MODEL: 'gpt-4',
+      QWEN_CODE_BASE_URL: 'https://api.example.com/',
+      QWEN_CODE_MODEL: 'gpt-4',
     };
 
     const result1 = getCoreSystemPrompt(undefined, config);
@@ -140,8 +140,8 @@ describe('URL matching with trailing slash compatibility', () => {
     // Test case 2: Config has trailing slash, actual URL has no trailing slash
     process.env = {
       ...originalEnv,
-      OPENAI_BASE_URL: 'https://api.openai.com',
-      OPENAI_MODEL: 'gpt-3.5-turbo',
+      QWEN_CODE_BASE_URL: 'https://api.openai.com',
+      QWEN_CODE_MODEL: 'gpt-3.5-turbo',
     };
 
     const result2 = getCoreSystemPrompt(undefined, config);
@@ -150,8 +150,8 @@ describe('URL matching with trailing slash compatibility', () => {
     // Test case 3: No trailing slash in config, actual URL has no trailing slash
     process.env = {
       ...originalEnv,
-      OPENAI_BASE_URL: 'https://api.example.com',
-      OPENAI_MODEL: 'gpt-4',
+      QWEN_CODE_BASE_URL: 'https://api.example.com',
+      QWEN_CODE_MODEL: 'gpt-4',
     };
 
     const result3 = getCoreSystemPrompt(undefined, config);
@@ -160,8 +160,8 @@ describe('URL matching with trailing slash compatibility', () => {
     // Test case 4: Config has trailing slash, actual URL has trailing slash
     process.env = {
       ...originalEnv,
-      OPENAI_BASE_URL: 'https://api.openai.com/',
-      OPENAI_MODEL: 'gpt-3.5-turbo',
+      QWEN_CODE_BASE_URL: 'https://api.openai.com/',
+      QWEN_CODE_MODEL: 'gpt-3.5-turbo',
     };
 
     const result4 = getCoreSystemPrompt(undefined, config);
@@ -187,8 +187,8 @@ describe('URL matching with trailing slash compatibility', () => {
     // Test case: URLs do not match
     process.env = {
       ...originalEnv,
-      OPENAI_BASE_URL: 'https://api.different.com',
-      OPENAI_MODEL: 'gpt-4',
+      QWEN_CODE_BASE_URL: 'https://api.different.com',
+      QWEN_CODE_MODEL: 'gpt-4',
     };
 
     const result = getCoreSystemPrompt(undefined, config);
