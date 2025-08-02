@@ -159,6 +159,22 @@ export interface ConfigParameters {
     modelNames?: string[];
     template?: string;
   }>;
+  providerPreferences?: {
+    order?: string[];
+    allow_fallbacks?: boolean;
+    require_parameters?: boolean;
+    data_collection?: 'allow' | 'deny';
+    only?: string[];
+    ignore?: string[];
+    quantizations?: string[];
+    sort?: string;
+    max_price?: {
+      prompt?: number;
+      completion?: number;
+      request?: number;
+      image?: number;
+    };
+  };
 }
 
 export class Config {
@@ -214,6 +230,22 @@ export class Config {
     modelNames?: string[];
     template?: string;
   }>;
+  private readonly providerPreferences?: {
+    order?: string[];
+    allow_fallbacks?: boolean;
+    require_parameters?: boolean;
+    data_collection?: 'allow' | 'deny';
+    only?: string[];
+    ignore?: string[];
+    quantizations?: string[];
+    sort?: string;
+    max_price?: {
+      prompt?: number;
+      completion?: number;
+      request?: number;
+      image?: number;
+    };
+  };
   private modelSwitchedDuringSession: boolean = false;
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
@@ -273,6 +305,7 @@ export class Config {
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
     this.sampling_params = params.sampling_params;
     this.systemPromptMappings = params.systemPromptMappings;
+    this.providerPreferences = params.providerPreferences;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -305,6 +338,7 @@ export class Config {
     this.contentGeneratorConfig = await createContentGeneratorConfig(
       this.model,
       authMethod,
+      this.providerPreferences,
     );
     this.contentGeneratorConfig.enableOpenAILogging = this.enableOpenAILogging;
 
@@ -572,6 +606,27 @@ export class Config {
       }>
     | undefined {
     return this.systemPromptMappings;
+  }
+
+  getProviderPreferences():
+    | {
+        order?: string[];
+        allow_fallbacks?: boolean;
+        require_parameters?: boolean;
+        data_collection?: 'allow' | 'deny';
+        only?: string[];
+        ignore?: string[];
+        quantizations?: string[];
+        sort?: string;
+        max_price?: {
+          prompt?: number;
+          completion?: number;
+          request?: number;
+          image?: number;
+        };
+      }
+    | undefined {
+    return this.providerPreferences;
   }
 
   async refreshMemory(): Promise<{ memoryContent: string; fileCount: number }> {

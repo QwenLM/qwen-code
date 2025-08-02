@@ -195,6 +195,13 @@ export class OpenAIContentGenerator implements ContentGenerator {
           request.config.tools,
         );
       }
+
+      // Add OpenRouter provider preferences if configured
+      const providerPreferences = this.config.getContentGeneratorConfig()?.providerPreferences;
+      if (providerPreferences && Object.keys(providerPreferences).length > 0) {
+        // TypeScript might complain about this, but OpenRouter accepts it
+        (createParams as any).provider = providerPreferences;
+      }
       // console.log('createParams', createParams);
       const completion = (await this.client.chat.completions.create(
         createParams,
@@ -320,6 +327,13 @@ export class OpenAIContentGenerator implements ContentGenerator {
         createParams.tools = await this.convertGeminiToolsToOpenAI(
           request.config.tools,
         );
+      }
+
+      // Add OpenRouter provider preferences if configured
+      const providerPreferences = this.config.getContentGeneratorConfig()?.providerPreferences;
+      if (providerPreferences && Object.keys(providerPreferences).length > 0) {
+        // TypeScript might complain about this, but OpenRouter accepts it
+        (createParams as any).provider = providerPreferences;
       }
 
       // console.log('createParams', createParams);

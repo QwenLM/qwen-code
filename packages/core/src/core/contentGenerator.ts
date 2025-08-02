@@ -65,11 +65,29 @@ export type ContentGeneratorConfig = {
     temperature?: number;
     max_tokens?: number;
   };
+  // OpenRouter provider preferences
+  providerPreferences?: {
+    order?: string[];
+    allow_fallbacks?: boolean;
+    require_parameters?: boolean;
+    data_collection?: 'allow' | 'deny';
+    only?: string[];
+    ignore?: string[];
+    quantizations?: string[];
+    sort?: string;
+    max_price?: {
+      prompt?: number;
+      completion?: number;
+      request?: number;
+      image?: number;
+    };
+  };
 };
 
 export async function createContentGeneratorConfig(
   model: string | undefined,
   authType: AuthType | undefined,
+  configProviderPreferences?: ContentGeneratorConfig['providerPreferences'],
 ): Promise<ContentGeneratorConfig> {
   const geminiApiKey = process.env.GEMINI_API_KEY || undefined;
   const googleApiKey = process.env.GOOGLE_API_KEY || undefined;
@@ -118,6 +136,63 @@ export async function createContentGeneratorConfig(
     contentGeneratorConfig.apiKey = openaiApiKey;
     contentGeneratorConfig.model =
       process.env.OPENAI_MODEL || DEFAULT_GEMINI_MODEL;
+
+    // Load OpenRouter provider preferences from environment variables
+    const providerOrder = process.env.OPENROUTER_PROVIDER_ORDER;
+    const providerAllowFallbacks = process.env.OPENROUTER_ALLOW_FALLBACKS;
+    const providerRequireParameters = process.env.OPENROUTER_REQUIRE_PARAMETERS;
+    const providerDataCollection = process.env.OPENROUTER_DATA_COLLECTION;
+    const providerOnly = process.env.OPENROUTER_PROVIDER_ONLY;
+    const providerIgnore = process.env.OPENROUTER_PROVIDER_IGNORE;
+    const providerQuantizations = process.env.OPENROUTER_QUANTIZATIONS;
+    const providerSort = process.env.OPENROUTER_SORT;
+    const providerMaxPrice = process.env.OPENROUTER_MAX_PRICE;
+
+    const providerPreferences: ContentGeneratorConfig['providerPreferences'] = {};
+
+    if (providerOrder) {
+      providerPreferences.order = providerOrder.split(',').map(p => p.trim());
+    }
+    if (providerAllowFallbacks !== undefined) {
+      providerPreferences.allow_fallbacks = providerAllowFallbacks.toLowerCase() === 'true';
+    }
+    if (providerRequireParameters !== undefined) {
+      providerPreferences.require_parameters = providerRequireParameters.toLowerCase() === 'true';
+    }
+    if (providerDataCollection && ['allow', 'deny'].includes(providerDataCollection.toLowerCase())) {
+      providerPreferences.data_collection = providerDataCollection.toLowerCase() as 'allow' | 'deny';
+    }
+    if (providerOnly) {
+      providerPreferences.only = providerOnly.split(',').map(p => p.trim());
+    }
+    if (providerIgnore) {
+      providerPreferences.ignore = providerIgnore.split(',').map(p => p.trim());
+    }
+    if (providerQuantizations) {
+      providerPreferences.quantizations = providerQuantizations.split(',').map(p => p.trim());
+    }
+    if (providerSort && ['price', 'throughput', 'latency'].includes(providerSort.toLowerCase())) {
+      providerPreferences.sort = providerSort.toLowerCase();
+    }
+    if (providerMaxPrice) {
+      try {
+        providerPreferences.max_price = JSON.parse(providerMaxPrice);
+      } catch (e) {
+        console.warn('Failed to parse OPENROUTER_MAX_PRICE:', e);
+      }
+    }
+
+    // Merge with config provider preferences (env vars take precedence)
+    if (configProviderPreferences) {
+      providerPreferences = {
+        ...configProviderPreferences,
+        ...providerPreferences,
+      };
+    }
+
+    if (Object.keys(providerPreferences).length > 0) {
+      contentGeneratorConfig.providerPreferences = providerPreferences;
+    }
 
     return contentGeneratorConfig;
   }
