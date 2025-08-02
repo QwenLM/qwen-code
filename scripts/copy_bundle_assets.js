@@ -37,4 +37,26 @@ for (const file of sbFiles) {
   copyFileSync(join(root, file), join(bundleDir, basename(file)));
 }
 
+// Copy tiktoken WASM files to bundle directory
+// We prioritize the main tiktoken WASM file over the lite version
+const tiktokenWasmFile = 'node_modules/tiktoken/tiktoken_bg.wasm';
+const sourcePath = join(root, tiktokenWasmFile);
+
+if (existsSync(sourcePath)) {
+  const targetPath = join(bundleDir, 'tiktoken_bg.wasm');
+  copyFileSync(sourcePath, targetPath);
+  console.log(`Copied ${tiktokenWasmFile} to bundle/`);
+} else {
+  // Fallback to lite version if main version doesn't exist
+  const liteWasmFile = 'node_modules/tiktoken/lite/tiktoken_bg.wasm';
+  const liteSourcePath = join(root, liteWasmFile);
+  if (existsSync(liteSourcePath)) {
+    const targetPath = join(bundleDir, 'tiktoken_bg.wasm');
+    copyFileSync(liteSourcePath, targetPath);
+    console.log(`Copied ${liteWasmFile} to bundle/ (fallback)`);
+  } else {
+    console.warn('Warning: No tiktoken WASM files found');
+  }
+}
+
 console.log('Assets copied to bundle/');
