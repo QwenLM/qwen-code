@@ -72,18 +72,17 @@ export class WriteFileTool
     super(
       WriteFileTool.Name,
       'WriteFile',
-      `Writes content to a specified file in the local filesystem. 
-      
-      The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
+      `Writes content to a specified file in the local filesystem. Use this only when explicitly instructed to write to a file or when a clear file modification is required (e.g., during code refactoring or file conversion). The file_path must be a valid, non-empty absolute path (e.g., '/home/user/project/src/index.ts'). Do not call this tool with an empty, relative, or invalid file_path. The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       {
         properties: {
           file_path: {
             description:
-              "The absolute path to the file to write to (e.g., '/home/user/project/file.txt'). Relative paths are not supported.",
+              "The absolute path to the file to write to (e.g., '/home/user/project/src/index.ts'). Must be a non-empty string and a valid absolute path. Relative paths are not supported.",
             type: Type.STRING,
           },
           content: {
-            description: 'The content to write to the file.',
+            description:
+              'The content to write to the file. Must be a non-empty string containing the data to write.',
             type: Type.STRING,
           },
         },
@@ -100,6 +99,9 @@ export class WriteFileTool
     }
 
     const filePath = params.file_path;
+    if (!filePath || filePath.trim() === '') {
+      return `File path must be a non-empty string: ${filePath}`;
+    }
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute: ${filePath}`;
     }
@@ -108,8 +110,6 @@ export class WriteFileTool
     }
 
     try {
-      // This check should be performed only if the path exists.
-      // If it doesn't exist, it's a new file, which is valid for writing.
       if (fs.existsSync(filePath)) {
         const stats = fs.lstatSync(filePath);
         if (stats.isDirectory()) {
@@ -117,8 +117,6 @@ export class WriteFileTool
         }
       }
     } catch (statError: unknown) {
-      // If fs.existsSync is true but lstatSync fails (e.g., permissions, race condition where file is deleted)
-      // this indicates an issue with accessing the path that should be reported.
       return `Error accessing path properties for validation: ${filePath}. Reason: ${statError instanceof Error ? statError.message : String(statError)}`;
     }
 

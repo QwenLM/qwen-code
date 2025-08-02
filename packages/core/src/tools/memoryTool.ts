@@ -13,19 +13,20 @@ import { homedir } from 'os';
 const memoryToolSchemaData: FunctionDeclaration = {
   name: 'save_memory',
   description:
-    'Saves a specific piece of information or fact to your long-term memory. Use this when the user explicitly asks you to remember something, or when they state a clear, concise fact that seems important to retain for future interactions.',
+    'Saves a specific piece of information or fact to your long-term memory. Use this only when the user explicitly asks to remember something, or when a clear, concise, and non-empty fact is provided that is important for future interactions. Do not call this tool with an empty or vague fact.',
   parameters: {
     type: Type.OBJECT,
     properties: {
       fact: {
         type: Type.STRING,
         description:
-          'The specific fact or piece of information to remember. Should be a clear, self-contained statement.',
+          'The specific fact or piece of information to remember. Must be a clear, self-contained, non-empty string (e.g., "The project uses Node.js v20" or "User prefers TypeScript for development").',
       },
     },
     required: ['fact'],
   },
 };
+
 
 const memoryToolDescription = `
 Saves a specific piece of information or fact to your long-term memory.

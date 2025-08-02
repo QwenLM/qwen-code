@@ -39,25 +39,26 @@ export class ShellTool extends BaseTool<ShellToolParams, ToolResult> {
     super(
       ShellTool.Name,
       'Shell',
-      `This tool executes a given shell command as \`bash -c <command>\`. Command can start background processes using \`&\`. Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.
+      `Executes a shell command in the local environment using \`bash -c <command>\`. Use this only when explicitly instructed to run a specific shell command (e.g., during workflow automation like analyzing git commits or installing dependencies). The command must be a valid, non-empty shell command string (e.g., "git status" or "npm install"). Do not call this tool with an empty, invalid, or unsafe command (e.g., containing command substitution like $()). Command can start background processes using \`&\`. Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.
 
-The following information is returned:
+    The following information is returned:
 
-Command: Executed command.
-Directory: Directory (relative to project root) where command was executed, or \`(root)\`.
-Stdout: Output on stdout stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
-Stderr: Output on stderr stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
-Error: Error or \`(none)\` if no error was reported for the subprocess.
-Exit Code: Exit code or \`(none)\` if terminated by signal.
-Signal: Signal number or \`(none)\` if no signal was received.
-Background PIDs: List of background processes started or \`(none)\`.
-Process Group PGID: Process group started or \`(none)\``,
+    Command: Executed command.
+    Directory: Directory (relative to project root) where command was executed, or \`(root)\`.
+    Stdout: Output on stdout stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
+    Stderr: Output on stderr stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
+    Error: Error or \`(none)\` if no error was reported for the subprocess.
+    Exit Code: Exit code or \`(none)\` if terminated by signal.
+    Signal: Signal number or \`(none)\` if no signal was received.
+    Background PIDs: List of background processes started or \`(none)\`.
+    Process Group PGID: Process group started or \`(none)\``,
       {
         type: Type.OBJECT,
         properties: {
           command: {
             type: Type.STRING,
-            description: 'Exact bash command to execute as `bash -c <command>`',
+            description:
+              'The exact bash command to execute as `bash -c <command>` (e.g., "git status" or "npm install"). Must be a non-empty, valid shell command string. Do not include command substitution (e.g., $()).',
           },
           description: {
             type: Type.STRING,
@@ -215,6 +216,10 @@ Process Group PGID: Process group started or \`(none)\``,
   }
 
   validateToolParams(params: ShellToolParams): string | null {
+    if (!params.command || typeof params.command !== 'string' || params.command.trim() === '') {
+      return 'Command must be a non-empty string';
+    }
+
     const commandCheck = this.isCommandAllowed(params.command);
     if (!commandCheck.allowed) {
       if (!commandCheck.reason) {
@@ -225,16 +230,16 @@ Process Group PGID: Process group started or \`(none)\``,
       }
       return commandCheck.reason;
     }
+
     const errors = SchemaValidator.validate(this.schema.parameters, params);
     if (errors) {
       return errors;
     }
-    if (!params.command.trim()) {
-      return 'Command cannot be empty.';
-    }
+
     if (!this.getCommandRoot(params.command)) {
       return 'Could not identify command root to obtain permission from user.';
     }
+
     if (params.directory) {
       if (path.isAbsolute(params.directory)) {
         return 'Directory cannot be absolute. Must be relative to the project root directory.';
