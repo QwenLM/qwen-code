@@ -1,4 +1,4 @@
-name: Gemini Scheduled PR Triage 🚀
+name: Qwen Scheduled PR Triage 🚀
 
 on:
   schedule:
@@ -8,7 +8,7 @@ on:
 jobs:
   audit-prs:
     timeout-minutes: 15
-    if: ${{ github.repository == 'google-gemini/gemini-cli' }}
+    if: ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
       contents: read
       id-token: write
@@ -21,16 +21,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
 
-      - name: Generate GitHub App Token
-        id: generate_token
-        uses: actions/create-github-app-token@df432ceedc7162793a195dd1713ff69aefc7379e # v2
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.PRIVATE_KEY }}
-
       - name: Run PR Triage Script
         id: run_triage
         env:
-          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: ./.github/scripts/pr-triage.sh

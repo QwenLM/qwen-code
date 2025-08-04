@@ -50,6 +50,7 @@ interface SessionStatsContextValue {
   stats: SessionStatsState;
   startNewPrompt: () => void;
   getPromptCount: () => number;
+  resetSession: () => void;
 }
 
 // --- Context Definition ---
@@ -109,13 +110,23 @@ export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
     [stats.promptCount],
   );
 
+  const resetSession = useCallback(() => {
+    setStats({
+      sessionStartTime: new Date(),
+      metrics: uiTelemetryService.getMetrics(),
+      lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+      promptCount: 0,
+    });
+  }, []);
+
   const value = useMemo(
     () => ({
       stats,
       startNewPrompt,
       getPromptCount,
+      resetSession,
     }),
-    [stats, startNewPrompt, getPromptCount],
+    [stats, startNewPrompt, getPromptCount, resetSession],
   );
 
   return (

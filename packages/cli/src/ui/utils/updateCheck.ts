@@ -10,6 +10,11 @@ import { getPackageJson } from '../../utils/package.js';
 
 export async function checkForUpdates(): Promise<string | null> {
   try {
+    // Skip update check when running from source (development mode)
+    if (process.env.DEV === 'true') {
+      return null;
+    }
+
     const packageJson = await getPackageJson();
     if (!packageJson || !packageJson.name || !packageJson.version) {
       return null;
@@ -29,7 +34,7 @@ export async function checkForUpdates(): Promise<string | null> {
       notifier.update &&
       semver.gt(notifier.update.latest, notifier.update.current)
     ) {
-      return `Gemini CLI update available! ${notifier.update.current} → ${notifier.update.latest}\nRun npm install -g ${packageJson.name} to update`;
+      return `Qwen Code update available! ${notifier.update.current} → ${notifier.update.latest}\nRun npm install -g ${packageJson.name} to update`;
     }
 
     return null;

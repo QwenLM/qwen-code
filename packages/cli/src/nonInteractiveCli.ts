@@ -11,7 +11,6 @@ import {
   ToolRegistry,
   shutdownTelemetry,
   isTelemetrySdkInitialized,
-  ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
   Content,
@@ -42,83 +41,6 @@ function getResponseText(response: GenerateContentResponse): string | null {
     }
   }
   return null;
-}
-
-// Helper function to format tool call arguments for display
-function formatToolArgs(args: Record<string, unknown>): string {
-  if (!args || Object.keys(args).length === 0) {
-    return '(no arguments)';
-  }
-
-  const formattedArgs = Object.entries(args)
-    .map(([key, value]) => {
-      if (typeof value === 'string') {
-        return `${key}: "${value}"`;
-      } else if (typeof value === 'object' && value !== null) {
-        return `${key}: ${JSON.stringify(value)}`;
-      } else {
-        return `${key}: ${value}`;
-      }
-    })
-    .join(', ');
-
-  return `(${formattedArgs})`;
-}
-// Helper function to display tool call information
-function displayToolCallInfo(
-  toolName: string,
-  args: Record<string, unknown>,
-  status: 'start' | 'success' | 'error',
-  resultDisplay?: ToolResultDisplay,
-  errorMessage?: string,
-): void {
-  const timestamp = new Date().toLocaleTimeString();
-  const argsStr = formatToolArgs(args);
-
-  switch (status) {
-    case 'start':
-      process.stdout.write(
-        `\n[${timestamp}] 🔧 Executing tool: ${toolName} ${argsStr}\n`,
-      );
-      break;
-    case 'success':
-      if (resultDisplay) {
-        if (typeof resultDisplay === 'string' && resultDisplay.trim()) {
-          process.stdout.write(
-            `[${timestamp}] ✅ Tool ${toolName} completed successfully\n`,
-          );
-          process.stdout.write(`📋 Result:\n${resultDisplay}\n`);
-        } else if (
-          typeof resultDisplay === 'object' &&
-          'fileDiff' in resultDisplay
-        ) {
-          process.stdout.write(
-            `[${timestamp}] ✅ Tool ${toolName} completed successfully\n`,
-          );
-          process.stdout.write(`📋 File: ${resultDisplay.fileName}\n`);
-          process.stdout.write(`📋 Diff:\n${resultDisplay.fileDiff}\n`);
-        } else {
-          process.stdout.write(
-            `[${timestamp}] ✅ Tool ${toolName} completed successfully (no output)\n`,
-          );
-        }
-      } else {
-        process.stdout.write(
-          `[${timestamp}] ✅ Tool ${toolName} completed successfully (no output)\n`,
-        );
-      }
-      break;
-    case 'error':
-      process.stdout.write(
-        `[${timestamp}] ❌ Tool ${toolName} failed: ${errorMessage}\n`,
-      );
-      break;
-    default:
-      process.stdout.write(
-        `[${timestamp}] ⚠️ Tool ${toolName} reported unknown status: ${status}\n`,
-      );
-      break;
-  }
 }
 
 export async function runNonInteractive(
@@ -196,9 +118,6 @@ export async function runNonInteractive(
             prompt_id,
           };
 
-          //Display tool call start information
-          displayToolCallInfo(fc.name as string, fc.args ?? {}, 'start');
-
           const toolResponse = await executeToolCall(
             config,
             requestInfo,
@@ -207,20 +126,6 @@ export async function runNonInteractive(
           );
 
           if (toolResponse.error) {
-            // Display tool call error information
-            const errorMessage =
-              typeof toolResponse.resultDisplay === 'string'
-                ? toolResponse.resultDisplay
-                : toolResponse.error?.message;
-
-            displayToolCallInfo(
-              fc.name as string,
-              fc.args ?? {},
-              'error',
-              undefined,
-              errorMessage,
-            );
-
             const isToolNotFound = toolResponse.error.message.includes(
               'not found in registry',
             );
@@ -230,14 +135,6 @@ export async function runNonInteractive(
             if (!isToolNotFound) {
               process.exit(1);
             }
-          } else {
-            // Display tool call success information
-            displayToolCallInfo(
-              fc.name as string,
-              fc.args ?? {},
-              'success',
-              toolResponse.resultDisplay,
-            );
           }
 
           if (toolResponse.responseParts) {

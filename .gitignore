@@ -38,11 +38,8 @@ packages/*/coverage/
 # Generated files
 packages/cli/src/generated/
 .integration-tests/
-
-
-# Logs
-logs/
-
+packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 .qwen/
+logs/

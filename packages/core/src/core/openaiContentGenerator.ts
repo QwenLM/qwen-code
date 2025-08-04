@@ -22,10 +22,6 @@ import {
 } from '@google/genai';
 import { ContentGenerator } from './contentGenerator.js';
 import OpenAI from 'openai';
-import type {
-  ChatCompletion,
-  ChatCompletionChunk,
-} from 'openai/resources/chat/index.js';
 import { logApiResponse } from '../telemetry/loggers.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
@@ -52,6 +48,9 @@ interface OpenAIUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+  };
 }
 
 interface OpenAIChoice {
@@ -115,11 +114,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
       timeoutConfig.maxRetries = contentGeneratorConfig.maxRetries;
     }
 
+    // Check if using OpenRouter and add required headers
+    const isOpenRouter = baseURL.includes('openrouter.ai');
+    const defaultHeaders = isOpenRouter
+      ? {
+          'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
+          'X-Title': 'Qwen Code',
+        }
+      : undefined;
+
     this.client = new OpenAI({
       apiKey,
       baseURL,
       timeout: timeoutConfig.timeout,
       maxRetries: timeoutConfig.maxRetries,
+      defaultHeaders,
     });
   }
 
@@ -185,7 +194,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
       // console.log('createParams', createParams);
       const completion = (await this.client.chat.completions.create(
         createParams,
-      )) as ChatCompletion;
+      )) as OpenAI.Chat.ChatCompletion;
 
       const response = this.convertToGeminiFormat(completion);
       const durationMs = Date.now() - startTime;
@@ -300,6 +309,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         messages,
         ...samplingParams,
         stream: true,
+        stream_options: { include_usage: true },
       };
 
       if (request.config?.tools) {
@@ -312,7 +322,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       const stream = (await this.client.chat.completions.create(
         createParams,
-      )) as AsyncIterable<ChatCompletionChunk>;
+      )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
 
       const originalStream = this.streamGenerator(stream);
 
@@ -494,7 +504,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private async *streamGenerator(
-    stream: AsyncIterable<ChatCompletionChunk>,
+    stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   ): AsyncGenerator<GenerateContentResponse> {
     // Reset the accumulator for each new stream
     this.streamingToolCalls.clear();
@@ -513,6 +523,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
     if (responses.length === 0) {
       return new GenerateContentResponse();
     }
+
+    const lastResponse = responses[responses.length - 1];
 
     // Find the last response with usage metadata
     const finalUsageMetadata = responses
@@ -560,6 +572,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
         safetyRatings: [],
       },
     ];
+    combinedResponse.responseId = lastResponse?.responseId;
+    combinedResponse.createTime = lastResponse?.createTime;
     combinedResponse.modelVersion = this.model;
     combinedResponse.promptFeedback = { safetyRatings: [] };
     combinedResponse.usageMetadata = finalUsageMetadata;
@@ -570,14 +584,26 @@ export class OpenAIContentGenerator implements ContentGenerator {
   async countTokens(
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
-    // OpenAI doesn't have a direct token counting endpoint
-    // We'll estimate based on the tiktoken library or a rough calculation
-    // For now, return a rough estimate
+    // Use tiktoken for accurate token counting
     const content = JSON.stringify(request.contents);
-    const estimatedTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
+    let totalTokens = 0;
+
+    try {
+      const { get_encoding } = await import('tiktoken');
+      const encoding = get_encoding('cl100k_base'); // GPT-4 encoding, but estimate for qwen
+      totalTokens = encoding.encode(content).length;
+      encoding.free();
+    } catch (error) {
+      console.warn(
+        'Failed to load tiktoken, falling back to character approximation:',
+        error,
+      );
+      // Fallback: rough approximation using character count
+      totalTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
+    }
 
     return {
-      totalTokens: estimatedTokens,
+      totalTokens,
     };
   }
 
@@ -1090,7 +1116,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private convertToGeminiFormat(
-    openaiResponse: ChatCompletion,
+    openaiResponse: OpenAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
     const choice = openaiResponse.choices[0];
     const response = new GenerateContentResponse();
@@ -1127,6 +1153,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
       }
     }
 
+    response.responseId = openaiResponse.id;
+    response.createTime = openaiResponse.created
+      ? openaiResponse.created.toString()
+      : new Date().getTime().toString();
+
     response.candidates = [
       {
         content: {
@@ -1144,15 +1175,12 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
     // Add usage metadata if available
     if (openaiResponse.usage) {
-      const usage = openaiResponse.usage as {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        total_tokens?: number;
-      };
+      const usage = openaiResponse.usage as OpenAIUsage;
 
       const promptTokens = usage.prompt_tokens || 0;
       const completionTokens = usage.completion_tokens || 0;
       const totalTokens = usage.total_tokens || 0;
+      const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations
@@ -1169,6 +1197,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         promptTokenCount: finalPromptTokens,
         candidatesTokenCount: finalCompletionTokens,
         totalTokenCount: totalTokens,
+        cachedContentTokenCount: cachedTokens,
       };
     }
 
@@ -1176,7 +1205,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private convertStreamChunkToGeminiFormat(
-    chunk: ChatCompletionChunk,
+    chunk: OpenAI.Chat.ChatCompletionChunk,
   ): GenerateContentResponse {
     const choice = chunk.choices?.[0];
     const response = new GenerateContentResponse();
@@ -1262,20 +1291,22 @@ export class OpenAIContentGenerator implements ContentGenerator {
       response.candidates = [];
     }
 
+    response.responseId = chunk.id;
+    response.createTime = chunk.created
+      ? chunk.created.toString()
+      : new Date().getTime().toString();
+
     response.modelVersion = this.model;
     response.promptFeedback = { safetyRatings: [] };
 
     // Add usage metadata if available in the chunk
     if (chunk.usage) {
-      const usage = chunk.usage as {
-        prompt_tokens?: number;
-        completion_tokens?: number;
-        total_tokens?: number;
-      };
+      const usage = chunk.usage as OpenAIUsage;
 
       const promptTokens = usage.prompt_tokens || 0;
       const completionTokens = usage.completion_tokens || 0;
       const totalTokens = usage.total_tokens || 0;
+      const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations
@@ -1292,6 +1323,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         promptTokenCount: finalPromptTokens,
         candidatesTokenCount: finalCompletionTokens,
         totalTokenCount: totalTokens,
+        cachedContentTokenCount: cachedTokens,
       };
     }
 
@@ -1726,9 +1758,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     const openaiResponse: OpenAIResponseFormat = {
-      id: `chatcmpl-${Date.now()}`,
+      id: response.responseId || `chatcmpl-${Date.now()}`,
       object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
+      created: response.createTime
+        ? Number(response.createTime)
+        : Math.floor(Date.now() / 1000),
       model: this.model,
       choices: [choice],
     };
@@ -1740,6 +1774,12 @@ export class OpenAIContentGenerator implements ContentGenerator {
         completion_tokens: response.usageMetadata.candidatesTokenCount || 0,
         total_tokens: response.usageMetadata.totalTokenCount || 0,
       };
+
+      if (response.usageMetadata.cachedContentTokenCount) {
+        openaiResponse.usage.prompt_tokens_details = {
+          cached_tokens: response.usageMetadata.cachedContentTokenCount,
+        };
+      }
     }
 
     return openaiResponse;

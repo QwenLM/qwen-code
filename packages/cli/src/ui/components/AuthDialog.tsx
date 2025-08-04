@@ -102,7 +102,6 @@ export function AuthDialog({
   };
 
   useInput((_input, key) => {
-    // 当显示 OpenAIKeyPrompt 时，不处理输入事件
     if (showOpenAIKeyPrompt) {
       return;
     }

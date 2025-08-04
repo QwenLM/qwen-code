@@ -6,7 +6,7 @@
 
 import fs from 'fs/promises';
 import * as os from 'os';
-import semver from 'semver';
+import path from 'path';
 
 type WarningCheck = {
   id: string;
@@ -33,22 +33,30 @@ const homeDirectoryCheck: WarningCheck = {
   },
 };
 
-const nodeVersionCheck: WarningCheck = {
-  id: 'node-version',
-  check: async (_workspaceRoot: string) => {
-    const minMajor = 20;
-    const major = semver.major(process.versions.node);
-    if (major < minMajor) {
-      return `You are using Node.js v${process.versions.node}. Gemini CLI requires Node.js ${minMajor} or higher for best results.`;
+const rootDirectoryCheck: WarningCheck = {
+  id: 'root-directory',
+  check: async (workspaceRoot: string) => {
+    try {
+      const workspaceRealPath = await fs.realpath(workspaceRoot);
+      const errorMessage =
+        'Warning: You are running Qwen Code in the root directory. Your entire folder structure will be used for context. It is strongly recommended to run in a project-specific directory.';
+
+      // Check for Unix root directory
+      if (path.dirname(workspaceRealPath) === workspaceRealPath) {
+        return errorMessage;
+      }
+
+      return null;
+    } catch (_err: unknown) {
+      return 'Could not verify the current directory due to a file system error.';
     }
-    return null;
   },
 };
 
 // All warning checks
 const WARNING_CHECKS: readonly WarningCheck[] = [
   homeDirectoryCheck,
-  nodeVersionCheck,
+  rootDirectoryCheck,
 ];
 
 export async function getUserStartupWarnings(

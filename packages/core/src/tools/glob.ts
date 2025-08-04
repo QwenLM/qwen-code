@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { glob } from 'glob';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import { BaseTool, ToolResult } from './tools.js';
+import { BaseTool, Icon, ToolResult } from './tools.js';
 import { Type } from '@google/genai';
 import { shortenPath, makeRelative } from '../utils/paths.js';
 import { isWithinRoot } from '../utils/fileUtils.js';
@@ -86,6 +86,7 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
       GlobTool.Name,
       'FindFiles',
       'Efficiently finds files matching specific glob patterns (e.g., `src/**/*.ts`, `**/*.md`), returning absolute paths sorted by modification time (newest first). Ideal for quickly locating files based on their name or path structure, especially in large codebases.',
+      Icon.FileSearch,
       {
         properties: {
           pattern: {
@@ -199,7 +200,7 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
         this.config.getFileFilteringRespectGitIgnore();
       const fileDiscovery = this.config.getFileService();
 
-      const entries = (await glob(params.pattern, {
+      const entries = await glob(params.pattern, {
         cwd: searchDirAbsolute,
         withFileTypes: true,
         nodir: true,
@@ -209,7 +210,7 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
         ignore: ['**/node_modules/**', '**/.git/**'],
         follow: false,
         signal,
-      })) as GlobPath[];
+      });
 
       // Apply git-aware filtering if enabled and in git repository
       let filteredEntries = entries;

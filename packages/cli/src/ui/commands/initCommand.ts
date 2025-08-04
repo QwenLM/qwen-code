@@ -4,13 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SlashCommand } from './types.js';
+import { SlashCommand, CommandKind } from './types.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 export const initCommand: SlashCommand = {
   name: 'init',
   description: 'create QWEN.md project guide',
+  kind: CommandKind.BUILT_IN,
   action: async (context, args) => {
     const { config } = context.services;
 

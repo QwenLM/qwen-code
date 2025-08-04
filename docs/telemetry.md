@@ -8,7 +8,7 @@ Gemini CLI's telemetry system is built on the **[OpenTelemetry] (OTEL)** standar
 
 ## Enabling telemetry
 
-You can enable telemetry in multiple ways. Configuration is primarily managed via the [`.qwen/settings.json` file](./cli/configuration.md) and environment variables, but CLI flags can override these settings for a specific session.
+You can enable telemetry in multiple ways. Configuration is primarily managed via the [`.gemini/settings.json` file](./cli/configuration.md) and environment variables, but CLI flags can override these settings for a specific session.
 
 ### Order of precedence
 
@@ -19,13 +19,14 @@ The following lists the precedence for applying telemetry settings, with items l
     - `--telemetry-target <local|gcp>`: Overrides `telemetry.target`.
     - `--telemetry-otlp-endpoint <URL>`: Overrides `telemetry.otlpEndpoint`.
     - `--telemetry-log-prompts` / `--no-telemetry-log-prompts`: Overrides `telemetry.logPrompts`.
+    - `--telemetry-outfile <path>`: Redirects telemetry output to a file. See [Exporting to a file](#exporting-to-a-file).
 
 1.  **Environment variables:**
     - `OTEL_EXPORTER_OTLP_ENDPOINT`: Overrides `telemetry.otlpEndpoint`.
 
-1.  **Workspace settings file (`.qwen/settings.json`):** Values from the `telemetry` object in this project-specific file.
+1.  **Workspace settings file (`.gemini/settings.json`):** Values from the `telemetry` object in this project-specific file.
 
-1.  **User settings file (`~/.qwen/settings.json`):** Values from the `telemetry` object in this global user file.
+1.  **User settings file (`~/.gemini/settings.json`):** Values from the `telemetry` object in this global user file.
 
 1.  **Defaults:** applied if not set by any of the above.
     - `telemetry.enabled`: `false`
@@ -38,7 +39,7 @@ The `--target` argument to this script _only_ overrides the `telemetry.target` f
 
 ### Example settings
 
-The following code can be added to your workspace (`.qwen/settings.json`) or user (`~/.qwen/settings.json`) settings to enable telemetry and send the output to Google Cloud:
+The following code can be added to your workspace (`.gemini/settings.json`) or user (`~/.gemini/settings.json`) settings to enable telemetry and send the output to Google Cloud:
 
 ```json
 {
@@ -48,6 +49,16 @@ The following code can be added to your workspace (`.qwen/settings.json`) or use
   },
   "sandbox": false
 }
+```
+
+### Exporting to a file
+
+You can export all telemetry data to a file for local inspection.
+
+To enable file export, use the `--telemetry-outfile` flag with a path to your desired output file. This must be run using `--telemetry-target=local`.
+
+```bash
+gemini --telemetry --telemetry-target=local --telemetry-outfile=/path/to/telemetry.log "your prompt"
 ```
 
 ## Running an OTEL Collector
@@ -61,7 +72,7 @@ Learn more about OTEL exporter standard configuration in [documentation][otel-co
 
 ### Local
 
-Use the `npm run telemetry -- --target=local` command to automate the process of setting up a local telemetry pipeline, including configuring the necessary settings in your `.qwen/settings.json` file. The underlying script installs `otelcol-contrib` (the OpenTelemetry Collector) and `jaeger` (The Jaeger UI for viewing traces). To use it:
+Use the `npm run telemetry -- --target=local` command to automate the process of setting up a local telemetry pipeline, including configuring the necessary settings in your `.gemini/settings.json` file. The underlying script installs `otelcol-contrib` (the OpenTelemetry Collector) and `jaeger` (The Jaeger UI for viewing traces). To use it:
 
 1.  **Run the command**:
     Execute the command from the root of the repository:
@@ -81,14 +92,14 @@ Use the `npm run telemetry -- --target=local` command to automate the process of
     Open your web browser and navigate to **http://localhost:16686** to access the Jaeger UI. Here you can inspect detailed traces of Gemini CLI operations.
 
 1.  **Inspect logs and metrics**:
-    The script redirects the OTEL collector output (which includes logs and metrics) to `~/.qwen/tmp/<projectHash>/otel/collector.log`. The script will provide links to view and a command to tail your telemetry data (traces, metrics, logs) locally.
+    The script redirects the OTEL collector output (which includes logs and metrics) to `~/.gemini/tmp/<projectHash>/otel/collector.log`. The script will provide links to view and a command to tail your telemetry data (traces, metrics, logs) locally.
 
 1.  **Stop the services**:
     Press `Ctrl+C` in the terminal where the script is running to stop the OTEL Collector and Jaeger services.
 
 ### Google Cloud
 
-Use the `npm run telemetry -- --target=gcp` command to automate setting up a local OpenTelemetry collector that forwards data to your Google Cloud project, including configuring the necessary settings in your `.qwen/settings.json` file. The underlying script installs `otelcol-contrib`. To use it:
+Use the `npm run telemetry -- --target=gcp` command to automate setting up a local OpenTelemetry collector that forwards data to your Google Cloud project, including configuring the necessary settings in your `.gemini/settings.json` file. The underlying script installs `otelcol-contrib`. To use it:
 
 1.  **Prerequisites**:
     - Have a Google Cloud project ID.
@@ -109,7 +120,7 @@ Use the `npm run telemetry -- --target=gcp` command to automate setting up a loc
     The script will:
     - Download the `otelcol-contrib` binary if needed.
     - Start an OTEL collector configured to receive data from Gemini CLI and export it to your specified Google Cloud project.
-    - Automatically enable telemetry and disable sandbox mode in your workspace settings (`.qwen/settings.json`).
+    - Automatically enable telemetry and disable sandbox mode in your workspace settings (`.gemini/settings.json`).
     - Provide direct links to view traces, metrics, and logs in your Google Cloud Console.
     - On exit (Ctrl+C), it will attempt to restore your original telemetry and sandbox settings.
 
@@ -120,7 +131,7 @@ Use the `npm run telemetry -- --target=gcp` command to automate setting up a loc
     Use the links provided by the script to navigate to the Google Cloud Console and view your traces, metrics, and logs.
 
 1.  **Inspect local collector logs**:
-    The script redirects the local OTEL collector output to `~/.qwen/tmp/<projectHash>/otel/collector-gcp.log`. The script provides links to view and command to tail your collector logs locally.
+    The script redirects the local OTEL collector output to `~/.gemini/tmp/<projectHash>/otel/collector-gcp.log`. The script provides links to view and command to tail your collector logs locally.
 
 1.  **Stop the service**:
     Press `Ctrl+C` in the terminal where the script is running to stop the OTEL Collector.

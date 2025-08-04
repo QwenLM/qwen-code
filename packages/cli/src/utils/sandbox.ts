@@ -31,9 +31,9 @@ function getContainerPath(hostPath: string): string {
   return hostPath;
 }
 
-const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'gemini-cli-sandbox';
-const SANDBOX_NETWORK_NAME = 'gemini-cli-sandbox';
-const SANDBOX_PROXY_NAME = 'gemini-cli-sandbox-proxy';
+const LOCAL_DEV_SANDBOX_IMAGE_NAME = 'qwen-code-sandbox';
+const SANDBOX_NETWORK_NAME = 'qwen-code-sandbox';
+const SANDBOX_PROXY_NAME = 'qwen-code-sandbox-proxy';
 const BUILTIN_SEATBELT_PROFILES = [
   'permissive-open',
   'permissive-closed',
@@ -99,7 +99,7 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
 }
 
 // docker does not allow container names to contain ':' or '/', so we
-// parse those out and make the name a little shorter
+// parse those out to shorten the name
 function parseImageName(image: string): string {
   const [fullName, tag] = image.split(':');
   const name = fullName.split('/').at(-1) ?? 'unknown-image';
@@ -172,8 +172,8 @@ function entrypoint(workdir: string): string[] {
         ? 'npm run debug --'
         : 'npm rebuild && npm run start --'
       : process.env.DEBUG
-        ? `node --inspect-brk=0.0.0.0:${process.env.DEBUG_PORT || '9229'} $(which gemini)`
-        : 'gemini';
+        ? `node --inspect-brk=0.0.0.0:${process.env.DEBUG_PORT || '9229'} $(which qwen)`
+        : 'qwen';
 
   const args = [...shellCmds, cliCmd, ...cliArgs];
 
@@ -187,7 +187,7 @@ export async function start_sandbox(
   if (config.command === 'sandbox-exec') {
     // disallow BUILD_SANDBOX
     if (process.env.BUILD_SANDBOX) {
-      console.error('ERROR: cannot BUILD_SANDBOX when using MacOS Seatbelt');
+      console.error('ERROR: cannot BUILD_SANDBOX when using macOS Seatbelt');
       process.exit(1);
     }
     const profile = (process.env.SEATBELT_PROFILE ??= 'permissive-open');
@@ -517,11 +517,30 @@ export async function start_sandbox(
     args.push('--env', `GOOGLE_API_KEY=${process.env.GOOGLE_API_KEY}`);
   }
 
+  // copy OPENAI_API_KEY and related env vars for Qwen
+  if (process.env.OPENAI_API_KEY) {
+    args.push('--env', `OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`);
+  }
+  if (process.env.OPENAI_BASE_URL) {
+    args.push('--env', `OPENAI_BASE_URL=${process.env.OPENAI_BASE_URL}`);
+  }
+  if (process.env.OPENAI_MODEL) {
+    args.push('--env', `OPENAI_MODEL=${process.env.OPENAI_MODEL}`);
+  }
+
   // copy GOOGLE_GENAI_USE_VERTEXAI
   if (process.env.GOOGLE_GENAI_USE_VERTEXAI) {
     args.push(
       '--env',
       `GOOGLE_GENAI_USE_VERTEXAI=${process.env.GOOGLE_GENAI_USE_VERTEXAI}`,
+    );
+  }
+
+  // copy GOOGLE_GENAI_USE_GCA
+  if (process.env.GOOGLE_GENAI_USE_GCA) {
+    args.push(
+      '--env',
+      `GOOGLE_GENAI_USE_GCA=${process.env.GOOGLE_GENAI_USE_GCA}`,
     );
   }
 
@@ -847,7 +866,7 @@ async function ensureSandboxImageIsPresent(
 
   console.info(`Sandbox image ${image} not found locally.`);
   if (image === LOCAL_DEV_SANDBOX_IMAGE_NAME) {
-    // user needs to build the image themself
+    // user needs to build the image themselves
     return false;
   }
 

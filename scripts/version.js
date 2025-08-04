@@ -23,18 +23,24 @@ function writeJson(filePath, data) {
   writeFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
-// 1. Get the version type from the command line arguments.
-const versionType = process.argv[2];
-if (!versionType) {
-  console.error('Error: No version type specified.');
-  console.error('Usage: npm run version <patch|minor|major|prerelease>');
+// 1. Get the version from the command line arguments.
+const versionArg = process.argv[2];
+if (!versionArg) {
+  console.error('Error: No version specified.');
+  console.error(
+    'Usage: npm run version <version> (e.g., 1.2.3 or patch|minor|major|prerelease)',
+  );
   process.exit(1);
 }
 
-// 2. Bump the version in the root and all workspace package.json files.
-run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
+// 2. Determine if we have a specific version or a version type
+const isSpecificVersion = /^\d+\.\d+\.\d+/.test(versionArg);
+const npmVersionArg = isSpecificVersion ? versionArg : versionArg;
+
+// 3. Bump the version in the root and all workspace package.json files.
+run(`npm version ${npmVersionArg} --no-git-tag-version --allow-same-version`);
 run(
-  `npm version ${versionType} --workspaces --no-git-tag-version --allow-same-version`,
+  `npm version ${npmVersionArg} --workspaces --no-git-tag-version --allow-same-version`,
 );
 
 // 3. Get the new version number from the root package.json

@@ -41,15 +41,14 @@ describe('getReleaseVersion', () => {
 
   it('should calculate nightly version when IS_NIGHTLY is true', () => {
     process.env.IS_NIGHTLY = 'true';
-    const knownDate = new Date('2025-07-20T10:00:00.000Z');
-    vi.setSystemTime(knownDate);
     vi.mocked(fs.default.readFileSync).mockReturnValue(
       JSON.stringify({ version: '0.1.0' }),
     );
-    vi.mocked(execSync).mockReturnValue('abcdef');
+    // Mock git tag command to return empty (no existing nightly tags)
+    vi.mocked(execSync).mockReturnValue('');
     const { releaseTag, releaseVersion, npmTag } = getReleaseVersion();
-    expect(releaseTag).toBe('v0.1.0-nightly.250720.abcdef');
-    expect(releaseVersion).toBe('0.1.0-nightly.250720.abcdef');
+    expect(releaseTag).toBe('v0.1.1-nightly.0');
+    expect(releaseVersion).toBe('0.1.1-nightly.0');
     expect(npmTag).toBe('nightly');
   });
 
@@ -99,8 +98,8 @@ describe('getReleaseVersion', () => {
 describe('get-release-version script', () => {
   it('should print version JSON to stdout when executed directly', () => {
     const expectedJson = {
-      releaseTag: 'v0.1.0-nightly.20250705',
-      releaseVersion: '0.1.0-nightly.20250705',
+      releaseTag: 'v0.1.1-nightly.0',
+      releaseVersion: '0.1.1-nightly.0',
       npmTag: 'nightly',
     };
     execSync.mockReturnValue(JSON.stringify(expectedJson));

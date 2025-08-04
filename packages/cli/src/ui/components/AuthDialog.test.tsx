@@ -31,7 +31,7 @@ describe('AuthDialog', () => {
 
     const settings: LoadedSettings = new LoadedSettings(
       {
-        settings: {},
+        settings: { customThemes: {}, mcpServers: {} },
         path: '',
       },
       {
@@ -41,7 +41,7 @@ describe('AuthDialog', () => {
         path: '',
       },
       {
-        settings: {},
+        settings: { customThemes: {}, mcpServers: {} },
         path: '',
       },
       [],
@@ -68,11 +68,17 @@ describe('AuthDialog', () => {
         {
           settings: {
             selectedAuthType: undefined,
+            customThemes: {},
+            mcpServers: {},
           },
           path: '',
         },
         {
-          settings: {},
+          settings: { customThemes: {}, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { customThemes: {}, mcpServers: {} },
           path: '',
         },
         [],
@@ -95,11 +101,17 @@ describe('AuthDialog', () => {
         {
           settings: {
             selectedAuthType: undefined,
+            customThemes: {},
+            mcpServers: {},
           },
           path: '',
         },
         {
-          settings: {},
+          settings: { customThemes: {}, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { customThemes: {}, mcpServers: {} },
           path: '',
         },
         [],
@@ -122,11 +134,17 @@ describe('AuthDialog', () => {
         {
           settings: {
             selectedAuthType: undefined,
+            customThemes: {},
+            mcpServers: {},
           },
           path: '',
         },
         {
-          settings: {},
+          settings: { customThemes: {}, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { customThemes: {}, mcpServers: {} },
           path: '',
         },
         [],
@@ -144,17 +162,23 @@ describe('AuthDialog', () => {
 
   describe('GEMINI_DEFAULT_AUTH_TYPE environment variable', () => {
     it('should select the auth type specified by GEMINI_DEFAULT_AUTH_TYPE', () => {
-      process.env.GEMINI_DEFAULT_AUTH_TYPE = AuthType.LOGIN_WITH_GOOGLE;
+      process.env.GEMINI_DEFAULT_AUTH_TYPE = AuthType.USE_OPENAI;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
             selectedAuthType: undefined,
+            customThemes: {},
+            mcpServers: {},
           },
           path: '',
         },
         {
-          settings: {},
+          settings: { customThemes: {}, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { customThemes: {}, mcpServers: {} },
           path: '',
         },
         [],
@@ -164,8 +188,8 @@ describe('AuthDialog', () => {
         <AuthDialog onSelect={() => {}} settings={settings} />,
       );
 
-      // Since only OpenAI is available, it should be selected by default
-      expect(lastFrame()).toContain('● OpenAI');
+      // This is a bit brittle, but it's the best way to check which item is selected.
+      expect(lastFrame()).toContain('● 1. OpenAI');
     });
 
     it('should fall back to default if GEMINI_DEFAULT_AUTH_TYPE is not set', () => {
@@ -173,11 +197,17 @@ describe('AuthDialog', () => {
         {
           settings: {
             selectedAuthType: undefined,
+            customThemes: {},
+            mcpServers: {},
           },
           path: '',
         },
         {
-          settings: {},
+          settings: { customThemes: {}, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { customThemes: {}, mcpServers: {} },
           path: '',
         },
         [],
@@ -187,8 +217,8 @@ describe('AuthDialog', () => {
         <AuthDialog onSelect={() => {}} settings={settings} />,
       );
 
-      // Default is OpenAI (the only option)
-      expect(lastFrame()).toContain('● OpenAI');
+      // Default is OpenAI (only option available)
+      expect(lastFrame()).toContain('● 1. OpenAI');
     });
 
     it('should show an error and fall back to default if GEMINI_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -198,11 +228,17 @@ describe('AuthDialog', () => {
         {
           settings: {
             selectedAuthType: undefined,
+            customThemes: {},
+            mcpServers: {},
           },
           path: '',
         },
         {
-          settings: {},
+          settings: { customThemes: {}, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { customThemes: {}, mcpServers: {} },
           path: '',
         },
         [],
@@ -214,7 +250,7 @@ describe('AuthDialog', () => {
 
       // Since the auth dialog doesn't show GEMINI_DEFAULT_AUTH_TYPE errors anymore,
       // it will just show the default OpenAI option
-      expect(lastFrame()).toContain('● OpenAI');
+      expect(lastFrame()).toContain('● 1. OpenAI');
     });
   });
 
@@ -259,11 +295,19 @@ describe('AuthDialog', () => {
     const onSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
-        settings: {},
+        settings: { customThemes: {}, mcpServers: {} },
         path: '',
       },
       {
-        settings: {},
+        settings: {
+          selectedAuthType: undefined,
+          customThemes: {},
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { customThemes: {}, mcpServers: {} },
         path: '',
       },
       [],
@@ -293,17 +337,19 @@ describe('AuthDialog', () => {
     const onSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
-        settings: {},
+        settings: { customThemes: {}, mcpServers: {} },
         path: '',
       },
       {
         settings: {
           selectedAuthType: AuthType.USE_GEMINI,
+          customThemes: {},
+          mcpServers: {},
         },
         path: '',
       },
       {
-        settings: {},
+        settings: { customThemes: {}, mcpServers: {} },
         path: '',
       },
       [],

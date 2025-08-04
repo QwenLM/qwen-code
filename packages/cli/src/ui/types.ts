@@ -218,6 +218,15 @@ export interface ConsoleMessageItem {
 }
 
 /**
+ * Result type for a slash command that should immediately result in a prompt
+ * being submitted to the Gemini model.
+ */
+export interface SubmitPromptResult {
+  type: 'submit_prompt';
+  content: string;
+}
+
+/**
  * Defines the result of the slash command processor for its consumer (useGeminiStream).
  */
 export type SlashCommandProcessorResult =
@@ -229,6 +238,7 @@ export type SlashCommandProcessorResult =
   | {
       type: 'handled'; // Indicates the command was processed and no further action is needed.
     }
+  | SubmitPromptResult
   | {
       type: 'submit_query'; // Submit a query to the AI
       query: string;
