@@ -1,8 +1,8 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.0.1-alpha.12",
+  "version": "0.0.4",
   "engines": {
-    "node": ">=20"
+    "node": ">=20.0.0"
   },
   "type": "module",
   "workspaces": [
@@ -10,10 +10,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+http://gitlab.alibaba-inc.com/Qwen-Coder/qwen-code.git"
+    "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.1-alpha.12"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.4"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -23,7 +23,8 @@
     "auth": "npm run auth:npm && npm run auth:docker",
     "generate": "node scripts/generate-git-commit-info.js",
     "build": "node scripts/build.js",
-    "build:all": "npm run build && npm run build:sandbox",
+    "build:vscode": "node scripts/build_vscode_companion.js",
+    "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
     "build:packages": "npm run build --workspaces",
     "build:sandbox": "node scripts/build_sandbox.js --skip-npm-install-build",
     "bundle": "npm run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",
@@ -59,8 +60,9 @@
     "@types/micromatch": "^4.0.9",
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
-    "@types/semver": "^7.7.0",
+    "@types/mock-fs": "^4.13.4",
     "@types/shell-quote": "^1.7.5",
+    "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",
     "concurrently": "^9.2.0",
     "cross-env": "^7.0.3",
@@ -76,13 +78,14 @@
     "json": "^11.0.0",
     "lodash": "^4.17.21",
     "memfs": "^4.17.2",
+    "mock-fs": "^5.5.0",
     "prettier": "^3.5.3",
     "react-devtools-core": "^4.28.5",
     "typescript-eslint": "^8.30.1",
     "vitest": "^3.2.4",
-    "yargs": "^18.0.0"
+    "yargs": "^17.7.2"
   },
   "dependencies": {
-    "@qwen-code/qwen-code": "^0.0.1-alpha.8"
+    "tiktoken": "^1.0.21"
   }
 }

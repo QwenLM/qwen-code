@@ -10,6 +10,7 @@ import {
   ToolResult,
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
+  Icon,
 } from './tools.js';
 import { Type } from '@google/genai';
 import { getErrorMessage } from '../utils/errors.js';
@@ -17,9 +18,10 @@ import { Config, ApprovalMode } from '../config/config.js';
 import { getResponseText } from '../utils/generateContentResponseUtilities.js';
 import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
 import { convert } from 'html-to-text';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 const URL_FETCH_TIMEOUT_MS = 10000;
-const MAX_CONTENT_LENGTH = 50000;
+const MAX_CONTENT_LENGTH = 100000;
 
 // Helper function to extract URLs from a string
 function extractUrls(text: string): string[] {
@@ -69,6 +71,7 @@ export class WebFetchTool extends BaseTool<WebFetchToolParams, ToolResult> {
       WebFetchTool.Name,
       'WebFetch',
       "Processes content from URL(s), including local and private network addresses (e.g., localhost), embedded in a prompt. Include up to 20 URLs and instructions (e.g., summarize, extract specific data) directly in the 'prompt' parameter.",
+      Icon.Globe,
       {
         properties: {
           prompt: {
@@ -81,6 +84,10 @@ export class WebFetchTool extends BaseTool<WebFetchToolParams, ToolResult> {
         type: Type.OBJECT,
       },
     );
+    const proxy = config.getProxy();
+    if (proxy) {
+      setGlobalDispatcher(new ProxyAgent(proxy as string));
+    }
   }
 
   private async executeFallback(
@@ -94,70 +101,40 @@ export class WebFetchTool extends BaseTool<WebFetchToolParams, ToolResult> {
         returnDisplay: 'Error: No URL found in the prompt for fallback.',
       };
     }
+    // For now, we only support one URL for fallback
+    let url = urls[0];
 
-    const results: string[] = [];
-    const processedUrls: string[] = [];
-
-    // Process multiple URLs (up to 20 as mentioned in description)
-    const urlsToProcess = urls.slice(0, 20);
-
-    for (const originalUrl of urlsToProcess) {
-      let url = originalUrl;
-
-      // Convert GitHub blob URL to raw URL
-      if (url.includes('github.com') && url.includes('/blob/')) {
-        url = url
-          .replace('github.com', 'raw.githubusercontent.com')
-          .replace('/blob/', '/');
-      }
-
-      try {
-        const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
-        if (!response.ok) {
-          throw new Error(
-            `Request failed with status code ${response.status} ${response.statusText}`,
-          );
-        }
-        const html = await response.text();
-        const textContent = convert(html, {
-          wordwrap: false,
-          selectors: [
-            { selector: 'a', options: { ignoreHref: true } },
-            { selector: 'img', format: 'skip' },
-          ],
-        }).substring(0, MAX_CONTENT_LENGTH);
-
-        results.push(`Content from ${url}:\n${textContent}`);
-        processedUrls.push(url);
-      } catch (e) {
-        const error = e as Error;
-        results.push(`Error fetching ${url}: ${error.message}`);
-        processedUrls.push(url);
-      }
+    // Convert GitHub blob URL to raw URL
+    if (url.includes('github.com') && url.includes('/blob/')) {
+      url = url
+        .replace('github.com', 'raw.githubusercontent.com')
+        .replace('/blob/', '/');
     }
 
     try {
-      const geminiClient = this.config.getGeminiClient();
-      const combinedContent = results.join('\n\n---\n\n');
-
-      // Ensure the total prompt length doesn't exceed limits
-      const maxPromptLength = 200000; // Leave room for system instructions
-      const promptPrefix = `The user requested the following: "${params.prompt}".
-
-I have fetched the content from the following URL(s). Please use this content to answer the user's request. Do not attempt to access the URL(s) again.
-
-`;
-
-      let finalContent = combinedContent;
-      if (promptPrefix.length + combinedContent.length > maxPromptLength) {
-        const availableLength = maxPromptLength - promptPrefix.length - 100; // Leave some buffer
-        finalContent =
-          combinedContent.substring(0, availableLength) +
-          '\n\n[Content truncated due to length limits]';
+      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
+      if (!response.ok) {
+        throw new Error(
+          `Request failed with status code ${response.status} ${response.statusText}`,
+        );
       }
+      const html = await response.text();
+      const textContent = convert(html, {
+        wordwrap: false,
+        selectors: [
+          { selector: 'a', options: { ignoreHref: true } },
+          { selector: 'img', format: 'skip' },
+        ],
+      }).substring(0, MAX_CONTENT_LENGTH);
 
-      const fallbackPrompt = promptPrefix + finalContent;
+      const geminiClient = this.config.getGeminiClient();
+      const fallbackPrompt = `The user requested the following: "${params.prompt}".
 
+I was unable to access the URL directly. Instead, I have fetched the raw content of the page. Please use the following content to answer the user's request. Do not attempt to access the URL again.
+
+---
+${textContent}
+---`;
       const result = await geminiClient.generateContent(
         [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
         {},
@@ -166,11 +143,11 @@ I have fetched the content from the following URL(s). Please use this content to
       const resultText = getResponseText(result) || '';
       return {
         llmContent: resultText,
-        returnDisplay: `Content from ${processedUrls.length} URL(s) processed using fallback fetch.`,
+        returnDisplay: `Content for ${url} processed using fallback fetch.`,
       };
     } catch (e) {
       const error = e as Error;
-      const errorMessage = `Error during fallback processing: ${error.message}`;
+      const errorMessage = `Error during fallback fetch for ${url}: ${error.message}`;
       return {
         llmContent: `Error: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
@@ -262,12 +239,6 @@ I have fetched the content from the following URL(s). Please use this content to
     }
 
     const geminiClient = this.config.getGeminiClient();
-    const contentGenerator = geminiClient.getContentGenerator();
-
-    // Check if using OpenAI content generator - if so, use fallback
-    if (contentGenerator.constructor.name === 'OpenAIContentGenerator') {
-      return this.executeFallback(params, signal);
-    }
 
     try {
       const response = await geminiClient.generateContent(

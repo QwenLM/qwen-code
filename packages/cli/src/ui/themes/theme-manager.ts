@@ -17,7 +17,13 @@ import { ShadesOfPurple } from './shades-of-purple.js';
 import { XCode } from './xcode.js';
 import { QwenLight } from './qwen-light.js';
 import { QwenDark } from './qwen-dark.js';
-import { Theme, ThemeType } from './theme.js';
+import {
+  Theme,
+  ThemeType,
+  CustomTheme,
+  createCustomTheme,
+  validateCustomTheme,
+} from './theme.js';
 import { ANSI } from './ansi.js';
 import { ANSILight } from './ansi-light.js';
 import { NoColorTheme } from './no-color.js';
@@ -26,6 +32,7 @@ import process from 'node:process';
 export interface ThemeDisplay {
   name: string;
   type: ThemeType;
+  isCustom?: boolean;
 }
 
 export const DEFAULT_THEME: Theme = QwenDark;
@@ -33,6 +40,7 @@ export const DEFAULT_THEME: Theme = QwenDark;
 class ThemeManager {
   private readonly availableThemes: Theme[];
   private activeTheme: Theme;
+  private customThemes: Map<string, Theme> = new Map();
 
   constructor() {
     this.availableThemes = [
@@ -56,84 +64,177 @@ class ThemeManager {
   }
 
   /**
-   * Returns a list of available theme names.
+   * Loads custom themes from settings.
+   * @param customThemesSettings Custom themes from settings.
    */
-  getAvailableThemes(): ThemeDisplay[] {
-    // Separate Qwen themes
-    const qwenThemes = this.availableThemes.filter(
-      (theme) => theme.name === QwenLight.name || theme.name === QwenDark.name,
-    );
-    const otherThemes = this.availableThemes.filter(
-      (theme) => theme.name !== QwenLight.name && theme.name !== QwenDark.name,
-    );
+  loadCustomThemes(customThemesSettings?: Record<string, CustomTheme>): void {
+    this.customThemes.clear();
 
-    // Sort other themes by type and then name
-    const sortedOtherThemes = otherThemes.sort((a, b) => {
-      const typeOrder = (type: ThemeType): number => {
-        switch (type) {
-          case 'dark':
-            return 1;
-          case 'light':
-            return 2;
-          default:
-            return 3;
+    if (!customThemesSettings) {
+      return;
+    }
+
+    for (const [name, customThemeConfig] of Object.entries(
+      customThemesSettings,
+    )) {
+      const validation = validateCustomTheme(customThemeConfig);
+      if (validation.isValid) {
+        if (validation.warning) {
+          console.warn(`Theme "${name}": ${validation.warning}`);
         }
-      };
+        const themeWithDefaults: CustomTheme = {
+          ...DEFAULT_THEME.colors,
+          ...customThemeConfig,
+          name: customThemeConfig.name || name,
+          type: 'custom',
+        };
 
-      const typeComparison = typeOrder(a.type) - typeOrder(b.type);
-      if (typeComparison !== 0) {
-        return typeComparison;
+        try {
+          const theme = createCustomTheme(themeWithDefaults);
+          this.customThemes.set(name, theme);
+        } catch (error) {
+          console.warn(`Failed to load custom theme "${name}":`, error);
+        }
+      } else {
+        console.warn(`Invalid custom theme "${name}": ${validation.error}`);
       }
-      return a.name.localeCompare(b.name);
-    });
-
-    // Combine Qwen themes first, then sorted others
-    const sortedThemes = [...qwenThemes, ...sortedOtherThemes];
-
-    return sortedThemes.map((theme) => ({
-      name: theme.name,
-      type: theme.type,
-    }));
+    }
+    // If the current active theme is a custom theme, keep it if still valid
+    if (
+      this.activeTheme &&
+      this.activeTheme.type === 'custom' &&
+      this.customThemes.has(this.activeTheme.name)
+    ) {
+      this.activeTheme = this.customThemes.get(this.activeTheme.name)!;
+    }
   }
 
   /**
    * Sets the active theme.
-   * @param themeName The name of the theme to activate.
+   * @param themeName The name of the theme to set as active.
    * @returns True if the theme was successfully set, false otherwise.
    */
   setActiveTheme(themeName: string | undefined): boolean {
-    const foundTheme = this.findThemeByName(themeName);
-
-    if (foundTheme) {
-      this.activeTheme = foundTheme;
-      return true;
-    } else {
-      // If themeName is undefined, it means we want to set the default theme.
-      // If findThemeByName returns undefined (e.g. default theme is also not found for some reason)
-      // then this will return false.
-      if (themeName === undefined) {
-        this.activeTheme = DEFAULT_THEME;
-        return true;
-      }
+    const theme = this.findThemeByName(themeName);
+    if (!theme) {
       return false;
     }
+    this.activeTheme = theme;
+    return true;
+  }
+
+  /**
+   * Gets the currently active theme.
+   * @returns The active theme.
+   */
+  getActiveTheme(): Theme {
+    if (process.env.NO_COLOR) {
+      return NoColorTheme;
+    }
+    // Ensure the active theme is always valid (fall back to default if not)
+    if (!this.activeTheme || !this.findThemeByName(this.activeTheme.name)) {
+      this.activeTheme = DEFAULT_THEME;
+    }
+    return this.activeTheme;
+  }
+
+  /**
+   * Gets a list of custom theme names.
+   * @returns Array of custom theme names.
+   */
+  getCustomThemeNames(): string[] {
+    return Array.from(this.customThemes.keys());
+  }
+
+  /**
+   * Checks if a theme name is a custom theme.
+   * @param themeName The theme name to check.
+   * @returns True if the theme is custom.
+   */
+  isCustomTheme(themeName: string): boolean {
+    return this.customThemes.has(themeName);
+  }
+
+  /**
+   * Returns a list of available theme names.
+   */
+  getAvailableThemes(): ThemeDisplay[] {
+    const builtInThemes = this.availableThemes.map((theme) => ({
+      name: theme.name,
+      type: theme.type,
+      isCustom: false,
+    }));
+
+    const customThemes = Array.from(this.customThemes.values()).map(
+      (theme) => ({
+        name: theme.name,
+        type: theme.type,
+        isCustom: true,
+      }),
+    );
+
+    // Separate Qwen themes
+    const qwenThemes = builtInThemes.filter(
+      (theme) => theme.name === QwenLight.name || theme.name === QwenDark.name,
+    );
+    const otherBuiltInThemes = builtInThemes.filter(
+      (theme) => theme.name !== QwenLight.name && theme.name !== QwenDark.name,
+    );
+
+    // Sort other themes by type and then name
+    const sortedOtherThemes = [...otherBuiltInThemes, ...customThemes].sort(
+      (a, b) => {
+        const typeOrder = (type: ThemeType): number => {
+          switch (type) {
+            case 'dark':
+              return 1;
+            case 'light':
+              return 2;
+            case 'ansi':
+              return 3;
+            case 'custom':
+              return 4; // Custom themes at the end
+            default:
+              return 5;
+          }
+        };
+
+        const typeComparison = typeOrder(a.type) - typeOrder(b.type);
+        if (typeComparison !== 0) {
+          return typeComparison;
+        }
+        return a.name.localeCompare(b.name);
+      },
+    );
+
+    // Combine Qwen themes first, then sorted others
+    return [...qwenThemes, ...sortedOtherThemes];
+  }
+
+  /**
+   * Gets a theme by name.
+   * @param themeName The name of the theme to get.
+   * @returns The theme if found, undefined otherwise.
+   */
+  getTheme(themeName: string): Theme | undefined {
+    return this.findThemeByName(themeName);
   }
 
   findThemeByName(themeName: string | undefined): Theme | undefined {
     if (!themeName) {
       return DEFAULT_THEME;
     }
-    return this.availableThemes.find((theme) => theme.name === themeName);
-  }
 
-  /**
-   * Returns the currently active theme object.
-   */
-  getActiveTheme(): Theme {
-    if (process.env.NO_COLOR) {
-      return NoColorTheme;
+    // First check built-in themes
+    const builtInTheme = this.availableThemes.find(
+      (theme) => theme.name === themeName,
+    );
+    if (builtInTheme) {
+      return builtInTheme;
     }
-    return this.activeTheme;
+
+    // Then check custom themes
+    return this.customThemes.get(themeName);
   }
 }
 

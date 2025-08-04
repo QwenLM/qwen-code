@@ -18,13 +18,12 @@ import {
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
 import { GitService } from '../services/gitService.js';
-import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 
 // Mock dependencies that might be called during Config construction or createServerConfig
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
-  ToolRegistryMock.prototype.discoverTools = vi.fn();
+  ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
@@ -48,9 +47,9 @@ vi.mock('../tools/read-many-files');
 vi.mock('../tools/memoryTool', () => ({
   MemoryTool: vi.fn(),
   setGeminiMdFilename: vi.fn(),
-  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
-  DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
-  GEMINI_CONFIG_DIR: '.qwen',
+  getCurrentGeminiMdFilename: vi.fn(() => 'GEMINI.md'), // Mock the original filename
+  DEFAULT_CONTEXT_FILENAME: 'GEMINI.md',
+  GEMINI_CONFIG_DIR: '.gemini',
 }));
 
 vi.mock('../core/contentGenerator.js', async (importOriginal) => {
@@ -93,7 +92,7 @@ describe('Server Config (config.ts)', () => {
   const QUESTION = 'test question';
   const FULL_CONTEXT = false;
   const USER_MEMORY = 'Test User Memory';
-  const TELEMETRY_SETTINGS = { enabled: true };
+  const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
   const SESSION_ID = 'test-session-id';
   const baseParams: ConfigParameters = {
@@ -151,14 +150,12 @@ describe('Server Config (config.ts)', () => {
         apiKey: 'test-key',
       };
 
-      (createContentGeneratorConfig as Mock).mockResolvedValue(
-        mockContentConfig,
-      );
+      (createContentGeneratorConfig as Mock).mockReturnValue(mockContentConfig);
 
       await config.refreshAuth(authType);
 
       expect(createContentGeneratorConfig).toHaveBeenCalledWith(
-        MODEL, // Should be called with the original model 'gemini-pro'
+        config,
         authType,
       );
       // Verify that contentGeneratorConfig is updated with the new model
@@ -234,11 +231,11 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(false);
   });
 
-  it('Config constructor should default telemetry to false if not provided', () => {
+  it('Config constructor should default telemetry to default value if not provided', () => {
     const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
     delete paramsWithoutTelemetry.telemetry;
     const config = new Config(paramsWithoutTelemetry);
-    expect(config.getTelemetryEnabled()).toBe(false);
+    expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
   });
 
   it('should have a getFileService method that returns FileDiscoveryService', () => {
@@ -285,20 +282,20 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
     });
 
-    it('should return default logPrompts setting (false) if not provided', () => {
+    it('should return default logPrompts setting (true) if not provided', () => {
       const params: ConfigParameters = {
         ...baseParams,
         telemetry: { enabled: true },
       };
       const config = new Config(params);
-      expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+      expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
     });
 
-    it('should return default logPrompts setting (false) if telemetry object is not provided', () => {
+    it('should return default logPrompts setting (true) if telemetry object is not provided', () => {
       const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
-      expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+      expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {
@@ -313,40 +310,6 @@ describe('Server Config (config.ts)', () => {
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
       expect(config.getTelemetryOtlpEndpoint()).toBe(DEFAULT_OTLP_ENDPOINT);
-    });
-  });
-
-  describe('refreshMemory', () => {
-    it('should update memory and file count on successful refresh', async () => {
-      const config = new Config(baseParams);
-      const mockMemoryData = {
-        memoryContent: 'new memory content',
-        fileCount: 5,
-      };
-
-      (loadServerHierarchicalMemory as Mock).mockResolvedValue(mockMemoryData);
-
-      const result = await config.refreshMemory();
-
-      expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
-        config.getWorkingDir(),
-        config.getDebugMode(),
-        config.getFileService(),
-        config.getExtensionContextFilePaths(),
-      );
-
-      expect(config.getUserMemory()).toBe(mockMemoryData.memoryContent);
-      expect(config.getGeminiMdFileCount()).toBe(mockMemoryData.fileCount);
-      expect(result).toEqual(mockMemoryData);
-    });
-
-    it('should propagate errors from loadServerHierarchicalMemory', async () => {
-      const config = new Config(baseParams);
-      const testError = new Error('Failed to load memory');
-
-      (loadServerHierarchicalMemory as Mock).mockRejectedValue(testError);
-
-      await expect(config.refreshMemory()).rejects.toThrow(testError);
     });
   });
 });

@@ -35,7 +35,7 @@ export interface ContentGenerator {
 
   embedContent(request: EmbedContentParameters): Promise<EmbedContentResponse>;
 
-  getTier?(): Promise<UserTierId | undefined>;
+  userTier?: UserTierId;
 }
 
 export enum AuthType {
@@ -65,24 +65,30 @@ export type ContentGeneratorConfig = {
     temperature?: number;
     max_tokens?: number;
   };
+  proxy?: string | undefined;
 };
 
-export async function createContentGeneratorConfig(
-  model: string | undefined,
+export function createContentGeneratorConfig(
+  config: Config,
   authType: AuthType | undefined,
-): Promise<ContentGeneratorConfig> {
+): ContentGeneratorConfig {
   const geminiApiKey = process.env.GEMINI_API_KEY || undefined;
   const googleApiKey = process.env.GOOGLE_API_KEY || undefined;
   const googleCloudProject = process.env.GOOGLE_CLOUD_PROJECT || undefined;
   const googleCloudLocation = process.env.GOOGLE_CLOUD_LOCATION || undefined;
   const openaiApiKey = process.env.OPENAI_API_KEY;
 
-  // Use runtime model from config if available, otherwise fallback to parameter or default
-  const effectiveModel = model || DEFAULT_GEMINI_MODEL;
+  // Use runtime model from config if available; otherwise, fall back to parameter or default
+  const effectiveModel = config.getModel() || DEFAULT_GEMINI_MODEL;
 
   const contentGeneratorConfig: ContentGeneratorConfig = {
     model: effectiveModel,
     authType,
+    proxy: config?.getProxy(),
+    enableOpenAILogging: config.getEnableOpenAILogging(),
+    timeout: config.getContentGeneratorTimeout(),
+    maxRetries: config.getContentGeneratorMaxRetries(),
+    samplingParams: config.getSamplingParams(),
   };
 
   // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
@@ -96,9 +102,10 @@ export async function createContentGeneratorConfig(
   if (authType === AuthType.USE_GEMINI && geminiApiKey) {
     contentGeneratorConfig.apiKey = geminiApiKey;
     contentGeneratorConfig.vertexai = false;
-    contentGeneratorConfig.model = await getEffectiveModel(
+    getEffectiveModel(
       contentGeneratorConfig.apiKey,
       contentGeneratorConfig.model,
+      contentGeneratorConfig.proxy,
     );
 
     return contentGeneratorConfig;

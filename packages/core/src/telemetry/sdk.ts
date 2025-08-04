@@ -6,23 +6,34 @@
 
 import { DiagConsoleLogger, DiagLogLevel, diag } from '@opentelemetry/api';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
+import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
 import { CompressionAlgorithm } from '@opentelemetry/otlp-exporter-base';
-import { Metadata } from '@grpc/grpc-js';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { Resource } from '@opentelemetry/resources';
-import { BatchSpanProcessor } from '@opentelemetry/sdk-trace-node';
-import { BatchLogRecordProcessor } from '@opentelemetry/sdk-logs';
-import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
-import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
-import type { LogRecord } from '@opentelemetry/sdk-logs';
-import type { ResourceMetrics } from '@opentelemetry/sdk-metrics';
-import type { ExportResult } from '@opentelemetry/core';
+import {
+  BatchSpanProcessor,
+  ConsoleSpanExporter,
+} from '@opentelemetry/sdk-trace-node';
+import {
+  BatchLogRecordProcessor,
+  ConsoleLogRecordExporter,
+} from '@opentelemetry/sdk-logs';
+import {
+  ConsoleMetricExporter,
+  PeriodicExportingMetricReader,
+} from '@opentelemetry/sdk-metrics';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { Config } from '../config/config.js';
 import { SERVICE_NAME } from './constants.js';
 import { initializeMetrics } from './metrics.js';
+import { ClearcutLogger } from './clearcut-logger/clearcut-logger.js';
+import {
+  FileLogExporter,
+  FileMetricExporter,
+  FileSpanExporter,
+} from './file-exporters.js';
 
 // For troubleshooting, set the log level to DiagLogLevel.DEBUG
 diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.INFO);
@@ -68,63 +79,41 @@ export function initializeTelemetry(config: Config): void {
   const otlpEndpoint = config.getTelemetryOtlpEndpoint();
   const grpcParsedEndpoint = parseGrpcEndpoint(otlpEndpoint);
   const useOtlp = !!grpcParsedEndpoint;
-
-  const metadata = new Metadata();
-  metadata.set(
-    'Authentication',
-    'gb7x9m2kzp@8f4e3b6c9d2a1e5_qw7x9m2kzp@19a8c5f2b4e7d93',
-  );
+  const telemetryOutfile = config.getTelemetryOutfile();
 
   const spanExporter = useOtlp
     ? new OTLPTraceExporter({
         url: grpcParsedEndpoint,
         compression: CompressionAlgorithm.GZIP,
-        metadata,
       })
-    : {
-        export: (
-          spans: ReadableSpan[],
-          callback: (result: ExportResult) => void,
-        ) => callback({ code: 0 }),
-        forceFlush: () => Promise.resolve(),
-        shutdown: () => Promise.resolve(),
-      };
-
-  // FIXME: Temporarily disable OTLP log export due to gRPC endpoint not supporting LogsService
-  // const logExporter = useOtlp
-  //   ? new OTLPLogExporter({
-  //       url: grpcParsedEndpoint,
-  //       compression: CompressionAlgorithm.GZIP,
-  //       metadata: _metadata,
-  //     })
-  //   : new ConsoleLogRecordExporter();
-
-  // Create a no-op log exporter to avoid cluttering console output
-  const logExporter = {
-    export: (logs: LogRecord[], callback: (result: ExportResult) => void) =>
-      callback({ code: 0 }),
-    shutdown: () => Promise.resolve(),
-  };
+    : telemetryOutfile
+      ? new FileSpanExporter(telemetryOutfile)
+      : new ConsoleSpanExporter();
+  const logExporter = useOtlp
+    ? new OTLPLogExporter({
+        url: grpcParsedEndpoint,
+        compression: CompressionAlgorithm.GZIP,
+      })
+    : telemetryOutfile
+      ? new FileLogExporter(telemetryOutfile)
+      : new ConsoleLogRecordExporter();
   const metricReader = useOtlp
     ? new PeriodicExportingMetricReader({
         exporter: new OTLPMetricExporter({
           url: grpcParsedEndpoint,
           compression: CompressionAlgorithm.GZIP,
-          metadata,
         }),
         exportIntervalMillis: 10000,
       })
-    : new PeriodicExportingMetricReader({
-        exporter: {
-          export: (
-            metrics: ResourceMetrics,
-            callback: (result: ExportResult) => void,
-          ) => callback({ code: 0 }),
-          forceFlush: () => Promise.resolve(),
-          shutdown: () => Promise.resolve(),
-        },
-        exportIntervalMillis: 10000,
-      });
+    : telemetryOutfile
+      ? new PeriodicExportingMetricReader({
+          exporter: new FileMetricExporter(telemetryOutfile),
+          exportIntervalMillis: 10000,
+        })
+      : new PeriodicExportingMetricReader({
+          exporter: new ConsoleMetricExporter(),
+          exportIntervalMillis: 10000,
+        });
 
   sdk = new NodeSDK({
     resource,
@@ -152,7 +141,7 @@ export async function shutdownTelemetry(): Promise<void> {
     return;
   }
   try {
-    // ClearcutLogger.getInstance()?.shutdown();
+    ClearcutLogger.getInstance()?.shutdown();
     await sdk.shutdown();
     console.log('OpenTelemetry SDK shut down successfully.');
   } catch (error) {

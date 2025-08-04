@@ -22,10 +22,6 @@ import {
 } from '@google/genai';
 import { ContentGenerator } from './contentGenerator.js';
 import OpenAI from 'openai';
-import type {
-  ChatCompletion,
-  ChatCompletionChunk,
-} from 'openai/resources/chat/index.js';
 import { logApiResponse } from '../telemetry/loggers.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
@@ -198,7 +194,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
       // console.log('createParams', createParams);
       const completion = (await this.client.chat.completions.create(
         createParams,
-      )) as ChatCompletion;
+      )) as OpenAI.Chat.ChatCompletion;
 
       const response = this.convertToGeminiFormat(completion);
       const durationMs = Date.now() - startTime;
@@ -326,7 +322,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       const stream = (await this.client.chat.completions.create(
         createParams,
-      )) as AsyncIterable<ChatCompletionChunk>;
+      )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
 
       const originalStream = this.streamGenerator(stream);
 
@@ -508,7 +504,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private async *streamGenerator(
-    stream: AsyncIterable<ChatCompletionChunk>,
+    stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
   ): AsyncGenerator<GenerateContentResponse> {
     // Reset the accumulator for each new stream
     this.streamingToolCalls.clear();
@@ -1173,7 +1169,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private convertToGeminiFormat(
-    openaiResponse: ChatCompletion,
+    openaiResponse: OpenAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
     const choice = openaiResponse.choices[0];
     const response = new GenerateContentResponse();
@@ -1211,7 +1207,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     response.responseId = openaiResponse.id;
-    response.createTime = openaiResponse.created.toString();
+    response.createTime = openaiResponse.created
+      ? openaiResponse.created.toString()
+      : new Date().getTime().toString();
 
     response.candidates = [
       {
@@ -1260,7 +1258,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private convertStreamChunkToGeminiFormat(
-    chunk: ChatCompletionChunk,
+    chunk: OpenAI.Chat.ChatCompletionChunk,
   ): GenerateContentResponse {
     const choice = chunk.choices?.[0];
     const response = new GenerateContentResponse();
@@ -1347,7 +1345,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     response.responseId = chunk.id;
-    response.createTime = chunk.created.toString();
+    response.createTime = chunk.created
+      ? chunk.created.toString()
+      : new Date().getTime().toString();
 
     response.modelVersion = this.model;
     response.promptFeedback = { safetyRatings: [] };

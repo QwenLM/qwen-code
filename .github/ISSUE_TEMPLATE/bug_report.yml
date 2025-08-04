@@ -1,5 +1,5 @@
 name: Bug Report
-description: Report a bug to help us improve Gemini CLI
+description: Report a bug to help us improve Qwen Code
 labels: ['kind/bug', 'status/need-triage']
 body:
   - type: markdown
@@ -8,7 +8,7 @@ body:
         > [!IMPORTANT]  
         > Thanks for taking the time to fill out this bug report!
         >
-        > Please search **[existing issues](https://github.com/google-gemini/gemini-cli/issues)** to see if an issue already exists for the bug you encountered.
+        > Please search **[existing issues](https://github.com/QwenLM/qwen-code/issues)** to see if an issue already exists for the bug you encountered.
 
   - type: textarea
     id: problem
@@ -29,12 +29,12 @@ body:
     id: info
     attributes:
       label: Client information
-      description: Please paste the full text from the `/about` command run from Gemini CLI. Also include which platform (MacOS, Windows, Linux).
+      description: Please paste the full text from the `/about` command run from Qwen Code. Also include which platform (macOS, Windows, Linux).
       value: |
         <details>
 
         ```console
-        $ gemini /about
+        $ qwen /about
         # paste output here
         ```
 
@@ -46,7 +46,7 @@ body:
     id: login-info
     attributes:
       label: Login information
-      description: Describe how you are logging in (e.g., Google Account, API key).
+      description: Describe how you are logging in (e.g., API Config).
 
   - type: textarea
     id: additional-context

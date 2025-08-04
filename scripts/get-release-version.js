@@ -14,20 +14,44 @@ function getPackageVersion() {
   return packageJson.version;
 }
 
-function getShortSha() {
-  return execSync('git rev-parse --short HEAD').toString().trim();
+function incrementPatchVersion(version) {
+  const parts = version.split('.');
+  const major = parseInt(parts[0]);
+  const minor = parseInt(parts[1]);
+  const patch = parseInt(parts[2].split('-')[0]); // Handle pre-release versions
+  return `${major}.${minor}.${patch + 1}`;
+}
+
+function getLatestNightlyCount() {
+  try {
+    // Try to get the latest nightly tag from git to determine the counter
+    const currentVersion = getPackageVersion();
+    const nextVersion = incrementPatchVersion(currentVersion);
+    const tags = execSync(`git tag -l "v${nextVersion}-nightly.*"`)
+      .toString()
+      .trim();
+
+    if (!tags) return 0;
+
+    const nightlyTags = tags.split('\n').filter(Boolean);
+    const counts = nightlyTags.map((tag) => {
+      const match = tag.match(/nightly\.(\d+)$/);
+      return match ? parseInt(match[1]) : 0;
+    });
+
+    return Math.max(...counts, -1) + 1;
+  } catch (_error) {
+    // If we can't get tags, start from 0
+    return 0;
+  }
 }
 
 export function getNightlyTagName() {
   const version = getPackageVersion();
-  const now = new Date();
-  const year = now.getUTCFullYear().toString().slice(-2);
-  const month = (now.getUTCMonth() + 1).toString().padStart(2, '0');
-  const day = now.getUTCDate().toString().padStart(2, '0');
-  const date = `${year}${month}${day}`;
+  const nextVersion = incrementPatchVersion(version);
+  const nightlyCount = getLatestNightlyCount();
 
-  const sha = getShortSha();
-  return `v${version}-nightly.${date}.${sha}`;
+  return `v${nextVersion}-nightly.${nightlyCount}`;
 }
 
 export function getReleaseVersion() {
@@ -72,7 +96,13 @@ export function getReleaseVersion() {
   const releaseVersion = releaseTag.substring(1);
   let npmTag = 'latest';
   if (releaseVersion.includes('-')) {
-    npmTag = releaseVersion.split('-')[1].split('.')[0];
+    const prereleasePart = releaseVersion.split('-')[1];
+    npmTag = prereleasePart.split('.')[0];
+
+    // Ensure nightly releases use 'nightly' tag, not 'latest'
+    if (npmTag === 'nightly') {
+      npmTag = 'nightly';
+    }
   }
 
   return { releaseTag, releaseVersion, npmTag };

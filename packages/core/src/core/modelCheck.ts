@@ -17,6 +17,7 @@
 export async function getEffectiveModel(
   _apiKey: string,
   currentConfiguredModel: string,
+  _proxy: string | undefined,
 ): Promise<string> {
   // Disable Google API Model Check
   return currentConfiguredModel;

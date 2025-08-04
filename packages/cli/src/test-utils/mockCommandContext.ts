@@ -7,7 +7,7 @@
 import { vi } from 'vitest';
 import { CommandContext } from '../ui/commands/types.js';
 import { LoadedSettings } from '../config/settings.js';
-import { GitService } from '@google/gemini-cli-core';
+import { GitService } from '@qwen-code/qwen-code-core';
 import { SessionStatsState } from '../ui/contexts/SessionContext.js';
 
 // A utility type to make all properties of an object, and its nested objects, partial.
@@ -28,6 +28,11 @@ export const createMockCommandContext = (
   overrides: DeepPartial<CommandContext> = {},
 ): CommandContext => {
   const defaultMocks: CommandContext = {
+    invocation: {
+      raw: '',
+      name: '',
+      args: '',
+    },
     services: {
       config: null,
       settings: { merged: {} } as LoadedSettings,
@@ -44,6 +49,10 @@ export const createMockCommandContext = (
       addItem: vi.fn(),
       clear: vi.fn(),
       setDebugMessage: vi.fn(),
+      pendingItem: null,
+      setPendingItem: vi.fn(),
+      loadHistory: vi.fn(),
+      toggleCorgiMode: vi.fn(),
     },
     session: {
       stats: {
@@ -76,15 +85,13 @@ export const createMockCommandContext = (
         const targetValue = output[key];
 
         if (
-          sourceValue &&
-          typeof sourceValue === 'object' &&
-          !Array.isArray(sourceValue) &&
-          targetValue &&
-          typeof targetValue === 'object' &&
-          !Array.isArray(targetValue)
+          // We only want to recursivlty merge plain objects
+          Object.prototype.toString.call(sourceValue) === '[object Object]' &&
+          Object.prototype.toString.call(targetValue) === '[object Object]'
         ) {
           output[key] = merge(targetValue, sourceValue);
         } else {
+          // If not, we do a direct assignment. This preserves Date objects and others.
           output[key] = sourceValue;
         }
       }

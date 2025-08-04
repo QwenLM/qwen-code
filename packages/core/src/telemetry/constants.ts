@@ -13,7 +13,8 @@ export const EVENT_API_ERROR = 'qwen-code.api_error';
 export const EVENT_API_RESPONSE = 'qwen-code.api_response';
 export const EVENT_CLI_CONFIG = 'qwen-code.config';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
-
+export const EVENT_FLASH_DECIDED_TO_CONTINUE =
+  'qwen-code.flash_decided_to_continue';
 export const METRIC_TOOL_CALL_COUNT = 'qwen-code.tool.call.count';
 export const METRIC_TOOL_CALL_LATENCY = 'qwen-code.tool.call.latency';
 export const METRIC_API_REQUEST_COUNT = 'qwen-code.api.request.count';

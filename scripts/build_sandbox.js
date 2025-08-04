@@ -40,6 +40,11 @@ const argv = yargs(hideBin(process.argv))
     alias: 'image',
     type: 'string',
     description: 'use <image> name for custom image',
+  })
+  .option('output-file', {
+    type: 'string',
+    description:
+      'Path to write the final image URI. Used for CI/CD pipeline integration.',
   }).argv;
 
 let sandboxCommand;

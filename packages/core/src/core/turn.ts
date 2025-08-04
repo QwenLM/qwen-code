@@ -9,6 +9,7 @@ import {
   GenerateContentResponse,
   FunctionCall,
   FunctionDeclaration,
+  FinishReason,
 } from '@google/genai';
 import {
   ToolCallConfirmationDetails,
@@ -50,6 +51,7 @@ export enum GeminiEventType {
   Thought = 'thought',
   MaxSessionTurns = 'max_session_turns',
   SessionTokenLimitExceeded = 'session_token_limit_exceeded',
+  Finished = 'finished',
   LoopDetected = 'loop_detected',
 }
 
@@ -146,6 +148,11 @@ export type ServerGeminiSessionTokenLimitExceededEvent = {
   value: SessionTokenLimitExceededValue;
 };
 
+export type ServerGeminiFinishedEvent = {
+  type: GeminiEventType.Finished;
+  value: FinishReason;
+};
+
 export type ServerGeminiLoopDetectedEvent = {
   type: GeminiEventType.LoopDetected;
 };
@@ -162,6 +169,7 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiThoughtEvent
   | ServerGeminiMaxSessionTurnsEvent
   | ServerGeminiSessionTokenLimitExceededEvent
+  | ServerGeminiFinishedEvent
   | ServerGeminiLoopDetectedEvent;
 
 // A turn manages the agentic loop turn within the server context.
@@ -234,6 +242,16 @@ export class Turn {
           if (event) {
             yield event;
           }
+        }
+
+        // Check if response was truncated or stopped for various reasons
+        const finishReason = resp.candidates?.[0]?.finishReason;
+
+        if (finishReason) {
+          yield {
+            type: GeminiEventType.Finished,
+            value: finishReason as FinishReason,
+          };
         }
       }
     } catch (e) {

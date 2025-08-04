@@ -6,11 +6,12 @@
 
 export enum TelemetryTarget {
   GCP = 'gcp',
-  QW = 'qw',
+  LOCAL = 'local',
+  QWEN = 'qwen',
 }
 
-const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.QW;
-const DEFAULT_OTLP_ENDPOINT = 'http://tracing-analysis-dc-hz.aliyuncs.com:8090';
+const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.LOCAL;
+const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
 export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {

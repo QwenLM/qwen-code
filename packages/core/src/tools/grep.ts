@@ -9,8 +9,8 @@ import fsPromises from 'fs/promises';
 import path from 'path';
 import { EOL } from 'os';
 import { spawn } from 'child_process';
-import { globStream } from 'glob';
-import { BaseTool, ToolResult } from './tools.js';
+import { globIterate } from 'glob';
+import { BaseTool, Icon, ToolResult } from './tools.js';
 import { Type } from '@google/genai';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
@@ -62,6 +62,7 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
       GrepTool.Name,
       'SearchText',
       'Searches for a regular expression pattern within the content of files in a specified directory (or current working directory). Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.',
+      Icon.Regex,
       {
         properties: {
           pattern: {
@@ -498,7 +499,7 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
         '.hg/**',
       ]; // Use glob patterns for ignores here
 
-      const filesStream = globStream(globPattern, {
+      const filesIterator = globIterate(globPattern, {
         cwd: absolutePath,
         dot: true,
         ignore: ignorePatterns,
@@ -510,7 +511,7 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
       const regex = new RegExp(pattern, 'i');
       const allMatches: GrepMatch[] = [];
 
-      for await (const filePath of filesStream) {
+      for await (const filePath of filesIterator) {
         const fileAbsolutePath = filePath as string;
         try {
           const content = await fsPromises.readFile(fileAbsolutePath, 'utf8');
