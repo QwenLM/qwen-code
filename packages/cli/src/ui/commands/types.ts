@@ -135,6 +135,14 @@ export interface ConfirmShellCommandsActionReturn {
   };
 }
 
+/**
+ * The return type for a command action that needs to submit a query to the AI.
+ */
+export interface SubmitQueryActionReturn {
+  type: 'query';
+  query: string;
+}
+
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
@@ -142,7 +150,8 @@ export type SlashCommandActionReturn =
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
-  | ConfirmShellCommandsActionReturn;
+  | ConfirmShellCommandsActionReturn
+  | SubmitQueryActionReturn;
 
 export enum CommandKind {
   BUILT_IN = 'built-in',
