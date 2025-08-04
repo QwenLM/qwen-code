@@ -79,6 +79,7 @@ export interface Settings {
   checkpointing?: CheckpointingSettings;
   autoConfigureMaxOldSpaceSize?: boolean;
   enableOpenAILogging?: boolean;
+  openaiConfig?: Record<string, string>;
 
   // Git-aware file filtering settings
   fileFiltering?: {
@@ -173,6 +174,11 @@ export class LoadedSettings {
         ...(user.mcpServers || {}),
         ...(workspace.mcpServers || {}),
         ...(system.mcpServers || {}),
+      },
+      openaiConfig: {
+        ...(user.openaiConfig || {}),
+        ...(workspace.openaiConfig || {}),
+        ...(system.openaiConfig || {}),
       },
     };
   }
@@ -308,6 +314,30 @@ export function loadEnvironment(): void {
 }
 
 /**
+ * Loads OpenAI configuration from user settings as fallback.
+ * Priority order: env vars > .env file > workspace settings.json > ~/.qwen/settings.json
+ */
+export function loadOpenAIConfigFromSettings(settings: Settings): void {
+  if (!settings.openaiConfig) {
+    return;
+  }
+
+  // Only set environment variables if they're not already set
+  // This maintains the priority order
+  if (!process.env.OPENAI_API_KEY && settings.openaiConfig.OPENAI_API_KEY) {
+    process.env.OPENAI_API_KEY = settings.openaiConfig.OPENAI_API_KEY;
+  }
+
+  if (!process.env.OPENAI_BASE_URL && settings.openaiConfig.OPENAI_BASE_URL) {
+    process.env.OPENAI_BASE_URL = settings.openaiConfig.OPENAI_BASE_URL;
+  }
+
+  if (!process.env.OPENAI_MODEL && settings.openaiConfig.OPENAI_MODEL) {
+    process.env.OPENAI_MODEL = settings.openaiConfig.OPENAI_MODEL;
+  }
+}
+
+/**
  * Loads settings from user and workspace directories.
  * Project settings override user settings.
  */
@@ -386,7 +416,7 @@ export function loadSettings(workspaceDir: string): LoadedSettings {
     });
   }
 
-  return new LoadedSettings(
+  const loadedSettings = new LoadedSettings(
     {
       path: systemSettingsPath,
       settings: systemSettings,
@@ -401,6 +431,12 @@ export function loadSettings(workspaceDir: string): LoadedSettings {
     },
     settingsErrors,
   );
+
+  // Load OpenAI config from settings as fallback
+  // Priority order: env vars > .env file > workspace settings > user settings
+  loadOpenAIConfigFromSettings(loadedSettings.merged);
+
+  return loadedSettings;
 }
 
 export function saveSettings(settingsFile: SettingsFile): void {

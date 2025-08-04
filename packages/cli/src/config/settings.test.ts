@@ -98,6 +98,7 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged).toEqual({
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
       expect(settings.errors.length).toBe(0);
     });
@@ -131,6 +132,7 @@ describe('Settings Loading and Merging', () => {
         ...systemSettingsContent,
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
     });
 
@@ -164,6 +166,7 @@ describe('Settings Loading and Merging', () => {
         ...userSettingsContent,
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
     });
 
@@ -195,6 +198,7 @@ describe('Settings Loading and Merging', () => {
         ...workspaceSettingsContent,
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
     });
 
@@ -232,6 +236,7 @@ describe('Settings Loading and Merging', () => {
         contextFileName: 'WORKSPACE_CONTEXT.md',
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
     });
 
@@ -281,6 +286,7 @@ describe('Settings Loading and Merging', () => {
         allowMCPServers: ['server1', 'server2'],
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
     });
 
@@ -560,6 +566,7 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged).toEqual({
         customThemes: {},
         mcpServers: {},
+        openaiConfig: {},
       });
 
       // Check that error objects are populated in settings.errors
@@ -954,6 +961,7 @@ describe('Settings Loading and Merging', () => {
           ...systemSettingsContent,
           customThemes: {},
           mcpServers: {},
+          openaiConfig: {},
         });
       });
     });

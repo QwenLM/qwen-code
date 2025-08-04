@@ -11,63 +11,77 @@ import { Colors } from '../colors.js';
 interface OpenAIKeyPromptProps {
   onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
   onCancel: () => void;
+  defaultValues?: {
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+  };
 }
 
 export function OpenAIKeyPrompt({
   onSubmit,
   onCancel,
+  defaultValues,
 }: OpenAIKeyPromptProps): React.JSX.Element {
-  const [apiKey, setApiKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
-  const [model, setModel] = useState('');
+  const [apiKey, setApiKey] = useState(defaultValues?.apiKey || '');
+  const [baseUrl, setBaseUrl] = useState(defaultValues?.baseUrl || '');
+  const [model, setModel] = useState(defaultValues?.model || '');
   const [currentField, setCurrentField] = useState<
     'apiKey' | 'baseUrl' | 'model'
   >('apiKey');
 
   useInput((input, key) => {
-    // 过滤粘贴相关的控制序列
-    let cleanInput = (input || '')
-      // 过滤 ESC 开头的控制序列（如 \u001b[200~、\u001b[201~ 等）
-      .replace(/\u001b\[[0-9;]*[a-zA-Z]/g, '') // eslint-disable-line no-control-regex
-      // 过滤粘贴开始标记 [200~
-      .replace(/\[200~/g, '')
-      // 过滤粘贴结束标记 [201~
-      .replace(/\[201~/g, '')
-      // 过滤单独的 [ 和 ~ 字符（可能是粘贴标记的残留）
-      .replace(/^\[|~$/g, '');
-
-    // 再过滤所有不可见字符（ASCII < 32，除了回车换行）
-    cleanInput = cleanInput
-      .split('')
-      .filter((ch) => ch.charCodeAt(0) >= 32)
-      .join('');
-
-    if (cleanInput.length > 0) {
-      if (currentField === 'apiKey') {
-        setApiKey((prev) => prev + cleanInput);
-      } else if (currentField === 'baseUrl') {
-        setBaseUrl((prev) => prev + cleanInput);
-      } else if (currentField === 'model') {
-        setModel((prev) => prev + cleanInput);
-      }
+    // Ignore control sequences like [I or [O from focus switching
+    if (input && (input === '[I' || input === '[O')) {
       return;
     }
 
-    // 检查是否是 Enter 键（通过检查输入是否包含换行符）
+    // 处理字符输入
+    if (input && input.length > 0) {
+      // Filter paste-related control sequences
+      let cleanInput = (input || '')
+        // Filter ESC-based control sequences (like \u001b[200~, \u001b[201~, etc.)
+        .replace(/\u001b\[[0-9;]*[a-zA-Z]/g, '') // eslint-disable-line no-control-regex
+        // Filter paste start marker [200~
+        .replace(/\[200~/g, '')
+        // Filter paste end marker [201~
+        .replace(/\[201~/g, '')
+        // Filter standalone [ and ~ characters (possible paste marker remnants)
+        .replace(/^\[|~$/g, '');
+
+      // Filter all invisible characters (ASCII < 32, except newlines)
+      cleanInput = cleanInput
+        .split('')
+        .filter((ch) => ch.charCodeAt(0) >= 32)
+        .join('');
+
+      if (cleanInput.length > 0) {
+        if (currentField === 'apiKey') {
+          setApiKey((prev) => prev + cleanInput);
+        } else if (currentField === 'baseUrl') {
+          setBaseUrl((prev) => prev + cleanInput);
+        } else if (currentField === 'model') {
+          setModel((prev) => prev + cleanInput);
+        }
+        return;
+      }
+    }
+
+    // Check if Enter key was pressed (by checking for newline characters)
     if (input.includes('\n') || input.includes('\r')) {
       if (currentField === 'apiKey') {
-        // 允许空 API key 跳转到下一个字段，让用户稍后可以返回修改
+        // Allow empty API key to jump to next field, user can return to modify later
         setCurrentField('baseUrl');
         return;
       } else if (currentField === 'baseUrl') {
         setCurrentField('model');
         return;
       } else if (currentField === 'model') {
-        // 只有在提交时才检查 API key 是否为空
+        // Only check if API key is empty when submitting
         if (apiKey.trim()) {
           onSubmit(apiKey.trim(), baseUrl.trim(), model.trim());
         } else {
-          // 如果 API key 为空，回到 API key 字段
+          // If API key is empty, return to API key field
           setCurrentField('apiKey');
         }
       }
@@ -132,15 +146,10 @@ export function OpenAIKeyPrompt({
       width="100%"
     >
       <Text bold color={Colors.AccentBlue}>
-        OpenAI Configuration Required
+        API Configuration Required
       </Text>
       <Box marginTop={1}>
-        <Text>
-          Please enter your OpenAI configuration. You can get an API key from{' '}
-          <Text color={Colors.AccentBlue}>
-            https://platform.openai.com/api-keys
-          </Text>
-        </Text>
+        <Text>Please enter your API configuration.</Text>
       </Box>
       <Box marginTop={1} flexDirection="row">
         <Box width={12}>

@@ -92,6 +92,22 @@ export function AuthDialog({
     setOpenAIApiKey(apiKey);
     setOpenAIBaseUrl(baseUrl);
     setOpenAIModel(model);
+
+    // Save OpenAI configuration to user settings as fallback
+    // Priority order: .env > workspace settings.json > ~/.qwen/settings.json
+    try {
+      const openAIConfig: { [key: string]: string } = {};
+      if (apiKey.trim()) openAIConfig.OPENAI_API_KEY = apiKey.trim();
+      if (baseUrl.trim()) openAIConfig.OPENAI_BASE_URL = baseUrl.trim();
+      if (model.trim()) openAIConfig.OPENAI_MODEL = model.trim();
+
+      // Save to user settings as environment variables for next time
+      settings.setValue(SettingScope.User, 'openaiConfig', openAIConfig);
+    } catch (error) {
+      // Don't block authentication if saving fails
+      console.warn('Failed to save OpenAI config to settings:', error);
+    }
+
     setShowOpenAIKeyPrompt(false);
     onSelect(AuthType.USE_OPENAI, SettingScope.User);
   };
@@ -124,10 +140,27 @@ export function AuthDialog({
   });
 
   if (showOpenAIKeyPrompt) {
+    // Load default values from settings
+    const defaultValues = {
+      apiKey:
+        process.env.OPENAI_API_KEY ||
+        settings.merged.openaiConfig?.OPENAI_API_KEY ||
+        '',
+      baseUrl:
+        process.env.OPENAI_BASE_URL ||
+        settings.merged.openaiConfig?.OPENAI_BASE_URL ||
+        '',
+      model:
+        process.env.OPENAI_MODEL ||
+        settings.merged.openaiConfig?.OPENAI_MODEL ||
+        '',
+    };
+
     return (
       <OpenAIKeyPrompt
         onSubmit={handleOpenAIKeySubmit}
         onCancel={handleOpenAIKeyCancel}
+        defaultValues={defaultValues}
       />
     );
   }
@@ -165,7 +198,7 @@ export function AuthDialog({
       </Box>
       <Box marginTop={1}>
         <Text color={Colors.AccentBlue}>
-          {'https://github.com/QwenLM/Qwen3-Coder/blob/main/README.md'}
+          {'https://github.com/QwenLM/qwen-code/blob/main/README.md'}
         </Text>
       </Box>
     </Box>
