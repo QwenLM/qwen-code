@@ -65,6 +65,7 @@ export interface CliArgs {
   openaiBaseUrl: string | undefined;
   proxy: string | undefined;
   resume: string | undefined;
+  save: string | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -220,6 +221,11 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'string',
       description:
         'Resume a checkpoint',
+    })
+    .option('save', {
+      type: 'string',
+      description:
+        'Save conversation history to a checkpoint',
     })
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
     .alias('v', 'version')
@@ -474,7 +480,8 @@ export async function loadCliConfig(
       },
     ],
     contentGenerator: settings.contentGenerator,
-    resume: argv.resume
+    resume: argv.resume,
+    save: argv.save
   });
 }
 

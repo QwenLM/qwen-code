@@ -197,6 +197,7 @@ export interface ConfigParameters {
     maxRetries?: number;
   };
   resume?: string;
+  save?: string;
 }
 
 export class Config {
@@ -268,6 +269,7 @@ export class Config {
     maxRetries?: number;
   };
   private readonly resume: string | undefined;
+  private readonly save: string | undefined;
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
     this.embeddingModel =
@@ -326,6 +328,7 @@ export class Config {
     this.sampling_params = params.sampling_params;
     this.contentGenerator = params.contentGenerator;
     this.resume = params.resume;
+    this.save = params.save;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -649,6 +652,10 @@ export class Config {
 
   getResume(): string | undefined {
     return this.resume;
+  }
+
+  getSave(): string | undefined {
+    return this.save;
   }
 
   getSystemPromptMappings():

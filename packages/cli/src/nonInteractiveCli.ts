@@ -49,6 +49,21 @@ async function loadCheckpoint(checkpointPath: string): Promise<{
   }
 }
 
+async function saveCheckpoint(checkpointPath: string, history: Content[]): Promise<boolean> {
+  try {
+    // Ensure the directory exists
+    const dir = path.dirname(checkpointPath);
+    await fs.mkdir(dir, { recursive: true });
+    
+    // Save the conversation history in logger checkpoint format
+    await fs.writeFile(checkpointPath, JSON.stringify(history, null, 2), 'utf-8');
+    return true;
+  } catch (error) {
+    console.error(`Failed to save checkpoint to ${checkpointPath}:`, error);
+    return false;
+  }
+}
+
 function getResponseText(response: GenerateContentResponse): string | null {
   if (response.candidates && response.candidates.length > 0) {
     const candidate = response.candidates[0];
@@ -227,6 +242,27 @@ export async function runNonInteractive(
     );
     process.exit(1);
   } finally {
+    // Save checkpoint if requested
+    const save = config.getSave();
+    if (save) {
+      let checkpointPath: string;
+      
+      if (save.includes('/') || save.endsWith('.json')) {
+        // If it's a path or includes .json, use it directly
+        checkpointPath = save;
+      } else {
+        // For tags, use the checkpoint-<tag>.json format
+        checkpointPath = path.join(config.getProjectTempDir(), `checkpoint-${save}.json`);
+      }
+      
+      const history = await geminiClient.getHistory();
+      const success = await saveCheckpoint(checkpointPath, history);
+      
+      if (success) {
+        console.error(`Saved checkpoint to: ${save}`);
+      }
+    }
+    
     if (isTelemetrySdkInitialized()) {
       await shutdownTelemetry();
     }
