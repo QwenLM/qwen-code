@@ -18,8 +18,36 @@ import {
   FunctionCall,
   GenerateContentResponse,
 } from '@google/genai';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 import { parseAndFormatApiError } from './ui/utils/errorParsing.js';
+
+async function loadCheckpoint(checkpointPath: string): Promise<{
+  history?: Content[];
+  clientHistory?: Content[];
+  toolCall?: { name: string; args: any };
+  commitHash?: string;
+  filePath?: string;
+} | null> {
+  try {
+    const data = await fs.readFile(checkpointPath, 'utf-8');
+    const parsed = JSON.parse(data);
+    
+    // Check if it's a simple conversation history array (logger checkpoint format)
+    if (Array.isArray(parsed)) {
+      return {
+        clientHistory: parsed as Content[]
+      };
+    }
+    
+    // Otherwise, it's the full checkpoint format
+    return parsed;
+  } catch (error) {
+    console.error(`Failed to load checkpoint from ${checkpointPath}:`, error);
+    return null;
+  }
+}
 
 function getResponseText(response: GenerateContentResponse): string | null {
   if (response.candidates && response.candidates.length > 0) {
@@ -65,13 +93,34 @@ export async function runNonInteractive(
   const resume = config.getResume();
   
   if (resume) {
-    // TODO: Load actual conversation history from checkpoint file
-    // For now, using placeholder history
-    const previousMessages: Content[] = [
-      { role: 'user', parts: [{text: 'My secret number is 101'}] },
-      { role: 'model', parts: [{text: 'I understand. Your secret number is 101. How can I help you?'}] }
-    ];
-    chat.setHistory(previousMessages);
+    // Check if resume is a checkpoint file name or path
+    let checkpointPath: string;
+    
+    if (resume.includes('/') || resume.endsWith('.json')) {
+      // If it's a path or includes .json, use it directly
+      checkpointPath = resume;
+    } else {
+      // For tags, use the checkpoint-<tag>.json format
+      checkpointPath = path.join(config.getProjectTempDir(), `checkpoint-${resume}.json`);
+    }
+    
+    // Check if checkpoint file exists before trying to load it
+    try {
+      await fs.access(checkpointPath);
+    } catch {
+      console.error(`Error: Checkpoint '${resume}' not found at ${checkpointPath}`);
+      process.exit(1);
+    }
+    
+    const checkpoint = await loadCheckpoint(checkpointPath);
+    
+    if (checkpoint && checkpoint.clientHistory) {
+      chat.setHistory(checkpoint.clientHistory);
+      console.error(`Resumed from checkpoint: ${resume}`);
+    } else {
+      console.error(`Error: Invalid checkpoint file or no conversation history found`);
+      process.exit(1);
+    }
   }
 
   const abortController = new AbortController();
