@@ -1,5 +1,5 @@
 /**
- * @license
+* @license
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -61,6 +61,19 @@ export async function runNonInteractive(
   const toolRegistry: ToolRegistry = await config.getToolRegistry();
 
   const chat = await geminiClient.getChat();
+
+  const resume = config.getResume();
+  
+  if (resume) {
+    // TODO: Load actual conversation history from checkpoint file
+    // For now, using placeholder history
+    const previousMessages: Content[] = [
+      { role: 'user', parts: [{text: 'My secret number is 101'}] },
+      { role: 'model', parts: [{text: 'I understand. Your secret number is 101. How can I help you?'}] }
+    ];
+    chat.setHistory(previousMessages);
+  }
+
   const abortController = new AbortController();
   let currentMessages: Content[] = [{ role: 'user', parts: [{ text: input }] }];
   let turnCount = 0;

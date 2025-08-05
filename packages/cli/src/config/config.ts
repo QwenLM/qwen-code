@@ -64,6 +64,7 @@ export interface CliArgs {
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
   proxy: string | undefined;
+  resume: string | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -214,6 +215,11 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'string',
       description:
         'Proxy for gemini client, like schema://user:password@host:port',
+    })
+    .option('resume', {
+      type: 'string',
+      description:
+        'Resume a checkpoint',
     })
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
     .alias('v', 'version')
@@ -468,6 +474,7 @@ export async function loadCliConfig(
       },
     ],
     contentGenerator: settings.contentGenerator,
+    resume: argv.resume
   });
 }
 
