@@ -38,6 +38,7 @@
     "html-to-text": "^9.0.5",
     "https-proxy-agent": "^7.0.6",
     "ignore": "^7.0.0",
+    "marked": "^15.0.12",
     "micromatch": "^4.0.8",
     "open": "^10.1.2",
     "openai": "^5.7.0",

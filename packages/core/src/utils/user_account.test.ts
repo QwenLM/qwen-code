@@ -29,7 +29,7 @@ describe('user_account', () => {
     path.join(tempHomeDir, '.qwen', 'google_accounts.json');
   beforeEach(() => {
     tempHomeDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'gemini-cli-test-home-'),
+      path.join(os.tmpdir(), 'qwen-code-test-home-'),
     );
     (os.homedir as Mock).mockReturnValue(tempHomeDir);
   });

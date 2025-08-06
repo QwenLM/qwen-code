@@ -37,7 +37,7 @@ describe('Configuration Integration Tests', () => {
   let originalEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(tmpdir(), 'gemini-cli-test-'));
+    tempDir = fs.mkdtempSync(path.join(tmpdir(), 'qwen-code-test-'));
     originalEnv = { ...process.env };
     process.env.GEMINI_API_KEY = 'test-api-key';
     vi.clearAllMocks();

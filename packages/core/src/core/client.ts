@@ -13,6 +13,8 @@ import {
   Content,
   Tool,
   GenerateContentResponse,
+  FunctionDeclaration,
+  Schema,
 } from '@google/genai';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import {
@@ -25,7 +27,7 @@ import { Config } from '../config/config.js';
 import { UserTierId } from '../code_assist/types.js';
 import { getCoreSystemPrompt, getCompressionPrompt } from './prompts.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
-import { getResponseText } from '../utils/generateContentResponseUtilities.js';
+import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { reportError } from '../utils/errorReporting.js';
 import { GeminiChat } from './geminiChat.js';
@@ -43,8 +45,8 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { ideContext } from '../ide/ideContext.js';
-import { logFlashDecidedToContinue } from '../telemetry/loggers.js';
-import { FlashDecidedToContinueEvent } from '../telemetry/types.js';
+import { logNextSpeakerCheck } from '../telemetry/loggers.js';
+import { NextSpeakerCheckEvent } from '../telemetry/types.js';
 
 function isThinkingSupported(model: string) {
   if (model.startsWith('gemini-2.5')) return true;
@@ -106,7 +108,7 @@ export class GeminiClient {
   private readonly COMPRESSION_PRESERVE_THRESHOLD = 0.3;
 
   private readonly loopDetector: LoopDetectionService;
-  private lastPromptId?: string;
+  private lastPromptId: string;
 
   constructor(private config: Config) {
     if (config.getProxy()) {
@@ -115,6 +117,7 @@ export class GeminiClient {
 
     this.embeddingModel = config.getEmbeddingModel();
     this.loopDetector = new LoopDetectionService(config);
+    this.lastPromptId = this.config.getSessionId();
   }
 
   async initialize(contentGeneratorConfig: ContentGeneratorConfig) {
@@ -171,8 +174,36 @@ export class GeminiClient {
     this.chat = await this.startChat();
   }
 
+  async addDirectoryContext(): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: await this.getDirectoryContext() }],
+    });
+  }
+
+  private async getDirectoryContext(): Promise<string> {
+    const workspaceContext = this.config.getWorkspaceContext();
+    const workspaceDirectories = workspaceContext.getDirectories();
+
+    const folderStructures = await Promise.all(
+      workspaceDirectories.map((dir) =>
+        getFolderStructure(dir, {
+          fileService: this.config.getFileService(),
+        }),
+      ),
+    );
+
+    const folderStructure = folderStructures.join('\n');
+    const dirList = workspaceDirectories.map((dir) => `  - ${dir}`).join('\n');
+    const workingDirPreamble = `I'm currently working in the following directories:\n${dirList}\n Folder structures are as follows:\n${folderStructure}`;
+    return workingDirPreamble;
+  }
+
   private async getEnvironment(): Promise<Part[]> {
-    const cwd = this.config.getWorkingDir();
     const today = new Date().toLocaleDateString(undefined, {
       weekday: 'long',
       year: 'numeric',
@@ -180,15 +211,36 @@ export class GeminiClient {
       day: 'numeric',
     });
     const platform = process.platform;
-    const folderStructure = await getFolderStructure(cwd, {
-      fileService: this.config.getFileService(),
-      maxItems: this.config.getMaxFolderItems(),
-    });
+
+    const workspaceContext = this.config.getWorkspaceContext();
+    const workspaceDirectories = workspaceContext.getDirectories();
+
+    const folderStructures = await Promise.all(
+      workspaceDirectories.map((dir) =>
+        getFolderStructure(dir, {
+          fileService: this.config.getFileService(),
+        }),
+      ),
+    );
+
+    const folderStructure = folderStructures.join('\n');
+
+    let workingDirPreamble: string;
+    if (workspaceDirectories.length === 1) {
+      workingDirPreamble = `I'm currently working in the directory: ${workspaceDirectories[0]}`;
+    } else {
+      const dirList = workspaceDirectories
+        .map((dir) => `  - ${dir}`)
+        .join('\n');
+      workingDirPreamble = `I'm currently working in the following directories:\n${dirList}`;
+    }
+
     const context = `
   This is the Qwen Code. We are setting up the context for our chat.
   Today's date is ${today}.
   My operating system is: ${platform}
-  I'm currently working in the directory: ${cwd}
+  ${workingDirPreamble}
+  Here is the folder structure of the current working directories:\n
   ${folderStructure}
           `.trim();
 
@@ -363,33 +415,41 @@ export class GeminiClient {
       }
     }
 
-    if (this.config.getIdeMode()) {
-      const openFiles = ideContext.getOpenFilesContext();
-      if (openFiles) {
+    if (this.config.getIdeModeFeature() && this.config.getIdeMode()) {
+      const ideContextState = ideContext.getIdeContext();
+      const openFiles = ideContextState?.workspaceState?.openFiles;
+
+      if (openFiles && openFiles.length > 0) {
         const contextParts: string[] = [];
-        if (openFiles.activeFile) {
+        const firstFile = openFiles[0];
+        const activeFile = firstFile.isActive ? firstFile : undefined;
+
+        if (activeFile) {
           contextParts.push(
-            `This is the file that the user was most recently looking at:\n- Path: ${openFiles.activeFile}`,
+            `This is the file that the user is looking at:\n- Path: ${activeFile.path}`,
           );
-          if (openFiles.cursor) {
+          if (activeFile.cursor) {
             contextParts.push(
-              `This is the cursor position in the file:\n- Cursor Position: Line ${openFiles.cursor.line}, Character ${openFiles.cursor.character}`,
+              `This is the cursor position in the file:\n- Cursor Position: Line ${activeFile.cursor.line}, Character ${activeFile.cursor.character}`,
             );
           }
-          if (openFiles.selectedText) {
+          if (activeFile.selectedText) {
             contextParts.push(
-              `This is the selected text in the active file:\n- ${openFiles.selectedText}`,
+              `This is the selected text in the file:\n- ${activeFile.selectedText}`,
             );
           }
         }
 
-        if (openFiles.recentOpenFiles && openFiles.recentOpenFiles.length > 0) {
-          const recentFiles = openFiles.recentOpenFiles
-            .map((file) => `- ${file.filePath}`)
+        const otherOpenFiles = activeFile ? openFiles.slice(1) : openFiles;
+
+        if (otherOpenFiles.length > 0) {
+          const recentFiles = otherOpenFiles
+            .map((file) => `- ${file.path}`)
             .join('\n');
-          contextParts.push(
-            `Here are files the user has recently opened, with the most recent at the top:\n${recentFiles}`,
-          );
+          const heading = activeFile
+            ? `Here are some other files the user has open, with the most recent at the top:`
+            : `Here are some files the user has open, with the most recent at the top:`;
+          contextParts.push(`${heading}\n${recentFiles}`);
         }
 
         if (contextParts.length > 0) {
@@ -431,11 +491,15 @@ export class GeminiClient {
         this,
         signal,
       );
+      logNextSpeakerCheck(
+        this.config,
+        new NextSpeakerCheckEvent(
+          prompt_id,
+          turn.finishReason?.toString() || '',
+          nextSpeakerCheck?.next_speaker || '',
+        ),
+      );
       if (nextSpeakerCheck?.next_speaker === 'model') {
-        logFlashDecidedToContinue(
-          this.config,
-          new FlashDecidedToContinueEvent(prompt_id),
-        );
         const nextRequest = [{ text: 'Please continue.' }];
         // This recursive call's events will be yielded out, but the final
         // turn object will be from the top-level call.
@@ -473,76 +537,48 @@ export class GeminiClient {
         ...config,
       };
 
+      // Convert schema to function declaration
+      const functionDeclaration: FunctionDeclaration = {
+        name: 'respond_in_schema',
+        description: 'Provide the response in provided schema',
+        parameters: schema as Schema,
+      };
+
+      const tools: Tool[] = [
+        {
+          functionDeclarations: [functionDeclaration],
+        },
+      ];
+
       const apiCall = () =>
-        this.getContentGenerator().generateContent({
-          model: modelToUse,
-          config: {
-            ...requestConfig,
-            systemInstruction,
-            responseSchema: schema,
-            responseMimeType: 'application/json',
+        this.getContentGenerator().generateContent(
+          {
+            model: modelToUse,
+            config: {
+              ...requestConfig,
+              systemInstruction,
+              tools,
+            },
+            contents,
           },
-          contents,
-        });
+          this.lastPromptId,
+        );
 
       const result = await retryWithBackoff(apiCall, {
         onPersistent429: async (authType?: string, error?: unknown) =>
           await this.handleFlashFallback(authType, error),
         authType: this.config.getContentGeneratorConfig()?.authType,
       });
-
-      const text = getResponseText(result);
-      if (!text) {
-        const error = new Error(
-          'API returned an empty response for generateJson.',
+      const functionCalls = getFunctionCalls(result);
+      if (functionCalls && functionCalls.length > 0) {
+        const functionCall = functionCalls.find(
+          (call) => call.name === 'respond_in_schema',
         );
-        await reportError(
-          error,
-          'Error in generateJson: API returned an empty response.',
-          contents,
-          'generateJson-empty-response',
-        );
-        throw error;
-      }
-      try {
-        // Try to extract JSON from various formats
-        const extractors = [
-          // Match ```json ... ``` or ``` ... ``` blocks
-          /```(?:json)?\s*\n?([\s\S]*?)\n?```/,
-          // Match inline code blocks `{...}`
-          /`(\{[\s\S]*?\})`/,
-          // Match raw JSON objects or arrays
-          /(\{[\s\S]*\}|\[[\s\S]*\])/,
-        ];
-
-        for (const regex of extractors) {
-          const match = text.match(regex);
-          if (match && match[1]) {
-            try {
-              return JSON.parse(match[1].trim());
-            } catch {
-              // Continue to next pattern if parsing fails
-              continue;
-            }
-          }
+        if (functionCall && functionCall.args) {
+          return functionCall.args as Record<string, unknown>;
         }
-
-        // If no patterns matched, try parsing the entire text
-        return JSON.parse(text.trim());
-      } catch (parseError) {
-        await reportError(
-          parseError,
-          'Failed to parse JSON response from generateJson.',
-          {
-            responseTextFailedToParse: text,
-            originalRequestContents: contents,
-          },
-          'generateJson-parse',
-        );
-        throw new Error(
-          `Failed to parse API response as JSON: ${getErrorMessage(parseError)}`,
-        );
       }
+      return {};
     } catch (error) {
       if (abortSignal.aborted) {
         throw error;
@@ -594,11 +630,14 @@ export class GeminiClient {
       };
 
       const apiCall = () =>
-        this.getContentGenerator().generateContent({
-          model: modelToUse,
-          config: requestConfig,
-          contents,
-        });
+        this.getContentGenerator().generateContent(
+          {
+            model: modelToUse,
+            config: requestConfig,
+            contents,
+          },
+          this.lastPromptId,
+        );
 
       const result = await retryWithBackoff(apiCall, {
         onPersistent429: async (authType?: string, error?: unknown) =>
@@ -782,6 +821,7 @@ export class GeminiClient {
         );
         if (accepted !== false && accepted !== null) {
           this.config.setModel(fallbackModel);
+          this.config.setFallbackMode(true);
           return fallbackModel;
         }
         // Check if the model was switched manually in the handler

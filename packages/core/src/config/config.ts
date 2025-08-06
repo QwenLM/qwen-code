@@ -47,9 +47,11 @@ import { ClearcutLogger } from '../telemetry/clearcut-logger/clearcut-logger.js'
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import { IdeClient } from '../ide/ide-client.js';
+import type { Content } from '@google/genai';
 
 // Re-export OAuth config type
 export type { MCPOAuthConfig };
+import { WorkspaceContext } from '../utils/workspaceContext.js';
 
 export enum ApprovalMode {
   DEFAULT = 'default',
@@ -81,6 +83,7 @@ export interface GeminiCLIExtension {
   name: string;
   version: string;
   isActive: boolean;
+  path: string;
 }
 export interface FileFilteringOptions {
   respectGitIgnore: boolean;
@@ -171,6 +174,7 @@ export interface ConfigParameters {
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
+  includeDirectories?: string[];
   bugCommand?: BugCommandSettings;
   model: string;
   extensionContextFilePaths?: string[];
@@ -183,6 +187,7 @@ export interface ConfigParameters {
   blockedMcpServers?: Array<{ name: string; extensionName: string }>;
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
+  ideModeFeature?: boolean;
   ideMode?: boolean;
   ideClient?: IdeClient;
   enableOpenAILogging?: boolean;
@@ -208,6 +213,7 @@ export class Config {
   private readonly embeddingModel: string;
   private readonly sandbox: SandboxConfig | undefined;
   private readonly targetDir: string;
+  private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly question: string | undefined;
   private readonly fullContext: boolean;
@@ -239,14 +245,15 @@ export class Config {
   private readonly model: string;
   private readonly extensionContextFilePaths: string[];
   private readonly noBrowser: boolean;
-  private readonly ideMode: boolean;
-  private readonly ideClient: IdeClient | undefined;
+  private readonly ideModeFeature: boolean;
+  private ideMode: boolean;
+  private ideClient: IdeClient;
+  private inFallbackMode = false;
   private readonly systemPromptMappings?: Array<{
     baseUrls?: string[];
     modelNames?: string[];
     template?: string;
   }>;
-  private modelSwitchedDuringSession: boolean = false;
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
   private readonly maxFolderItems: number;
@@ -276,6 +283,10 @@ export class Config {
       params.embeddingModel ?? DEFAULT_GEMINI_EMBEDDING_MODEL;
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.workspaceContext = new WorkspaceContext(
+      this.targetDir,
+      params.includeDirectories ?? [],
+    );
     this.debugMode = params.debugMode;
     this.question = params.question;
     this.fullContext = params.fullContext ?? false;
@@ -321,8 +332,11 @@ export class Config {
     this._blockedMcpServers = params.blockedMcpServers ?? [];
     this.noBrowser = params.noBrowser ?? false;
     this.summarizeToolOutput = params.summarizeToolOutput;
+    this.ideModeFeature = params.ideModeFeature ?? false;
     this.ideMode = params.ideMode ?? false;
-    this.ideClient = params.ideClient;
+    this.ideClient =
+      params.ideClient ??
+      IdeClient.getInstance(this.ideMode && this.ideModeFeature);
     this.systemPromptMappings = params.systemPromptMappings;
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
     this.sampling_params = params.sampling_params;
@@ -358,16 +372,33 @@ export class Config {
   }
 
   async refreshAuth(authMethod: AuthType) {
-    this.contentGeneratorConfig = createContentGeneratorConfig(
+    // Save the current conversation history before creating a new client
+    let existingHistory: Content[] = [];
+    if (this.geminiClient && this.geminiClient.isInitialized()) {
+      existingHistory = this.geminiClient.getHistory();
+    }
+
+    // Create new content generator config
+    const newContentGeneratorConfig = createContentGeneratorConfig(
       this,
       authMethod,
     );
 
-    this.geminiClient = new GeminiClient(this);
-    await this.geminiClient.initialize(this.contentGeneratorConfig);
+    // Create and initialize new client in local variable first
+    const newGeminiClient = new GeminiClient(this);
+    await newGeminiClient.initialize(newContentGeneratorConfig);
+
+    // Only assign to instance properties after successful initialization
+    this.contentGeneratorConfig = newContentGeneratorConfig;
+    this.geminiClient = newGeminiClient;
+
+    // Restore the conversation history to the new client
+    if (existingHistory.length > 0) {
+      this.geminiClient.setHistory(existingHistory);
+    }
 
     // Reset the session flag since we're explicitly changing auth and using default model
-    this.modelSwitchedDuringSession = false;
+    this.inFallbackMode = false;
   }
 
   getSessionId(): string {
@@ -385,19 +416,15 @@ export class Config {
   setModel(newModel: string): void {
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
-      this.modelSwitchedDuringSession = true;
     }
   }
 
-  isModelSwitchedDuringSession(): boolean {
-    return this.modelSwitchedDuringSession;
+  isInFallbackMode(): boolean {
+    return this.inFallbackMode;
   }
 
-  resetModelToDefault(): void {
-    if (this.contentGeneratorConfig) {
-      this.contentGeneratorConfig.model = this.model; // Reset to the original default model
-      this.modelSwitchedDuringSession = false;
-    }
+  setFallbackMode(active: boolean): void {
+    this.inFallbackMode = active;
   }
 
   setFlashFallbackHandler(handler: FlashFallbackHandler): void {
@@ -432,12 +459,27 @@ export class Config {
     return this.sandbox;
   }
 
+  isRestrictiveSandbox(): boolean {
+    const sandboxConfig = this.getSandbox();
+    const seatbeltProfile = process.env.SEATBELT_PROFILE;
+    return (
+      !!sandboxConfig &&
+      sandboxConfig.command === 'sandbox-exec' &&
+      !!seatbeltProfile &&
+      seatbeltProfile.startsWith('restrictive-')
+    );
+  }
+
   getTargetDir(): string {
     return this.targetDir;
   }
 
   getProjectRoot(): string {
     return this.targetDir;
+  }
+
+  getWorkspaceContext(): WorkspaceContext {
+    return this.workspaceContext;
   }
 
   getToolRegistry(): Promise<ToolRegistry> {
@@ -626,12 +668,28 @@ export class Config {
     return this.summarizeToolOutput;
   }
 
+  getIdeModeFeature(): boolean {
+    return this.ideModeFeature;
+  }
+
+  getIdeClient(): IdeClient {
+    return this.ideClient;
+  }
+
   getIdeMode(): boolean {
     return this.ideMode;
   }
 
-  getIdeClient(): IdeClient | undefined {
-    return this.ideClient;
+  setIdeMode(value: boolean): void {
+    this.ideMode = value;
+  }
+
+  setIdeClientDisconnected(): void {
+    this.ideClient.setDisconnected();
+  }
+
+  setIdeClientConnected(): void {
+    this.ideClient.reconnect(this.ideMode && this.ideModeFeature);
   }
 
   getEnableOpenAILogging(): boolean {

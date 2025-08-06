@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+import { homedir } from 'node:os';
 import yargs from 'yargs/yargs';
 import { hideBin } from 'yargs/helpers';
 import process from 'node:process';
@@ -59,13 +62,14 @@ export interface CliArgs {
   experimentalAcp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
-  ideMode: boolean | undefined;
+  ideModeFeature: boolean | undefined;
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
   proxy: string | undefined;
   resume: string | undefined;
   save: string | undefined;
+  includeDirectories: string[] | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -79,7 +83,7 @@ export async function parseArguments(): Promise<CliArgs> {
       alias: 'm',
       type: 'string',
       description: `Model`,
-      default: process.env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL,
+      default: process.env.GEMINI_MODEL,
     })
     .option('prompt', {
       alias: 'p',
@@ -195,7 +199,7 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'boolean',
       description: 'List all available extensions and exit.',
     })
-    .option('ide-mode', {
+    .option('ide-mode-feature', {
       type: 'boolean',
       description: 'Run in IDE mode?',
     })
@@ -227,6 +231,15 @@ export async function parseArguments(): Promise<CliArgs> {
       description:
         'Save conversation history to a checkpoint',
     })
+    .option('include-directories', {
+      type: 'array',
+      string: true,
+      description:
+        'Additional directories to include in the workspace (comma-separated or multiple --include-directories)',
+      coerce: (dirs: string[]) =>
+        // Handle comma-separated values
+        dirs.flatMap((dir) => dir.split(',').map((d) => d.trim())),
+    })
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
     .alias('v', 'version')
     .help()
@@ -242,7 +255,11 @@ export async function parseArguments(): Promise<CliArgs> {
     });
 
   yargsInstance.wrap(yargsInstance.terminalWidth());
-  return yargsInstance.argv;
+  const result = yargsInstance.parseSync();
+
+  // The import format is now only controlled by settings.memoryImportFormat
+  // We no longer accept it as a CLI argument
+  return result as CliArgs;
 }
 
 // This function is now a thin wrapper around the server's implementation.
@@ -254,21 +271,31 @@ export async function loadHierarchicalGeminiMemory(
   fileService: FileDiscoveryService,
   settings: Settings,
   extensionContextFilePaths: string[] = [],
+  memoryImportFormat: 'flat' | 'tree' = 'tree',
   fileFilteringOptions?: FileFilteringOptions,
 ): Promise<{ memoryContent: string; fileCount: number }> {
+  // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
+  const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
+  const realHome = fs.realpathSync(path.resolve(homedir()));
+  const isHomeDirectory = realCwd === realHome;
+
+  // If it is the home directory, pass an empty string to the core memory
+  // function to signal that it should skip the workspace search.
+  const effectiveCwd = isHomeDirectory ? '' : currentWorkingDirectory;
+
   if (debugMode) {
     logger.debug(
-      `CLI: Delegating hierarchical memory load to server for CWD: ${currentWorkingDirectory}`,
+      `CLI: Delegating hierarchical memory load to server for CWD: ${currentWorkingDirectory} (memoryImportFormat: ${memoryImportFormat})`,
     );
   }
 
-  // Directly call the server function.
-  // The server function will use its own homedir() for the global path.
+  // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
-    currentWorkingDirectory,
+    effectiveCwd,
     debugMode,
     fileService,
     extensionContextFilePaths,
+    memoryImportFormat,
     fileFilteringOptions,
     settings.memoryDiscoveryMaxDirs,
   );
@@ -284,17 +311,16 @@ export async function loadCliConfig(
     argv.debug ||
     [process.env.DEBUG, process.env.DEBUG_MODE].some(
       (v) => v === 'true' || v === '1',
-    );
+    ) ||
+    false;
+  const memoryImportFormat = settings.memoryImportFormat || 'tree';
+  const ideMode = settings.ideMode ?? false;
 
-  const ideMode =
-    (argv.ideMode ?? settings.ideMode ?? false) &&
-    process.env.TERM_PROGRAM === 'vscode' &&
+  const ideModeFeature =
+    (argv.ideModeFeature ?? settings.ideModeFeature ?? false) &&
     !process.env.SANDBOX;
 
-  let ideClient: IdeClient | undefined;
-  if (ideMode) {
-    ideClient = new IdeClient();
-  }
+  const ideClient = IdeClient.getInstance(ideMode && ideModeFeature);
 
   const allExtensions = annotateActiveExtensions(
     extensions,
@@ -343,6 +369,7 @@ export async function loadCliConfig(
     fileService,
     settings,
     extensionContextFilePaths,
+    memoryImportFormat,
     fileFiltering,
   );
 
@@ -403,6 +430,7 @@ export async function loadCliConfig(
     embeddingModel: DEFAULT_GEMINI_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: process.cwd(),
+    includeDirectories: argv.includeDirectories,
     debugMode,
     question: argv.promptInteractive || argv.prompt || '',
     fullContext: argv.allFiles || argv.all_files || false,
@@ -450,7 +478,7 @@ export async function loadCliConfig(
     cwd: process.cwd(),
     fileDiscoveryService: fileService,
     bugCommand: settings.bugCommand,
-    model: argv.model!,
+    model: argv.model || settings.model || DEFAULT_GEMINI_MODEL,
     extensionContextFilePaths,
     maxSessionTurns: settings.maxSessionTurns ?? -1,
     sessionTokenLimit: settings.sessionTokenLimit ?? 32000,
@@ -462,6 +490,7 @@ export async function loadCliConfig(
     noBrowser: !!process.env.NO_BROWSER,
     summarizeToolOutput: settings.summarizeToolOutput,
     ideMode,
+    ideModeFeature,
     ideClient,
     enableOpenAILogging:
       (typeof argv.openaiLogging === 'undefined'

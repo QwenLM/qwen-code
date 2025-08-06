@@ -31,22 +31,79 @@
     "onStartupFinished"
   ],
   "contributes": {
+    "languages": [
+      {
+        "id": "qwen-diff-editable"
+      }
+    ],
     "commands": [
       {
-        "command": "qwen-code.runQwenCode",
+        "command": "qwen.diff.accept",
+        "title": "Qwen Code: Accept Current Diff",
+        "icon": "$(check)"
+      },
+      {
+        "command": "qwen.diff.cancel",
+        "title": "Cancel",
+        "icon": "$(close)"
+      },
+      {
+        "command": "qwen-code.runGeminiCLI",
         "title": "Qwen Code: Run"
+      },
+      {
+        "command": "qwen-code.showNotices",
+        "title": "Qwen Code: View Third-Party Notices"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "qwen.diff.accept",
+          "when": "qwen.diff.isVisible"
+        },
+        {
+          "command": "qwen.diff.cancel",
+          "when": "qwen.diff.isVisible"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "qwen.diff.accept",
+          "when": "qwen.diff.isVisible",
+          "group": "navigation"
+        },
+        {
+          "command": "qwen.diff.cancel",
+          "when": "qwen.diff.isVisible",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "qwen.diff.accept",
+        "key": "ctrl+s",
+        "when": "qwen.diff.isVisible"
+      },
+      {
+        "command": "qwen.diff.accept",
+        "key": "cmd+s",
+        "when": "qwen.diff.isVisible"
       }
     ]
   },
-  "main": "./dist/extension.js",
+  "main": "./dist/extension.cjs",
+  "type": "module",
   "scripts": {
-    "vscode:prepublish": "npm run check-types && npm run lint && node esbuild.js --production",
+    "vscode:prepublish": "npm run generate:notices && npm run check-types && npm run lint && node esbuild.js --production",
     "build": "npm run compile",
     "compile": "npm run check-types && npm run lint && node esbuild.js",
     "watch": "npm-run-all -p watch:*",
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "vsce package --no-dependencies",
+    "generate:notices": "node ./scripts/generate-notices.js",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vitest run",

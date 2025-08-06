@@ -82,7 +82,6 @@ export const useGeminiStream = (
   geminiClient: GeminiClient,
   history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
-  setShowHelp: React.Dispatch<React.SetStateAction<boolean>>,
   config: Config,
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
@@ -414,8 +413,9 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
       setIsResponding(false);
+      setThought(null); // Reset thought when user cancels
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, setThought],
   );
 
   const handleErrorEvent = useCallback(
@@ -437,8 +437,9 @@ export const useGeminiStream = (
         },
         userMessageTimestamp,
       );
+      setThought(null); // Reset thought when there's an error
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, config],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, config, setThought],
   );
 
   const handleFinishedEvent = useCallback(
@@ -629,7 +630,6 @@ export const useGeminiStream = (
         return;
 
       const userMessageTimestamp = Date.now();
-      setShowHelp(false);
 
       // Reset quota error flag when starting a new query (not a continuation)
       if (!options?.isContinuation) {
@@ -658,6 +658,7 @@ export const useGeminiStream = (
 
       if (!options?.isContinuation) {
         startNewPrompt();
+        setThought(null); // Reset thought when starting a new prompt
       }
 
       setIsResponding(true);
@@ -711,7 +712,6 @@ export const useGeminiStream = (
     },
     [
       streamingState,
-      setShowHelp,
       setModelSwitchedFromQuotaError,
       prepareQueryForGemini,
       processGeminiStreamEvents,

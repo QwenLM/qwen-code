@@ -9,7 +9,7 @@ import os from 'os';
 import { join as pathJoin } from 'node:path';
 import { getErrorMessage } from '@qwen-code/qwen-code-core';
 
-const warningsFilePath = pathJoin(os.tmpdir(), 'gemini-cli-warnings.txt');
+const warningsFilePath = pathJoin(os.tmpdir(), 'qwen-code-warnings.txt');
 
 export async function getStartupWarnings(): Promise<string[]> {
   try {

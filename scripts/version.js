@@ -39,15 +39,28 @@ const npmVersionArg = isSpecificVersion ? versionArg : versionArg;
 
 // 3. Bump the version in the root and all workspace package.json files.
 run(`npm version ${npmVersionArg} --no-git-tag-version --allow-same-version`);
-run(
-  `npm version ${npmVersionArg} --workspaces --no-git-tag-version --allow-same-version`,
+
+// 4. Get all workspaces and filter out the one we don't want to version.
+const workspacesToExclude = ['qwen-code-vscode-ide-companion'];
+const lsOutput = JSON.parse(
+  execSync('npm ls --workspaces --json --depth=0').toString(),
+);
+const allWorkspaces = Object.keys(lsOutput.dependencies || {});
+const workspacesToVersion = allWorkspaces.filter(
+  (wsName) => !workspacesToExclude.includes(wsName),
 );
 
-// 3. Get the new version number from the root package.json
+for (const workspaceName of workspacesToVersion) {
+  run(
+    `npm version ${npmVersionArg} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
+  );
+}
+
+// 5. Get the new version number from the root package.json
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
 
-// 4. Update the sandboxImageUri in the root package.json
+// 6. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
 if (rootPackageJson.config?.sandboxImageUri) {
   rootPackageJson.config.sandboxImageUri =
@@ -56,7 +69,7 @@ if (rootPackageJson.config?.sandboxImageUri) {
   writeJson(rootPackageJsonPath, rootPackageJson);
 }
 
-// 5. Update the sandboxImageUri in the cli package.json
+// 7. Update the sandboxImageUri in the cli package.json
 const cliPackageJsonPath = resolve(process.cwd(), 'packages/cli/package.json');
 const cliPackageJson = readJson(cliPackageJsonPath);
 if (cliPackageJson.config?.sandboxImageUri) {
@@ -68,7 +81,7 @@ if (cliPackageJson.config?.sandboxImageUri) {
   writeJson(cliPackageJsonPath, cliPackageJson);
 }
 
-// 6. Run `npm install` to update package-lock.json.
+// 8. Run `npm install` to update package-lock.json.
 run('npm install');
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

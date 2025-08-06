@@ -29,10 +29,10 @@ describe('loadExtensions', () => {
 
   beforeEach(() => {
     tempWorkspaceDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'gemini-cli-test-workspace-'),
+      path.join(os.tmpdir(), 'qwen-code-test-workspace-'),
     );
     tempHomeDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), 'gemini-cli-test-home-'),
+      path.join(os.tmpdir(), 'qwen-code-test-home-'),
     );
     vi.mocked(os.homedir).mockReturnValue(tempHomeDir);
   });
@@ -40,6 +40,81 @@ describe('loadExtensions', () => {
   afterEach(() => {
     fs.rmSync(tempWorkspaceDir, { recursive: true, force: true });
     fs.rmSync(tempHomeDir, { recursive: true, force: true });
+  });
+
+  it('should include extension path in loaded extension', () => {
+    const workspaceExtensionsDir = path.join(
+      tempWorkspaceDir,
+      EXTENSIONS_DIRECTORY_NAME,
+    );
+    fs.mkdirSync(workspaceExtensionsDir, { recursive: true });
+
+    const extensionDir = path.join(workspaceExtensionsDir, 'test-extension');
+    fs.mkdirSync(extensionDir, { recursive: true });
+
+    const config = {
+      name: 'test-extension',
+      version: '1.0.0',
+    };
+    fs.writeFileSync(
+      path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify(config),
+    );
+
+    const extensions = loadExtensions(tempWorkspaceDir);
+    expect(extensions).toHaveLength(1);
+    expect(extensions[0].path).toBe(extensionDir);
+    expect(extensions[0].config.name).toBe('test-extension');
+  });
+
+  it('should include extension path in loaded extension', () => {
+    const workspaceExtensionsDir = path.join(
+      tempWorkspaceDir,
+      EXTENSIONS_DIRECTORY_NAME,
+    );
+    fs.mkdirSync(workspaceExtensionsDir, { recursive: true });
+
+    const extensionDir = path.join(workspaceExtensionsDir, 'test-extension');
+    fs.mkdirSync(extensionDir, { recursive: true });
+
+    const config = {
+      name: 'test-extension',
+      version: '1.0.0',
+    };
+    fs.writeFileSync(
+      path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify(config),
+    );
+
+    const extensions = loadExtensions(tempWorkspaceDir);
+    expect(extensions).toHaveLength(1);
+    expect(extensions[0].path).toBe(extensionDir);
+    expect(extensions[0].config.name).toBe('test-extension');
+  });
+
+  it('should include extension path in loaded extension', () => {
+    const workspaceExtensionsDir = path.join(
+      tempWorkspaceDir,
+      EXTENSIONS_DIRECTORY_NAME,
+    );
+    fs.mkdirSync(workspaceExtensionsDir, { recursive: true });
+
+    const extensionDir = path.join(workspaceExtensionsDir, 'test-extension');
+    fs.mkdirSync(extensionDir, { recursive: true });
+
+    const config = {
+      name: 'test-extension',
+      version: '1.0.0',
+    };
+    fs.writeFileSync(
+      path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+      JSON.stringify(config),
+    );
+
+    const extensions = loadExtensions(tempWorkspaceDir);
+    expect(extensions).toHaveLength(1);
+    expect(extensions[0].path).toBe(extensionDir);
+    expect(extensions[0].config.name).toBe('test-extension');
   });
 
   it('should load context file path when QWEN.md is present', () => {
