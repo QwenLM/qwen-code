@@ -142,7 +142,7 @@ export async function createContentGenerator(
   const version = process.env.CLI_VERSION || process.version;
   const httpOptions = {
     headers: {
-      'User-Agent': `GeminiCLI/${version} (${process.platform}; ${process.arch})`,
+      'User-Agent': `QwenCode/${version} (${process.platform}; ${process.arch})`,
     },
   };
   if (
