@@ -79,6 +79,12 @@ export interface TelemetrySettings {
   outfile?: string;
 }
 
+export interface GitCoAuthorSettings {
+  enabled?: boolean;
+  name?: string;
+  email?: string;
+}
+
 export interface GeminiCLIExtension {
   name: string;
   version: string;
@@ -164,6 +170,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
+  gitCoAuthor?: GitCoAuthorSettings;
   usageStatisticsEnabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
@@ -229,6 +236,7 @@ export class Config {
   private readonly showMemoryUsage: boolean;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
+  private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
   private readonly fileFiltering: {
@@ -307,6 +315,11 @@ export class Config {
       otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
       logPrompts: params.telemetry?.logPrompts ?? true,
       outfile: params.telemetry?.outfile,
+    };
+    this.gitCoAuthor = {
+      enabled: params.gitCoAuthor?.enabled ?? true,
+      name: params.gitCoAuthor?.name ?? 'Qwen-Coder',
+      email: params.gitCoAuthor?.email ?? 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
 
@@ -575,6 +588,10 @@ export class Config {
 
   getTelemetryOutfile(): string | undefined {
     return this.telemetrySettings.outfile;
+  }
+
+  getGitCoAuthor(): GitCoAuthorSettings {
+    return this.gitCoAuthor;
   }
 
   getGeminiClient(): GeminiClient {

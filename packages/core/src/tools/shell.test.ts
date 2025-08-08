@@ -56,6 +56,11 @@ describe('ShellTool', () => {
       getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: () => createMockWorkspaceContext('.'),
       getGeminiClient: vi.fn(),
+      getGitCoAuthor: vi.fn().mockReturnValue({
+        enabled: true,
+        name: 'Qwen-Coder',
+        email: 'qwen-coder@alibabacloud.com',
+      }),
     } as unknown as Config;
 
     shellTool = new ShellTool(mockConfig);
@@ -384,6 +389,123 @@ describe('ShellTool', () => {
         new AbortController().signal,
       );
       expect(confirmation).toBe(false);
+    });
+  });
+
+  describe('addCoAuthorToGitCommit', () => {
+    it('should add co-author to git commit with double quotes', () => {
+      const command = 'git commit -m "Initial commit"';
+      // Use public test method
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m "Initial commit
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>"`,
+      );
+    });
+
+    it('should add co-author to git commit with single quotes', () => {
+      const command = "git commit -m 'Fix bug'";
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m 'Fix bug
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>'`,
+      );
+    });
+
+    it('should handle git commit with additional flags', () => {
+      const command = 'git commit -a -m "Add feature"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -a -m "Add feature
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>"`,
+      );
+    });
+
+    it('should not modify non-git commands', () => {
+      const command = 'npm install';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe('npm install');
+    });
+
+    it('should not modify git commands without -m flag', () => {
+      const command = 'git commit';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe('git commit');
+    });
+
+    it('should handle git commit with escaped quotes in message', () => {
+      const command = 'git commit -m "Fix \\"quoted\\" text"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m "Fix \\"quoted\\" text
+
+Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>"`,
+      );
+    });
+
+    it('should not add co-author when disabled in config', () => {
+      // Mock config with disabled co-author
+      (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+        enabled: false,
+        name: 'Qwen-Coder',
+        email: 'qwen-coder@alibabacloud.com',
+      });
+
+      const command = 'git commit -m "Initial commit"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe('git commit -m "Initial commit"');
+    });
+
+    it('should use custom name and email from config', () => {
+      // Mock config with custom co-author details
+      (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
+        enabled: true,
+        name: 'Custom Bot',
+        email: 'custom@example.com',
+      });
+
+      const command = 'git commit -m "Test commit"';
+      const result = (
+        shellTool as unknown as {
+          addCoAuthorToGitCommit: (command: string) => string;
+        }
+      ).addCoAuthorToGitCommit(command);
+      expect(result).toBe(
+        `git commit -m "Test commit
+
+Co-authored-by: Custom Bot <custom@example.com>"`,
+      );
     });
   });
 });
