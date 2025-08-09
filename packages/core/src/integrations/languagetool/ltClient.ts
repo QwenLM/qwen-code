@@ -22,6 +22,7 @@ export type LTCheckParams = {
   enabledRules?: string[]; // ids
   disabledRules?: string[]; // ids
   level?: 'default' | 'picky';
+  signal?: AbortSignal; // para cancelamento de requests
 };
 
 export type LTCheckResponse = {
@@ -39,6 +40,7 @@ export async function checkText({
   enabledRules,
   disabledRules,
   level = 'default',
+  signal,
 }: LTCheckParams): Promise<LTCheckResponse> {
   const body = new URLSearchParams();
   body.set('text', text);
@@ -52,6 +54,7 @@ export async function checkText({
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    signal, // <- importante para cancelamento
   });
 
   if (!res.ok) {

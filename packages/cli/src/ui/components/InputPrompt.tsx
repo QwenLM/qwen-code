@@ -25,6 +25,8 @@ import {
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import * as path from 'path';
+import { useLiveLanguageTool } from '../hooks/useLiveLanguageTool.js';
+import { AnnotatedText, LanguageToolIndicator } from './LanguageToolDisplay.js';
 
 export interface InputPromptProps {
   buffer: TextBuffer;
@@ -60,6 +62,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   vimHandleInput,
 }) => {
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
+
+  // Hook para verificação ao vivo do LanguageTool
+  const { matches, busy, error, changes } = useLiveLanguageTool(buffer.text, 400);
 
   const [dirs, setDirs] = useState<readonly string[]>(
     config.getWorkspaceContext().getDirectories(),
@@ -535,6 +540,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           )}
         </Box>
       </Box>
+      {/* Exibe o texto com erros sublinhados */}
+      {buffer.text.length > 0 && (
+        <Box marginTop={1}>
+          <Text color="yellow">Visualização: </Text>
+          <AnnotatedText text={buffer.text} matches={matches} />
+        </Box>
+      )}
+      {/* Exibe os indicadores do LanguageTool */}
+      <LanguageToolIndicator
+        matches={matches}
+        busy={busy}
+        error={error}
+        changes={changes}
+      />
       {completion.showSuggestions && (
         <Box>
           <SuggestionsDisplay
