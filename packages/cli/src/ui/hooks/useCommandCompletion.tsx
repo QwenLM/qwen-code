@@ -394,7 +394,7 @@ export function useCommandCompletion(
 
     const findFilesWithGlob = async (
       searchPrefix: string,
-      fileDiscoveryService: FileDiscoveryService,
+      fileDiscoveryService: FileDiscoveryService | null,
       filterOptions: {
         respectGitIgnore?: boolean;
         respectGeminiIgnore?: boolean;
@@ -402,14 +402,20 @@ export function useCommandCompletion(
       searchDir: string,
       maxResults = 50,
     ): Promise<Suggestion[]> => {
-      const globPattern = `**/${searchPrefix}*`;
+      // top-level @ (prefix vazio) => apenas diretórios de topo
+      const isTopLevel = !searchPrefix || searchPrefix.length === 0;
+      const globPattern = isTopLevel ? '*/' : `**/${searchPrefix}*`;
+
       const files = await glob(globPattern, {
         cwd: searchDir,
         dot: searchPrefix.startsWith('.'),
         nocase: true,
+        mark: true, // acrescenta '/' em diretórios
       });
 
-      const suggestions: Suggestion[] = files
+      const entries = isTopLevel ? files.filter((f) => f.endsWith('/')) : files;
+
+      const suggestions: Suggestion[] = entries
         .filter((file) => {
           if (fileDiscoveryService) {
             return !fileDiscoveryService.shouldIgnoreFile(file, filterOptions);
@@ -440,31 +446,18 @@ export function useCommandCompletion(
         config?.getFileFilteringOptions() ?? DEFAULT_FILE_FILTERING_OPTIONS;
 
       try {
-        // If there's no slash, or it's the root, do a recursive search from workspace directories
+        // Para top-level (@ ou @/), ou quando não há '/', use glob (mesmo com prefix vazio)
         for (const dir of dirs) {
           let fetchedSuggestionsPerDir: Suggestion[] = [];
-          if (
-            partialPath.indexOf('/') === -1 &&
-            prefix &&
-            enableRecursiveSearch
-          ) {
-            if (fileDiscoveryService) {
-              fetchedSuggestionsPerDir = await findFilesWithGlob(
-                prefix,
-                fileDiscoveryService,
-                filterOptions,
-                dir,
-              );
-            } else {
-              fetchedSuggestionsPerDir = await findFilesRecursively(
-                dir,
-                prefix,
-                null,
-                filterOptions,
-              );
-            }
+          if (partialPath.indexOf('/') === -1 && enableRecursiveSearch) {
+            fetchedSuggestionsPerDir = await findFilesWithGlob(
+              prefix,
+              fileDiscoveryService,
+              filterOptions,
+              dir,
+            );
           } else {
-            // Original behavior: list files in the specific directory
+            // Listagem no diretório base calculado
             const lowerPrefix = prefix.toLowerCase();
             const baseDirAbsolute = path.resolve(dir, baseDirRelative);
             const entries = await fs.readdir(baseDirAbsolute, {
