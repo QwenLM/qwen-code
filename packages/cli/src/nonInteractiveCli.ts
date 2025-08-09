@@ -1,5 +1,5 @@
 /**
- * @license
+* @license
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -15,8 +15,51 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import { Content, Part, FunctionCall } from '@google/genai';
+import * as fs from 'fs/promises';
+import * as path from 'path';
 
 import { parseAndFormatApiError } from './ui/utils/errorParsing.js';
+
+async function loadCheckpoint(checkpointPath: string): Promise<{
+  history?: Content[];
+  clientHistory?: Content[];
+  toolCall?: { name: string; args: any };
+  commitHash?: string;
+  filePath?: string;
+} | null> {
+  try {
+    const data = await fs.readFile(checkpointPath, 'utf-8');
+    const parsed = JSON.parse(data);
+    
+    // Check if it's a simple conversation history array (logger checkpoint format)
+    if (Array.isArray(parsed)) {
+      return {
+        clientHistory: parsed as Content[]
+      };
+    }
+    
+    // Otherwise, it's the full checkpoint format
+    return parsed;
+  } catch (error) {
+    console.error(`Failed to load checkpoint from ${checkpointPath}:`, error);
+    return null;
+  }
+}
+
+async function saveCheckpoint(checkpointPath: string, history: Content[]): Promise<boolean> {
+  try {
+    // Ensure the directory exists
+    const dir = path.dirname(checkpointPath);
+    await fs.mkdir(dir, { recursive: true });
+    
+    // Save the conversation history in logger checkpoint format
+    await fs.writeFile(checkpointPath, JSON.stringify(history, null, 2), 'utf-8');
+    return true;
+  } catch (error) {
+    console.error(`Failed to save checkpoint to ${checkpointPath}:`, error);
+    return false;
+  }
+}
 
 export async function runNonInteractive(
   config: Config,
@@ -34,6 +77,39 @@ export async function runNonInteractive(
 
   const geminiClient = config.getGeminiClient();
   const toolRegistry: ToolRegistry = await config.getToolRegistry();
+
+  const resume = config.getResume();
+  
+  if (resume) {
+    // Check if resume is a checkpoint file name or path
+    let checkpointPath: string;
+    
+    if (resume.includes('/') || resume.endsWith('.json')) {
+      // If it's a path or includes .json, use it directly
+      checkpointPath = resume;
+    } else {
+      // For tags, use the checkpoint-<tag>.json format
+      checkpointPath = path.join(config.getProjectTempDir(), `checkpoint-${resume}.json`);
+    }
+    
+    // Check if checkpoint file exists before trying to load it
+    try {
+      await fs.access(checkpointPath);
+    } catch {
+      console.error(`Error: Checkpoint '${resume}' not found at ${checkpointPath}`);
+      process.exit(1);
+    }
+    
+    const checkpoint = await loadCheckpoint(checkpointPath);
+    
+    if (checkpoint && checkpoint.clientHistory) {
+      await geminiClient.setHistory(checkpoint.clientHistory);
+      console.error(`Resumed from checkpoint: ${resume}`);
+    } else {
+      console.error(`Error: Invalid checkpoint file or no conversation history found`);
+      process.exit(1);
+    }
+  }
 
   const abortController = new AbortController();
   let currentMessages: Content[] = [{ role: 'user', parts: [{ text: input }] }];
@@ -133,6 +209,27 @@ export async function runNonInteractive(
     );
     process.exit(1);
   } finally {
+    // Save checkpoint if requested
+    const save = config.getSave();
+    if (save) {
+      let checkpointPath: string;
+      
+      if (save.includes('/') || save.endsWith('.json')) {
+        // If it's a path or includes .json, use it directly
+        checkpointPath = save;
+      } else {
+        // For tags, use the checkpoint-<tag>.json format
+        checkpointPath = path.join(config.getProjectTempDir(), `checkpoint-${save}.json`);
+      }
+      
+      const history = await geminiClient.getHistory();
+      const success = await saveCheckpoint(checkpointPath, history);
+      
+      if (success) {
+        console.error(`Saved checkpoint to: ${save}`);
+      }
+    }
+    
     if (isTelemetrySdkInitialized()) {
       await shutdownTelemetry();
     }
