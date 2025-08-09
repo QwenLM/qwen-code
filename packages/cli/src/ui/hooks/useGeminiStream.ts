@@ -55,6 +55,7 @@ import {
   TrackedCancelledToolCall,
 } from './useReactToolScheduler.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
+import { useLanguageTool } from './useLanguageTool.js';
 
 export function mergePartListUnions(list: PartListUnion[]): PartListUnion {
   const resultParts: PartListUnion = [];
@@ -134,6 +135,8 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       getPreferredEditor,
     );
+
+  const { processWithLanguageTool } = useLanguageTool();
 
   const pendingToolCallGroupDisplay = useMemo(
     () =>
@@ -222,7 +225,11 @@ export const useGeminiStream = (
       let localQueryToSendToGemini: PartListUnion | null = null;
 
       if (typeof query === 'string') {
-        const trimmedQuery = query.trim();
+        let trimmedQuery = query.trim();
+
+        // Apply LanguageTool correction if enabled
+        trimmedQuery = await processWithLanguageTool(trimmedQuery);
+
         logUserPrompt(
           config,
           new UserPromptEvent(
@@ -320,6 +327,7 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
+      processWithLanguageTool,
     ],
   );
 
