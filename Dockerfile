@@ -40,11 +40,10 @@ ENV PATH=$PATH:/usr/local/share/npm-global/bin
 USER node
 
 # install qwen-code and clean up
-COPY packages/cli/dist/qwen-code-*.tgz /usr/local/share/npm-global/qwen-code.tgz
-COPY packages/core/dist/qwen-code-qwen-code-core-*.tgz /usr/local/share/npm-global/qwen-code-core.tgz
-RUN npm install -g /usr/local/share/npm-global/qwen-code.tgz /usr/local/share/npm-global/qwen-code-core.tgz \
+COPY qwen-code-*.tgz /usr/local/share/npm-global/
+RUN npm install -g /usr/local/share/npm-global/qwen-code*.tgz \
   && npm cache clean --force \
-  && rm -f /usr/local/share/npm-global/qwen-{code,code-core}.tgz
+  && rm -f /usr/local/share/npm-global/qwen-code*.tgz
 
 # default entrypoint when none specified
 CMD ["qwen"]
