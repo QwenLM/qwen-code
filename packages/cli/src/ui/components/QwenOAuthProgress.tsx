@@ -5,7 +5,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, Static } from 'ink';
 import Spinner from 'ink-spinner';
 import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
@@ -24,6 +24,19 @@ interface QwenOAuthProgressProps {
     | 'timeout'
     | 'rate_limit';
   authMessage?: string | null;
+}
+
+interface StaticItem {
+  key: string;
+  type:
+    | 'title'
+    | 'instructions'
+    | 'url'
+    | 'qr-instructions'
+    | 'qr-code'
+    | 'auth-content';
+  url?: string;
+  qrCode?: string;
 }
 
 export function QwenOAuthProgress({
@@ -54,24 +67,26 @@ export function QwenOAuthProgress({
       return;
     }
 
-    // Generate QR code string
-    const generateQR = () => {
-      try {
-        qrcode.generate(
-          deviceAuth.verification_uri_complete,
-          { small: true },
-          (qrcode: string) => {
-            setQrCodeData(qrcode);
-          },
-        );
-      } catch (error) {
-        console.error('Failed to generate QR code:', error);
-        setQrCodeData(null);
-      }
-    };
+    // Only generate QR code if we don't have one yet for this URL
+    if (qrCodeData === null) {
+      const generateQR = () => {
+        try {
+          qrcode.generate(
+            deviceAuth.verification_uri_complete,
+            { small: true },
+            (qrcode: string) => {
+              setQrCodeData(qrcode);
+            },
+          );
+        } catch (error) {
+          console.error('Failed to generate QR code:', error);
+          setQrCodeData(null);
+        }
+      };
 
-    generateQR();
-  }, [deviceAuth]);
+      generateQR();
+    }
+  }, [deviceAuth, qrCodeData]);
 
   // Countdown timer
   useEffect(() => {
@@ -161,48 +176,77 @@ export function QwenOAuthProgress({
   }
 
   return (
-    <Box
-      borderStyle="round"
-      borderColor={Colors.AccentBlue}
-      flexDirection="column"
-      padding={1}
-      width="100%"
-    >
-      <Text bold color={Colors.AccentBlue}>
-        Qwen OAuth Authentication
-      </Text>
-
-      <Box marginTop={1}>
-        <Text>Please visit this URL to authorize:</Text>
-      </Box>
-      <Link url={deviceAuth.verification_uri_complete} fallback={false}>
-        <Text color={Colors.AccentGreen} bold>
-          {deviceAuth.verification_uri_complete}
-        </Text>
-      </Link>
+    <>
       {qrCodeData && (
-        <>
-          <Box marginTop={1}>
-            <Text>Or scan the QR code below:</Text>
-          </Box>
-          <Box marginTop={1}>
-            <Text>{qrCodeData}</Text>
-          </Box>
-        </>
+        <Static
+          items={
+            [
+              {
+                key: 'auth-content',
+                type: 'auth-content' as const,
+                url: deviceAuth.verification_uri_complete,
+                qrCode: qrCodeData,
+              },
+            ] as StaticItem[]
+          }
+          style={{
+            width: '100%',
+          }}
+        >
+          {(item: StaticItem) => (
+            <Box
+              borderStyle="round"
+              borderColor={Colors.AccentBlue}
+              flexDirection="column"
+              padding={1}
+              width="100%"
+              key={item.key}
+            >
+              <Text bold color={Colors.AccentBlue}>
+                Qwen OAuth Authentication
+              </Text>
+
+              <Box marginTop={1}>
+                <Text>Please visit this URL to authorize:</Text>
+              </Box>
+
+              <Link url={item.url || ''} fallback={false}>
+                <Text color={Colors.AccentGreen} bold>
+                  {item.url || ''}
+                </Text>
+              </Link>
+
+              <Box marginTop={1}>
+                <Text>Or scan the QR code below:</Text>
+              </Box>
+
+              <Box marginTop={1}>
+                <Text>{item.qrCode || ''}</Text>
+              </Box>
+            </Box>
+          )}
+        </Static>
       )}
+      <Box
+        borderStyle="round"
+        borderColor={Colors.AccentBlue}
+        flexDirection="column"
+        padding={1}
+        width="100%"
+      >
+        <Box marginTop={1}>
+          <Text>
+            <Spinner type="dots" /> Waiting for authorization{dots}
+          </Text>
+        </Box>
 
-      <Box marginTop={1}>
-        <Text>
-          <Spinner type="dots" /> Waiting for authorization{dots}
-        </Text>
+        <Box marginTop={1} justifyContent="space-between">
+          <Text color={Colors.Gray}>
+            Time remaining: {formatTime(timeRemaining)}
+          </Text>
+          <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
+        </Box>
       </Box>
-
-      <Box marginTop={1} justifyContent="space-between">
-        <Text color={Colors.Gray}>
-          Time remaining: {formatTime(timeRemaining)}
-        </Text>
-        <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
-      </Box>
-    </Box>
+    </>
   );
 }
