@@ -101,3 +101,70 @@ export function isGenericQuotaExceededError(error: unknown): boolean {
 
   return false;
 }
+
+export function isQwenQuotaExceededError(error: unknown): boolean {
+  // Check for Qwen insufficient quota errors (should not retry)
+  const checkMessage = (message: string): boolean => {
+    const lowerMessage = message.toLowerCase();
+    return (
+      lowerMessage.includes('insufficient_quota') ||
+      lowerMessage.includes('free allocated quota exceeded') ||
+      (lowerMessage.includes('quota') && lowerMessage.includes('exceeded'))
+    );
+  };
+
+  if (typeof error === 'string') {
+    return checkMessage(error);
+  }
+
+  if (isStructuredError(error)) {
+    return checkMessage(error.message);
+  }
+
+  if (isApiError(error)) {
+    return checkMessage(error.error.message);
+  }
+
+  return false;
+}
+
+export function isQwenThrottlingError(error: unknown): boolean {
+  // Check for Qwen throttling errors (should retry)
+  const checkMessage = (message: string): boolean => {
+    const lowerMessage = message.toLowerCase();
+    return (
+      lowerMessage.includes('throttling') ||
+      lowerMessage.includes('requests throttling triggered') ||
+      lowerMessage.includes('rate limit') ||
+      lowerMessage.includes('too many requests')
+    );
+  };
+
+  // Check status code
+  const getStatusCode = (error: unknown): number | undefined => {
+    if (error && typeof error === 'object') {
+      const errorObj = error as { status?: number; code?: number };
+      return errorObj.status || errorObj.code;
+    }
+    return undefined;
+  };
+
+  const statusCode = getStatusCode(error);
+
+  if (typeof error === 'string') {
+    return (
+      (statusCode === 429 && checkMessage(error)) ||
+      error.includes('throttling')
+    );
+  }
+
+  if (isStructuredError(error)) {
+    return statusCode === 429 && checkMessage(error.message);
+  }
+
+  if (isApiError(error)) {
+    return error.error.code === 429 && checkMessage(error.error.message);
+  }
+
+  return false;
+}

@@ -17,10 +17,27 @@
 
 Qwen Code is a powerful command-line AI workflow tool adapted from [**Gemini CLI**](https://github.com/google-gemini/gemini-cli) ([details](./README.gemini.md)), specifically optimized for [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder) models. It enhances your development workflow with advanced code understanding, automated tasks, and intelligent assistance.
 
+## 💡 Free Options Available
+
+Get started with Qwen Code at no cost using any of these free options:
+
+### 🔥 Qwen OAuth (Recommended)
+
+- **2,000 requests per day** with no token limits
+- **60 requests per minute** rate limit
+- Simply run `qwen` and authenticate with your qwen.ai account
+- Automatic credential management and refresh
+- Use `/auth` command to switch to Qwen OAuth if you have initialized with OpenAI compatible mode
+
+### 🌏 Regional Free Tiers
+
+- **Mainland China**: ModelScope offers **2,000 free API calls per day**
+- **International**: OpenRouter provides **up to 1,000 free API calls per day** worldwide
+
+For detailed setup instructions, see [Authorization](#authorization).
+
 > [!WARNING]
 > **Token Usage Notice**: Qwen Code may issue multiple API calls per cycle, resulting in higher token usage (similar to Claude Code). We're actively optimizing API efficiency.
->
-> 💡 **Free Option**: ModelScope provides **2,000 free API calls per day** for users in mainland China. OpenRouter offers up to **1,000 free API calls per day** worldwide. For setup instructions, see [API Configuration](#api-configuration).
 
 ## Key Features
 
@@ -88,11 +105,39 @@ Create or edit `.qwen/settings.json` in your home directory:
 
 > 📝 **Note**: Session token limit applies to a single conversation, not cumulative API calls.
 
-### API Configuration
+### Authorization
 
-Qwen Code supports multiple API providers. You can configure your API key through environment variables or a `.env` file in your project root.
+Choose your preferred authentication method based on your needs:
 
-#### Configuration Methods
+#### 1. Qwen OAuth (🚀 Recommended - Start in 30 seconds)
+
+The easiest way to get started - completely free with generous quotas:
+
+```bash
+# Just run this command and follow the browser authentication
+qwen
+```
+
+**What happens:**
+
+1. **Instant Setup**: CLI opens your browser automatically
+2. **One-Click Login**: Authenticate with your qwen.ai account
+3. **Automatic Management**: Credentials cached locally for future use
+4. **No Configuration**: Zero setup required - just start coding!
+
+**Free Tier Benefits:**
+
+- ✅ **2,000 requests/day** (no token counting needed)
+- ✅ **60 requests/minute** rate limit
+- ✅ **Automatic credential refresh**
+- ✅ **Zero cost** for individual users
+- ℹ️ **Note**: Model fallback may occur to maintain service quality
+
+#### 2. OpenAI-Compatible API
+
+Use API keys for OpenAI or other compatible providers:
+
+**Configuration Methods:**
 
 1. **Environment Variables**
 
@@ -110,7 +155,7 @@ Qwen Code supports multiple API providers. You can configure your API key throug
    OPENAI_MODEL=your_model_choice
    ```
 
-#### API Provider Options
+**API Provider Options**
 
 > ⚠️ **Regional Notice:**
 >
@@ -286,6 +331,8 @@ qwen
 ## Development & Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) to learn how to contribute to the project.
+
+For detailed authentication setup, see the [authentication guide](./docs/cli/authentication.md).
 
 ## Troubleshooting
 

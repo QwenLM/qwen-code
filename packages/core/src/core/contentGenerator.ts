@@ -46,6 +46,7 @@ export enum AuthType {
   USE_VERTEX_AI = 'vertex-ai',
   CLOUD_SHELL = 'cloud-shell',
   USE_OPENAI = 'openai',
+  QWEN_OAUTH = 'qwen-oauth',
 }
 
 export type ContentGeneratorConfig = {
@@ -131,6 +132,15 @@ export function createContentGeneratorConfig(
     return contentGeneratorConfig;
   }
 
+  if (authType === AuthType.QWEN_OAUTH) {
+    // For Qwen OAuth, we'll handle the API key dynamically in createContentGenerator
+    // Set a special marker to indicate this is Qwen OAuth
+    contentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
+    contentGeneratorConfig.model = config.getModel() || DEFAULT_GEMINI_MODEL;
+
+    return contentGeneratorConfig;
+  }
+
   return contentGeneratorConfig;
 }
 
@@ -182,6 +192,32 @@ export async function createContentGenerator(
 
     // Always use OpenAIContentGenerator, logging is controlled by enableOpenAILogging flag
     return new OpenAIContentGenerator(config.apiKey, config.model, gcConfig);
+  }
+
+  if (config.authType === AuthType.QWEN_OAUTH) {
+    if (config.apiKey !== 'QWEN_OAUTH_DYNAMIC_TOKEN') {
+      throw new Error('Invalid Qwen OAuth configuration');
+    }
+
+    // Import required classes dynamically
+    const { getQwenOAuthClient: getQwenOauthClient } = await import(
+      '../qwen/qwenOAuth2.js'
+    );
+    const { QwenContentGenerator } = await import(
+      '../qwen/qwenContentGenerator.js'
+    );
+
+    try {
+      // Get the Qwen OAuth client (now includes integrated token management)
+      const qwenClient = await getQwenOauthClient(gcConfig);
+
+      // Create the content generator with dynamic token management
+      return new QwenContentGenerator(qwenClient, config.model, gcConfig);
+    } catch (error) {
+      throw new Error(
+        `Failed to initialize Qwen: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   throw new Error(

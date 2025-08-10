@@ -21,6 +21,9 @@ function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env.OPENAI_API_KEY) {
     return AuthType.USE_OPENAI;
   }
+  if (process.env.QWEN_OAUTH_TOKEN) {
+    return AuthType.QWEN_OAUTH;
+  }
   return undefined;
 }
 

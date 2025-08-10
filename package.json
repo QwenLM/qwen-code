@@ -62,6 +62,7 @@
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",
     "@types/mock-fs": "^4.13.4",
+    "@types/qrcode-terminal": "^0.12.2",
     "@types/shell-quote": "^1.7.5",
     "@types/uuid": "^10.0.0",
     "@vitest/coverage-v8": "^3.1.1",

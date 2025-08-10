@@ -1,106 +1,93 @@
 # Authentication Setup
 
-The Gemini CLI requires you to authenticate with Google's AI services. On initial startup you'll need to configure **one** of the following authentication methods:
+Qwen Code supports two main authentication methods to access AI models. Choose the method that best fits your use case:
 
-1.  **Login with Google (Gemini Code Assist):**
-    - Use this option to log in with your google account.
-    - During initial startup, Gemini CLI will direct you to a webpage for authentication. Once authenticated, your credentials will be cached locally so the web login can be skipped on subsequent runs.
-    - Note that the web login must be done in a browser that can communicate with the machine Gemini CLI is being run from. (Specifically, the browser will be redirected to a localhost url that Gemini CLI will be listening on).
-    - <a id="workspace-gca">Users may have to specify a GOOGLE_CLOUD_PROJECT if:</a>
-      1. You have a Google Workspace account. Google Workspace is a paid service for businesses and organizations that provides a suite of productivity tools, including a custom email domain (e.g. your-name@your-company.com), enhanced security features, and administrative controls. These accounts are often managed by an employer or school.
-      1. You have received a Gemini Code Assist license through the [Google Developer Program](https://developers.google.com/program/plans-and-pricing) (including qualified Google Developer Experts)
-      1. You have been assigned a license to a current Gemini Code Assist standard or enterprise subscription.
-      1. You are using the product outside the [supported regions](https://developers.google.com/gemini-code-assist/resources/available-locations) for free individual usage.
-      1. You are a Google account holder under the age of 18
-      - If you fall into one of these categories, you must first configure a Google Cloud Project ID to use, [enable the Gemini for Cloud API](https://cloud.google.com/gemini/docs/discover/set-up-gemini#enable-api) and [configure access permissions](https://cloud.google.com/gemini/docs/discover/set-up-gemini#grant-iam).
+1.  **Qwen OAuth (Recommended):**
+    - Use this option to log in with your qwen.ai account.
+    - During initial startup, Qwen Code will direct you to the qwen.ai authentication page. Once authenticated, your credentials will be cached locally so the web login can be skipped on subsequent runs.
+    - **Requirements:**
+      - Valid qwen.ai account
+      - Internet connection for initial authentication
+    - **Benefits:**
+      - Seamless access to Qwen models
+      - Automatic credential refresh
+      - No manual API key management required
 
-      You can temporarily set the environment variable in your current shell session using the following command:
+    **Getting Started:**
 
-      ```bash
-      export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
-      ```
+    ```bash
+    # Start Qwen Code and follow the OAuth flow
+    qwen
+    ```
 
-      - For repeated use, you can add the environment variable to your [.env file](#persisting-environment-variables-with-env-files) or your shell's configuration file (like `~/.bashrc`, `~/.zshrc`, or `~/.profile`). For example, the following command adds the environment variable to a `~/.bashrc` file:
+    The CLI will automatically open your browser and guide you through the authentication process.
 
-      ```bash
-      echo 'export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"' >> ~/.bashrc
-      source ~/.bashrc
-      ```
+    **For users who authenticate using their qwen.ai account:**
 
-2.  **<a id="gemini-api-key"></a>Gemini API key:**
-    - Obtain your API key from Google AI Studio: [https://aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey)
-    - Set the `GEMINI_API_KEY` environment variable. In the following methods, replace `YOUR_GEMINI_API_KEY` with the API key you obtained from Google AI Studio:
-      - You can temporarily set the environment variable in your current shell session using the following command:
-        ```bash
-        export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-        ```
-      - For repeated use, you can add the environment variable to your [.env file](#persisting-environment-variables-with-env-files).
+    **Quota:**
+    - 60 requests per minute
+    - 2,000 requests per day
+    - Token usage is not applicable
 
-      - Alternatively you can export the API key from your shell's configuration file (like `~/.bashrc`, `~/.zshrc`, or `~/.profile`). For example, the following command adds the environment variable to a `~/.bashrc` file:
+    **Cost:** Free
 
-        ```bash
-        echo 'export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"' >> ~/.bashrc
-        source ~/.bashrc
-        ```
+    **Notes:** A specific quota for different models is not specified; model fallback may occur to preserve shared experience quality.
 
-        :warning: Be advised that when you export your API key inside your shell configuration file, any other process executed from the shell can read it.
+2.  **<a id="openai-api"></a>OpenAI-Compatible API:**
+    - Use API keys for OpenAI or other compatible providers.
+    - This method allows you to use various AI models through API keys.
 
-3.  **Vertex AI:**
-    - Obtain your Google Cloud API key: [Get an API Key](https://cloud.google.com/vertex-ai/generative-ai/docs/start/api-keys?usertype=newuser)
-      - Set the `GOOGLE_API_KEY` environment variable. In the following methods, replace `YOUR_GOOGLE_API_KEY` with your Vertex AI API key:
-        - You can temporarily set these environment variables in your current shell session using the following commands:
-          ```bash
-          export GOOGLE_API_KEY="YOUR_GOOGLE_API_KEY"
-          ```
-        - For repeated use, you can add the environment variables to your [.env file](#persisting-environment-variables-with-env-files) or your shell's configuration file (like `~/.bashrc`, `~/.zshrc`, or `~/.profile`). For example, the following commands add the environment variables to a `~/.bashrc` file:
-          ```bash
-          echo 'export GOOGLE_API_KEY="YOUR_GOOGLE_API_KEY"' >> ~/.bashrc
-          source ~/.bashrc
-          ```
-    - To use Application Default Credentials (ADC), use the following command:
-      - Ensure you have a Google Cloud project and have enabled the Vertex AI API.
-        ```bash
-        gcloud auth application-default login
-        ```
-        For more information, see [Set up Application Default Credentials for Google Cloud](https://cloud.google.com/docs/authentication/provide-credentials-adc).
-      - Set the `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` environment variables. In the following methods, replace `YOUR_PROJECT_ID` and `YOUR_PROJECT_LOCATION` with the relevant values for your project:
-        - You can temporarily set these environment variables in your current shell session using the following commands:
-          ```bash
-          export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"
-          export GOOGLE_CLOUD_LOCATION="YOUR_PROJECT_LOCATION" # e.g., us-central1
-          ```
-        - For repeated use, you can add the environment variables to your [.env file](#persisting-environment-variables-with-env-files)
+    **Configuration Methods:**
 
-        - Alternatively you can export the environment variables from your shell's configuration file (like `~/.bashrc`, `~/.zshrc`, or `~/.profile`). For example, the following commands add the environment variables to a `~/.bashrc` file:
+    a) **Environment Variables:**
 
-          ```bash
-          echo 'export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"' >> ~/.bashrc
-          echo 'export GOOGLE_CLOUD_LOCATION="YOUR_PROJECT_LOCATION"' >> ~/.bashrc
-          source ~/.bashrc
-          ```
+    ```bash
+    export OPENAI_API_KEY="your_api_key_here"
+    export OPENAI_BASE_URL="your_api_endpoint"  # Optional
+    export OPENAI_MODEL="your_model_choice"     # Optional
+    ```
 
-          :warning: Be advised that when you export your API key inside your shell configuration file, any other process executed from the shell can read it.
+    b) **Project `.env` File:**
+    Create a `.env` file in your project root:
 
-4.  **Cloud Shell:**
-    - This option is only available when running in a Google Cloud Shell environment.
-    - It automatically uses the credentials of the logged-in user in the Cloud Shell environment.
-    - This is the default authentication method when running in Cloud Shell and no other method is configured.
+    ```env
+    OPENAI_API_KEY=your_api_key_here
+    OPENAI_BASE_URL=your_api_endpoint
+    OPENAI_MODEL=your_model_choice
+    ```
 
-          :warning: Be advised that when you export your API key inside your shell configuration file, any other process executed from the shell can read it.
+    **Supported Providers:**
+    - OpenAI (https://platform.openai.com/api-keys)
+    - Alibaba Cloud Bailian
+    - ModelScope
+    - OpenRouter
+    - Azure OpenAI
+    - Any OpenAI-compatible API
+
+## Switching Authentication Methods
+
+To switch between authentication methods during a session, use the `/auth` command in the CLI interface:
+
+```bash
+# Within the CLI, type:
+/auth
+```
+
+This will allow you to reconfigure your authentication method without restarting the application.
 
 ### Persisting Environment Variables with `.env` Files
 
-You can create a **`.gemini/.env`** file in your project directory or in your home directory. Creating a plain **`.env`** file also works, but `.gemini/.env` is recommended to keep Gemini variables isolated from other tools.
+You can create a **`.qwen/.env`** file in your project directory or in your home directory. Creating a plain **`.env`** file also works, but `.qwen/.env` is recommended to keep Qwen Code variables isolated from other tools.
 
-**Important:** Some environment variables (like `DEBUG` and `DEBUG_MODE`) are automatically excluded from project `.env` files to prevent interference with gemini-cli behavior. Use `.gemini/.env` files for gemini-cli specific variables.
+**Important:** Some environment variables (like `DEBUG` and `DEBUG_MODE`) are automatically excluded from project `.env` files to prevent interference with qwen-code behavior. Use `.qwen/.env` files for qwen-code specific variables.
 
-Gemini CLI automatically loads environment variables from the **first** `.env` file it finds, using the following search order:
+Qwen Code automatically loads environment variables from the **first** `.env` file it finds, using the following search order:
 
 1. Starting in the **current directory** and moving upward toward `/`, for each directory it checks:
-   1. `.gemini/.env`
+   1. `.qwen/.env`
    2. `.env`
 2. If no file is found, it falls back to your **home directory**:
-   - `~/.gemini/.env`
+   - `~/.qwen/.env`
    - `~/.env`
 
 > **Important:** The search stops at the **first** file encountered—variables are **not merged** across multiple files.
@@ -110,37 +97,47 @@ Gemini CLI automatically loads environment variables from the **first** `.env` f
 **Project-specific overrides** (take precedence when you are inside the project):
 
 ```bash
-mkdir -p .gemini
-echo 'GOOGLE_CLOUD_PROJECT="your-project-id"' >> .gemini/.env
+mkdir -p .qwen
+cat >> .qwen/.env <<'EOF'
+OPENAI_API_KEY="your-api-key"
+OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
+OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+EOF
 ```
 
 **User-wide settings** (available in every directory):
 
 ```bash
-mkdir -p ~/.gemini
-cat >> ~/.gemini/.env <<'EOF'
-GOOGLE_CLOUD_PROJECT="your-project-id"
-GEMINI_API_KEY="your-gemini-api-key"
+mkdir -p ~/.qwen
+cat >> ~/.qwen/.env <<'EOF'
+OPENAI_API_KEY="your-api-key"
+OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+OPENAI_MODEL="qwen3-coder-plus"
 EOF
 ```
 
 ## Non-Interactive Mode / Headless Environments
 
-When running the Gemini CLI in a non-interactive environment, you cannot use the interactive login flow.
+When running Qwen Code in a non-interactive environment, you cannot use the OAuth login flow.
 Instead, you must configure authentication using environment variables.
 
-The CLI will automatically detect if it is running in a non-interactive terminal and will use one of the
-following authentication methods if available:
+The CLI will automatically detect if it is running in a non-interactive terminal and will use the
+OpenAI-compatible API method if configured:
 
-1.  **Gemini API Key:**
-    - Set the `GEMINI_API_KEY` environment variable.
-    - The CLI will use this key to authenticate with the Gemini API.
+1.  **OpenAI-Compatible API:**
+    - Set the `OPENAI_API_KEY` environment variable.
+    - Optionally set `OPENAI_BASE_URL` and `OPENAI_MODEL` for custom endpoints.
+    - The CLI will use these credentials to authenticate with the API provider.
 
-2.  **Vertex AI:**
-    - Set the `GOOGLE_GENAI_USE_VERTEXAI=true` environment variable.
-    - **Using an API Key:** Set the `GOOGLE_API_KEY` environment variable.
-    - **Using Application Default Credentials (ADC):**
-      - Run `gcloud auth application-default login` in your environment to configure ADC.
-      - Ensure the `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION` environment variables are set.
+**Example for headless environments:**
 
-If none of these environment variables are set in a non-interactive session, the CLI will exit with an error.
+```bash
+export OPENAI_API_KEY="your-api-key"
+export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
+export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+
+# Run Qwen Code
+qwen
+```
+
+If no API key is set in a non-interactive session, the CLI will exit with an error prompting you to configure authentication.

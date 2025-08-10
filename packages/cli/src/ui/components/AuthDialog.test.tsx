@@ -189,7 +189,7 @@ describe('AuthDialog', () => {
       );
 
       // This is a bit brittle, but it's the best way to check which item is selected.
-      expect(lastFrame()).toContain('● 1. OpenAI');
+      expect(lastFrame()).toContain('● 2. OpenAI');
     });
 
     it('should fall back to default if GEMINI_DEFAULT_AUTH_TYPE is not set', () => {
@@ -217,8 +217,8 @@ describe('AuthDialog', () => {
         <AuthDialog onSelect={() => {}} settings={settings} />,
       );
 
-      // Default is OpenAI (only option available)
-      expect(lastFrame()).toContain('● 1. OpenAI');
+      // Default is Qwen OAuth (first option)
+      expect(lastFrame()).toContain('● 1. Qwen OAuth');
     });
 
     it('should show an error and fall back to default if GEMINI_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -249,8 +249,8 @@ describe('AuthDialog', () => {
       );
 
       // Since the auth dialog doesn't show GEMINI_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default OpenAI option
-      expect(lastFrame()).toContain('● 1. OpenAI');
+      // it will just show the default Qwen OAuth option
+      expect(lastFrame()).toContain('● 1. Qwen OAuth');
     });
   });
 

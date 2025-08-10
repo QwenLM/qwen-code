@@ -481,7 +481,7 @@ export async function loadCliConfig(
     model: argv.model || settings.model || DEFAULT_GEMINI_MODEL,
     extensionContextFilePaths,
     maxSessionTurns: settings.maxSessionTurns ?? -1,
-    sessionTokenLimit: settings.sessionTokenLimit ?? 32000,
+    sessionTokenLimit: settings.sessionTokenLimit ?? -1,
     maxFolderItems: settings.maxFolderItems ?? 20,
     experimentalAcp: argv.experimentalAcp || false,
     listExtensions: argv.listExtensions || false,

@@ -22,6 +22,7 @@ import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useAuthCommand } from './hooks/useAuthCommand.js';
+import { useQwenAuth } from './hooks/useQwenAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
@@ -35,6 +36,7 @@ import { Footer } from './components/Footer.js';
 import { ThemeDialog } from './components/ThemeDialog.js';
 import { AuthDialog } from './components/AuthDialog.js';
 import { AuthInProgress } from './components/AuthInProgress.js';
+import { QwenOAuthProgress } from './components/QwenOAuthProgress.js';
 import { EditorSettingsDialog } from './components/EditorSettingsDialog.js';
 import { ShellConfirmationDialog } from './components/ShellConfirmationDialog.js';
 import { Colors } from './colors.js';
@@ -231,6 +233,15 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     cancelAuthentication,
   } = useAuthCommand(settings, setAuthError, config);
 
+  const {
+    isQwenAuthenticating,
+    deviceAuth,
+    isQwenAuth,
+    cancelQwenAuth,
+    authStatus,
+    authMessage,
+  } = useQwenAuth(settings, isAuthenticating);
+
   useEffect(() => {
     if (settings.merged.selectedAuthType && !settings.merged.useExternalAuth) {
       const error = validateAuthMethod(settings.merged.selectedAuthType);
@@ -253,6 +264,27 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       setUserTier(config.getGeminiClient()?.getUserTier());
     }
   }, [config, isAuthenticating]);
+
+  // Handle Qwen OAuth timeout
+  useEffect(() => {
+    if (isQwenAuth && authStatus === 'timeout') {
+      setAuthError(
+        authMessage ||
+          'Qwen OAuth authentication timed out. Please try again or select a different authentication method.',
+      );
+      cancelQwenAuth();
+      cancelAuthentication();
+      openAuthDialog();
+    }
+  }, [
+    isQwenAuth,
+    authStatus,
+    authMessage,
+    cancelQwenAuth,
+    cancelAuthentication,
+    openAuthDialog,
+    setAuthError,
+  ]);
 
   const {
     isEditorDialogOpen,
@@ -868,13 +900,35 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
             </Box>
           ) : isAuthenticating ? (
             <>
-              <AuthInProgress
-                onTimeout={() => {
-                  setAuthError('Authentication timed out. Please try again.');
-                  cancelAuthentication();
-                  openAuthDialog();
-                }}
-              />
+              {isQwenAuth && isQwenAuthenticating ? (
+                <QwenOAuthProgress
+                  deviceAuth={deviceAuth || undefined}
+                  authStatus={authStatus}
+                  authMessage={authMessage}
+                  onTimeout={() => {
+                    setAuthError(
+                      'Qwen OAuth authentication timed out. Please try again.',
+                    );
+                    cancelQwenAuth();
+                    cancelAuthentication();
+                    openAuthDialog();
+                  }}
+                  onCancel={() => {
+                    setAuthError('Qwen OAuth authentication cancelled.');
+                    cancelQwenAuth();
+                    cancelAuthentication();
+                    openAuthDialog();
+                  }}
+                />
+              ) : (
+                <AuthInProgress
+                  onTimeout={() => {
+                    setAuthError('Authentication timed out. Please try again.');
+                    cancelAuthentication();
+                    openAuthDialog();
+                  }}
+                />
+              )}
               {showErrorDetails && (
                 <OverflowProvider>
                   <Box flexDirection="column">
