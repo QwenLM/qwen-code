@@ -19,6 +19,10 @@ import {
 } from '../utils/displayUtils.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 
+// Number formatting: deterministic en-US (e.g., 1000 -> "1,000")
+const nfIntUS = new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 });
+const formatInt = (n: number) => nfIntUS.format(Math.round(n));
+
 // A more flexible and powerful StatRow component
 interface StatRowProps {
   title: string;
@@ -108,16 +112,16 @@ const ModelUsageTable: React.FC<{
             <Text>{name.replace('-001', '')}</Text>
           </Box>
           <Box width={requestsWidth} justifyContent="flex-end">
-            <Text>{modelMetrics.api.totalRequests}</Text>
+            <Text>{formatInt(modelMetrics.api.totalRequests)}</Text>
           </Box>
           <Box width={inputTokensWidth} justifyContent="flex-end">
             <Text color={Colors.AccentYellow}>
-              {modelMetrics.tokens.prompt.toLocaleString()}
+              {formatInt(modelMetrics.tokens.prompt)}
             </Text>
           </Box>
           <Box width={outputTokensWidth} justifyContent="flex-end">
             <Text color={Colors.AccentYellow}>
-              {modelMetrics.tokens.candidates.toLocaleString()}
+              {formatInt(modelMetrics.tokens.candidates)}
             </Text>
           </Box>
         </Box>
@@ -126,7 +130,7 @@ const ModelUsageTable: React.FC<{
         <Box flexDirection="column" marginTop={1}>
           <Text>
             <Text color={Colors.AccentGreen}>Savings Highlight:</Text>{' '}
-            {totalCachedTokens.toLocaleString()} ({cacheEfficiency.toFixed(1)}
+            {formatInt(totalCachedTokens)} ({cacheEfficiency.toFixed(1)}
             %) of input tokens were served from the cache, reducing costs.
           </Text>
           <Box height={1} />
@@ -201,9 +205,9 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
         <Section title="Interaction Summary">
           <StatRow title="Tool Calls:">
             <Text>
-              {tools.totalCalls} ({' '}
-              <Text color={Colors.AccentGreen}>✔ {tools.totalSuccess}</Text>{' '}
-              <Text color={Colors.AccentRed}>✖ {tools.totalFail}</Text> )
+              {formatInt(tools.totalCalls)} ({' '}
+              <Text color={Colors.AccentGreen}>✔ {formatInt(tools.totalSuccess)}</Text>{' '}
+              <Text color={Colors.AccentRed}>✖ {formatInt(tools.totalFail)}</Text> )
             </Text>
           </StatRow>
           <StatRow title="Success Rate:">
@@ -214,7 +218,7 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
               <Text color={agreementColor}>
                 {computed.agreementRate.toFixed(1)}%{' '}
                 <Text color={Colors.Gray}>
-                  ({computed.totalDecisions} reviewed)
+                  ({formatInt(computed.totalDecisions)} reviewed)
                 </Text>
               </Text>
             </StatRow>

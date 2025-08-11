@@ -55,6 +55,7 @@ import {
   TrackedCancelledToolCall,
 } from './useReactToolScheduler.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
+import { useLanguageTool } from './useLanguageTool.js';
 
 export function mergePartListUnions(list: PartListUnion[]): PartListUnion {
   const resultParts: PartListUnion = [];
@@ -134,6 +135,8 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       getPreferredEditor,
     );
+
+  const { processWithLanguageTool } = useLanguageTool();
 
   const pendingToolCallGroupDisplay = useMemo(
     () =>
@@ -222,7 +225,11 @@ export const useGeminiStream = (
       let localQueryToSendToGemini: PartListUnion | null = null;
 
       if (typeof query === 'string') {
-        const trimmedQuery = query.trim();
+        let trimmedQuery = query.trim();
+
+        // Apply LanguageTool correction if enabled
+        trimmedQuery = await processWithLanguageTool(trimmedQuery);
+
         logUserPrompt(
           config,
           new UserPromptEvent(
@@ -320,6 +327,7 @@ export const useGeminiStream = (
       logger,
       shellModeActive,
       scheduleToolCalls,
+      processWithLanguageTool,
     ],
   );
 
@@ -444,7 +452,7 @@ export const useGeminiStream = (
 
   const handleFinishedEvent = useCallback(
     (event: ServerGeminiFinishedEvent, userMessageTimestamp: number) => {
-      const finishReason = event.value;
+      const finishReason = event.value as FinishReason;
 
       const finishReasonMessages: Record<FinishReason, string | undefined> = {
         [FinishReason.FINISH_REASON_UNSPECIFIED]: undefined,
@@ -468,16 +476,23 @@ export const useGeminiStream = (
           'Response stopped due to unexpected tool call.',
       };
 
-      const message = finishReasonMessages[finishReason];
-      if (message) {
-        addItem(
-          {
-            type: 'info',
-            text: `⚠️  ${message}`,
-          },
-          userMessageTimestamp,
-        );
-      }
+      const mapped = finishReasonMessages[finishReason];
+      const isInformative =
+        finishReason !== FinishReason.STOP &&
+        finishReason !== FinishReason.FINISH_REASON_UNSPECIFIED;
+      const fallback = isInformative
+        ? `Response stopped with reason: ${FinishReason[finishReason] ?? String(finishReason)}.`
+        : undefined;
+      const text = mapped ?? fallback;
+      if (!text) return;
+
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `⚠️  ${text}`,
+        },
+        userMessageTimestamp,
+      );
     },
     [addItem],
   );
@@ -486,7 +501,7 @@ export const useGeminiStream = (
     (eventValue: ServerGeminiChatCompressedEvent['value']) =>
       addItem(
         {
-          type: 'info',
+          type: MessageType.INFO,
           text:
             `IMPORTANT: This conversation approached the input token limit for ${config.getModel()}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
@@ -502,7 +517,7 @@ export const useGeminiStream = (
     () =>
       addItem(
         {
-          type: 'info',
+          type: MessageType.INFO,
           text:
             `The session has reached the maximum number of turns: ${config.getMaxSessionTurns()}. ` +
             `Please update this limit in your setting.json file.`,
@@ -516,7 +531,7 @@ export const useGeminiStream = (
     (value: { currentTokens: number; limit: number; message: string }) =>
       addItem(
         {
-          type: 'error',
+          type: MessageType.ERROR,
           text:
             `🚫 Session token limit exceeded: ${value.currentTokens.toLocaleString()} tokens > ${value.limit.toLocaleString()} limit.\n\n` +
             `💡 Solutions:\n` +
@@ -532,7 +547,7 @@ export const useGeminiStream = (
   const handleLoopDetectedEvent = useCallback(() => {
     addItem(
       {
-        type: 'info',
+        type: MessageType.INFO,
         text: `A potential loop was detected. This can happen due to repetitive tool calls or other model behavior. The request has been halted.`,
       },
       Date.now(),

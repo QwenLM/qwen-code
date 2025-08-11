@@ -102,8 +102,51 @@ Create or edit `.qwen/settings.json` in your home directory:
 - **`/compress`** - Compress conversation history to continue within token limits
 - **`/clear`** - Clear all conversation history and start fresh
 - **`/status`** - Check current token usage and limits
+- **`/lt`** - Check text grammar with LanguageTool
 
 > 📝 **Note**: Session token limit applies to a single conversation, not cumulative API calls.
+
+### LanguageTool Integration
+
+Qwen Code now includes integration with LanguageTool for automatic grammar checking and correction of user inputs. This feature helps improve the quality of your prompts by correcting grammatical errors before they are sent to the AI model.
+
+#### Setup
+
+1. Install and run LanguageTool server on port 8081:
+
+   ```bash
+   # Download LanguageTool Server
+   wget https://languagetool.org/download/LanguageTool-6.0.zip
+   unzip LanguageTool-6.0.zip
+   cd LanguageTool-6.0
+
+   # Run server on port 8081
+   java -cp languagetool-server.jar org.languagetool.server.HTTPServer --port 8081
+   ```
+
+2. Configure environment variables (optional):
+
+   ```bash
+   # Enable automatic checking (0 or 1)
+   export LT_ENABLED=1
+
+   # Correction policy: off | confirm | auto-first | auto-best
+   export LT_POLICY=confirm
+
+   # LanguageTool server URL
+   export LT_SERVER=http://localhost:8081
+
+   # Default language
+   export LT_LANG=pt-BR
+   ```
+
+#### Usage
+
+- **Automatic correction**: When enabled, Qwen Code will automatically check and suggest corrections for your inputs
+- **Manual checking**: Use the `/lt` command to manually check text grammar
+- **Model integration**: The AI model can automatically use LanguageTool to check grammar when needed
+
+For detailed configuration options, see [LANGUAGE_TOOL_INTEGRATION.md](./LANGUAGE_TOOL_INTEGRATION.md).
 
 ### Authorization
 
