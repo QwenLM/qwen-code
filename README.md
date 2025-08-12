@@ -141,18 +141,41 @@ Use API keys for OpenAI or other compatible providers:
 
 1. **Environment Variables**
 
+   **For Standard OpenAI:**
+
    ```bash
    export OPENAI_API_KEY="your_api_key_here"
    export OPENAI_BASE_URL="your_api_endpoint"
    export OPENAI_MODEL="your_model_choice"
    ```
 
+   **For Azure OpenAI:**
+
+   ```bash
+   export AZURE_OPENAI_ENDPOINT="https://your-resource-name.openai.azure.com"
+   export AZURE_OPENAI_DEPLOYMENT="your-deployment-name"
+   export AZURE_OPENAI_API_KEY="your-azure-api-key"
+   export AZURE_OPENAI_API_VERSION="2024-05-01-preview"
+   ```
+
 2. **Project `.env` File**
    Create a `.env` file in your project root:
+
+   **For Standard OpenAI:**
+
    ```env
    OPENAI_API_KEY=your_api_key_here
    OPENAI_BASE_URL=your_api_endpoint
    OPENAI_MODEL=your_model_choice
+   ```
+
+   **For Azure OpenAI:**
+
+   ```env
+   AZURE_OPENAI_ENDPOINT=https://your-resource-name.openai.azure.com
+   AZURE_OPENAI_DEPLOYMENT=your-deployment-name
+   AZURE_OPENAI_API_KEY=your-azure-api-key
+   AZURE_OPENAI_API_VERSION=2024-05-01-preview
    ```
 
 **API Provider Options**

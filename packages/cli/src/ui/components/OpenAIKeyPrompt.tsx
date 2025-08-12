@@ -20,8 +20,18 @@ export function OpenAIKeyPrompt({
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
+  const [azureEndpoint, setAzureEndpoint] = useState('');
+  const [azureDeployment, setAzureDeployment] = useState('');
+  const [azureApiKey, setAzureApiKey] = useState('');
+  const [azureApiVersion, setAzureApiVersion] = useState('');
   const [currentField, setCurrentField] = useState<
-    'apiKey' | 'baseUrl' | 'model'
+    | 'apiKey'
+    | 'baseUrl'
+    | 'model'
+    | 'azureEndpoint'
+    | 'azureDeployment'
+    | 'azureApiKey'
+    | 'azureApiVersion'
   >('apiKey');
 
   useInput((input, key) => {
@@ -49,6 +59,14 @@ export function OpenAIKeyPrompt({
         setBaseUrl((prev) => prev + cleanInput);
       } else if (currentField === 'model') {
         setModel((prev) => prev + cleanInput);
+      } else if (currentField === 'azureEndpoint') {
+        setAzureEndpoint((prev) => prev + cleanInput);
+      } else if (currentField === 'azureDeployment') {
+        setAzureDeployment((prev) => prev + cleanInput);
+      } else if (currentField === 'azureApiKey') {
+        setAzureApiKey((prev) => prev + cleanInput);
+      } else if (currentField === 'azureApiVersion') {
+        setAzureApiVersion((prev) => prev + cleanInput);
       }
       return;
     }
@@ -63,12 +81,47 @@ export function OpenAIKeyPrompt({
         setCurrentField('model');
         return;
       } else if (currentField === 'model') {
-        // 只有在提交时才检查 API key 是否为空
-        if (apiKey.trim()) {
+        // Check if we should use Azure configuration
+        if (azureEndpoint && azureDeployment && azureApiKey) {
+          // Set Azure environment variables and submit
+          process.env.AZURE_OPENAI_ENDPOINT = azureEndpoint;
+          process.env.AZURE_OPENAI_DEPLOYMENT = azureDeployment;
+          process.env.AZURE_OPENAI_API_KEY = azureApiKey;
+          if (azureApiVersion) {
+            process.env.AZURE_OPENAI_API_VERSION = azureApiVersion;
+          }
+          // Use a placeholder API key since Azure uses the API key in a different way
+          onSubmit('azure-api-key', '', azureDeployment);
+        } else if (apiKey.trim()) {
           onSubmit(apiKey.trim(), baseUrl.trim(), model.trim());
         } else {
-          // 如果 API key 为空，回到 API key 字段
+          // If API key is empty, go back to API key field
           setCurrentField('apiKey');
+        }
+      } else if (currentField === 'azureEndpoint') {
+        setCurrentField('azureDeployment');
+        return;
+      } else if (currentField === 'azureDeployment') {
+        setCurrentField('azureApiKey');
+        return;
+      } else if (currentField === 'azureApiKey') {
+        setCurrentField('azureApiVersion');
+        return;
+      } else if (currentField === 'azureApiVersion') {
+        // After filling all Azure fields, submit
+        if (azureEndpoint && azureDeployment && azureApiKey) {
+          // Set Azure environment variables and submit
+          process.env.AZURE_OPENAI_ENDPOINT = azureEndpoint;
+          process.env.AZURE_OPENAI_DEPLOYMENT = azureDeployment;
+          process.env.AZURE_OPENAI_API_KEY = azureApiKey;
+          if (azureApiVersion) {
+            process.env.AZURE_OPENAI_API_VERSION = azureApiVersion;
+          }
+          // Use a placeholder API key since Azure uses the API key in a different way
+          onSubmit('azure-api-key', '', azureDeployment);
+        } else {
+          // If Azure fields are not complete, go back to Azure endpoint field
+          setCurrentField('azureEndpoint');
         }
       }
       return;
@@ -86,6 +139,14 @@ export function OpenAIKeyPrompt({
       } else if (currentField === 'baseUrl') {
         setCurrentField('model');
       } else if (currentField === 'model') {
+        setCurrentField('azureEndpoint');
+      } else if (currentField === 'azureEndpoint') {
+        setCurrentField('azureDeployment');
+      } else if (currentField === 'azureDeployment') {
+        setCurrentField('azureApiKey');
+      } else if (currentField === 'azureApiKey') {
+        setCurrentField('azureApiVersion');
+      } else if (currentField === 'azureApiVersion') {
         setCurrentField('apiKey');
       }
       return;
@@ -97,6 +158,14 @@ export function OpenAIKeyPrompt({
         setCurrentField('apiKey');
       } else if (currentField === 'model') {
         setCurrentField('baseUrl');
+      } else if (currentField === 'azureEndpoint') {
+        setCurrentField('model');
+      } else if (currentField === 'azureDeployment') {
+        setCurrentField('azureEndpoint');
+      } else if (currentField === 'azureApiKey') {
+        setCurrentField('azureDeployment');
+      } else if (currentField === 'azureApiVersion') {
+        setCurrentField('azureApiKey');
       }
       return;
     }
@@ -106,6 +175,14 @@ export function OpenAIKeyPrompt({
         setCurrentField('baseUrl');
       } else if (currentField === 'baseUrl') {
         setCurrentField('model');
+      } else if (currentField === 'model') {
+        setCurrentField('azureEndpoint');
+      } else if (currentField === 'azureEndpoint') {
+        setCurrentField('azureDeployment');
+      } else if (currentField === 'azureDeployment') {
+        setCurrentField('azureApiKey');
+      } else if (currentField === 'azureApiKey') {
+        setCurrentField('azureApiVersion');
       }
       return;
     }
@@ -118,6 +195,14 @@ export function OpenAIKeyPrompt({
         setBaseUrl((prev) => prev.slice(0, -1));
       } else if (currentField === 'model') {
         setModel((prev) => prev.slice(0, -1));
+      } else if (currentField === 'azureEndpoint') {
+        setAzureEndpoint((prev) => prev.slice(0, -1));
+      } else if (currentField === 'azureDeployment') {
+        setAzureDeployment((prev) => prev.slice(0, -1));
+      } else if (currentField === 'azureApiKey') {
+        setAzureApiKey((prev) => prev.slice(0, -1));
+      } else if (currentField === 'azureApiVersion') {
+        setAzureApiVersion((prev) => prev.slice(0, -1));
       }
       return;
     }
@@ -143,7 +228,7 @@ export function OpenAIKeyPrompt({
         </Text>
       </Box>
       <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
+        <Box width={15}>
           <Text
             color={currentField === 'apiKey' ? Colors.AccentBlue : Colors.Gray}
           >
@@ -158,7 +243,7 @@ export function OpenAIKeyPrompt({
         </Box>
       </Box>
       <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
+        <Box width={15}>
           <Text
             color={currentField === 'baseUrl' ? Colors.AccentBlue : Colors.Gray}
           >
@@ -173,7 +258,7 @@ export function OpenAIKeyPrompt({
         </Box>
       </Box>
       <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
+        <Box width={15}>
           <Text
             color={currentField === 'model' ? Colors.AccentBlue : Colors.Gray}
           >
@@ -187,6 +272,86 @@ export function OpenAIKeyPrompt({
           </Text>
         </Box>
       </Box>
+
+      {/* Azure OpenAI Configuration */}
+      <Box marginTop={1}>
+        <Text bold color={Colors.AccentBlue}>
+          OR Azure OpenAI Configuration
+        </Text>
+      </Box>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={15}>
+          <Text
+            color={
+              currentField === 'azureEndpoint' ? Colors.AccentBlue : Colors.Gray
+            }
+          >
+            Endpoint:
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text>
+            {currentField === 'azureEndpoint' ? '> ' : '  '}
+            {azureEndpoint}
+          </Text>
+        </Box>
+      </Box>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={15}>
+          <Text
+            color={
+              currentField === 'azureDeployment'
+                ? Colors.AccentBlue
+                : Colors.Gray
+            }
+          >
+            Deployment:
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text>
+            {currentField === 'azureDeployment' ? '> ' : '  '}
+            {azureDeployment}
+          </Text>
+        </Box>
+      </Box>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={15}>
+          <Text
+            color={
+              currentField === 'azureApiKey' ? Colors.AccentBlue : Colors.Gray
+            }
+          >
+            API Key:
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text>
+            {currentField === 'azureApiKey' ? '> ' : '  '}
+            {azureApiKey}
+          </Text>
+        </Box>
+      </Box>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={15}>
+          <Text
+            color={
+              currentField === 'azureApiVersion'
+                ? Colors.AccentBlue
+                : Colors.Gray
+            }
+          >
+            API Version:
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text>
+            {currentField === 'azureApiVersion' ? '> ' : '  '}
+            {azureApiVersion || '2024-05-01-preview'}
+          </Text>
+        </Box>
+      </Box>
+
       <Box marginTop={1}>
         <Text color={Colors.Gray}>
           Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel

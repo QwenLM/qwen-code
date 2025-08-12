@@ -66,6 +66,10 @@ export interface CliArgs {
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
+  azureOpenAIEndpoint?: string | undefined;
+  azureOpenAIDeployment?: string | undefined;
+  azureOpenAIApiKey?: string | undefined;
+  azureOpenAIApiVersion?: string | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   loadMemoryFromIncludeDirectories: boolean | undefined;
@@ -220,6 +224,22 @@ export async function parseArguments(): Promise<CliArgs> {
       type: 'string',
       description: 'Tavily API key for web search functionality',
     })
+    .option('azure-openai-endpoint', {
+      type: 'string',
+      description: 'Azure OpenAI endpoint (for Azure OpenAI deployments)',
+    })
+    .option('azure-openai-deployment', {
+      type: 'string',
+      description: 'Azure OpenAI deployment name',
+    })
+    .option('azure-openai-api-key', {
+      type: 'string',
+      description: 'Azure OpenAI API key',
+    })
+    .option('azure-openai-api-version', {
+      type: 'string',
+      description: 'Azure OpenAI API version (default: 2024-05-01-preview)',
+    })
     .option('proxy', {
       type: 'string',
       description:
@@ -337,6 +357,20 @@ export async function loadCliConfig(
   // Handle OpenAI base URL from command line
   if (argv.openaiBaseUrl) {
     process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
+  }
+
+  // Handle Azure OpenAI configuration from command line
+  if (argv.azureOpenAIEndpoint) {
+    process.env.AZURE_OPENAI_ENDPOINT = argv.azureOpenAIEndpoint;
+  }
+  if (argv.azureOpenAIDeployment) {
+    process.env.AZURE_OPENAI_DEPLOYMENT = argv.azureOpenAIDeployment;
+  }
+  if (argv.azureOpenAIApiKey) {
+    process.env.AZURE_OPENAI_API_KEY = argv.azureOpenAIApiKey;
+  }
+  if (argv.azureOpenAIApiVersion) {
+    process.env.AZURE_OPENAI_API_VERSION = argv.azureOpenAIApiVersion;
   }
 
   // Handle Tavily API key from command line
