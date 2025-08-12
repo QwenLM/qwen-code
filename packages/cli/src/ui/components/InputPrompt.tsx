@@ -371,7 +371,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return;
         }
       }
-      if (key.name === 'return' && !key.ctrl && !key.meta && !key.paste) {
+
+      // Newline insertion
+      if (key.name === 'return' && (key.ctrl || key.meta || key.paste)) {
+        buffer.newline();
+        return;
+      }
+      
+      if (
+        key.name === 'return' &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.shift &&
+        !key.paste
+      ) {
         if (buffer.text.trim()) {
           const [row, col] = buffer.cursor;
           const line = buffer.lines[row];
@@ -383,12 +396,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             handleSubmitAndClear(buffer.text);
           }
         }
-        return;
-      }
-
-      // Newline insertion
-      if (key.name === 'return' && (key.ctrl || key.meta || key.paste)) {
-        buffer.newline();
         return;
       }
 
