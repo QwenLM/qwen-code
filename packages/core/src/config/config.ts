@@ -208,6 +208,8 @@ export interface ConfigParameters {
     timeout?: number;
     maxRetries?: number;
   };
+  resume?: string;
+  save?: string;
   cliVersion?: string;
 }
 
@@ -282,6 +284,8 @@ export class Config {
     timeout?: number;
     maxRetries?: number;
   };
+  private readonly resume: string | undefined;
+  private readonly save: string | undefined;
   private readonly cliVersion?: string;
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -352,6 +356,8 @@ export class Config {
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
     this.sampling_params = params.sampling_params;
     this.contentGenerator = params.contentGenerator;
+    this.resume = params.resume;
+    this.save = params.save;
     this.cliVersion = params.cliVersion;
 
     if (params.contextFileName) {
@@ -722,6 +728,13 @@ export class Config {
     return this.contentGenerator?.maxRetries;
   }
 
+  getResume(): string | undefined {
+    return this.resume;
+  }
+
+  getSave(): string | undefined {
+    return this.save;
+  }
   getCliVersion(): string | undefined {
     return this.cliVersion;
   }
