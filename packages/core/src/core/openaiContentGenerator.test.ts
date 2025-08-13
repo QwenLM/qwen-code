@@ -23,6 +23,7 @@ vi.mock('openai');
 // Mock logger modules
 vi.mock('../telemetry/loggers.js', () => ({
   logApiResponse: vi.fn(),
+  logApiError: vi.fn(),
 }));
 
 vi.mock('../utils/openaiLogger.js', () => ({
@@ -65,6 +66,7 @@ describe('OpenAIContentGenerator', () => {
           top_p: 0.9,
         },
       }),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     } as unknown as Config;
 
     // Mock OpenAI client
@@ -142,6 +144,7 @@ describe('OpenAIContentGenerator', () => {
           timeout: 300000,
           maxRetries: 5,
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       new OpenAIContentGenerator('test-key', 'gpt-4', customConfig);
@@ -900,6 +903,7 @@ describe('OpenAIContentGenerator', () => {
         getContentGeneratorConfig: vi.fn().mockReturnValue({
           enableOpenAILogging: true,
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       const loggingGenerator = new OpenAIContentGenerator(
@@ -1022,6 +1026,7 @@ describe('OpenAIContentGenerator', () => {
         getContentGeneratorConfig: vi.fn().mockReturnValue({
           enableOpenAILogging: true,
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       const loggingGenerator = new OpenAIContentGenerator(
@@ -1816,6 +1821,7 @@ describe('OpenAIContentGenerator', () => {
             max_tokens: 500,
           },
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       const loggingGenerator = new OpenAIContentGenerator(
@@ -2000,6 +2006,7 @@ describe('OpenAIContentGenerator', () => {
         getContentGeneratorConfig: vi.fn().mockReturnValue({
           enableOpenAILogging: true,
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       const loggingGenerator = new OpenAIContentGenerator(
@@ -2256,6 +2263,7 @@ describe('OpenAIContentGenerator', () => {
             top_p: undefined,
           },
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       const testGenerator = new OpenAIContentGenerator(
@@ -2313,6 +2321,7 @@ describe('OpenAIContentGenerator', () => {
             frequency_penalty: 0.3,
           },
         }),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
       const testGenerator = new OpenAIContentGenerator(
@@ -2382,6 +2391,618 @@ describe('OpenAIContentGenerator', () => {
       expect(result.totalTokens).toBeGreaterThan(0);
 
       consoleSpy.mockRestore();
+    });
+  });
+
+  describe('metadata control', () => {
+    it('should include metadata when authType is QWEN_OAUTH', async () => {
+      const qwenConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'qwen-oauth',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('test-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const qwenGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'qwen-turbo',
+        qwenConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'qwen-turbo',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'qwen-turbo',
+      };
+
+      await qwenGenerator.generateContent(request, 'test-prompt-id');
+
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            sessionId: 'test-session-id',
+            promptId: 'test-prompt-id',
+          },
+        }),
+      );
+    });
+
+    it('should include metadata when baseURL is dashscope openai compatible mode', async () => {
+      // Mock environment to set dashscope base URL BEFORE creating the generator
+      vi.stubEnv(
+        'OPENAI_BASE_URL',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+
+      const dashscopeConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai', // Not QWEN_OAUTH
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('dashscope-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const dashscopeGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'qwen-turbo',
+        dashscopeConfig,
+      );
+
+      // Debug: Check if the client was created with the correct baseURL
+      expect(vi.mocked(OpenAI)).toHaveBeenCalledWith(
+        expect.objectContaining({
+          baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        }),
+      );
+
+      // Mock the client's baseURL property to return the expected value
+      Object.defineProperty(dashscopeGenerator['client'], 'baseURL', {
+        value: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        writable: true,
+      });
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'qwen-turbo',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'qwen-turbo',
+      };
+
+      await dashscopeGenerator.generateContent(request, 'dashscope-prompt-id');
+
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            sessionId: 'dashscope-session-id',
+            promptId: 'dashscope-prompt-id',
+          },
+        }),
+      );
+    });
+
+    it('should NOT include metadata for regular OpenAI providers', async () => {
+      const regularConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('regular-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const regularGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        regularConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      await regularGenerator.generateContent(request, 'regular-prompt-id');
+
+      // Should NOT include metadata
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
+    });
+
+    it('should NOT include metadata for other auth types', async () => {
+      const otherAuthConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'gemini-api-key',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('other-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const otherGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        otherAuthConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      await otherGenerator.generateContent(request, 'other-prompt-id');
+
+      // Should NOT include metadata
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
+    });
+
+    it('should NOT include metadata for other base URLs', async () => {
+      // Mock environment to set a different base URL
+      vi.stubEnv('OPENAI_BASE_URL', 'https://api.openai.com/v1');
+
+      const otherBaseUrlConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('other-base-url-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const otherBaseUrlGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        otherBaseUrlConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      await otherBaseUrlGenerator.generateContent(
+        request,
+        'other-base-url-prompt-id',
+      );
+
+      // Should NOT include metadata
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
+    });
+
+    it('should include metadata in streaming requests when conditions are met', async () => {
+      const qwenConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'qwen-oauth',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('streaming-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const qwenGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'qwen-turbo',
+        qwenConfig,
+      );
+
+      const mockStream = [
+        {
+          id: 'chatcmpl-123',
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Hello' },
+              finish_reason: null,
+            },
+          ],
+          created: 1677652288,
+        },
+        {
+          id: 'chatcmpl-123',
+          choices: [
+            {
+              index: 0,
+              delta: { content: ' there!' },
+              finish_reason: 'stop',
+            },
+          ],
+          created: 1677652288,
+        },
+      ];
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue({
+        async *[Symbol.asyncIterator]() {
+          for (const chunk of mockStream) {
+            yield chunk;
+          }
+        },
+      });
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'qwen-turbo',
+      };
+
+      const stream = await qwenGenerator.generateContentStream(
+        request,
+        'streaming-prompt-id',
+      );
+
+      // Verify metadata was included in the streaming request
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            sessionId: 'streaming-session-id',
+            promptId: 'streaming-prompt-id',
+          },
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      );
+
+      // Consume the stream to complete the test
+      const responses = [];
+      for await (const response of stream) {
+        responses.push(response);
+      }
+      expect(responses).toHaveLength(2);
+    });
+
+    it('should NOT include metadata in streaming requests when conditions are not met', async () => {
+      const regularConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('regular-streaming-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const regularGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        regularConfig,
+      );
+
+      const mockStream = [
+        {
+          id: 'chatcmpl-123',
+          choices: [
+            {
+              index: 0,
+              delta: { content: 'Hello' },
+              finish_reason: null,
+            },
+          ],
+          created: 1677652288,
+        },
+        {
+          id: 'chatcmpl-123',
+          choices: [
+            {
+              index: 0,
+              delta: { content: ' there!' },
+              finish_reason: 'stop',
+            },
+          ],
+          created: 1677652288,
+        },
+      ];
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue({
+        async *[Symbol.asyncIterator]() {
+          for (const chunk of mockStream) {
+            yield chunk;
+          }
+        },
+      });
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      const stream = await regularGenerator.generateContentStream(
+        request,
+        'regular-streaming-prompt-id',
+      );
+
+      // Verify metadata was NOT included in the streaming request
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
+
+      // Consume the stream to complete the test
+      const responses = [];
+      for await (const response of stream) {
+        responses.push(response);
+      }
+      expect(responses).toHaveLength(2);
+    });
+
+    it('should handle undefined sessionId gracefully', async () => {
+      const qwenConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'qwen-oauth',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue(undefined), // Undefined session ID
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const qwenGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'qwen-turbo',
+        qwenConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'qwen-turbo',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'qwen-turbo',
+      };
+
+      await qwenGenerator.generateContent(
+        request,
+        'undefined-session-prompt-id',
+      );
+
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          metadata: {
+            sessionId: undefined,
+            promptId: 'undefined-session-prompt-id',
+          },
+        }),
+      );
+    });
+
+    it('should handle undefined baseURL gracefully', async () => {
+      // Ensure no base URL is set
+      vi.stubEnv('OPENAI_BASE_URL', '');
+
+      const noBaseUrlConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('no-base-url-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const noBaseUrlGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        noBaseUrlConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      await noBaseUrlGenerator.generateContent(
+        request,
+        'no-base-url-prompt-id',
+      );
+
+      // Should NOT include metadata when baseURL is empty
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
+    });
+
+    it('should handle undefined authType gracefully', async () => {
+      const undefinedAuthConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: undefined, // Undefined auth type
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('undefined-auth-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const undefinedAuthGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        undefinedAuthConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      await undefinedAuthGenerator.generateContent(
+        request,
+        'undefined-auth-prompt-id',
+      );
+
+      // Should NOT include metadata when authType is undefined
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
+    });
+
+    it('should handle undefined config gracefully', async () => {
+      const undefinedConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(undefined), // Undefined config
+        getSessionId: vi.fn().mockReturnValue('undefined-config-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const undefinedConfigGenerator = new OpenAIContentGenerator(
+        'test-key',
+        'gpt-4',
+        undefinedConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        model: 'gpt-4',
+      };
+
+      await undefinedConfigGenerator.generateContent(
+        request,
+        'undefined-config-prompt-id',
+      );
+
+      // Should NOT include metadata when config is undefined
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.not.objectContaining({
+          metadata: expect.any(Object),
+        }),
+      );
     });
   });
 });

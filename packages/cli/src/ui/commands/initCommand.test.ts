@@ -11,16 +11,31 @@ import { initCommand } from './initCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { type CommandContext } from './types.js';
 
-// Mock the 'fs' module
-vi.mock('fs', () => ({
-  existsSync: vi.fn(),
-  writeFileSync: vi.fn(),
-}));
+// Mock the 'fs' module with both named and default exports to avoid breaking default import sites
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const existsSync = vi.fn();
+  const writeFileSync = vi.fn();
+  const readFileSync = vi.fn();
+  return {
+    ...actual,
+    existsSync,
+    writeFileSync,
+    readFileSync,
+    default: {
+      ...(actual as unknown as Record<string, unknown>),
+      existsSync,
+      writeFileSync,
+      readFileSync,
+    },
+  } as unknown as typeof import('fs');
+});
 
 describe('initCommand', () => {
   let mockContext: CommandContext;
   const targetDir = '/test/dir';
-  const geminiMdPath = path.join(targetDir, 'GEMINI.md');
+  const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
+  const geminiMdPath = path.join(targetDir, DEFAULT_CONTEXT_FILENAME);
 
   beforeEach(() => {
     // Create a fresh mock context for each test
@@ -38,9 +53,10 @@ describe('initCommand', () => {
     vi.clearAllMocks();
   });
 
-  it('should inform the user if GEMINI.md already exists', async () => {
+  it(`should inform the user if ${DEFAULT_CONTEXT_FILENAME} already exists and is non-empty`, async () => {
     // Arrange: Simulate that the file exists
     vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('# Existing content');
 
     // Act: Run the command's action
     const result = await initCommand.action!(mockContext, '');
@@ -49,14 +65,13 @@ describe('initCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content:
-        'A GEMINI.md file already exists in this directory. No changes were made.',
+      content: `A ${DEFAULT_CONTEXT_FILENAME} file already exists in this directory. No changes were made.`,
     });
     // Assert: Ensure no file was written
     expect(fs.writeFileSync).not.toHaveBeenCalled();
   });
 
-  it('should create GEMINI.md and submit a prompt if it does not exist', async () => {
+  it(`should create ${DEFAULT_CONTEXT_FILENAME} and submit a prompt if it does not exist`, async () => {
     // Arrange: Simulate that the file does not exist
     vi.mocked(fs.existsSync).mockReturnValue(false);
 
@@ -70,7 +85,7 @@ describe('initCommand', () => {
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       {
         type: 'info',
-        text: 'Empty GEMINI.md created. Now analyzing the project to populate it.',
+        text: `Empty ${DEFAULT_CONTEXT_FILENAME} created. Now analyzing the project to populate it.`,
       },
       expect.any(Number),
     );
@@ -78,8 +93,18 @@ describe('initCommand', () => {
     // Assert: Check that the correct prompt is submitted
     expect(result.type).toBe('submit_prompt');
     expect(result.content).toContain(
-      'You are an AI agent that brings the power of Gemini',
+      'You are Qwen Code, an interactive CLI agent',
     );
+  });
+
+  it(`should proceed to initialize when ${DEFAULT_CONTEXT_FILENAME} exists but is empty`, async () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('   \n  ');
+
+    const result = await initCommand.action!(mockContext, '');
+
+    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+    expect(result.type).toBe('submit_prompt');
   });
 
   it('should return an error if config is not available', async () => {

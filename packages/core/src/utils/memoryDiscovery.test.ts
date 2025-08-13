@@ -365,7 +365,7 @@ My code memory
 
   it('should load extension context file paths', async () => {
     const extensionFilePath = await createTestFile(
-      path.join(testRootDir, 'extensions/ext1/GEMINI.md'),
+      path.join(testRootDir, 'extensions/ext1/QWEN.md'),
       'Extension memory content',
     );
 

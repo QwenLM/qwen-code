@@ -212,6 +212,7 @@ describe('loggers', () => {
         toolUsePromptTokenCount: 2,
       };
       const event = new ApiResponseEvent(
+        'test-response-id',
         'test-model',
         100,
         'prompt-id-1',
@@ -229,6 +230,7 @@ describe('loggers', () => {
           'event.name': EVENT_API_RESPONSE,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           [SemanticAttributes.HTTP_STATUS_CODE]: 200,
+          response_id: 'test-response-id',
           model: 'test-model',
           status_code: 200,
           duration_ms: 100,
@@ -275,6 +277,7 @@ describe('loggers', () => {
         toolUsePromptTokenCount: 2,
       };
       const event = new ApiResponseEvent(
+        'test-response-id-2',
         'test-model',
         100,
         'prompt-id-1',

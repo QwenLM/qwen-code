@@ -161,6 +161,7 @@ export class ApiRequestEvent {
 export class ApiErrorEvent {
   'event.name': 'api_error';
   'event.timestamp': string; // ISO 8601
+  response_id?: string;
   model: string;
   error: string;
   error_type?: string;
@@ -170,6 +171,7 @@ export class ApiErrorEvent {
   auth_type?: string;
 
   constructor(
+    response_id: string | undefined,
     model: string,
     error: string,
     duration_ms: number,
@@ -180,6 +182,7 @@ export class ApiErrorEvent {
   ) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
+    this.response_id = response_id;
     this.model = model;
     this.error = error;
     this.error_type = error_type;
@@ -193,6 +196,7 @@ export class ApiErrorEvent {
 export class ApiResponseEvent {
   'event.name': 'api_response';
   'event.timestamp': string; // ISO 8601
+  response_id: string;
   model: string;
   status_code?: number | string;
   duration_ms: number;
@@ -208,6 +212,7 @@ export class ApiResponseEvent {
   auth_type?: string;
 
   constructor(
+    response_id: string,
     model: string,
     duration_ms: number,
     prompt_id: string,
@@ -218,6 +223,7 @@ export class ApiResponseEvent {
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
+    this.response_id = response_id;
     this.model = model;
     this.duration_ms = duration_ms;
     this.status_code = 200;

@@ -5,14 +5,14 @@ Gemini CLI's core package (`packages/core`) is the backend portion of Gemini CLI
 ## Navigating this section
 
 - **[Core tools API](./tools-api.md):** Information on how tools are defined, registered, and used by the core.
-- **[Memory Import Processor](./memport.md):** Documentation for the modular GEMINI.md import feature using @file.md syntax.
+- **[Memory Import Processor](./memport.md):** Documentation for the modular QWEN.md import feature using @file.md syntax.
 
 ## Role of the core
 
 While the `packages/cli` portion of Gemini CLI provides the user interface, `packages/core` is responsible for:
 
 - **Gemini API interaction:** Securely communicating with the Google Gemini API, sending user prompts, and receiving model responses.
-- **Prompt engineering:** Constructing effective prompts for the Gemini model, potentially incorporating conversation history, tool definitions, and instructional context from `GEMINI.md` files.
+- **Prompt engineering:** Constructing effective prompts for the model, potentially incorporating conversation history, tool definitions, and instructional context from context files (e.g., `QWEN.md`).
 - **Tool management & orchestration:**
   - Registering available tools (e.g., file system tools, shell command execution).
   - Interpreting tool use requests from the Gemini model.
@@ -48,8 +48,8 @@ The file discovery service is responsible for finding files in the project that 
 
 ## Memory discovery service
 
-The memory discovery service is responsible for finding and loading the `GEMINI.md` files that provide context to the model. It searches for these files in a hierarchical manner, starting from the current working directory and moving up to the project root and the user's home directory. It also searches in subdirectories.
+The memory discovery service is responsible for finding and loading the context files (default: `QWEN.md`) that provide context to the model. It searches for these files in a hierarchical manner, starting from the current working directory and moving up to the project root and the user's home directory. It also searches in subdirectories.
 
 This allows you to have global, project-level, and component-level context files, which are all combined to provide the model with the most relevant information.
 
-You can use the [`/memory` command](../cli/commands.md) to `show`, `add`, and `refresh` the content of loaded `GEMINI.md` files.
+You can use the [`/memory` command](../cli/commands.md) to `show`, `add`, and `refresh` the content of loaded context files.

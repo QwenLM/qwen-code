@@ -43,7 +43,7 @@ import {
   DEFAULT_GEMINI_EMBEDDING_MODEL,
   DEFAULT_GEMINI_FLASH_MODEL,
 } from './models.js';
-import { ClearcutLogger } from '../telemetry/clearcut-logger/clearcut-logger.js';
+import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import { IdeClient } from '../ide/ide-client.js';
@@ -210,6 +210,7 @@ export interface ConfigParameters {
   };
   resume?: string;
   save?: string;
+  cliVersion?: string;
 }
 
 export class Config {
@@ -285,6 +286,7 @@ export class Config {
   };
   private readonly resume: string | undefined;
   private readonly save: string | undefined;
+  private readonly cliVersion?: string;
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
     this.embeddingModel =
@@ -356,6 +358,7 @@ export class Config {
     this.contentGenerator = params.contentGenerator;
     this.resume = params.resume;
     this.save = params.save;
+    this.cliVersion = params.cliVersion;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -366,7 +369,7 @@ export class Config {
     }
 
     if (this.getUsageStatisticsEnabled()) {
-      ClearcutLogger.getInstance(this)?.logStartSessionEvent(
+      QwenLogger.getInstance(this)?.logStartSessionEvent(
         new StartSessionEvent(this),
       );
     } else {
@@ -731,6 +734,9 @@ export class Config {
 
   getSave(): string | undefined {
     return this.save;
+  }
+  getCliVersion(): string | undefined {
+    return this.cliVersion;
   }
 
   getSystemPromptMappings():

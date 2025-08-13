@@ -9,11 +9,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { ClearcutLogger } from './clearcut-logger/clearcut-logger.js';
+import { QwenLogger } from './qwen-logger/qwen-logger.js';
+import { RumEvent } from './qwen-logger/event-types.js';
 import { Config } from '../config/config.js';
 
 describe('Circular Reference Integration Test', () => {
-  it('should handle HttpsProxyAgent-like circular references in clearcut logging', () => {
+  it('should handle HttpsProxyAgent-like circular references in qwen logging', () => {
     // Create a mock config with proxy
     const mockConfig = {
       getTelemetryEnabled: () => true,
@@ -44,16 +45,20 @@ describe('Circular Reference Integration Test', () => {
     proxyAgentLike.sockets['cloudcode-pa.googleapis.com:443'] = [socketLike];
 
     // Create an event that would contain this circular structure
-    const problematicEvent = {
+    const problematicEvent: RumEvent = {
+      timestamp: Date.now(),
+      event_type: 'exception',
+      type: 'error',
+      name: 'api_error',
       error: new Error('Network error'),
       function_args: {
         filePath: '/test/file.txt',
         httpAgent: proxyAgentLike, // This would cause the circular reference
       },
-    };
+    } as RumEvent;
 
-    // Test that ClearcutLogger can handle this
-    const logger = ClearcutLogger.getInstance(mockConfig);
+    // Test that QwenLogger can handle this
+    const logger = QwenLogger.getInstance(mockConfig);
 
     expect(() => {
       logger?.enqueueLogEvent(problematicEvent);

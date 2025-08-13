@@ -4,7 +4,7 @@ This document describes the `save_memory` tool for the Gemini CLI.
 
 ## Description
 
-Use `save_memory` to save and recall information across your Gemini CLI sessions. With `save_memory`, you can direct the CLI to remember key details across sessions, providing personalized and directed assistance.
+Use `save_memory` to save and recall information across your Qwen Code sessions. With `save_memory`, you can direct the CLI to remember key details across sessions, providing personalized and directed assistance.
 
 ### Arguments
 
@@ -14,9 +14,9 @@ Use `save_memory` to save and recall information across your Gemini CLI sessions
 
 ## How to use `save_memory` with the Gemini CLI
 
-The tool appends the provided `fact` to a special `GEMINI.md` file located in the user's home directory (`~/.gemini/GEMINI.md`). This file can be configured to have a different name.
+The tool appends the provided `fact` to your context file in the user's home directory (`~/.qwen/QWEN.md` by default). This filename can be configured via `contextFileName`.
 
-Once added, the facts are stored under a `## Gemini Added Memories` section. This file is loaded as context in subsequent sessions, allowing the CLI to recall the saved information.
+Once added, the facts are stored under a `## Qwen Added Memories` section. This file is loaded as context in subsequent sessions, allowing the CLI to recall the saved information.
 
 Usage:
 

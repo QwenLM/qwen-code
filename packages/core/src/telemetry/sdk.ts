@@ -28,7 +28,6 @@ import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { Config } from '../config/config.js';
 import { SERVICE_NAME } from './constants.js';
 import { initializeMetrics } from './metrics.js';
-import { ClearcutLogger } from './clearcut-logger/clearcut-logger.js';
 import {
   FileLogExporter,
   FileMetricExporter,
@@ -141,7 +140,6 @@ export async function shutdownTelemetry(): Promise<void> {
     return;
   }
   try {
-    ClearcutLogger.getInstance()?.shutdown();
     await sdk.shutdown();
     console.log('OpenTelemetry SDK shut down successfully.');
   } catch (error) {

@@ -158,14 +158,23 @@ export class GeminiChat {
     prompt_id: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
+    responseId?: string,
   ): Promise<void> {
+    const authType = this.config.getContentGeneratorConfig()?.authType;
+
+    // Don't log API responses for openaiContentGenerator
+    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
+      return;
+    }
+
     logApiResponse(
       this.config,
       new ApiResponseEvent(
+        responseId || `gemini-${Date.now()}`,
         this.config.getModel(),
         durationMs,
         prompt_id,
-        this.config.getContentGeneratorConfig()?.authType,
+        authType,
         usageMetadata,
         responseText,
       ),
@@ -176,18 +185,27 @@ export class GeminiChat {
     durationMs: number,
     error: unknown,
     prompt_id: string,
+    responseId?: string,
   ): void {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorType = error instanceof Error ? error.name : 'unknown';
 
+    const authType = this.config.getContentGeneratorConfig()?.authType;
+
+    // Don't log API errors for openaiContentGenerator
+    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
+      return;
+    }
+
     logApiError(
       this.config,
       new ApiErrorEvent(
+        responseId,
         this.config.getModel(),
         errorMessage,
         durationMs,
         prompt_id,
-        this.config.getContentGeneratorConfig()?.authType,
+        authType,
         errorType,
       ),
     );
@@ -320,6 +338,7 @@ export class GeminiChat {
         prompt_id,
         response.usageMetadata,
         JSON.stringify(response),
+        response.responseId,
       );
 
       this.sendPromise = (async () => {
@@ -563,6 +582,7 @@ export class GeminiChat {
         prompt_id,
         this.getFinalUsageMetadata(chunks),
         JSON.stringify(chunks),
+        chunks[chunks.length - 1]?.responseId,
       );
     }
     this.recordHistory(inputContent, outputContent);

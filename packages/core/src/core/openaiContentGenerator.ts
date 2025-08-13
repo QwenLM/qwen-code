@@ -20,10 +20,10 @@ import {
   FunctionCall,
   FunctionResponse,
 } from '@google/genai';
-import { ContentGenerator } from './contentGenerator.js';
+import { AuthType, ContentGenerator } from './contentGenerator.js';
 import OpenAI from 'openai';
-import { logApiResponse } from '../telemetry/loggers.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
+import { logApiError, logApiResponse } from '../telemetry/loggers.js';
+import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
 
@@ -114,8 +114,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
       timeoutConfig.maxRetries = contentGeneratorConfig.maxRetries;
     }
 
-    // Set up User-Agent header (same format as contentGenerator.ts)
-    const version = process.env.CLI_VERSION || process.version;
+    const version = config.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
 
     // Check if using OpenRouter and add required headers
@@ -185,6 +184,46 @@ export class OpenAIContentGenerator implements ContentGenerator {
     );
   }
 
+  /**
+   * Determine if metadata should be included in the request.
+   * Only include the `metadata` field if the provider is QWEN_OAUTH
+   * or the baseUrl is 'https://dashscope.aliyuncs.com/compatible-mode/v1'.
+   * This is because some models/providers do not support metadata or need extra configuration.
+   *
+   * @returns true if metadata should be included, false otherwise
+   */
+  private shouldIncludeMetadata(): boolean {
+    const authType = this.config.getContentGeneratorConfig?.()?.authType;
+    // baseUrl may be undefined; default to empty string if so
+    const baseUrl = this.client?.baseURL || '';
+
+    return (
+      authType === AuthType.QWEN_OAUTH ||
+      baseUrl === 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    );
+  }
+
+  /**
+   * Build metadata object for OpenAI API requests.
+   *
+   * @param userPromptId The user prompt ID to include in metadata
+   * @returns metadata object if shouldIncludeMetadata() returns true, undefined otherwise
+   */
+  private buildMetadata(
+    userPromptId: string,
+  ): { metadata: { sessionId?: string; promptId: string } } | undefined {
+    if (!this.shouldIncludeMetadata()) {
+      return undefined;
+    }
+
+    return {
+      metadata: {
+        sessionId: this.config.getSessionId?.(),
+        promptId: userPromptId,
+      },
+    };
+  }
+
   async generateContent(
     request: GenerateContentParameters,
     userPromptId: string,
@@ -205,10 +244,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         model: this.model,
         messages,
         ...samplingParams,
-        metadata: {
-          sessionId: this.config.getSessionId?.(),
-          promptId: userPromptId,
-        },
+        ...(this.buildMetadata(userPromptId) || {}),
       };
 
       if (request.config?.tools) {
@@ -226,6 +262,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Log API response event for UI telemetry
       const responseEvent = new ApiResponseEvent(
+        response.responseId || 'unknown',
         this.model,
         durationMs,
         userPromptId,
@@ -254,41 +291,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
           ? error.message
           : String(error);
 
-      // Estimate token usage even when there's an error
-      // This helps track costs and usage even for failed requests
-      let estimatedUsage;
-      try {
-        const tokenCountResult = await this.countTokens({
-          contents: request.contents,
-          model: this.model,
-        });
-        estimatedUsage = {
-          promptTokenCount: tokenCountResult.totalTokens,
-          candidatesTokenCount: 0, // No completion tokens since request failed
-          totalTokenCount: tokenCountResult.totalTokens,
-        };
-      } catch {
-        // If token counting also fails, provide a minimal estimate
-        const contentStr = JSON.stringify(request.contents);
-        const estimatedTokens = Math.ceil(contentStr.length / 4);
-        estimatedUsage = {
-          promptTokenCount: estimatedTokens,
-          candidatesTokenCount: 0,
-          totalTokenCount: estimatedTokens,
-        };
-      }
-
-      // Log API error event for UI telemetry with estimated usage
-      const errorEvent = new ApiResponseEvent(
+      // Log API error event for UI telemetry
+      const errorEvent = new ApiErrorEvent(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).requestID || 'unknown',
         this.model,
+        errorMessage,
         durationMs,
         userPromptId,
         this.config.getContentGeneratorConfig()?.authType,
-        estimatedUsage,
-        undefined,
-        errorMessage,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).type,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).code,
       );
-      logApiResponse(this.config, errorEvent);
+      logApiError(this.config, errorEvent);
 
       // Log error interaction if enabled
       if (this.config.getContentGeneratorConfig()?.enableOpenAILogging) {
@@ -339,10 +356,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ...samplingParams,
         stream: true,
         stream_options: { include_usage: true },
-        metadata: {
-          sessionId: this.config.getSessionId?.(),
-          promptId: userPromptId,
-        },
+        ...(this.buildMetadata(userPromptId) || {}),
       };
 
       if (request.config?.tools) {
@@ -380,6 +394,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
           // Log API response event for UI telemetry
           const responseEvent = new ApiResponseEvent(
+            responses[responses.length - 1]?.responseId || 'unknown',
             this.model,
             durationMs,
             userPromptId,
@@ -411,40 +426,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
               ? error.message
               : String(error);
 
-          // Estimate token usage even when there's an error in streaming
-          let estimatedUsage;
-          try {
-            const tokenCountResult = await this.countTokens({
-              contents: request.contents,
-              model: this.model,
-            });
-            estimatedUsage = {
-              promptTokenCount: tokenCountResult.totalTokens,
-              candidatesTokenCount: 0, // No completion tokens since request failed
-              totalTokenCount: tokenCountResult.totalTokens,
-            };
-          } catch {
-            // If token counting also fails, provide a minimal estimate
-            const contentStr = JSON.stringify(request.contents);
-            const estimatedTokens = Math.ceil(contentStr.length / 4);
-            estimatedUsage = {
-              promptTokenCount: estimatedTokens,
-              candidatesTokenCount: 0,
-              totalTokenCount: estimatedTokens,
-            };
-          }
-
-          // Log API error event for UI telemetry with estimated usage
-          const errorEvent = new ApiResponseEvent(
+          // Log API error event for UI telemetry
+          const errorEvent = new ApiErrorEvent(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (error as any).requestID || 'unknown',
             this.model,
+            errorMessage,
             durationMs,
             userPromptId,
             this.config.getContentGeneratorConfig()?.authType,
-            estimatedUsage,
-            undefined,
-            errorMessage,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (error as any).type,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (error as any).code,
           );
-          logApiResponse(this.config, errorEvent);
+          logApiError(this.config, errorEvent);
 
           // Log error interaction if enabled
           if (this.config.getContentGeneratorConfig()?.enableOpenAILogging) {
@@ -484,40 +480,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
           ? error.message
           : String(error);
 
-      // Estimate token usage even when there's an error in streaming setup
-      let estimatedUsage;
-      try {
-        const tokenCountResult = await this.countTokens({
-          contents: request.contents,
-          model: this.model,
-        });
-        estimatedUsage = {
-          promptTokenCount: tokenCountResult.totalTokens,
-          candidatesTokenCount: 0, // No completion tokens since request failed
-          totalTokenCount: tokenCountResult.totalTokens,
-        };
-      } catch {
-        // If token counting also fails, provide a minimal estimate
-        const contentStr = JSON.stringify(request.contents);
-        const estimatedTokens = Math.ceil(contentStr.length / 4);
-        estimatedUsage = {
-          promptTokenCount: estimatedTokens,
-          candidatesTokenCount: 0,
-          totalTokenCount: estimatedTokens,
-        };
-      }
-
-      // Log API error event for UI telemetry with estimated usage
-      const errorEvent = new ApiResponseEvent(
+      // Log API error event for UI telemetry
+      const errorEvent = new ApiErrorEvent(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).requestID || 'unknown',
         this.model,
+        errorMessage,
         durationMs,
         userPromptId,
         this.config.getContentGeneratorConfig()?.authType,
-        estimatedUsage,
-        undefined,
-        errorMessage,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).type,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (error as any).code,
       );
-      logApiResponse(this.config, errorEvent);
+      logApiError(this.config, errorEvent);
 
       // Allow subclasses to suppress error logging for specific scenarios
       if (!this.shouldSuppressErrorLogging(error, request)) {

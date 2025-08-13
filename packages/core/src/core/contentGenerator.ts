@@ -14,7 +14,7 @@ import {
   GoogleGenAI,
 } from '@google/genai';
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
-import { DEFAULT_GEMINI_MODEL } from '../config/models.js';
+import { DEFAULT_GEMINI_MODEL, DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { Config } from '../config/config.js';
 import { getEffectiveModel } from './modelCheck.js';
 import { UserTierId } from '../code_assist/types.js';
@@ -136,7 +136,9 @@ export function createContentGeneratorConfig(
     // For Qwen OAuth, we'll handle the API key dynamically in createContentGenerator
     // Set a special marker to indicate this is Qwen OAuth
     contentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
-    contentGeneratorConfig.model = config.getModel() || DEFAULT_GEMINI_MODEL;
+
+    // Prefer to use qwen3-coder-plus as the default Qwen model if QWEN_MODEL is not set.
+    contentGeneratorConfig.model = process.env.QWEN_MODEL || DEFAULT_QWEN_MODEL;
 
     return contentGeneratorConfig;
   }
@@ -149,7 +151,7 @@ export async function createContentGenerator(
   gcConfig: Config,
   sessionId?: string,
 ): Promise<ContentGenerator> {
-  const version = process.env.CLI_VERSION || process.version;
+  const version = gcConfig.getCliVersion() || 'unknown';
   const httpOptions = {
     headers: {
       'User-Agent': `GeminiCLI/${version} (${process.platform}; ${process.arch})`,

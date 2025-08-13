@@ -228,6 +228,7 @@ describe('Gemini Client (client.ts)', () => {
       getGeminiClient: vi.fn(),
       setFallbackMode: vi.fn(),
       getDebugMode: vi.fn().mockReturnValue(false),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     };
     const MockedConfig = vi.mocked(Config, true);
     MockedConfig.mockImplementation(

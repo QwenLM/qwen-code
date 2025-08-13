@@ -202,8 +202,8 @@ describe('bfsFileSearch', () => {
       await createEmptyDir(`dir${i}`, 'subdir1', 'deep');
       if (i < 10) {
         // Add target files in some directories
-        await createTestFile('content', `dir${i}`, 'GEMINI.md');
-        await createTestFile('content', `dir${i}`, 'subdir1', 'GEMINI.md');
+        await createTestFile('content', `dir${i}`, 'QWEN.md');
+        await createTestFile('content', `dir${i}`, 'subdir1', 'QWEN.md');
       }
     }
 
@@ -216,7 +216,7 @@ describe('bfsFileSearch', () => {
     for (let i = 0; i < iterations; i++) {
       const searchStartTime = performance.now();
       const result = await bfsFileSearch(testRootDir, {
-        fileName: 'GEMINI.md',
+        fileName: 'QWEN.md',
         maxDirs: 200,
         debug: false,
       });
@@ -242,7 +242,7 @@ describe('bfsFileSearch', () => {
     console.log(
       `📊 Min/Max Duration: ${minDuration.toFixed(2)}ms / ${maxDuration.toFixed(2)}ms`,
     );
-    console.log(`📁 Found ${foundFiles} GEMINI.md files`);
+    console.log(`📁 Found ${foundFiles} QWEN.md files`);
     console.log(
       `🏎️  Processing ~${Math.round(200 / (avgDuration / 1000))} dirs/second`,
     );

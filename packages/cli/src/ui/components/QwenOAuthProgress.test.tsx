@@ -22,6 +22,12 @@ vi.mock('ink-spinner', () => ({
   default: ({ type }: { type: string }) => `MockSpinner(${type})`,
 }));
 
+// Mock ink-link
+vi.mock('ink-link', () => ({
+  default: ({ children }: { children: React.ReactNode; url: string }) =>
+    children,
+}));
+
 describe('QwenOAuthProgress', () => {
   const mockOnTimeout = vi.fn();
   const mockOnCancel = vi.fn();
@@ -39,7 +45,17 @@ describe('QwenOAuthProgress', () => {
   const mockDeviceAuth = createMockDeviceAuth();
 
   const renderComponent = (
-    props: Partial<{ deviceAuth: DeviceAuthorizationInfo }> = {},
+    props: Partial<{
+      deviceAuth: DeviceAuthorizationInfo;
+      authStatus:
+        | 'idle'
+        | 'polling'
+        | 'success'
+        | 'error'
+        | 'timeout'
+        | 'rate_limit';
+      authMessage: string | null;
+    }> = {},
   ) =>
     render(
       <QwenOAuthProgress
@@ -85,20 +101,43 @@ describe('QwenOAuthProgress', () => {
       const { lastFrame } = renderComponent({ deviceAuth: mockDeviceAuth });
 
       const output = lastFrame();
-      expect(output).toContain('Qwen OAuth Authentication');
-      expect(output).toContain('Please visit this URL to authorize:');
-      expect(output).toContain(mockDeviceAuth.verification_uri_complete);
+      // Initially no QR code shown until it's generated, but the status area should be visible
       expect(output).toContain('MockSpinner(dots)');
       expect(output).toContain('Waiting for authorization');
       expect(output).toContain('Time remaining: 5:00');
       expect(output).toContain('(Press ESC to cancel)');
     });
 
-    it('should display correct URL in bordered box', () => {
+    it('should display correct URL in Static component when QR code is generated', async () => {
+      const qrcode = await import('qrcode-terminal');
+      const mockGenerate = vi.mocked(qrcode.default.generate);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let qrCallback: any = null;
+      mockGenerate.mockImplementation((url, options, callback) => {
+        qrCallback = callback;
+      });
+
       const customAuth = createMockDeviceAuth({
         verification_uri_complete: 'https://custom.com/auth?code=XYZ789',
       });
-      const { lastFrame } = renderComponent({ deviceAuth: customAuth });
+
+      const { lastFrame, rerender } = renderComponent({
+        deviceAuth: customAuth,
+      });
+
+      // Manually trigger the QR code callback
+      if (qrCallback && typeof qrCallback === 'function') {
+        qrCallback('Mock QR Code Data');
+      }
+
+      rerender(
+        <QwenOAuthProgress
+          onTimeout={mockOnTimeout}
+          onCancel={mockOnCancel}
+          deviceAuth={customAuth}
+        />,
+      );
 
       expect(lastFrame()).toContain('https://custom.com/auth?code=XYZ789');
     });
@@ -204,14 +243,16 @@ describe('QwenOAuthProgress', () => {
       expect(lastFrame()).toContain('Time remaining: 4:59');
     });
 
-    it('should not start timer when deviceAuth is null', () => {
-      render(
+    it('should use default 300 second timeout when deviceAuth is null', () => {
+      const { lastFrame } = render(
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
-      // Advance timer and ensure onTimeout is not called
-      vi.advanceTimersByTime(5000);
-      expect(mockOnTimeout).not.toHaveBeenCalled();
+      // Should show default 5:00 (300 seconds) timeout
+      expect(lastFrame()).toContain('Time remaining: 5:00');
+
+      // The timer functionality is already tested in other tests,
+      // this test mainly verifies the default timeout value is used
     });
   });
 
@@ -298,8 +339,41 @@ describe('QwenOAuthProgress', () => {
       );
     });
 
-    // Note: QR code display test skipped due to timing complexities with async state updates
-    // The QR code generation is already tested in 'should generate QR code when deviceAuth is provided'
+    it('should display QR code in Static component when available', async () => {
+      const qrcode = await import('qrcode-terminal');
+      const mockGenerate = vi.mocked(qrcode.default.generate);
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let qrCallback: any = null;
+      mockGenerate.mockImplementation((url, options, callback) => {
+        qrCallback = callback;
+      });
+
+      const { lastFrame, rerender } = render(
+        <QwenOAuthProgress
+          onTimeout={mockOnTimeout}
+          onCancel={mockOnCancel}
+          deviceAuth={mockDeviceAuth}
+        />,
+      );
+
+      // Manually trigger the QR code callback
+      if (qrCallback && typeof qrCallback === 'function') {
+        qrCallback('Mock QR Code Data');
+      }
+
+      rerender(
+        <QwenOAuthProgress
+          onTimeout={mockOnTimeout}
+          onCancel={mockOnCancel}
+          deviceAuth={mockDeviceAuth}
+        />,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('Or scan the QR code below:');
+      expect(output).toContain('Mock QR Code Data');
+    });
 
     it('should handle QR code generation errors gracefully', async () => {
       const qrcode = await import('qrcode-terminal');
@@ -320,7 +394,7 @@ describe('QwenOAuthProgress', () => {
         />,
       );
 
-      // Should not crash and should not show QR code section
+      // Should not crash and should not show QR code section since QR generation failed
       const output = lastFrame();
       expect(output).not.toContain('Or scan the QR code below:');
       expect(consoleErrorSpy).toHaveBeenCalledWith(
@@ -415,14 +489,58 @@ describe('QwenOAuthProgress', () => {
         />,
       );
 
-      expect(lastFrame()).toContain('Qwen OAuth Authentication');
+      // Initially shows waiting for authorization
+      expect(lastFrame()).toContain('Waiting for authorization');
 
       rerender(
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
       expect(lastFrame()).toContain('Waiting for Qwen OAuth authentication...');
-      expect(lastFrame()).not.toContain('Qwen OAuth Authentication');
+      expect(lastFrame()).not.toContain('Waiting for authorization');
+    });
+  });
+
+  describe('Timeout state', () => {
+    it('should render timeout state when authStatus is timeout', () => {
+      const { lastFrame } = renderComponent({
+        authStatus: 'timeout',
+        authMessage: 'Custom timeout message',
+      });
+
+      const output = lastFrame();
+      expect(output).toContain('Qwen OAuth Authentication Timeout');
+      expect(output).toContain('Custom timeout message');
+      expect(output).toContain(
+        'Press any key to return to authentication type selection.',
+      );
+    });
+
+    it('should render default timeout message when no authMessage provided', () => {
+      const { lastFrame } = renderComponent({
+        authStatus: 'timeout',
+      });
+
+      const output = lastFrame();
+      expect(output).toContain('Qwen OAuth Authentication Timeout');
+      expect(output).toContain(
+        'OAuth token expired (over 300 seconds). Please select authentication method again.',
+      );
+    });
+
+    it('should call onCancel for any key press in timeout state', () => {
+      const { stdin } = renderComponent({
+        authStatus: 'timeout',
+      });
+
+      // Simulate any key press
+      stdin.write('a');
+      expect(mockOnCancel).toHaveBeenCalledTimes(1);
+
+      // Reset mock and try enter key
+      mockOnCancel.mockClear();
+      stdin.write('\r');
+      expect(mockOnCancel).toHaveBeenCalledTimes(1);
     });
   });
 });

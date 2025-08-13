@@ -17,7 +17,9 @@ import { Config } from '../config/config.js';
 vi.mock('../code_assist/codeAssist.js');
 vi.mock('@google/genai');
 
-const mockConfig = {} as unknown as Config;
+const mockConfig = {
+  getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+} as unknown as Config;
 
 describe('createContentGenerator', () => {
   it('should create a CodeAssistContentGenerator', async () => {
@@ -73,6 +75,7 @@ describe('createContentGeneratorConfig', () => {
     getSamplingParams: vi.fn().mockReturnValue(undefined),
     getContentGeneratorTimeout: vi.fn().mockReturnValue(undefined),
     getContentGeneratorMaxRetries: vi.fn().mockReturnValue(undefined),
+    getCliVersion: vi.fn().mockReturnValue('1.0.0'),
   } as unknown as Config;
 
   beforeEach(() => {
