@@ -37,9 +37,14 @@ export function OpenAIKeyPrompt({
         onSubmit(savedApiKey, savedBaseUrl, savedModel);
         return;
       }
-      
+
       const cleanInput = input.trim().toLowerCase();
-      if (cleanInput === 'y' || cleanInput === 'yes' || input.includes('\n') || input.includes('\r')) {
+      if (
+        cleanInput === 'y' ||
+        cleanInput === 'yes' ||
+        input.includes('\n') ||
+        input.includes('\r')
+      ) {
         // Save and continue
         saveToQwenEnv(savedApiKey, savedBaseUrl, savedModel)
           .then(() => {
@@ -173,13 +178,12 @@ export function OpenAIKeyPrompt({
           Save Configuration?
         </Text>
         <Box marginTop={1}>
-          <Text>
-            Save these credentials to .qwen.env for future use? [Y/n]
-          </Text>
+          <Text>Save these credentials to .qwen.env for future use? [Y/n]</Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={Colors.Warning}>
-            Warning: Add .qwen.env to your .gitignore to prevent accidentally committing your API credentials.
+          <Text color={Colors.AccentYellow}>
+            Warning: Add .qwen.env to your .gitignore to prevent accidentally
+            committing your API credentials.
           </Text>
         </Box>
       </Box>

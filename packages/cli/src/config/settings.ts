@@ -328,7 +328,10 @@ function findEnvFile(startDir: string): string | null {
   }
 }
 
-function loadEnvFile(envFilePath: string, resolvedSettings: Settings | undefined): void {
+function loadEnvFile(
+  envFilePath: string,
+  resolvedSettings: Settings | undefined,
+): void {
   // Manually parse and load environment variables to handle exclusions correctly.
   // This avoids modifying environment variables that were already set from the shell.
   try {

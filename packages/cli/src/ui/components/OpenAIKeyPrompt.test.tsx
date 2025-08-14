@@ -66,11 +66,11 @@ describe('OpenAIKeyPrompt', () => {
     // Mock the internal state to show the save prompt
     const onSubmit = vi.fn();
     const onCancel = vi.fn();
-    
+
     const { lastFrame, stdin } = render(
       <OpenAIKeyPrompt onSubmit={onSubmit} onCancel={onCancel} />,
     );
-    
+
     // Simulate entering API key and pressing enter to reach save prompt
     stdin.write('test-key');
     stdin.write('\n'); // Enter to go to base URL
@@ -78,13 +78,17 @@ describe('OpenAIKeyPrompt', () => {
     stdin.write('\n'); // Enter to go to model
     stdin.write('gpt-4');
     stdin.write('\n'); // Enter to submit and show save prompt
-    
+
     // Wait a bit for processing
     setTimeout(() => {
       const output = lastFrame();
       expect(output).toContain('Save Configuration?');
-      expect(output).toContain('Save these credentials to .qwen.env for future use? [Y/n]');
-      expect(output).toContain('Warning: Add .qwen.env to your .gitignore to prevent accidentally committing your API credentials.');
+      expect(output).toContain(
+        'Save these credentials to .qwen.env for future use? [Y/n]',
+      );
+      expect(output).toContain(
+        'Warning: Add .qwen.env to your .gitignore to prevent accidentally committing your API credentials.',
+      );
     }, 100);
   });
 });

@@ -71,7 +71,7 @@ export const setOpenAIModel = (model: string): void => {
 export async function saveToQwenEnv(
   apiKey: string,
   baseUrl: string,
-  model: string
+  model: string,
 ): Promise<void> {
   const envPath = path.join(process.cwd(), '.qwen.env');
   const content = `# Qwen Code API Configuration
@@ -80,13 +80,13 @@ OPENAI_API_KEY=${apiKey}
 OPENAI_BASE_URL=${baseUrl}
 OPENAI_MODEL=${model}
 `;
-  
+
   if (fs.existsSync(envPath)) {
     // In a real implementation, we would prompt the user here
     // For now, we'll just overwrite (following the task requirements)
     // Note: In a full implementation, we'd want to ask "Overwrite existing .qwen.env? [Y/n]"
   }
-  
+
   fs.writeFileSync(envPath, content, 'utf-8');
   // In a real implementation, we would show a success message here
 }
