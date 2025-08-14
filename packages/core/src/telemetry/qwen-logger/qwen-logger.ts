@@ -322,19 +322,16 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logApiRequestEvent(_event: ApiRequestEvent): void {
-    // ignore for now
-    return;
+  logApiRequestEvent(event: ApiRequestEvent): void {
+    const rumEvent = this.createResourceEvent('api', 'api_request', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id,
+      },
+    });
 
-    // const rumEvent = this.createResourceEvent('api', 'api_request', {
-    //   properties: {
-    //     model: event.model,
-    //     prompt_id: event.prompt_id,
-    //   },
-    // });
-
-    // this.enqueueLogEvent(rumEvent);
-    // this.flushIfNeeded();
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
   }
 
   logApiResponseEvent(event: ApiResponseEvent): void {
