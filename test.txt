@@ -1,0 +1,2 @@
+This is a test file for reproducing the tool bug.
+It contains some sample content.

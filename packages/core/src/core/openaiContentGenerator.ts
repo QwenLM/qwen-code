@@ -232,6 +232,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
+    // Debug: dump messages if QC_DUMP_PRE_INFER is set
+    if (process.env.QC_DUMP_PRE_INFER === '1') {
+      const fs = await import('fs');
+      try {
+        await fs.promises.mkdir('.debug', { recursive: true });
+        await fs.promises.writeFile(
+          `.debug/turn-${Date.now()}-pre-infer.json`,
+          JSON.stringify({ messages, model: this.model, request }, null, 2)
+        );
+        console.log('🐛 Debug: Pre-inference messages dumped to .debug/');
+      } catch (error) {
+        console.error('Debug dump failed:', error);
+      }
+    }
+
     try {
       // Build sampling parameters with clear priority:
       // 1. Request-level parameters (highest priority)
@@ -344,6 +359,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
+
+    // Debug: dump messages if QC_DUMP_PRE_INFER is set
+    if (process.env.QC_DUMP_PRE_INFER === '1') {
+      const fs = await import('fs');
+      try {
+        await fs.promises.mkdir('.debug', { recursive: true });
+        await fs.promises.writeFile(
+          `.debug/turn-stream-${Date.now()}-pre-infer.json`,
+          JSON.stringify({ messages, model: this.model, request }, null, 2)
+        );
+        console.log('🐛 Debug: Pre-inference streaming messages dumped to .debug/');
+      } catch (error) {
+        console.error('Debug dump failed:', error);
+      }
+    }
 
     try {
       // Build sampling parameters with clear priority
@@ -914,10 +944,17 @@ export class OpenAIContentGenerator implements ContentGenerator {
           }
           // Handle regular text messages
           else {
-            const role =
-              content.role === 'model'
-                ? ('assistant' as const)
-                : ('user' as const);
+            // Only assign user role to genuine user content, not tool responses
+            let role: 'assistant' | 'user' | 'system';
+            if (content.role === 'model') {
+              role = 'assistant' as const;
+            } else if (content.role === 'user') {
+              role = 'user' as const;
+            } else {
+              // For any other role (e.g., system, unknown), use system to avoid confusion
+              role = 'system' as const;
+            }
+            
             const text = textParts.join('\n');
             if (text) {
               messages.push({ role, content: text });
@@ -1559,7 +1596,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
         messages.push({ role: 'user', content: request.contents });
       } else if ('role' in request.contents && 'parts' in request.contents) {
         const content = request.contents;
-        const role = content.role === 'model' ? 'assistant' : 'user';
+        // Only assign user role to genuine user content
+        const role = content.role === 'model' ? 'assistant' : 
+                    content.role === 'user' ? 'user' : 'system';
         const text =
           content.parts
             ?.map((p: Part) =>
