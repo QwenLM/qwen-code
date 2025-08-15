@@ -4,24 +4,25 @@ This document describes the `web_fetch` tool for the Gemini CLI.
 
 ## Description
 
-Use `web_fetch` to summarize, compare, or extract information from web pages. The `web_fetch` tool processes content from one or more URLs (up to 20) embedded in a prompt. `web_fetch` takes a natural language prompt and returns a generated response.
+Use `web_fetch` to fetch content from a specified URL and process it using an AI model. The tool takes a URL and a prompt as input, fetches the URL content, converts HTML to markdown, and processes the content with the prompt using a small, fast model.
 
 ### Arguments
 
-`web_fetch` takes one argument:
+`web_fetch` takes two arguments:
 
-- `prompt` (string, required): A comprehensive prompt that includes the URL(s) (up to 20) to fetch and specific instructions on how to process their content. For example: `"Summarize https://example.com/article and extract key points from https://another.com/data"`. The prompt must contain at least one URL starting with `http://` or `https://`.
+- `url` (string, required): The URL to fetch content from. Must be a fully-formed valid URL starting with `http://` or `https://`.
+- `prompt` (string, required): The prompt describing what information you want to extract from the page content.
 
 ## How to use `web_fetch` with the Gemini CLI
 
-To use `web_fetch` with the Gemini CLI, provide a natural language prompt that contains URLs. The tool will ask for confirmation before fetching any URLs. Once confirmed, the tool will process URLs through Gemini API's `urlContext`.
+To use `web_fetch` with the Gemini CLI, provide a URL and a prompt describing what you want to extract from that URL. The tool will ask for confirmation before fetching the URL. Once confirmed, the tool will fetch the content directly and process it using an AI model.
 
-If the Gemini API cannot access the URL, the tool will fall back to fetching content directly from the local machine. The tool will format the response, including source attribution and citations where possible. The tool will then provide the response to the user.
+The tool automatically converts HTML to text, handles GitHub blob URLs (converting them to raw URLs), and upgrades HTTP URLs to HTTPS for security.
 
 Usage:
 
 ```
-web_fetch(prompt="Your prompt, including a URL such as https://google.com.")
+web_fetch(url="https://example.com", prompt="Summarize the main points of this article")
 ```
 
 ## `web_fetch` examples
@@ -29,16 +30,25 @@ web_fetch(prompt="Your prompt, including a URL such as https://google.com.")
 Summarize a single article:
 
 ```
-web_fetch(prompt="Can you summarize the main points of https://example.com/news/latest")
+web_fetch(url="https://example.com/news/latest", prompt="Can you summarize the main points of this article?")
 ```
 
-Compare two articles:
+Extract specific information:
 
 ```
-web_fetch(prompt="What are the differences in the conclusions of these two papers: https://arxiv.org/abs/2401.0001 and https://arxiv.org/abs/2401.0002?")
+web_fetch(url="https://arxiv.org/abs/2401.0001", prompt="What are the key findings and methodology described in this paper?")
+```
+
+Analyze GitHub documentation:
+
+```
+web_fetch(url="https://github.com/google/gemini-react/blob/main/README.md", prompt="What are the installation steps and main features?")
 ```
 
 ## Important notes
 
-- **URL processing:** `web_fetch` relies on the Gemini API's ability to access and process the given URLs.
+- **Single URL processing:** `web_fetch` processes one URL at a time. To analyze multiple URLs, make separate calls to the tool.
+- **URL format:** The tool automatically upgrades HTTP URLs to HTTPS and converts GitHub blob URLs to raw format for better content access.
+- **Content processing:** The tool fetches content directly and processes it using an AI model, converting HTML to readable text format.
 - **Output quality:** The quality of the output will depend on the clarity of the instructions in the prompt.
+- **MCP tools:** If an MCP-provided web fetch tool is available (starting with "mcp\_\_"), prefer using that tool as it may have fewer restrictions.
