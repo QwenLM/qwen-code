@@ -377,7 +377,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         buffer.newline();
         return;
       }
-      
+
       if (
         key.name === 'return' &&
         !key.ctrl &&
