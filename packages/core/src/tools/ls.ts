@@ -252,10 +252,24 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
         }
 
         const fullPath = path.join(params.path, file);
-        const relativePath = path.relative(
-          this.config.getTargetDir(),
-          fullPath,
-        );
+
+        // Find the appropriate workspace directory for calculating relative path
+        const workspaceContext = this.config.getWorkspaceContext();
+        const workspaceDirectories = workspaceContext.getDirectories();
+
+        let relativePath = fullPath;
+        // Find which workspace directory contains this file
+        for (const workspaceDir of workspaceDirectories) {
+          if (fullPath.startsWith(workspaceDir)) {
+            relativePath = path.relative(workspaceDir, fullPath);
+            break;
+          }
+        }
+
+        // If no workspace directory contains this file, fall back to target dir
+        if (relativePath === fullPath) {
+          relativePath = path.relative(this.config.getTargetDir(), fullPath);
+        }
 
         // Check if this file should be ignored based on git or gemini ignore rules
         if (
