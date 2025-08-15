@@ -76,6 +76,80 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     params: LSToolParams,
   ) {
     super(params);
+/**
+ * Implementation of the LS tool logic
+ */
+export class LSTool extends BaseTool<LSToolParams, ToolResult> {
+  static readonly Name = 'list_directory';
+
+  constructor(private config: Config) {
+    super(
+      LSTool.Name,
+      'ReadFolder',
+      'Lists the names of files and subdirectories directly within a specified directory path. Can optionally ignore entries matching provided glob patterns.',
+      Icon.Folder,
+      {
+        properties: {
+          path: {
+            description:
+              'The absolute path to the directory to list (must be absolute, not relative)',
+            type: 'string',
+          },
+          ignore: {
+            description: 'List of glob patterns to ignore',
+            items: {
+              type: 'string',
+            },
+            type: 'array',
+          },
+          file_filtering_options: {
+            description:
+              'Optional: Whether to respect ignore patterns from .gitignore or .geminiignore',
+            type: 'object',
+            properties: {
+              respect_git_ignore: {
+                description:
+                  'Optional: Whether to respect .gitignore patterns when listing files. Only available in git repositories. Defaults to true.',
+                type: 'boolean',
+              },
+              respect_gemini_ignore: {
+                description:
+                  'Optional: Whether to respect .geminiignore patterns when listing files. Defaults to true.',
+                type: 'boolean',
+              },
+            },
+          },
+        },
+        required: ['path'],
+        type: 'object',
+      },
+    );
+  }
+
+  /**
+   * Validates the parameters for the tool
+   * @param params Parameters to validate
+   * @returns An error message string if invalid, null otherwise
+   */
+  validateToolParams(params: LSToolParams): string | null {
+    const errors = SchemaValidator.validate(
+      this.schema.parametersJsonSchema,
+      params,
+    );
+    if (errors) {
+      return errors;
+    }
+    if (!path.isAbsolute(params.path)) {
+      return `Path must be absolute: ${params.path}`;
+    }
+
+    const workspaceContext = this.config.getWorkspaceContext();
+    if (!workspaceContext.isPathWithinWorkspace(params.path)) {
+      const directories = workspaceContext.getDirectories();
+      return `Directory access restricted. I can only access files within the configured workspace directories: ${directories.join(', ')}. The requested path "${params.path}" is outside these allowed directories.`;
+    }
+    return null;
+    
   }
 
   /**
