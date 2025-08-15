@@ -42,4 +42,4 @@ packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 .qwen/
-logs/
+logs/.qwen.env
