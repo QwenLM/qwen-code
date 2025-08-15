@@ -18,6 +18,8 @@ The CLI will guide you through each field:
 2. Review/modify the base URL and press Enter
 3. Review/modify the model name and press Enter
 
+After entering your credentials, you'll be asked if you want to save them to a `.qwen.env` file for future use. This file will be created in your project directory with the OpenAI credentials.
+
 **Note**: You can paste your API key directly - the CLI supports paste functionality and will display the full key for verification.
 
 ### 2. Command Line Arguments
@@ -74,3 +76,4 @@ To switch between authentication methods, use the `/auth` command in the CLI int
 - For persistent storage, use environment variables or `.env` files
 - Never commit API keys to version control
 - The CLI displays API keys in plain text for verification - ensure your terminal is secure
+- When saving credentials to `.qwen.env`, remember to add this file to your `.gitignore` to prevent accidentally committing your API credentials
