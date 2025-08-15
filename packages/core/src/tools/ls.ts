@@ -272,7 +272,11 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
         }
 
         // Check if this file should be ignored based on git or gemini ignore rules
+        // Only apply ignore rules if the file is within the main project directory
+        const isInMainProject = fullPath.startsWith(this.config.getTargetDir());
+        
         if (
+          isInMainProject &&
           fileFilteringOptions.respectGitIgnore &&
           fileDiscovery.shouldGitIgnoreFile(relativePath)
         ) {
@@ -280,6 +284,7 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
           continue;
         }
         if (
+          isInMainProject &&
           fileFilteringOptions.respectGeminiIgnore &&
           fileDiscovery.shouldGeminiIgnoreFile(relativePath)
         ) {
