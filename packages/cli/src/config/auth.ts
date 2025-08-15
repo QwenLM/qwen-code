@@ -88,5 +88,5 @@ OPENAI_MODEL=${model}
   }
 
   fs.writeFileSync(envPath, content, 'utf-8');
-  // In a real implementation, we would show a success message here
+  console.log(`Credentials saved to ${envPath}`);
 }

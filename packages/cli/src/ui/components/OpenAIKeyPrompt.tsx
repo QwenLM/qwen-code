@@ -50,7 +50,8 @@ export function OpenAIKeyPrompt({
           .then(() => {
             onSubmit(savedApiKey, savedBaseUrl, savedModel);
           })
-          .catch(() => {
+          .catch((error) => {
+            console.warn('Failed to save credentials to .qwen.env:', error);
             // Even if save fails, continue with the session
             onSubmit(savedApiKey, savedBaseUrl, savedModel);
           });
