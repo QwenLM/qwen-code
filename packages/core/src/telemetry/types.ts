@@ -314,6 +314,23 @@ export class MalformedJsonResponseEvent {
   }
 }
 
+export enum IdeConnectionType {
+  START = 'start',
+  SESSION = 'session',
+}
+
+export class IdeConnectionEvent {
+  'event.name': 'ide_connection';
+  'event.timestamp': string; // ISO 8601
+  connection_type: IdeConnectionType;
+
+  constructor(connection_type: IdeConnectionType) {
+    this['event.name'] = 'ide_connection';
+    this['event.timestamp'] = new Date().toISOString();
+    this.connection_type = connection_type;
+  }
+}
+
 export type TelemetryEvent =
   | StartSessionEvent
   | EndSessionEvent
@@ -326,4 +343,5 @@ export type TelemetryEvent =
   | LoopDetectedEvent
   | NextSpeakerCheckEvent
   | SlashCommandEvent
-  | MalformedJsonResponseEvent;
+  | MalformedJsonResponseEvent
+  | IdeConnectionEvent;

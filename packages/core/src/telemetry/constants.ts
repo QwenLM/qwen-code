@@ -15,6 +15,7 @@ export const EVENT_CLI_CONFIG = 'qwen-code.config';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
 export const EVENT_NEXT_SPEAKER_CHECK = 'qwen-code.next_speaker_check';
 export const EVENT_SLASH_COMMAND = 'qwen-code.slash_command';
+export const EVENT_IDE_CONNECTION = 'qwen-code.ide_connection';
 
 export const METRIC_TOOL_CALL_COUNT = 'qwen-code.tool.call.count';
 export const METRIC_TOOL_CALL_LATENCY = 'qwen-code.tool.call.latency';

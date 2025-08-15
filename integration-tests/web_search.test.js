@@ -9,6 +9,11 @@ import { strict as assert } from 'assert';
 import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
 
 test('should be able to search the web', async () => {
+  // Skip if Tavily key is not configured
+  if (!process.env.TAVILY_API_KEY) {
+    console.warn('Skipping web search test: TAVILY_API_KEY not set');
+    return;
+  }
   const rig = new TestRig();
   await rig.setup('should be able to search the web');
 
@@ -27,7 +32,7 @@ test('should be able to search the web', async () => {
     throw error; // Re-throw if not a network error
   }
 
-  const foundToolCall = await rig.waitForToolCall('google_web_search');
+  const foundToolCall = await rig.waitForToolCall('web_search');
 
   // Add debugging information
   if (!foundToolCall) {
@@ -35,12 +40,11 @@ test('should be able to search the web', async () => {
 
     // Check if the tool call failed due to network issues
     const failedSearchCalls = allTools.filter(
-      (t) =>
-        t.toolRequest.name === 'google_web_search' && !t.toolRequest.success,
+      (t) => t.toolRequest.name === 'web_search' && !t.toolRequest.success,
     );
     if (failedSearchCalls.length > 0) {
       console.warn(
-        'google_web_search tool was called but failed, possibly due to network issues',
+        'web_search tool was called but failed, possibly due to network issues',
       );
       console.warn(
         'Failed calls:',
@@ -50,20 +54,20 @@ test('should be able to search the web', async () => {
     }
   }
 
-  assert.ok(foundToolCall, 'Expected to find a call to google_web_search');
+  assert.ok(foundToolCall, 'Expected to find a call to web_search');
 
   // Validate model output - will throw if no output, warn if missing expected content
   const hasExpectedContent = validateModelOutput(
     result,
     ['weather', 'london'],
-    'Google web search test',
+    'Web search test',
   );
 
   // If content was missing, log the search queries used
   if (!hasExpectedContent) {
     const searchCalls = rig
       .readToolLogs()
-      .filter((t) => t.toolRequest.name === 'google_web_search');
+      .filter((t) => t.toolRequest.name === 'web_search');
     if (searchCalls.length > 0) {
       console.warn(
         'Search queries used:',

@@ -248,6 +248,31 @@ In addition to a project settings file, a project's `.gemini` directory can cont
     "excludedProjectEnvVars": ["DEBUG", "DEBUG_MODE", "NODE_ENV"]
     ```
 
+- **`includeDirectories`** (array of strings):
+  - **Description:** Specifies an array of additional absolute or relative paths to include in the workspace context. This allows you to work with files across multiple directories as if they were one. Paths can use `~` to refer to the user's home directory. This setting can be combined with the `--include-directories` command-line flag.
+  - **Default:** `[]`
+  - **Example:**
+    ```json
+    "includeDirectories": [
+      "/path/to/another/project",
+      "../shared-library",
+      "~/common-utils"
+    ]
+    ```
+
+- **`loadMemoryFromIncludeDirectories`** (boolean):
+  - **Description:** Controls the behavior of the `/memory refresh` command. If set to `true`, `QWEN.md` files should be loaded from all directories that are added. If set to `false`, `QWEN.md` should only be loaded from the current directory.
+  - **Default:** `false`
+  - **Example:**
+    ```json
+    "loadMemoryFromIncludeDirectories": true
+    ```
+
+- **`tavilyApiKey`** (string):
+  - **Description:** API key for Tavily web search service. Required to enable the `web_search` tool functionality. If not configured, the web search tool will be disabled and skipped.
+  - **Default:** `undefined` (web search disabled)
+  - **Example:** `"tavilyApiKey": "tvly-your-api-key-here"`
+
 ### Example `settings.json`:
 
 ```json
@@ -256,6 +281,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   "sandbox": "docker",
   "toolDiscoveryCommand": "bin/get_tools",
   "toolCallCommand": "bin/call_tool",
+  "tavilyApiKey": "$TAVILY_API_KEY",
   "mcpServers": {
     "mainServer": {
       "command": "bin/mcp_server.py"
@@ -280,7 +306,9 @@ In addition to a project settings file, a project's `.gemini` directory can cont
       "tokenBudget": 100
     }
   },
-  "excludedProjectEnvVars": ["DEBUG", "DEBUG_MODE", "NODE_ENV"]
+  "excludedProjectEnvVars": ["DEBUG", "DEBUG_MODE", "NODE_ENV"],
+  "includeDirectories": ["path/to/dir1", "~/path/to/dir2", "../path/to/dir3"],
+  "loadMemoryFromIncludeDirectories": true
 }
 ```
 
@@ -351,6 +379,11 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
 - **`CODE_ASSIST_ENDPOINT`**:
   - Specifies the endpoint for the code assist server.
   - This is useful for development and testing.
+- **`TAVILY_API_KEY`**:
+  - Your API key for the Tavily web search service.
+  - Required to enable the `web_search` tool functionality.
+  - If not configured, the web search tool will be disabled and skipped.
+  - Example: `export TAVILY_API_KEY="tvly-your-api-key-here"`
 
 ## Command-Line Arguments
 
@@ -408,6 +441,9 @@ Arguments passed directly when running the CLI can override other configurations
   - Displays the version of the CLI.
 - **`--openai-logging`**:
   - Enables logging of OpenAI API calls for debugging and analysis. This flag overrides the `enableOpenAILogging` setting in `settings.json`.
+- **`--tavily-api-key <api_key>`**:
+  - Sets the Tavily API key for web search functionality for this session.
+  - Example: `gemini --tavily-api-key tvly-your-api-key-here`
 
 ## Context Files (Hierarchical Instructional Context)
 

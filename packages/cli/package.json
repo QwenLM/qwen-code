@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -25,7 +25,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.5"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.6"
   },
   "dependencies": {
     "@google/genai": "1.9.0",
@@ -75,7 +75,8 @@
     "pretty-format": "^30.0.2",
     "react-dom": "^19.1.0",
     "typescript": "^5.3.3",
-    "vitest": "^3.1.1"
+    "vitest": "^3.1.1",
+    "@qwen-code/qwen-code-test-utils": "file:../test-utils"
   },
   "engines": {
     "node": ">=20"

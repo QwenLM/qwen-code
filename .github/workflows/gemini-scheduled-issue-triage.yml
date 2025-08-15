@@ -42,7 +42,7 @@ jobs:
           ISSUES_TO_TRIAGE: ${{ steps.find_issues.outputs.issues_to_triage }}
           REPOSITORY: ${{ github.repository }}
         with:
-          version: 0.0.5
+          version: 0.0.6
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}

@@ -1,36 +1,43 @@
-# Web Search Tool (`google_web_search`)
+# Web Search Tool (`web_search`)
 
-This document describes the `google_web_search` tool.
+This document describes the `web_search` tool.
 
 ## Description
 
-Use `google_web_search` to perform a web search using Google Search via the Gemini API. The `google_web_search` tool returns a summary of web results with sources.
+Use `web_search` to perform a web search using the Tavily API. The tool returns a concise answer with sources when possible.
 
 ### Arguments
 
-`google_web_search` takes one argument:
+`web_search` takes one argument:
 
 - `query` (string, required): The search query.
 
-## How to use `google_web_search` with the Gemini CLI
+## How to use `web_search`
 
-The `google_web_search` tool sends a query to the Gemini API, which then performs a web search. `google_web_search` will return a generated response based on the search results, including citations and sources.
+`web_search` calls the Tavily API directly. You must configure the `TAVILY_API_KEY` through one of the following methods:
+
+1. **Settings file**: Add `"tavilyApiKey": "your-key-here"` to your `settings.json`
+2. **Environment variable**: Set `TAVILY_API_KEY` in your environment or `.env` file
+3. **Command line**: Use `--tavily-api-key your-key-here` when running the CLI
+
+If the key is not configured, the tool will be disabled and skipped.
 
 Usage:
 
 ```
-google_web_search(query="Your query goes here.")
+web_search(query="Your query goes here.")
 ```
 
-## `google_web_search` examples
+## `web_search` examples
 
 Get information on a topic:
 
 ```
-google_web_search(query="latest advancements in AI-powered code generation")
+web_search(query="latest advancements in AI-powered code generation")
 ```
 
 ## Important notes
 
-- **Response returned:** The `google_web_search` tool returns a processed summary, not a raw list of search results.
-- **Citations:** The response includes citations to the sources used to generate the summary.
+- **Response returned:** The `web_search` tool returns a concise answer when available, with a list of source links.
+- **Citations:** Source links are appended as a numbered list.
+- **API key:** Configure `TAVILY_API_KEY` via settings.json, environment variables, .env files, or command line arguments. If not configured, the tool is not registered.

@@ -7,7 +7,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Config } from './config.js';
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GEMINI_FLASH_MODEL } from './models.js';
-import { IdeClient } from '../ide/ide-client.js';
 import fs from 'node:fs';
 
 vi.mock('node:fs');
@@ -26,7 +25,6 @@ describe('Flash Model Fallback Configuration', () => {
       debugMode: false,
       cwd: '/test',
       model: DEFAULT_GEMINI_MODEL,
-      ideClient: IdeClient.getInstance(false),
     });
 
     // Initialize contentGeneratorConfig for testing
@@ -51,7 +49,6 @@ describe('Flash Model Fallback Configuration', () => {
         debugMode: false,
         cwd: '/test',
         model: DEFAULT_GEMINI_MODEL,
-        ideClient: IdeClient.getInstance(false),
       });
 
       // Should not crash when contentGeneratorConfig is undefined
@@ -75,7 +72,6 @@ describe('Flash Model Fallback Configuration', () => {
         debugMode: false,
         cwd: '/test',
         model: 'custom-model',
-        ideClient: IdeClient.getInstance(false),
       });
 
       expect(newConfig.getModel()).toBe('custom-model');
