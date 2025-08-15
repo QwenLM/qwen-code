@@ -134,7 +134,7 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
     const workspaceContext = this.config.getWorkspaceContext();
     if (!workspaceContext.isPathWithinWorkspace(params.path)) {
       const directories = workspaceContext.getDirectories();
-      return `Path must be within one of the workspace directories: ${directories.join(', ')}`;
+      return `Directory access restricted. I can only access files within the configured workspace directories: ${directories.join(', ')}. The requested path "${params.path}" is outside these allowed directories.`;
     }
     return null;
   }
