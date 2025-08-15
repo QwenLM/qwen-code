@@ -942,9 +942,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
       }
     }
 
-    // Clean up orphaned tool calls and merge consecutive assistant messages
-    const cleanedMessages = this.cleanOrphanedToolCalls(messages);
-    return this.mergeConsecutiveAssistantMessages(cleanedMessages);
+    // For OpenAI/Qwen-compatible providers, ensure strict tool pairing:
+    // Place each role: "tool" message immediately after its corresponding
+    // assistant message that contains the matching tool_call id, and avoid
+    // pruning tool_calls that could sever the pairing.
+    return this.ensureToolPairing(messages);
   }
 
   /**
@@ -1240,6 +1242,84 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     return response;
+  }
+
+  /**
+   * Reorder messages to ensure that each tool message immediately follows the
+   * assistant message that contains the corresponding tool_call id. This aligns
+   * with stricter providers (e.g., Qwen/DashScope) that require adjacency.
+   *
+   * - Does not drop assistant tool_calls
+   * - Preserves the relative order of tool_calls for a given assistant message
+   */
+  private ensureToolPairing(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+  ): OpenAI.Chat.ChatCompletionMessageParam[] {
+    if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+    // Build mapping from tool_call_id -> { assistantIndex, order }
+    const toolIdToAssistant: Map<string, { idx: number; order: number }> = new Map();
+    messages.forEach((m, idx) => {
+      if (m.role === 'assistant' && 'tool_calls' in m && m.tool_calls) {
+        m.tool_calls.forEach((tc, order) => {
+          if (tc?.id) {
+            toolIdToAssistant.set(tc.id, { idx, order });
+          }
+        });
+      }
+    });
+
+    // Group tool messages by their assistant index
+    const assistantIdxToTools: Map<
+      number,
+      { msg: OpenAI.Chat.ChatCompletionMessageParam; order: number }[]
+    > = new Map();
+
+    messages.forEach((m) => {
+      if (m.role === 'tool' && 'tool_call_id' in m && m.tool_call_id) {
+        const meta = toolIdToAssistant.get(m.tool_call_id);
+        if (meta) {
+          const arr = assistantIdxToTools.get(meta.idx) || [];
+          arr.push({ msg: m, order: meta.order });
+          assistantIdxToTools.set(meta.idx, arr);
+        }
+      }
+    });
+
+    // Assemble a new message list ensuring adjacency
+    const result: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+    const consumedToolMessages = new Set<OpenAI.Chat.ChatCompletionMessageParam>();
+
+    messages.forEach((m, idx) => {
+      if (m.role === 'assistant' && assistantIdxToTools.has(idx)) {
+        // Push assistant message
+        result.push(m);
+        // Push its corresponding tool messages in the same order as tool_calls
+        const tools = assistantIdxToTools
+          .get(idx)!
+          .sort((a, b) => a.order - b.order)
+          .map((x) => x.msg);
+        tools.forEach((t) => {
+          result.push(t);
+          consumedToolMessages.add(t);
+        });
+      } else if (m.role === 'tool') {
+        // Skip here; it will be inserted next to its assistant
+        if (!consumedToolMessages.has(m)) {
+          // If no matching assistant was found, keep it to avoid data loss
+          // (provider may error, but better than silently dropping)
+          const meta = 'tool_call_id' in m ? toolIdToAssistant.get(m.tool_call_id || '') : undefined;
+          if (!meta) {
+            result.push(m);
+          }
+        }
+      } else {
+        // Other roles are kept as-is
+        result.push(m);
+      }
+    });
+
+    return result;
   }
 
   private convertStreamChunkToGeminiFormat(
@@ -1570,14 +1650,12 @@ export class OpenAIContentGenerator implements ContentGenerator {
       }
     }
 
-    // Clean up orphaned tool calls and merge consecutive assistant messages
-    const cleanedMessages = this.cleanOrphanedToolCallsForLogging(messages);
-    const mergedMessages =
-      this.mergeConsecutiveAssistantMessagesForLogging(cleanedMessages);
+    // Ensure strict tool pairing for logging as well, to mirror actual requests
+    const pairedMessages = this.ensureToolPairingForLogging(messages);
 
     const openaiRequest: OpenAIRequestFormat = {
       model: this.model,
-      messages: mergedMessages,
+      messages: pairedMessages,
     };
 
     // Add sampling parameters using the same logic as actual API calls
@@ -1744,6 +1822,64 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     return merged;
+  }
+
+  /**
+   * Logging-time pairing to keep `tool` messages adjacent to their assistant
+   * `tool_calls` source while preserving order and avoiding drops.
+   */
+  private ensureToolPairingForLogging(messages: OpenAIMessage[]): OpenAIMessage[] {
+    if (!Array.isArray(messages) || messages.length === 0) return messages;
+
+    const toolIdToAssistant: Map<string, { idx: number; order: number }> = new Map();
+    messages.forEach((m, idx) => {
+      if (m.role === 'assistant' && m.tool_calls) {
+        m.tool_calls.forEach((tc, order) => {
+          if (tc?.id) {
+            toolIdToAssistant.set(tc.id, { idx, order });
+          }
+        });
+      }
+    });
+
+    const assistantIdxToTools: Map<number, { msg: OpenAIMessage; order: number }[]> = new Map();
+    messages.forEach((m) => {
+      if (m.role === 'tool' && m.tool_call_id) {
+        const meta = toolIdToAssistant.get(m.tool_call_id);
+        if (meta) {
+          const arr = assistantIdxToTools.get(meta.idx) || [];
+          arr.push({ msg: m, order: meta.order });
+          assistantIdxToTools.set(meta.idx, arr);
+        }
+      }
+    });
+
+    const result: OpenAIMessage[] = [];
+    const consumed = new Set<OpenAIMessage>();
+    messages.forEach((m, idx) => {
+      if (m.role === 'assistant' && assistantIdxToTools.has(idx)) {
+        result.push(m);
+        const tools = assistantIdxToTools
+          .get(idx)!
+          .sort((a, b) => a.order - b.order)
+          .map((x) => x.msg);
+        tools.forEach((t) => {
+          result.push(t);
+          consumed.add(t);
+        });
+      } else if (m.role === 'tool') {
+        if (!consumed.has(m)) {
+          const meta = m.tool_call_id ? toolIdToAssistant.get(m.tool_call_id) : undefined;
+          if (!meta) {
+            result.push(m);
+          }
+        }
+      } else {
+        result.push(m);
+      }
+    });
+
+    return result;
   }
 
   /**
