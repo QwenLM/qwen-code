@@ -33,7 +33,7 @@
     "chardet": "^2.1.0",
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",
-    "fdir": "^6.4.6",
+    "fdir": "^6.5.0",
     "glob": "^10.4.5",
     "google-auth-library": "^9.11.0",
     "html-to-text": "^9.0.5",
