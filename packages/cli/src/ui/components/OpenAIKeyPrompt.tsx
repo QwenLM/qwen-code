@@ -183,8 +183,12 @@ export function OpenAIKeyPrompt({
         </Box>
         <Box marginTop={1}>
           <Text color={Colors.AccentYellow}>
-            Warning: Add .qwen.env to your .gitignore to prevent accidentally
-            committing your API credentials.
+            Note: .qwen.env is already in .gitignore to prevent accidental commits
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={Colors.Gray}>
+            Press Enter or Y to save, N for session-only, Esc to use session-only
           </Text>
         </Box>
       </Box>

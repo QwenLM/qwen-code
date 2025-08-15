@@ -8,6 +8,11 @@ import { render } from 'ink-testing-library';
 import { describe, it, expect, vi } from 'vitest';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 
+// Mock the saveToQwenEnv function
+vi.mock('../../config/auth.js', () => ({
+  saveToQwenEnv: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe('OpenAIKeyPrompt', () => {
   it('should render the prompt correctly', () => {
     const onSubmit = vi.fn();
@@ -62,8 +67,8 @@ describe('OpenAIKeyPrompt', () => {
     expect(onSubmit).not.toHaveBeenCalled(); // Should not submit yet
   });
 
-  it('should show save prompt with gitignore warning', () => {
-    // Mock the internal state to show the save prompt
+  it('should show save prompt after entering configuration', () => {
+    // Test that save prompt appears after entering configuration
     const onSubmit = vi.fn();
     const onCancel = vi.fn();
 
@@ -87,7 +92,7 @@ describe('OpenAIKeyPrompt', () => {
         'Save these credentials to .qwen.env for future use? [Y/n]',
       );
       expect(output).toContain(
-        'Warning: Add .qwen.env to your .gitignore to prevent accidentally committing your API credentials.',
+        'Note: .qwen.env is already in .gitignore to prevent accidental commits',
       );
     }, 100);
   });

@@ -5,8 +5,10 @@
  */
 
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { vi } from 'vitest';
-import { validateAuthMethod } from './auth.js';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import { validateAuthMethod, saveToQwenEnv } from './auth.js';
 
 vi.mock('./settings.js', () => ({
   loadEnvironment: vi.fn(),
@@ -71,5 +73,87 @@ describe('validateAuthMethod', () => {
     expect(validateAuthMethod('invalid-method')).toBe(
       'Invalid auth method selected.',
     );
+  });
+});
+
+describe('saveToQwenEnv', () => {
+  const testDir = '/tmp/test-qwen-env-' + Date.now();
+  const originalCwd = process.cwd();
+
+  beforeEach(() => {
+    // Create test directory
+    if (!fs.existsSync(testDir)) {
+      fs.mkdirSync(testDir, { recursive: true });
+    }
+    process.chdir(testDir);
+  });
+
+  afterEach(() => {
+    // Clean up test files
+    process.chdir(originalCwd);
+    if (fs.existsSync(testDir)) {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('should create .qwen.env file with correct content', async () => {
+    await saveToQwenEnv('test-api-key', 'https://api.test.com', 'test-model');
+
+    const envPath = path.join(testDir, '.qwen.env');
+    expect(fs.existsSync(envPath)).toBe(true);
+
+    const content = fs.readFileSync(envPath, 'utf-8');
+    expect(content).toContain('# Qwen Code API Configuration');
+    expect(content).toContain('# This file is already included in .gitignore');
+    expect(content).toContain('OPENAI_API_KEY=test-api-key');
+    expect(content).toContain('OPENAI_BASE_URL=https://api.test.com');
+    expect(content).toContain('OPENAI_MODEL=test-model');
+  });
+
+  it('should create file with secure permissions (0o600)', async () => {
+    await saveToQwenEnv('test-key', 'https://api.test.com', 'model');
+
+    const envPath = path.join(testDir, '.qwen.env');
+    const stats = fs.statSync(envPath);
+    const mode = stats.mode & parseInt('777', 8);
+    
+    // File should be readable and writable only by owner (0o600)
+    expect(mode.toString(8)).toBe('600');
+  });
+
+  it('should overwrite existing file', async () => {
+    const envPath = path.join(testDir, '.qwen.env');
+    
+    // Create initial file
+    fs.writeFileSync(envPath, 'OLD_CONTENT=old');
+    
+    // Save new content
+    await saveToQwenEnv('new-key', 'new-url', 'new-model');
+    
+    // Check it was overwritten
+    const content = fs.readFileSync(envPath, 'utf-8');
+    expect(content).not.toContain('OLD_CONTENT');
+    expect(content).toContain('OPENAI_API_KEY=new-key');
+  });
+
+  it('should handle empty values correctly', async () => {
+    await saveToQwenEnv('api-key', '', '');
+
+    const content = fs.readFileSync(path.join(testDir, '.qwen.env'), 'utf-8');
+    expect(content).toContain('OPENAI_API_KEY=api-key');
+    expect(content).toContain('OPENAI_BASE_URL=');
+    expect(content).toContain('OPENAI_MODEL=');
+  });
+
+  it('should log success message', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await saveToQwenEnv('key', 'url', 'model');
+
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Credentials saved securely to')
+    );
+
+    consoleSpy.mockRestore();
   });
 });

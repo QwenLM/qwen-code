@@ -74,17 +74,32 @@ export async function saveToQwenEnv(
   model: string,
 ): Promise<void> {
   const envPath = path.join(process.cwd(), '.qwen.env');
+  const tempPath = `${envPath}.tmp`;
   const content = `# Qwen Code API Configuration
-# Add .qwen.env to your .gitignore
+# This file is already included in .gitignore
 OPENAI_API_KEY=${apiKey}
 OPENAI_BASE_URL=${baseUrl}
 OPENAI_MODEL=${model}
 `;
 
-  if (fs.existsSync(envPath)) {
-    // Overwrite is intentional as the UI layer handles user confirmation.
+  try {
+    // Write to temporary file first with secure permissions (owner read/write only)
+    await fs.promises.writeFile(tempPath, content, { 
+      encoding: 'utf-8',
+      mode: 0o600 // Owner read/write only for security
+    });
+    
+    // Atomically rename to prevent corruption
+    await fs.promises.rename(tempPath, envPath);
+    
+    console.log(`Credentials saved securely to ${envPath}`);
+  } catch (error) {
+    // Clean up temp file if it exists
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw error;
   }
-
-  fs.writeFileSync(envPath, content, 'utf-8');
-  console.log(`Credentials saved to ${envPath}`);
 }

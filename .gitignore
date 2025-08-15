@@ -1,6 +1,7 @@
 # API keys and secrets
 .env
 .env~
+.qwen.env
 
 # gemini-cli settings
 .gemini/
@@ -42,4 +43,4 @@ packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 .qwen/
-logs/.qwen.env
+logs/
