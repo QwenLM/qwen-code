@@ -82,9 +82,7 @@ OPENAI_MODEL=${model}
 `;
 
   if (fs.existsSync(envPath)) {
-    // In a real implementation, we would prompt the user here
-    // For now, we'll just overwrite (following the task requirements)
-    // Note: In a full implementation, we'd want to ask "Overwrite existing .qwen.env? [Y/n]"
+    // Overwrite is intentional as the UI layer handles user confirmation.
   }
 
   fs.writeFileSync(envPath, content, 'utf-8');
