@@ -331,11 +331,13 @@ The CLI automatically loads environment variables from files in the following pr
 3. **`.qwen.env` file variables** - User-specific fallback configuration (lowest precedence)
 
 The file search order for `.env` files is:
+
 1.  `.env` file in the current working directory.
 2.  If not found, it searches upwards in parent directories until it finds an `.env` file or reaches the project root (identified by a `.git` folder) or the home directory.
 3.  If still not found, it looks for `~/.env` (in the user's home directory).
 
 The file search order for `.qwen.env` files is:
+
 1.  `.qwen.env` file in the current working directory.
 2.  If not found, it searches upwards in parent directories until it finds a `.qwen.env` file or reaches the project root (identified by a `.git` folder) or the home directory.
 3.  If still not found, it looks for `~/.qwen.env` (in the user's home directory).
