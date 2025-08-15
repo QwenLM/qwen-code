@@ -138,8 +138,12 @@ export class WorkspaceContext {
         }
       }
 
+      // Normalize paths for consistent comparison on Windows
+      const normalizedResolvedPath = path.normalize(resolvedPath).toLowerCase();
+
       for (const dir of this.directories) {
-        if (this.isPathWithinRoot(resolvedPath, dir)) {
+        const normalizedDir = path.normalize(dir).toLowerCase();
+        if (this.isPathWithinRoot(normalizedResolvedPath, normalizedDir)) {
           return true;
         }
       }
