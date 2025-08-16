@@ -129,13 +129,18 @@ async function readFullStructure(
         const fileName = entry.name;
         const filePath = path.join(currentPath, fileName);
         if (options.fileService) {
-          const shouldIgnore =
-            (options.fileFilteringOptions.respectGitIgnore &&
-              options.fileService.shouldGitIgnoreFile(filePath)) ||
-            (options.fileFilteringOptions.respectGeminiIgnore &&
-              options.fileService.shouldGeminiIgnoreFile(filePath));
-          if (shouldIgnore) {
-            continue;
+          try {
+            const shouldIgnore =
+              (options.fileFilteringOptions.respectGitIgnore &&
+                options.fileService.shouldGitIgnoreFile(filePath)) ||
+              (options.fileFilteringOptions.respectGeminiIgnore &&
+                options.fileService.shouldGeminiIgnoreFile(filePath));
+            if (shouldIgnore) {
+              continue;
+            }
+          } catch (error) {
+            // If ignore file checking fails, just continue processing the file
+            console.warn(`Warning: Could not check ignore status for file ${filePath}:`, error);
           }
         }
         if (
@@ -169,11 +174,17 @@ async function readFullStructure(
 
         let isIgnored = false;
         if (options.fileService) {
-          isIgnored =
-            (options.fileFilteringOptions.respectGitIgnore &&
-              options.fileService.shouldGitIgnoreFile(subFolderPath)) ||
-            (options.fileFilteringOptions.respectGeminiIgnore &&
-              options.fileService.shouldGeminiIgnoreFile(subFolderPath));
+          try {
+            isIgnored =
+              (options.fileFilteringOptions.respectGitIgnore &&
+                options.fileService.shouldGitIgnoreFile(subFolderPath)) ||
+              (options.fileFilteringOptions.respectGeminiIgnore &&
+                options.fileService.shouldGeminiIgnoreFile(subFolderPath));
+          } catch (error) {
+            // If ignore file checking fails, treat as not ignored and continue
+            console.warn(`Warning: Could not check ignore status for directory ${subFolderPath}:`, error);
+            isIgnored = false;
+          }
         }
 
         if (options.ignoredFolders.has(subFolderName) || isIgnored) {
