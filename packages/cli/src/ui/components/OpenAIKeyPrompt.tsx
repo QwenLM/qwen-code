@@ -138,7 +138,7 @@ export function OpenAIKeyPrompt({
         <Text>
           Please enter your OpenAI configuration. You can get an API key from{' '}
           <Text color={Colors.AccentBlue}>
-            https://platform.openai.com/api-keys
+            https://bailian.console.aliyun.com/?tab=model#/api-key
           </Text>
         </Text>
       </Box>
