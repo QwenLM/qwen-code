@@ -38,6 +38,24 @@ export const validateAuthMethod = (authMethod: string): string | null => {
     return null;
   }
 
+  if (authMethod === AuthType.AZURE_OPENAI) {
+    const hasCore =
+      !!process.env.AZURE_OPENAI_ENDPOINT &&
+      !!process.env.AZURE_OPENAI_DEPLOYMENT;
+    const hasCred =
+      !!process.env.AZURE_OPENAI_API_KEY || !!process.env.AZURE_OPENAI_BEARER_TOKEN;
+
+    if (!hasCore || !hasCred) {
+      return (
+        'Azure OpenAI configuration not found. You must set:\n' +
+        '• AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT and\n' +
+        '  either AZURE_OPENAI_API_KEY or AZURE_OPENAI_BEARER_TOKEN.\n' +
+        'You can enter these interactively or add them to your .env file.'
+      );
+    }
+    return null;
+  }
+
   if (authMethod === AuthType.USE_OPENAI) {
     const isOpenAIKeySet = !!process.env.OPENAI_API_KEY;
     const isAzureConfigSet = !!(
