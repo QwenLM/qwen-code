@@ -46,6 +46,7 @@ export enum AuthType {
   USE_VERTEX_AI = 'vertex-ai',
   CLOUD_SHELL = 'cloud-shell',
   USE_OPENAI = 'openai',
+  AZURE_OPENAI = 'azure-openai',
   QWEN_OAUTH = 'qwen-oauth',
 }
 
@@ -124,6 +125,21 @@ export function createContentGeneratorConfig(
     return contentGeneratorConfig;
   }
 
+  if (authType === AuthType.AZURE_OPENAI) {
+    // Azure OpenAI requires endpoint & deployment
+    const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+    const azureDeployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+    const azureApiKey = process.env.AZURE_OPENAI_API_KEY;
+    const azureBearer = process.env.AZURE_OPENAI_BEARER_TOKEN;
+    if (azureEndpoint && azureDeployment && (azureApiKey || azureBearer)) {
+      contentGeneratorConfig.apiKey = azureApiKey ?? '';
+      // Use deployment name as model if not explicitly set
+      contentGeneratorConfig.model =
+        process.env.OPENAI_MODEL || azureDeployment;
+      return contentGeneratorConfig;
+    }
+  }
+
   if (authType === AuthType.USE_OPENAI && openaiApiKey) {
     contentGeneratorConfig.apiKey = openaiApiKey;
     contentGeneratorConfig.model =
@@ -180,6 +196,20 @@ export async function createContentGenerator(
     });
 
     return googleGenAI.models;
+  }
+
+  if (config.authType === AuthType.AZURE_OPENAI) {
+    // Import Azure generator dynamically
+    // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+    // @ts-ignore TypeScript may not resolve the .js suffix in TS source; runtime path is correct after build.
+    const { AzureOpenAIContentGenerator } = await import(
+      './azureOpenAIContentGenerator.js'
+    );
+    return new AzureOpenAIContentGenerator(
+      config.apiKey ?? '',
+      config.model,
+      gcConfig,
+    );
   }
 
   if (config.authType === AuthType.USE_OPENAI) {

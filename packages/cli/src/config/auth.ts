@@ -38,9 +38,39 @@ export const validateAuthMethod = (authMethod: string): string | null => {
     return null;
   }
 
+  if (authMethod === AuthType.AZURE_OPENAI) {
+    const hasCore =
+      !!process.env.AZURE_OPENAI_ENDPOINT &&
+      !!process.env.AZURE_OPENAI_DEPLOYMENT;
+    const hasCred =
+      !!process.env.AZURE_OPENAI_API_KEY || !!process.env.AZURE_OPENAI_BEARER_TOKEN;
+
+    if (!hasCore || !hasCred) {
+      return (
+        'Azure OpenAI configuration not found. You must set:\n' +
+        '• AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT and\n' +
+        '  either AZURE_OPENAI_API_KEY or AZURE_OPENAI_BEARER_TOKEN.\n' +
+        'You can enter these interactively or add them to your .env file.'
+      );
+    }
+    return null;
+  }
+
   if (authMethod === AuthType.USE_OPENAI) {
-    if (!process.env.OPENAI_API_KEY) {
-      return 'OPENAI_API_KEY environment variable not found. You can enter it interactively or add it to your .env file.';
+    const isOpenAIKeySet = !!process.env.OPENAI_API_KEY;
+    const isAzureConfigSet = !!(
+      process.env.AZURE_OPENAI_ENDPOINT &&
+      process.env.AZURE_OPENAI_DEPLOYMENT &&
+      process.env.AZURE_OPENAI_API_KEY
+    );
+
+    if (!isOpenAIKeySet && !isAzureConfigSet) {
+      return (
+        'OpenAI configuration not found. You must set either:\n' +
+        '• OPENAI_API_KEY environment variable for standard OpenAI\n' +
+        '• AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT, and AZURE_OPENAI_API_KEY for Azure OpenAI\n' +
+        'You can enter these interactively or add them to your .env file.'
+      );
     }
     return null;
   }
@@ -56,6 +86,20 @@ export const validateAuthMethod = (authMethod: string): string | null => {
 
 export const setOpenAIApiKey = (apiKey: string): void => {
   process.env.OPENAI_API_KEY = apiKey;
+};
+
+export const setAzureOpenAIConfig = (
+  endpoint: string,
+  deployment: string,
+  apiKey: string,
+  apiVersion?: string,
+): void => {
+  process.env.AZURE_OPENAI_ENDPOINT = endpoint;
+  process.env.AZURE_OPENAI_DEPLOYMENT = deployment;
+  process.env.AZURE_OPENAI_API_KEY = apiKey;
+  if (apiVersion) {
+    process.env.AZURE_OPENAI_API_VERSION = apiVersion;
+  }
 };
 
 export const setOpenAIBaseUrl = (baseUrl: string): void => {

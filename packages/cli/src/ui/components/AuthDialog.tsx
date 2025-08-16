@@ -45,9 +45,13 @@ export function AuthDialog({
     initialErrorMessage || null,
   );
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
+  // Track which prompt variant to render to avoid showing both sets of fields at once
+  const [promptVariant, setPromptVariant] = useState<'openai' | 'azure'>('openai');
+
   const items = [
     { label: 'Qwen OAuth', value: AuthType.QWEN_OAUTH },
     { label: 'OpenAI', value: AuthType.USE_OPENAI },
+    { label: 'Azure OpenAI', value: AuthType.AZURE_OPENAI },
   ];
 
   const initialAuthIndex = Math.max(
@@ -79,12 +83,30 @@ export function AuthDialog({
   const handleAuthSelect = (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);
     if (error) {
-      if (authMethod === AuthType.USE_OPENAI && !process.env.OPENAI_API_KEY) {
-        setShowOpenAIKeyPrompt(true);
-        setErrorMessage(null);
-      } else {
-        setErrorMessage(error);
+      // Decide which prompt variant is needed
+      if (authMethod === AuthType.USE_OPENAI) {
+        const missingOpenAI = !process.env.OPENAI_API_KEY;
+        if (missingOpenAI) {
+          setPromptVariant('openai');
+          setShowOpenAIKeyPrompt(true);
+          setErrorMessage(null);
+          return;
+        }
+      } else if (authMethod === AuthType.AZURE_OPENAI) {
+        const missingAzure =
+          !(process.env.AZURE_OPENAI_API_KEY ||
+            process.env.AZURE_OPENAI_BEARER_TOKEN) ||
+          !process.env.AZURE_OPENAI_ENDPOINT ||
+          !process.env.AZURE_OPENAI_DEPLOYMENT;
+        if (missingAzure) {
+          setPromptVariant('azure');
+          setShowOpenAIKeyPrompt(true);
+          setErrorMessage(null);
+          return;
+        }
       }
+      // If we get here, show the validation error
+      setErrorMessage(error);
     } else {
       setErrorMessage(null);
       onSelect(authMethod, SettingScope.User);
@@ -100,7 +122,18 @@ export function AuthDialog({
     setOpenAIBaseUrl(baseUrl);
     setOpenAIModel(model);
     setShowOpenAIKeyPrompt(false);
-    onSelect(AuthType.USE_OPENAI, SettingScope.User);
+
+    // Decide which auth type is appropriate based on envs set by prompt
+    const isAzure =
+      process.env.AZURE_OPENAI_ENDPOINT &&
+      process.env.AZURE_OPENAI_DEPLOYMENT &&
+      (process.env.AZURE_OPENAI_API_KEY ||
+        process.env.AZURE_OPENAI_BEARER_TOKEN);
+
+    onSelect(
+      isAzure ? AuthType.AZURE_OPENAI : AuthType.USE_OPENAI,
+      SettingScope.User,
+    );
   };
 
   const handleOpenAIKeyCancel = () => {
@@ -135,6 +168,7 @@ export function AuthDialog({
       <OpenAIKeyPrompt
         onSubmit={handleOpenAIKeySubmit}
         onCancel={handleOpenAIKeyCancel}
+        variant={promptVariant}
       />
     );
   }

@@ -96,6 +96,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
     this.config = config;
     const baseURL = process.env.OPENAI_BASE_URL || '';
 
+    // Check if using Azure OpenAI
+    const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+    const azureDeployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+    const azureApiKey = process.env.AZURE_OPENAI_API_KEY;
+    const azureApiVersion =
+      process.env.AZURE_OPENAI_API_VERSION || '2024-05-01-preview';
+    const isAzureOpenAI = !!(azureEndpoint && azureDeployment && azureApiKey);
+
     // Configure timeout settings - using progressive timeouts
     const timeoutConfig = {
       // Base timeout for most requests (2 minutes)
@@ -130,13 +138,28 @@ export class OpenAIContentGenerator implements ContentGenerator {
         : {}),
     };
 
-    this.client = new OpenAI({
-      apiKey,
-      baseURL,
-      timeout: timeoutConfig.timeout,
-      maxRetries: timeoutConfig.maxRetries,
-      defaultHeaders,
-    });
+    if (isAzureOpenAI) {
+      // Azure OpenAI configuration
+      this.client = new OpenAI({
+        apiKey: azureApiKey,
+        baseURL: `${azureEndpoint}/openai/deployments/${azureDeployment}`,
+        defaultQuery: { 'api-version': azureApiVersion },
+        defaultHeaders,
+        timeout: timeoutConfig.timeout,
+        maxRetries: timeoutConfig.maxRetries,
+      });
+      // Use the deployment name as the model for Azure
+      this.model = azureDeployment;
+    } else {
+      // Standard OpenAI configuration
+      this.client = new OpenAI({
+        apiKey,
+        baseURL,
+        timeout: timeoutConfig.timeout,
+        maxRetries: timeoutConfig.maxRetries,
+        defaultHeaders,
+      });
+    }
   }
 
   /**
@@ -1373,20 +1396,40 @@ export class OpenAIContentGenerator implements ContentGenerator {
    * 2. Request-level parameters (medium priority)
    * 3. Default values (lowest priority)
    */
+  private isAzureOpenAI(): boolean {
+    // Check if using Azure OpenAI by checking for Azure-specific environment variables
+    const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+    const azureDeployment = process.env.AZURE_OPENAI_DEPLOYMENT;
+    const azureApiKey = process.env.AZURE_OPENAI_API_KEY;
+    const isAzureEnvSet = !!(azureEndpoint && azureDeployment && azureApiKey);
+
+    // Also check if the baseURL contains Azure-specific patterns
+    const baseURL = this.client?.baseURL || '';
+    const isAzureURL =
+      baseURL.includes('azure') || baseURL.includes('openai/deployments');
+
+    return isAzureEnvSet || isAzureURL;
+  }
+
   private buildSamplingParameters(
     request: GenerateContentParameters,
   ): Record<string, unknown> {
     const configSamplingParams =
       this.config.getContentGeneratorConfig()?.samplingParams;
 
+    // For Azure OpenAI, temperature must be 1.0 (the default)
+    const isAzure = this.isAzureOpenAI();
+    const temperature = isAzure
+      ? 1.0 // Hardcode to 1.0 for Azure OpenAI
+      : configSamplingParams?.temperature !== undefined
+        ? configSamplingParams.temperature
+        : request.config?.temperature !== undefined
+          ? request.config.temperature
+          : 0.0;
+
     const params = {
       // Temperature: config > request > default
-      temperature:
-        configSamplingParams?.temperature !== undefined
-          ? configSamplingParams.temperature
-          : request.config?.temperature !== undefined
-            ? request.config.temperature
-            : 0.0,
+      temperature,
 
       // Max tokens: config > request > undefined
       ...(configSamplingParams?.max_tokens !== undefined

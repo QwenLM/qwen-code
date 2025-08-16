@@ -573,6 +573,32 @@ export async function start_sandbox(
     args.push('--env', `OPENAI_MODEL=${process.env.OPENAI_MODEL}`);
   }
 
+  // Copy Azure OpenAI environment variables
+  if (process.env.AZURE_OPENAI_ENDPOINT) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_ENDPOINT=${process.env.AZURE_OPENAI_ENDPOINT}`,
+    );
+  }
+  if (process.env.AZURE_OPENAI_DEPLOYMENT) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_DEPLOYMENT=${process.env.AZURE_OPENAI_DEPLOYMENT}`,
+    );
+  }
+  if (process.env.AZURE_OPENAI_API_KEY) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_API_KEY=${process.env.AZURE_OPENAI_API_KEY}`,
+    );
+  }
+  if (process.env.AZURE_OPENAI_API_VERSION) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_API_VERSION=${process.env.AZURE_OPENAI_API_VERSION}`,
+    );
+  }
+
   // copy GOOGLE_GENAI_USE_VERTEXAI
   if (process.env.GOOGLE_GENAI_USE_VERTEXAI) {
     args.push(
