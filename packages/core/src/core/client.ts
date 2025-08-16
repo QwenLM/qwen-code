@@ -13,6 +13,7 @@ import {
   GenerateContentResponse,
   FunctionDeclaration,
   Schema,
+  Part,
 } from '@google/genai';
 import {
   getDirectoryContextString,
@@ -48,6 +49,7 @@ import { ideContext } from '../ide/ideContext.js';
 import { logNextSpeakerCheck } from '../telemetry/loggers.js';
 import { NextSpeakerCheckEvent } from '../telemetry/types.js';
 import { IdeContext, File } from '../ide/ideContext.js';
+import { getFolderStructure } from '../utils/getFolderStructure.js';
 
 function isThinkingSupported(model: string) {
   if (model.startsWith('gemini-2.5')) return true;
@@ -211,6 +213,91 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: await getDirectoryContextString(this.config) }],
     });
+  }
+
+  private async getDirectoryContext(): Promise<string> {
+    const workspaceContext = this.config.getWorkspaceContext();
+    const workspaceDirectories = workspaceContext.getDirectories();
+
+    const folderStructures = await Promise.allSettled(
+      workspaceDirectories.map(async (dir) => {
+        try {
+          return await getFolderStructure(dir, {
+            fileService: this.config.getFileService(),
+          });
+        } catch (error) {
+          console.warn(`Warning: Could not get folder structure for ${dir}:`, error);
+          return `Error reading directory: ${dir} - ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }),
+    );
+
+    const folderStructure = folderStructures
+      .map((result) => result.status === 'fulfilled' ? result.value : result.reason)
+      .join('\n');
+    const dirList = workspaceDirectories.map((dir) => `  - ${dir}`).join('\n');
+    const workingDirPreamble = `I'm currently working in the following directories:\n${dirList}\n Folder structures are as follows:\n${folderStructure}`;
+    return workingDirPreamble;
+  }
+
+  private async getEnvironment(): Promise<Part[]> {
+    const today = new Date().toLocaleDateString(undefined, {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+    const platform = process.platform;
+
+    const workspaceContext = this.config.getWorkspaceContext();
+    const workspaceDirectories = workspaceContext.getDirectories();
+
+    const folderStructures = await Promise.allSettled(
+      workspaceDirectories.map(async (dir) => {
+        try {
+          return await getFolderStructure(dir, {
+            fileService: this.config.getFileService(),
+          });
+        } catch (error) {
+          console.warn(`Warning: Could not get folder structure for ${dir}:`, error);
+          return `Error reading directory: ${dir} - ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }),
+    );
+
+    const folderStructure = folderStructures
+      .map((result) => result.status === 'fulfilled' ? result.value : result.reason)
+      .join('\n');
+
+    let workingDirPreamble: string;
+    if (workspaceDirectories.length === 1) {
+      workingDirPreamble = `I'm currently working in the directory: ${workspaceDirectories[0]}`;
+    } else {
+      const dirList = workspaceDirectories
+        .map((dir) => `  - ${dir}`)
+        .join('\n');
+      workingDirPreamble = `I'm currently working in the following directories:\n${dirList}`;
+    }
+
+    const context = `
+  This is the Qwen Code. We are setting up the context for our chat.
+  Today's date is ${today}.
+  My operating system is: ${platform}
+  ${workingDirPreamble}
+  Here is the folder structure of the current working directories:\n
+  ${folderStructure}
+          `.trim();
+
+    const initialParts: Part[] = [{ text: context }];
+
+    // Add full file context if the flag is set
+    if (this.config.getFullContext()) {
+      console.warn(
+        'Full context requested, but this feature is not available in this context.',
+      );
+    }
+
+    return initialParts;
   }
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
