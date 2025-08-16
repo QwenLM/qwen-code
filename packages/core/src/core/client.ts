@@ -189,15 +189,22 @@ export class GeminiClient {
     const workspaceContext = this.config.getWorkspaceContext();
     const workspaceDirectories = workspaceContext.getDirectories();
 
-    const folderStructures = await Promise.all(
-      workspaceDirectories.map((dir) =>
-        getFolderStructure(dir, {
-          fileService: this.config.getFileService(),
-        }),
-      ),
+    const folderStructures = await Promise.allSettled(
+      workspaceDirectories.map(async (dir) => {
+        try {
+          return await getFolderStructure(dir, {
+            fileService: this.config.getFileService(),
+          });
+        } catch (error) {
+          console.warn(`Warning: Could not get folder structure for ${dir}:`, error);
+          return `Error reading directory: ${dir} - ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }),
     );
 
-    const folderStructure = folderStructures.join('\n');
+    const folderStructure = folderStructures
+      .map((result) => result.status === 'fulfilled' ? result.value : result.reason)
+      .join('\n');
     const dirList = workspaceDirectories.map((dir) => `  - ${dir}`).join('\n');
     const workingDirPreamble = `I'm currently working in the following directories:\n${dirList}\n Folder structures are as follows:\n${folderStructure}`;
     return workingDirPreamble;
@@ -215,15 +222,22 @@ export class GeminiClient {
     const workspaceContext = this.config.getWorkspaceContext();
     const workspaceDirectories = workspaceContext.getDirectories();
 
-    const folderStructures = await Promise.all(
-      workspaceDirectories.map((dir) =>
-        getFolderStructure(dir, {
-          fileService: this.config.getFileService(),
-        }),
-      ),
+    const folderStructures = await Promise.allSettled(
+      workspaceDirectories.map(async (dir) => {
+        try {
+          return await getFolderStructure(dir, {
+            fileService: this.config.getFileService(),
+          });
+        } catch (error) {
+          console.warn(`Warning: Could not get folder structure for ${dir}:`, error);
+          return `Error reading directory: ${dir} - ${error instanceof Error ? error.message : String(error)}`;
+        }
+      }),
     );
 
-    const folderStructure = folderStructures.join('\n');
+    const folderStructure = folderStructures
+      .map((result) => result.status === 'fulfilled' ? result.value : result.reason)
+      .join('\n');
 
     let workingDirPreamble: string;
     if (workspaceDirectories.length === 1) {
