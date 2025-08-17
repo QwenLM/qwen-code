@@ -81,7 +81,9 @@ Qwen Code supports two main authentication methods to access AI models. Choose t
     **Supported Providers:**
     - OpenAI (https://platform.openai.com/api-keys)
     - Azure OpenAI
-    - Any OpenAI-compatible API
+    - Alibaba Cloud Bailian
+    - ModelScope
+    - OpenRouter
 
 ## Switching Authentication Methods
 

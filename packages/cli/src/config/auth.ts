@@ -43,7 +43,8 @@ export const validateAuthMethod = (authMethod: string): string | null => {
       !!process.env.AZURE_OPENAI_ENDPOINT &&
       !!process.env.AZURE_OPENAI_DEPLOYMENT;
     const hasCred =
-      !!process.env.AZURE_OPENAI_API_KEY || !!process.env.AZURE_OPENAI_BEARER_TOKEN;
+      !!process.env.AZURE_OPENAI_API_KEY ||
+      !!process.env.AZURE_OPENAI_BEARER_TOKEN;
 
     if (!hasCore || !hasCred) {
       return (

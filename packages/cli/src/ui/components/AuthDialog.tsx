@@ -46,7 +46,9 @@ export function AuthDialog({
   );
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
   // Track which prompt variant to render to avoid showing both sets of fields at once
-  const [promptVariant, setPromptVariant] = useState<'openai' | 'azure'>('openai');
+  const [promptVariant, setPromptVariant] = useState<'openai' | 'azure'>(
+    'openai',
+  );
 
   const items = [
     { label: 'Qwen OAuth', value: AuthType.QWEN_OAUTH },
@@ -94,8 +96,10 @@ export function AuthDialog({
         }
       } else if (authMethod === AuthType.AZURE_OPENAI) {
         const missingAzure =
-          !(process.env.AZURE_OPENAI_API_KEY ||
-            process.env.AZURE_OPENAI_BEARER_TOKEN) ||
+          !(
+            process.env.AZURE_OPENAI_API_KEY ||
+            process.env.AZURE_OPENAI_BEARER_TOKEN
+          ) ||
           !process.env.AZURE_OPENAI_ENDPOINT ||
           !process.env.AZURE_OPENAI_DEPLOYMENT;
         if (missingAzure) {

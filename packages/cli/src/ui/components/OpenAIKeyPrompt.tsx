@@ -13,13 +13,13 @@ type PromptVariant = 'openai' | 'azure';
 interface OpenAIKeyPromptProps {
   onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
   onCancel: () => void;
-  variant: PromptVariant;
+  variant?: PromptVariant; // default to 'openai' when not provided
 }
 
 export function OpenAIKeyPrompt({
   onSubmit,
   onCancel,
-  variant,
+  variant = 'openai',
 }: OpenAIKeyPromptProps): React.JSX.Element {
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
@@ -139,10 +139,14 @@ export function OpenAIKeyPrompt({
         else if (currentField === 'baseUrl') setCurrentField('model');
         else if (currentField === 'model') setCurrentField('apiKey');
       } else {
-        if (currentField === 'azureEndpoint') setCurrentField('azureDeployment');
-        else if (currentField === 'azureDeployment') setCurrentField('azureApiKey');
-        else if (currentField === 'azureApiKey') setCurrentField('azureApiVersion');
-        else if (currentField === 'azureApiVersion') setCurrentField('azureEndpoint');
+        if (currentField === 'azureEndpoint')
+          setCurrentField('azureDeployment');
+        else if (currentField === 'azureDeployment')
+          setCurrentField('azureApiKey');
+        else if (currentField === 'azureApiKey')
+          setCurrentField('azureApiVersion');
+        else if (currentField === 'azureApiVersion')
+          setCurrentField('azureEndpoint');
       }
       return;
     }
@@ -153,9 +157,12 @@ export function OpenAIKeyPrompt({
         if (currentField === 'baseUrl') setCurrentField('apiKey');
         else if (currentField === 'model') setCurrentField('baseUrl');
       } else {
-        if (currentField === 'azureDeployment') setCurrentField('azureEndpoint');
-        else if (currentField === 'azureApiKey') setCurrentField('azureDeployment');
-        else if (currentField === 'azureApiVersion') setCurrentField('azureApiKey');
+        if (currentField === 'azureDeployment')
+          setCurrentField('azureEndpoint');
+        else if (currentField === 'azureApiKey')
+          setCurrentField('azureDeployment');
+        else if (currentField === 'azureApiVersion')
+          setCurrentField('azureApiKey');
       }
       return;
     }
@@ -165,9 +172,12 @@ export function OpenAIKeyPrompt({
         if (currentField === 'apiKey') setCurrentField('baseUrl');
         else if (currentField === 'baseUrl') setCurrentField('model');
       } else {
-        if (currentField === 'azureEndpoint') setCurrentField('azureDeployment');
-        else if (currentField === 'azureDeployment') setCurrentField('azureApiKey');
-        else if (currentField === 'azureApiKey') setCurrentField('azureApiVersion');
+        if (currentField === 'azureEndpoint')
+          setCurrentField('azureDeployment');
+        else if (currentField === 'azureDeployment')
+          setCurrentField('azureApiKey');
+        else if (currentField === 'azureApiKey')
+          setCurrentField('azureApiVersion');
       }
       return;
     }
@@ -176,13 +186,19 @@ export function OpenAIKeyPrompt({
     if (key.backspace || key.delete) {
       if (variant === 'openai') {
         if (currentField === 'apiKey') setApiKey((prev) => prev.slice(0, -1));
-        else if (currentField === 'baseUrl') setBaseUrl((prev) => prev.slice(0, -1));
-        else if (currentField === 'model') setModel((prev) => prev.slice(0, -1));
+        else if (currentField === 'baseUrl')
+          setBaseUrl((prev) => prev.slice(0, -1));
+        else if (currentField === 'model')
+          setModel((prev) => prev.slice(0, -1));
       } else {
-        if (currentField === 'azureEndpoint') setAzureEndpoint((prev) => prev.slice(0, -1));
-        else if (currentField === 'azureDeployment') setAzureDeployment((prev) => prev.slice(0, -1));
-        else if (currentField === 'azureApiKey') setAzureApiKey((prev) => prev.slice(0, -1));
-        else if (currentField === 'azureApiVersion') setAzureApiVersion((prev) => prev.slice(0, -1));
+        if (currentField === 'azureEndpoint')
+          setAzureEndpoint((prev) => prev.slice(0, -1));
+        else if (currentField === 'azureDeployment')
+          setAzureDeployment((prev) => prev.slice(0, -1));
+        else if (currentField === 'azureApiKey')
+          setAzureApiKey((prev) => prev.slice(0, -1));
+        else if (currentField === 'azureApiVersion')
+          setAzureApiVersion((prev) => prev.slice(0, -1));
       }
       return;
     }
@@ -197,14 +213,17 @@ export function OpenAIKeyPrompt({
       width="100%"
     >
       <Text bold color={Colors.AccentBlue}>
-        {variant === 'azure' ? 'Azure OpenAI Configuration Required' : 'OpenAI Configuration Required'}
+        {variant === 'azure'
+          ? 'Azure OpenAI Configuration Required'
+          : 'OpenAI Configuration Required'}
       </Text>
 
       {variant === 'openai' ? (
         <>
           <Box marginTop={1}>
             <Text>
-              Please enter your OpenAI configuration. You can get an API key from{' '}
+              Please enter your OpenAI configuration. You can get an API key
+              from{' '}
               <Text color={Colors.AccentBlue}>
                 https://platform.openai.com/api-keys
               </Text>
@@ -213,7 +232,11 @@ export function OpenAIKeyPrompt({
 
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'apiKey' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'apiKey' ? Colors.AccentBlue : Colors.Gray
+                }
+              >
                 API Key:
               </Text>
             </Box>
@@ -227,7 +250,11 @@ export function OpenAIKeyPrompt({
 
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'baseUrl' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'baseUrl' ? Colors.AccentBlue : Colors.Gray
+                }
+              >
                 Base URL:
               </Text>
             </Box>
@@ -241,7 +268,11 @@ export function OpenAIKeyPrompt({
 
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'model' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'model' ? Colors.AccentBlue : Colors.Gray
+                }
+              >
                 Model:
               </Text>
             </Box>
@@ -257,7 +288,13 @@ export function OpenAIKeyPrompt({
         <>
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'azureEndpoint' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'azureEndpoint'
+                    ? Colors.AccentBlue
+                    : Colors.Gray
+                }
+              >
                 Endpoint:
               </Text>
             </Box>
@@ -271,7 +308,13 @@ export function OpenAIKeyPrompt({
 
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'azureDeployment' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'azureDeployment'
+                    ? Colors.AccentBlue
+                    : Colors.Gray
+                }
+              >
                 Deployment:
               </Text>
             </Box>
@@ -285,7 +328,13 @@ export function OpenAIKeyPrompt({
 
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'azureApiKey' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'azureApiKey'
+                    ? Colors.AccentBlue
+                    : Colors.Gray
+                }
+              >
                 API Key:
               </Text>
             </Box>
@@ -299,7 +348,13 @@ export function OpenAIKeyPrompt({
 
           <Box marginTop={1} flexDirection="row">
             <Box width={15}>
-              <Text color={currentField === 'azureApiVersion' ? Colors.AccentBlue : Colors.Gray}>
+              <Text
+                color={
+                  currentField === 'azureApiVersion'
+                    ? Colors.AccentBlue
+                    : Colors.Gray
+                }
+              >
                 API Version:
               </Text>
             </Box>
