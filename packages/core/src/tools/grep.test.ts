@@ -248,7 +248,7 @@ describe('GrepTool', () => {
       expect(result.llmContent).toContain(
         'Found 3 matches for pattern "world" in the workspace directory',
       );
-      
+
       // Should find matches in the regular files
       expect(result.llmContent).toContain('File: fileA.txt');
       expect(result.llmContent).toContain('L1: hello world');
@@ -257,10 +257,10 @@ describe('GrepTool', () => {
         `File: ${path.join('sub', 'fileC.txt')}`,
       );
       expect(result.llmContent).toContain('L1: another world in sub dir');
-      
+
       // Should NOT find matches in the ignored file
       expect(result.llmContent).not.toContain('ignored-file.txt');
-      
+
       expect(result.returnDisplay).toBe('Found 3 matches');
     });
   });
@@ -284,7 +284,7 @@ describe('GrepTool', () => {
       const multiDirFileService = {
         getGeminiIgnorePatterns: () => [],
       };
-      
+
       const multiDirConfig = {
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
@@ -338,7 +338,7 @@ describe('GrepTool', () => {
       const multiDirFileService = {
         getGeminiIgnorePatterns: () => [],
       };
-      
+
       const multiDirConfig = {
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
