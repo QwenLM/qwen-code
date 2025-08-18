@@ -48,7 +48,7 @@
         "icon": "$(close)"
       },
       {
-        "command": "qwen-code.runGeminiCLI",
+        "command": "qwen-code.runQwenCode",
         "title": "Qwen Code: Run"
       },
       {

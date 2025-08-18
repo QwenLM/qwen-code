@@ -54,7 +54,7 @@ export async function activate(context: vscode.ExtensionContext) {
       diffContentProvider,
     ),
     vscode.commands.registerCommand(
-      'gemini.diff.accept',
+      'qwen.diff.accept',
       (uri?: vscode.Uri) => {
         const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
         if (docUri && docUri.scheme === DIFF_SCHEME) {
@@ -63,7 +63,7 @@ export async function activate(context: vscode.ExtensionContext) {
       },
     ),
     vscode.commands.registerCommand(
-      'gemini.diff.cancel',
+      'qwen.diff.cancel',
       (uri?: vscode.Uri) => {
         const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
         if (docUri && docUri.scheme === DIFF_SCHEME) {
@@ -85,13 +85,13 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       updateWorkspacePath(context);
     }),
-    vscode.commands.registerCommand('gemini-cli.runGeminiCLI', () => {
-      const geminiCmd = 'gemini';
-      const terminal = vscode.window.createTerminal(`Gemini CLI`);
+    vscode.commands.registerCommand('qwen-code.runQwenCode', () => {
+      const qwenCmd = 'qwen --ide-mode-feature';
+      const terminal = vscode.window.createTerminal(`Qwen Code`);
       terminal.show();
-      terminal.sendText(geminiCmd);
+      terminal.sendText(qwenCmd);
     }),
-    vscode.commands.registerCommand('gemini-cli.showNotices', async () => {
+    vscode.commands.registerCommand('qwen-code.showNotices', async () => {
       const noticePath = vscode.Uri.joinPath(
         context.extensionUri,
         'NOTICES.txt',

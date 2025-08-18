@@ -79,7 +79,7 @@ export class DiffManager {
     const diffTitle = `${path.basename(filePath)} ↔ Modified`;
     await vscode.commands.executeCommand(
       'setContext',
-      'gemini.diff.isVisible',
+      'qwen.diff.isVisible',
       true,
     );
 
@@ -202,7 +202,7 @@ export class DiffManager {
     const diffInfo = this.diffDocuments.get(rightDocUri.toString());
     await vscode.commands.executeCommand(
       'setContext',
-      'gemini.diff.isVisible',
+      'qwen.diff.isVisible',
       false,
     );
 
