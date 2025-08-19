@@ -203,7 +203,7 @@ describe('MemoryTool', () => {
     });
 
     it('should call performAddMemoryEntry with correct parameters and return success', async () => {
-      const params = { fact: 'The sky is blue' };
+      const params = { fact: 'The sky is blue', scope: 'global' as const };
       const result = await memoryTool.execute(params, mockAbortSignal);
       // Use getCurrentGeminiMdFilename for the default expectation before any setGeminiMdFilename calls in a test
       const expectedFilePath = path.join(
@@ -224,7 +224,7 @@ describe('MemoryTool', () => {
         expectedFilePath,
         expectedFsArgument,
       );
-      const successMessage = `Okay, I've remembered that: "${params.fact}"`;
+      const successMessage = `Okay, I've remembered that in global memory: "${params.fact}"`;
       expect(result.llmContent).toBe(
         JSON.stringify({ success: true, message: successMessage }),
       );
@@ -244,7 +244,7 @@ describe('MemoryTool', () => {
     });
 
     it('should handle errors from performAddMemoryEntry', async () => {
-      const params = { fact: 'This will fail' };
+      const params = { fact: 'This will fail', scope: 'global' as const };
       const underlyingError = new Error(
         '[MemoryTool] Failed to add memory entry: Disk full',
       );
@@ -276,7 +276,7 @@ describe('MemoryTool', () => {
     });
 
     it('should return confirmation details when memory file is not allowlisted', async () => {
-      const params = { fact: 'Test fact' };
+      const params = { fact: 'Test fact', scope: 'global' as const };
       const result = await memoryTool.shouldConfirmExecute(
         params,
         mockAbortSignal,
@@ -287,7 +287,9 @@ describe('MemoryTool', () => {
 
       if (result && result.type === 'edit') {
         const expectedPath = path.join('~', '.qwen', 'QWEN.md');
-        expect(result.title).toBe(`Confirm Memory Save: ${expectedPath}`);
+        expect(result.title).toBe(
+          `Confirm Memory Save: ${expectedPath} (global)`,
+        );
         expect(result.fileName).toContain(path.join('mock', 'home', '.qwen'));
         expect(result.fileName).toContain('QWEN.md');
         expect(result.fileDiff).toContain('Index: QWEN.md');
@@ -300,16 +302,16 @@ describe('MemoryTool', () => {
     });
 
     it('should return false when memory file is already allowlisted', async () => {
-      const params = { fact: 'Test fact' };
+      const params = { fact: 'Test fact', scope: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
         getCurrentGeminiMdFilename(),
       );
 
-      // Add the memory file to the allowlist
+      // Add the memory file to the allowlist with the new key format
       (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.add(
-        memoryFilePath,
+        `${memoryFilePath}_global`,
       );
 
       const result = await memoryTool.shouldConfirmExecute(
@@ -321,7 +323,7 @@ describe('MemoryTool', () => {
     });
 
     it('should add memory file to allowlist when ProceedAlways is confirmed', async () => {
-      const params = { fact: 'Test fact' };
+      const params = { fact: 'Test fact', scope: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
@@ -340,10 +342,10 @@ describe('MemoryTool', () => {
         // Simulate the onConfirm callback
         await result.onConfirm(ToolConfirmationOutcome.ProceedAlways);
 
-        // Check that the memory file was added to the allowlist
+        // Check that the memory file was added to the allowlist with the new key format
         expect(
           (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.has(
-            memoryFilePath,
+            `${memoryFilePath}_global`,
           ),
         ).toBe(true);
       }
@@ -384,7 +386,7 @@ describe('MemoryTool', () => {
     });
 
     it('should handle existing memory file with content', async () => {
-      const params = { fact: 'New fact' };
+      const params = { fact: 'New fact', scope: 'global' as const };
       const existingContent =
         'Some existing content.\n\n## Qwen Added Memories\n- Old fact\n';
 
@@ -401,13 +403,47 @@ describe('MemoryTool', () => {
 
       if (result && result.type === 'edit') {
         const expectedPath = path.join('~', '.qwen', 'QWEN.md');
-        expect(result.title).toBe(`Confirm Memory Save: ${expectedPath}`);
+        expect(result.title).toBe(
+          `Confirm Memory Save: ${expectedPath} (global)`,
+        );
         expect(result.fileDiff).toContain('Index: QWEN.md');
         expect(result.fileDiff).toContain('+- New fact');
         expect(result.originalContent).toBe(existingContent);
         expect(result.newContent).toContain('- Old fact');
         expect(result.newContent).toContain('- New fact');
       }
+    });
+
+    it('should prompt for scope selection when scope is not specified', async () => {
+      const params = { fact: 'Test fact' };
+      const result = await memoryTool.shouldConfirmExecute(
+        params,
+        mockAbortSignal,
+      );
+
+      expect(result).toBeDefined();
+      expect(result).not.toBe(false);
+
+      if (result && result.type === 'edit') {
+        expect(result.title).toBe('Choose Memory Storage Location');
+        expect(result.fileName).toBe('Memory Storage Options');
+        expect(result.fileDiff).toContain('Choose where to save this memory');
+        expect(result.fileDiff).toContain('Test fact');
+        expect(result.fileDiff).toContain('Global:');
+        expect(result.fileDiff).toContain('Project:');
+        expect(result.originalContent).toBe('');
+      }
+    });
+
+    it('should return error when executing without scope parameter', async () => {
+      const params = { fact: 'Test fact' };
+      const result = await memoryTool.execute(params, mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Please specify where to save this memory',
+      );
+      expect(result.returnDisplay).toContain('Global:');
+      expect(result.returnDisplay).toContain('Project:');
     });
   });
 });

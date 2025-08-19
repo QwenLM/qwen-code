@@ -24,8 +24,8 @@ function writeJson(filePath, data) {
 }
 
 // 1. Get the version from the command line arguments.
-const versionArg = process.argv[2];
-if (!versionArg) {
+const versionType = process.argv[2];
+if (!versionType) {
   console.error('Error: No version specified.');
   console.error(
     'Usage: npm run version <version> (e.g., 1.2.3 or patch|minor|major|prerelease)',
@@ -33,15 +33,11 @@ if (!versionArg) {
   process.exit(1);
 }
 
-// 2. Determine if we have a specific version or a version type
-const isSpecificVersion = /^\d+\.\d+\.\d+/.test(versionArg);
-const npmVersionArg = isSpecificVersion ? versionArg : versionArg;
+// 2. Bump the version in the root and all workspace package.json files.
+run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
 
-// 3. Bump the version in the root and all workspace package.json files.
-run(`npm version ${npmVersionArg} --no-git-tag-version --allow-same-version`);
-
-// 4. Get all workspaces and filter out the one we don't want to version.
-const workspacesToExclude = ['qwen-code-vscode-ide-companion'];
+// 3. Get all workspaces and filter out the one we don't want to version.
+const workspacesToExclude = ['gemini-cli-vscode-ide-companion'];
 const lsOutput = JSON.parse(
   execSync('npm ls --workspaces --json --depth=0').toString(),
 );
@@ -52,11 +48,11 @@ const workspacesToVersion = allWorkspaces.filter(
 
 for (const workspaceName of workspacesToVersion) {
   run(
-    `npm version ${npmVersionArg} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
+    `npm version ${versionType} --workspace ${workspaceName} --no-git-tag-version --allow-same-version`,
   );
 }
 
-// 5. Get the new version number from the root package.json
+// 4. Get the new version number from the root package.json
 const rootPackageJsonPath = resolve(process.cwd(), 'package.json');
 const newVersion = readJson(rootPackageJsonPath).version;
 

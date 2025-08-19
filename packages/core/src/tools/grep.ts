@@ -536,12 +536,18 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
       );
       strategyUsed = 'javascript fallback';
       const globPattern = include ? include : '**/*';
+
+      // Get the file discovery service to check ignore patterns
+      const fileDiscovery = this.config.getFileService();
+
+      // Basic ignore patterns
       const ignorePatterns = [
         '.git/**',
         'node_modules/**',
         'bower_components/**',
         '.svn/**',
         '.hg/**',
+        ...fileDiscovery.getGeminiIgnorePatterns(),
       ]; // Use glob patterns for ignores here
 
       const filesIterator = globIterate(globPattern, {

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
-import { Box, Text, useInput, Static } from 'ink';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Box, Text, useInput } from 'ink';
 import Spinner from 'ink-spinner';
 import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
@@ -26,17 +26,93 @@ interface QwenOAuthProgressProps {
   authMessage?: string | null;
 }
 
-interface StaticItem {
-  key: string;
-  type:
-    | 'title'
-    | 'instructions'
-    | 'url'
-    | 'qr-instructions'
-    | 'qr-code'
-    | 'auth-content';
-  url?: string;
-  qrCode?: string;
+/**
+ * Static QR Code Display Component
+ * Renders the QR code and URL once and doesn't re-render unless the URL changes
+ */
+function QrCodeDisplay({
+  verificationUrl,
+  qrCodeData,
+}: {
+  verificationUrl: string;
+  qrCodeData: string | null;
+}): React.JSX.Element | null {
+  if (!qrCodeData) {
+    return null;
+  }
+
+  return (
+    <Box
+      borderStyle="round"
+      borderColor={Colors.AccentBlue}
+      flexDirection="column"
+      padding={1}
+      width="100%"
+    >
+      <Text bold color={Colors.AccentBlue}>
+        Qwen OAuth Authentication
+      </Text>
+
+      <Box marginTop={1}>
+        <Text>Please visit this URL to authorize:</Text>
+      </Box>
+
+      <Link url={verificationUrl} fallback={false}>
+        <Text color={Colors.AccentGreen} bold>
+          {verificationUrl}
+        </Text>
+      </Link>
+
+      <Box marginTop={1}>
+        <Text>Or scan the QR code below:</Text>
+      </Box>
+
+      <Box marginTop={1}>
+        <Text>{qrCodeData}</Text>
+      </Box>
+    </Box>
+  );
+}
+
+/**
+ * Dynamic Status Display Component
+ * Shows the loading spinner, timer, and status messages
+ */
+function StatusDisplay({
+  timeRemaining,
+  dots,
+}: {
+  timeRemaining: number;
+  dots: string;
+}): React.JSX.Element {
+  const formatTime = (seconds: number): string => {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <Box
+      borderStyle="round"
+      borderColor={Colors.AccentBlue}
+      flexDirection="column"
+      padding={1}
+      width="100%"
+    >
+      <Box marginTop={1}>
+        <Text>
+          <Spinner type="dots" /> Waiting for authorization{dots}
+        </Text>
+      </Box>
+
+      <Box marginTop={1} justifyContent="space-between">
+        <Text color={Colors.Gray}>
+          Time remaining: {formatTime(timeRemaining)}
+        </Text>
+        <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
+      </Box>
+    </Box>
+  );
 }
 
 export function QwenOAuthProgress({
@@ -60,33 +136,29 @@ export function QwenOAuthProgress({
     }
   });
 
-  // Generate QR code when device auth is available
+  // Generate QR code once when device auth is available
   useEffect(() => {
-    if (!deviceAuth) {
-      setQrCodeData(null);
+    if (!deviceAuth?.verification_uri_complete) {
       return;
     }
 
-    // Only generate QR code if we don't have one yet for this URL
-    if (qrCodeData === null) {
-      const generateQR = () => {
-        try {
-          qrcode.generate(
-            deviceAuth.verification_uri_complete,
-            { small: true },
-            (qrcode: string) => {
-              setQrCodeData(qrcode);
-            },
-          );
-        } catch (error) {
-          console.error('Failed to generate QR code:', error);
-          setQrCodeData(null);
-        }
-      };
+    const generateQR = () => {
+      try {
+        qrcode.generate(
+          deviceAuth.verification_uri_complete,
+          { small: true },
+          (qrcode: string) => {
+            setQrCodeData(qrcode);
+          },
+        );
+      } catch (error) {
+        console.error('Failed to generate QR code:', error);
+        setQrCodeData(null);
+      }
+    };
 
-      generateQR();
-    }
-  }, [deviceAuth, qrCodeData]);
+    generateQR();
+  }, [deviceAuth?.verification_uri_complete]);
 
   // Countdown timer
   useEffect(() => {
@@ -115,11 +187,17 @@ export function QwenOAuthProgress({
     return () => clearInterval(dotsTimer);
   }, []);
 
-  const formatTime = (seconds: number): string => {
-    const minutes = Math.floor(seconds / 60);
-    const remainingSeconds = seconds % 60;
-    return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
-  };
+  // Memoize the QR code display to prevent unnecessary re-renders
+  const qrCodeDisplay = useMemo(() => {
+    if (!deviceAuth?.verification_uri_complete) return null;
+
+    return (
+      <QrCodeDisplay
+        verificationUrl={deviceAuth.verification_uri_complete}
+        qrCodeData={qrCodeData}
+      />
+    );
+  }, [deviceAuth?.verification_uri_complete, qrCodeData]);
 
   // Handle timeout state
   if (authStatus === 'timeout') {
@@ -151,6 +229,7 @@ export function QwenOAuthProgress({
     );
   }
 
+  // Show loading state when no device auth is available yet
   if (!deviceAuth) {
     return (
       <Box
@@ -167,7 +246,8 @@ export function QwenOAuthProgress({
         </Box>
         <Box marginTop={1} justifyContent="space-between">
           <Text color={Colors.Gray}>
-            Time remaining: {formatTime(timeRemaining)}
+            Time remaining: {Math.floor(timeRemaining / 60)}:
+            {(timeRemaining % 60).toString().padStart(2, '0')}
           </Text>
           <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
         </Box>
@@ -176,77 +256,12 @@ export function QwenOAuthProgress({
   }
 
   return (
-    <>
-      {qrCodeData && (
-        <Static
-          items={
-            [
-              {
-                key: 'auth-content',
-                type: 'auth-content' as const,
-                url: deviceAuth.verification_uri_complete,
-                qrCode: qrCodeData,
-              },
-            ] as StaticItem[]
-          }
-          style={{
-            width: '100%',
-          }}
-        >
-          {(item: StaticItem) => (
-            <Box
-              borderStyle="round"
-              borderColor={Colors.AccentBlue}
-              flexDirection="column"
-              padding={1}
-              width="100%"
-              key={item.key}
-            >
-              <Text bold color={Colors.AccentBlue}>
-                Qwen OAuth Authentication
-              </Text>
+    <Box flexDirection="column" width="100%">
+      {/* Static QR Code Display */}
+      {qrCodeDisplay}
 
-              <Box marginTop={1}>
-                <Text>Please visit this URL to authorize:</Text>
-              </Box>
-
-              <Link url={item.url || ''} fallback={false}>
-                <Text color={Colors.AccentGreen} bold>
-                  {item.url || ''}
-                </Text>
-              </Link>
-
-              <Box marginTop={1}>
-                <Text>Or scan the QR code below:</Text>
-              </Box>
-
-              <Box marginTop={1}>
-                <Text>{item.qrCode || ''}</Text>
-              </Box>
-            </Box>
-          )}
-        </Static>
-      )}
-      <Box
-        borderStyle="round"
-        borderColor={Colors.AccentBlue}
-        flexDirection="column"
-        padding={1}
-        width="100%"
-      >
-        <Box marginTop={1}>
-          <Text>
-            <Spinner type="dots" /> Waiting for authorization{dots}
-          </Text>
-        </Box>
-
-        <Box marginTop={1} justifyContent="space-between">
-          <Text color={Colors.Gray}>
-            Time remaining: {formatTime(timeRemaining)}
-          </Text>
-          <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
-        </Box>
-      </Box>
-    </>
+      {/* Dynamic Status Display */}
+      <StatusDisplay timeRemaining={timeRemaining} dots={dots} />
+    </Box>
   );
 }

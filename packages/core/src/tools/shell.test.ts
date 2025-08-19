@@ -543,3 +543,37 @@ describe('validateToolParams', () => {
     expect(result).toContain('is not a registered workspace directory');
   });
 });
+
+describe('validateToolParams', () => {
+  it('should return null for valid directory', () => {
+    const config = {
+      getCoreTools: () => undefined,
+      getExcludeTools: () => undefined,
+      getTargetDir: () => '/root',
+      getWorkspaceContext: () =>
+        createMockWorkspaceContext('/root', ['/users/test']),
+    } as unknown as Config;
+    const shellTool = new ShellTool(config);
+    const result = shellTool.validateToolParams({
+      command: 'ls',
+      directory: 'test',
+    });
+    expect(result).toBeNull();
+  });
+
+  it('should return error for directory outside workspace', () => {
+    const config = {
+      getCoreTools: () => undefined,
+      getExcludeTools: () => undefined,
+      getTargetDir: () => '/root',
+      getWorkspaceContext: () =>
+        createMockWorkspaceContext('/root', ['/users/test']),
+    } as unknown as Config;
+    const shellTool = new ShellTool(config);
+    const result = shellTool.validateToolParams({
+      command: 'ls',
+      directory: 'test2',
+    });
+    expect(result).toContain('is not a registered workspace directory');
+  });
+});

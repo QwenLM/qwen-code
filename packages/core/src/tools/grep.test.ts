@@ -11,6 +11,7 @@ import fs from 'fs/promises';
 import os from 'os';
 import { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 
 // Mock the child_process module to control grep/git grep behavior
 vi.mock('child_process', () => ({
@@ -32,9 +33,14 @@ describe('GrepTool', () => {
   let grepTool: GrepTool;
   const abortSignal = new AbortController().signal;
 
+  const mockFileService = {
+    getGeminiIgnorePatterns: () => [],
+  } as unknown as FileDiscoveryService;
+
   const mockConfig = {
     getTargetDir: () => tempRootDir,
     getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+    getFileService: () => mockFileService,
   } as unknown as Config;
 
   beforeEach(async () => {
@@ -220,6 +226,43 @@ describe('GrepTool', () => {
         "Model provided invalid parameters. Error: params must have required property 'pattern'",
       );
     });
+
+    it('should exclude files matching geminiIgnorePatterns', async () => {
+      // Create a file that should be ignored
+      await fs.writeFile(
+        path.join(tempRootDir, 'ignored-file.txt'),
+        'this file should be ignored\nit contains the word world',
+      );
+
+      // Update the mock file service to return ignore patterns
+      mockFileService.getGeminiIgnorePatterns = () => ['ignored-file.txt'];
+
+      // Re-create the grep tool with the updated mock
+      const grepToolWithIgnore = new GrepTool(mockConfig);
+
+      // Search for 'world' which exists in both the regular file and the ignored file
+      const params: GrepToolParams = { pattern: 'world' };
+      const result = await grepToolWithIgnore.execute(params, abortSignal);
+
+      // Should only find matches in the non-ignored files (3 matches)
+      expect(result.llmContent).toContain(
+        'Found 3 matches for pattern "world" in the workspace directory',
+      );
+
+      // Should find matches in the regular files
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).toContain('L1: hello world');
+      expect(result.llmContent).toContain('L2: second line with world');
+      expect(result.llmContent).toContain(
+        `File: ${path.join('sub', 'fileC.txt')}`,
+      );
+      expect(result.llmContent).toContain('L1: another world in sub dir');
+
+      // Should NOT find matches in the ignored file
+      expect(result.llmContent).not.toContain('ignored-file.txt');
+
+      expect(result.returnDisplay).toBe('Found 3 matches');
+    });
   });
 
   describe('multi-directory workspace', () => {
@@ -238,10 +281,15 @@ describe('GrepTool', () => {
       );
 
       // Create a mock config with multiple directories
+      const multiDirFileService = {
+        getGeminiIgnorePatterns: () => [],
+      };
+
       const multiDirConfig = {
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
           createMockWorkspaceContext(tempRootDir, [secondDir]),
+        getFileService: () => multiDirFileService,
       } as unknown as Config;
 
       const multiDirGrepTool = new GrepTool(multiDirConfig);
@@ -287,10 +335,15 @@ describe('GrepTool', () => {
       );
 
       // Create a mock config with multiple directories
+      const multiDirFileService = {
+        getGeminiIgnorePatterns: () => [],
+      };
+
       const multiDirConfig = {
         getTargetDir: () => tempRootDir,
         getWorkspaceContext: () =>
           createMockWorkspaceContext(tempRootDir, [secondDir]),
+        getFileService: () => multiDirFileService,
       } as unknown as Config;
 
       const multiDirGrepTool = new GrepTool(multiDirConfig);

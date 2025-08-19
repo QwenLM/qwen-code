@@ -26,6 +26,7 @@ import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
+import { safeJsonParse } from '../utils/safeJsonParse.js';
 
 // OpenAI API type definitions for logging
 interface OpenAIToolCall {
@@ -365,8 +366,6 @@ export class OpenAIContentGenerator implements ContentGenerator {
         );
       }
 
-      // console.log('createParams', createParams);
-
       const stream = (await this.client.chat.completions.create(
         createParams,
       )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
@@ -564,7 +563,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
     // Add combined text if any
     if (combinedText) {
-      combinedParts.push({ text: combinedText });
+      combinedParts.push({ text: combinedText.trimEnd() });
     }
 
     // Add function calls
@@ -741,6 +740,16 @@ export class OpenAIContentGenerator implements ContentGenerator {
     return convertTypes(converted) as Record<string, unknown> | undefined;
   }
 
+  /**
+   * Converts Gemini tools to OpenAI format for API compatibility.
+   * Handles both Gemini tools (using 'parameters' field) and MCP tools (using 'parametersJsonSchema' field).
+   *
+   * Gemini tools use a custom parameter format that needs conversion to OpenAI JSON Schema format.
+   * MCP tools already use JSON Schema format in the parametersJsonSchema field and can be used directly.
+   *
+   * @param geminiTools - Array of Gemini tools to convert
+   * @returns Promise resolving to array of OpenAI-compatible tools
+   */
   private async convertGeminiToolsToOpenAI(
     geminiTools: ToolListUnion,
   ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
@@ -761,14 +770,31 @@ export class OpenAIContentGenerator implements ContentGenerator {
       if (actualTool.functionDeclarations) {
         for (const func of actualTool.functionDeclarations) {
           if (func.name && func.description) {
+            let parameters: Record<string, unknown> | undefined;
+
+            // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
+            if (func.parametersJsonSchema) {
+              // MCP tool format - use parametersJsonSchema directly
+              if (func.parametersJsonSchema) {
+                // Create a shallow copy to avoid mutating the original object
+                const paramsCopy = {
+                  ...(func.parametersJsonSchema as Record<string, unknown>),
+                };
+                parameters = paramsCopy;
+              }
+            } else if (func.parameters) {
+              // Gemini tool format - convert parameters to OpenAI format
+              parameters = this.convertGeminiParametersToOpenAI(
+                func.parameters as Record<string, unknown>,
+              );
+            }
+
             openAITools.push({
               type: 'function',
               function: {
                 name: func.name,
                 description: func.description,
-                parameters: this.convertGeminiParametersToOpenAI(
-                  (func.parameters || {}) as Record<string, unknown>,
-                ),
+                parameters,
               },
             });
           }
@@ -1138,7 +1164,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
     // Handle text content
     if (choice.message.content) {
-      parts.push({ text: choice.message.content });
+      if (typeof choice.message.content === 'string') {
+        parts.push({ text: choice.message.content.trimEnd() });
+      } else {
+        parts.push({ text: choice.message.content });
+      }
     }
 
     // Handle tool calls
@@ -1147,12 +1177,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         if (toolCall.function) {
           let args: Record<string, unknown> = {};
           if (toolCall.function.arguments) {
-            try {
-              args = JSON.parse(toolCall.function.arguments);
-            } catch (error) {
-              console.error('Failed to parse function arguments:', error);
-              args = {};
-            }
+            args = safeJsonParse(toolCall.function.arguments, {});
           }
 
           parts.push({
@@ -1228,7 +1253,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Handle text content
       if (choice.delta?.content) {
-        parts.push({ text: choice.delta.content });
+        if (typeof choice.delta.content === 'string') {
+          parts.push({ text: choice.delta.content.trimEnd() });
+        } else {
+          parts.push({ text: choice.delta.content });
+        }
       }
 
       // Handle tool calls - only accumulate during streaming, emit when complete
@@ -1264,19 +1293,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
           if (accumulatedCall.name) {
             let args: Record<string, unknown> = {};
             if (accumulatedCall.arguments) {
-              try {
-                args = JSON.parse(accumulatedCall.arguments);
-              } catch (error) {
-                console.error(
-                  'Failed to parse final tool call arguments:',
-                  error,
-                );
-              }
+              args = safeJsonParse(accumulatedCall.arguments, {});
             }
 
             parts.push({
               functionCall: {
-                id: accumulatedCall.id,
+                id:
+                  accumulatedCall.id ||
+                  `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
                 name: accumulatedCall.name,
                 args,
               },
@@ -1752,7 +1776,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         }
       }
 
-      messageContent = textParts.join('');
+      messageContent = textParts.join('').trimEnd();
     }
 
     const choice: OpenAIChoice = {

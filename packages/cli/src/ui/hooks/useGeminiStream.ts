@@ -93,10 +93,12 @@ export const useGeminiStream = (
   performMemoryRefresh: () => Promise<void>,
   modelSwitchedFromQuotaError: boolean,
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
+  onEditorClose: () => void,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const turnCancelledRef = useRef(false);
+  const isSubmittingQueryRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItemRef, setPendingHistoryItem] =
@@ -133,6 +135,7 @@ export const useGeminiStream = (
       config,
       setPendingHistoryItem,
       getPreferredEditor,
+      onEditorClose,
     );
 
   const pendingToolCallGroupDisplay = useMemo(
@@ -622,12 +625,20 @@ export const useGeminiStream = (
       options?: { isContinuation: boolean },
       prompt_id?: string,
     ) => {
+      // Prevent concurrent executions of submitQuery
+      if (isSubmittingQueryRef.current) {
+        return;
+      }
+
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
         !options?.isContinuation
       )
         return;
+
+      // Set the flag to indicate we're now executing
+      isSubmittingQueryRef.current = true;
 
       const userMessageTimestamp = Date.now();
 
@@ -653,6 +664,7 @@ export const useGeminiStream = (
       );
 
       if (!shouldProceed || queryToSend === null) {
+        isSubmittingQueryRef.current = false;
         return;
       }
 
@@ -677,6 +689,7 @@ export const useGeminiStream = (
         );
 
         if (processingStatus === StreamProcessingStatus.UserCancelled) {
+          isSubmittingQueryRef.current = false;
           return;
         }
 
@@ -708,6 +721,7 @@ export const useGeminiStream = (
         }
       } finally {
         setIsResponding(false);
+        isSubmittingQueryRef.current = false;
       }
     },
     [

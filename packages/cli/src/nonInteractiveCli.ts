@@ -19,6 +19,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 
 import { parseAndFormatApiError } from './ui/utils/errorParsing.js';
+import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 
 async function loadCheckpoint(checkpointPath: string): Promise<{
   history?: Content[];
@@ -66,13 +67,9 @@ export async function runNonInteractive(
   input: string,
   prompt_id: string,
 ): Promise<void> {
-  await config.initialize();
-  // Handle EPIPE errors when the output is piped to a command that closes early.
-  process.stdout.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EPIPE') {
-      // Exit gracefully if the pipe is closed.
-      process.exit(0);
-    }
+  const consolePatcher = new ConsolePatcher({
+    stderr: true,
+    debugMode: config.getDebugMode(),
   });
 
   const geminiClient = config.getGeminiClient();
@@ -111,10 +108,25 @@ export async function runNonInteractive(
     }
   }
 
-  const abortController = new AbortController();
-  let currentMessages: Content[] = [{ role: 'user', parts: [{ text: input }] }];
-  let turnCount = 0;
   try {
+    await config.initialize();
+    consolePatcher.patch();
+    // Handle EPIPE errors when the output is piped to a command that closes early.
+    process.stdout.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE') {
+        // Exit gracefully if the pipe is closed.
+        process.exit(0);
+      }
+    });
+
+    const geminiClient = config.getGeminiClient();
+    const toolRegistry: ToolRegistry = await config.getToolRegistry();
+
+    const abortController = new AbortController();
+    let currentMessages: Content[] = [
+      { role: 'user', parts: [{ text: input }] },
+    ];
+    let turnCount = 0;
     while (true) {
       turnCount++;
       if (
@@ -229,7 +241,7 @@ export async function runNonInteractive(
         console.error(`Saved checkpoint to: ${save}`);
       }
     }
-    
+    consolePatcher.cleanup();
     if (isTelemetrySdkInitialized()) {
       await shutdownTelemetry();
     }

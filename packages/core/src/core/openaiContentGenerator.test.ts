@@ -1160,6 +1160,90 @@ describe('OpenAIContentGenerator', () => {
       );
     });
 
+    it('should handle MCP tools with parametersJsonSchema', async () => {
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Test' }] }],
+        model: 'gpt-4',
+        config: {
+          tools: [
+            {
+              callTool: vi.fn(),
+              tool: () =>
+                Promise.resolve({
+                  functionDeclarations: [
+                    {
+                      name: 'list-items',
+                      description: 'Get a list of items',
+                      parametersJsonSchema: {
+                        type: 'object',
+                        properties: {
+                          page_number: {
+                            type: 'number',
+                            description: 'Page number',
+                          },
+                          page_size: {
+                            type: 'number',
+                            description: 'Number of items per page',
+                          },
+                        },
+                        additionalProperties: false,
+                        $schema: 'http://json-schema.org/draft-07/schema#',
+                      },
+                    },
+                  ],
+                }),
+            } as unknown as CallableTool,
+          ],
+        },
+      };
+
+      await generator.generateContent(request, 'test-prompt-id');
+
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'list-items',
+                description: 'Get a list of items',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    page_number: {
+                      type: 'number',
+                      description: 'Page number',
+                    },
+                    page_size: {
+                      type: 'number',
+                      description: 'Number of items per page',
+                    },
+                  },
+                  additionalProperties: false,
+                  $schema: 'http://json-schema.org/draft-07/schema#',
+                },
+              },
+            },
+          ],
+        }),
+      );
+    });
+
     it('should handle nested parameter objects', async () => {
       const mockResponse = {
         id: 'chatcmpl-123',
