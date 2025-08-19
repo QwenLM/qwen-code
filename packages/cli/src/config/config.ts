@@ -535,7 +535,7 @@ export async function loadCliConfig(
     ],
     contentGenerator: settings.contentGenerator,
     resume: argv.resume,
-    save: argv.save
+    save: argv.save,
     cliVersion,
     tavilyApiKey:
       argv.tavilyApiKey || settings.tavilyApiKey || process.env.TAVILY_API_KEY,
