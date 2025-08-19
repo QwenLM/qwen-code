@@ -53,24 +53,18 @@ export async function activate(context: vscode.ExtensionContext) {
       DIFF_SCHEME,
       diffContentProvider,
     ),
-    vscode.commands.registerCommand(
-      'qwen.diff.accept',
-      (uri?: vscode.Uri) => {
-        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-        if (docUri && docUri.scheme === DIFF_SCHEME) {
-          diffManager.acceptDiff(docUri);
-        }
-      },
-    ),
-    vscode.commands.registerCommand(
-      'qwen.diff.cancel',
-      (uri?: vscode.Uri) => {
-        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-        if (docUri && docUri.scheme === DIFF_SCHEME) {
-          diffManager.cancelDiff(docUri);
-        }
-      },
-    ),
+    vscode.commands.registerCommand('qwen.diff.accept', (uri?: vscode.Uri) => {
+      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (docUri && docUri.scheme === DIFF_SCHEME) {
+        diffManager.acceptDiff(docUri);
+      }
+    }),
+    vscode.commands.registerCommand('qwen.diff.cancel', (uri?: vscode.Uri) => {
+      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (docUri && docUri.scheme === DIFF_SCHEME) {
+        diffManager.cancelDiff(docUri);
+      }
+    }),
   );
 
   ideServer = new IDEServer(log, diffManager);
