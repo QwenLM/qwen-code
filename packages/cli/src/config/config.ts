@@ -223,7 +223,7 @@ export async function parseArguments(): Promise<CliArgs> {
     .option('proxy', {
       type: 'string',
       description:
-        'Proxy for gemini client, like schema://user:password@host:port',
+        'Proxy for qwen client, like schema://user:password@host:port',
     })
     .option('include-directories', {
       type: 'array',
