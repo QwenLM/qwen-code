@@ -162,8 +162,12 @@ export class GeminiChat {
   ): Promise<void> {
     const authType = this.config.getContentGeneratorConfig()?.authType;
 
-    // Don't log API responses for openaiContentGenerator
-    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
+    // Don't log API responses for OpenAI-compatible providers
+    if (
+      authType === AuthType.QWEN_OAUTH ||
+      authType === AuthType.USE_OPENAI ||
+      authType === AuthType.AZURE_OPENAI
+    ) {
       return;
     }
 
@@ -192,8 +196,12 @@ export class GeminiChat {
 
     const authType = this.config.getContentGeneratorConfig()?.authType;
 
-    // Don't log API errors for openaiContentGenerator
-    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
+    // Don't log API errors for OpenAI-compatible providers
+    if (
+      authType === AuthType.QWEN_OAUTH ||
+      authType === AuthType.USE_OPENAI ||
+      authType === AuthType.AZURE_OPENAI
+    ) {
       return;
     }
 
