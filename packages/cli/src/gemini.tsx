@@ -250,6 +250,16 @@ export async function main() {
   }
 
   let input = config.getQuestion();
+  
+  // Debug: Log key values for troubleshooting
+  if (process.env.QC_DUMP_PRE_INFER === '1') {
+    console.log('🐛 Debug - CLI Flow:');
+    console.log('  - input:', JSON.stringify(input));
+    console.log('  - argv.prompt:', JSON.stringify(argv.prompt));
+    console.log('  - argv.promptInteractive:', JSON.stringify(argv.promptInteractive));
+    console.log('  - process.stdin.isTTY:', process.stdin.isTTY);
+  }
+  
   const startupWarnings = [
     ...(await getStartupWarnings()),
     ...(await getUserStartupWarnings(workspaceRoot)),
@@ -257,6 +267,11 @@ export async function main() {
 
   const shouldBeInteractive =
     !!argv.promptInteractive || (process.stdin.isTTY && input?.length === 0);
+    
+  // Debug: Log interactive decision
+  if (process.env.QC_DUMP_PRE_INFER === '1') {
+    console.log('  - shouldBeInteractive:', shouldBeInteractive);
+  }
 
   // Render UI, passing necessary config values. Check that there is no command line question.
   if (shouldBeInteractive) {
