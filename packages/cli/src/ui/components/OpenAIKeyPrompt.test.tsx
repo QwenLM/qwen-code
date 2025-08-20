@@ -8,6 +8,11 @@ import { render } from 'ink-testing-library';
 import { describe, it, expect, vi } from 'vitest';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 
+// Mock the saveToQwenEnv function
+vi.mock('../../config/auth.js', () => ({
+  saveToQwenEnv: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe('OpenAIKeyPrompt', () => {
   it('should render the prompt correctly', () => {
     const onSubmit = vi.fn();
@@ -60,5 +65,35 @@ describe('OpenAIKeyPrompt', () => {
     // The component should have filtered out the control characters
     // and only kept 'sk-test123'
     expect(onSubmit).not.toHaveBeenCalled(); // Should not submit yet
+  });
+
+  it('should show save prompt after entering configuration', () => {
+    // Test that save prompt appears after entering configuration
+    const onSubmit = vi.fn();
+    const onCancel = vi.fn();
+
+    const { lastFrame, stdin } = render(
+      <OpenAIKeyPrompt onSubmit={onSubmit} onCancel={onCancel} />,
+    );
+
+    // Simulate entering API key and pressing enter to reach save prompt
+    stdin.write('test-key');
+    stdin.write('\n'); // Enter to go to base URL
+    stdin.write('https://api.openai.com/v1');
+    stdin.write('\n'); // Enter to go to model
+    stdin.write('gpt-4');
+    stdin.write('\n'); // Enter to submit and show save prompt
+
+    // Wait a bit for processing
+    setTimeout(() => {
+      const output = lastFrame();
+      expect(output).toContain('Save Configuration?');
+      expect(output).toContain(
+        'Save these credentials to .qwen.env for future use? [Y/n]',
+      );
+      expect(output).toContain(
+        'Note: .qwen.env is already in .gitignore to prevent accidental commits',
+      );
+    }, 100);
   });
 });

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { loadEnvironment } from './settings.js';
 
@@ -65,3 +67,39 @@ export const setOpenAIBaseUrl = (baseUrl: string): void => {
 export const setOpenAIModel = (model: string): void => {
   process.env.OPENAI_MODEL = model;
 };
+
+export async function saveToQwenEnv(
+  apiKey: string,
+  baseUrl: string,
+  model: string,
+): Promise<void> {
+  const envPath = path.join(process.cwd(), '.qwen.env');
+  const tempPath = `${envPath}.tmp`;
+  const content = `# Qwen Code API Configuration
+# This file is already included in .gitignore
+OPENAI_API_KEY=${apiKey}
+OPENAI_BASE_URL=${baseUrl}
+OPENAI_MODEL=${model}
+`;
+
+  try {
+    // Write to temporary file first with secure permissions (owner read/write only)
+    await fs.promises.writeFile(tempPath, content, { 
+      encoding: 'utf-8',
+      mode: 0o600 // Owner read/write only for security
+    });
+    
+    // Atomically rename to prevent corruption
+    await fs.promises.rename(tempPath, envPath);
+    
+    console.log(`Credentials saved securely to ${envPath}`);
+  } catch (error) {
+    // Clean up temp file if it exists
+    try {
+      await fs.promises.unlink(tempPath);
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw error;
+  }
+}

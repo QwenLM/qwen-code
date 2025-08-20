@@ -198,6 +198,25 @@ function resolveEnvVarsInObject<T>(obj: T): T {
   return obj;
 }
 
+function findQwenEnvFile(startDir: string): string | null {
+  let currentDir = path.resolve(startDir);
+  while (true) {
+    const qwenEnvPath = path.join(currentDir, '.qwen.env');
+    if (fs.existsSync(qwenEnvPath)) {
+      return qwenEnvPath;
+    }
+    const parentDir = path.dirname(currentDir);
+    if (parentDir === currentDir || !parentDir) {
+      const homeQwenEnvPath = path.join(homedir(), '.qwen.env');
+      if (fs.existsSync(homeQwenEnvPath)) {
+        return homeQwenEnvPath;
+      }
+      return null;
+    }
+    currentDir = parentDir;
+  }
+}
+
 function findEnvFile(startDir: string): string | null {
   let currentDir = path.resolve(startDir);
   while (true) {
@@ -227,6 +246,38 @@ function findEnvFile(startDir: string): string | null {
   }
 }
 
+function loadEnvFile(
+  envFilePath: string,
+  resolvedSettings: Settings | undefined,
+): void {
+  // Manually parse and load environment variables to handle exclusions correctly.
+  // This avoids modifying environment variables that were already set from the shell.
+  try {
+    const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
+    const parsedEnv = dotenv.parse(envFileContent);
+
+    const excludedVars =
+      resolvedSettings?.excludedProjectEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
+    const isProjectEnvFile = !envFilePath.includes(GEMINI_DIR);
+
+    for (const key in parsedEnv) {
+      if (Object.hasOwn(parsedEnv, key)) {
+        // If it's a project .env file, skip loading excluded variables.
+        if (isProjectEnvFile && excludedVars.includes(key)) {
+          continue;
+        }
+
+        // Load variable only if it's not already set in the environment.
+        if (!Object.hasOwn(process.env, key)) {
+          process.env[key] = parsedEnv[key];
+        }
+      }
+    }
+  } catch (_e) {
+    // Errors are ignored to match the behavior of `dotenv.config({ quiet: true })`.
+  }
+}
+
 export function setUpCloudShellEnvironment(envFilePath: string | null): void {
   // Special handling for GOOGLE_CLOUD_PROJECT in Cloud Shell:
   // Because GOOGLE_CLOUD_PROJECT in Cloud Shell tracks the project
@@ -250,6 +301,7 @@ export function setUpCloudShellEnvironment(envFilePath: string | null): void {
 }
 
 export function loadEnvironment(settings?: Settings): void {
+  const qwenEnvFilePath = findQwenEnvFile(process.cwd());
   const envFilePath = findEnvFile(process.cwd());
 
   // Cloud Shell environment variable handling
@@ -277,33 +329,14 @@ export function loadEnvironment(settings?: Settings): void {
     }
   }
 
+  // Load .qwen.env first (lower precedence)
+  if (qwenEnvFilePath) {
+    loadEnvFile(qwenEnvFilePath, resolvedSettings);
+  }
+
+  // Load .env second (higher precedence than .qwen.env, but still lower than shell env)
   if (envFilePath) {
-    // Manually parse and load environment variables to handle exclusions correctly.
-    // This avoids modifying environment variables that were already set from the shell.
-    try {
-      const envFileContent = fs.readFileSync(envFilePath, 'utf-8');
-      const parsedEnv = dotenv.parse(envFileContent);
-
-      const excludedVars =
-        resolvedSettings?.excludedProjectEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
-      const isProjectEnvFile = !envFilePath.includes(GEMINI_DIR);
-
-      for (const key in parsedEnv) {
-        if (Object.hasOwn(parsedEnv, key)) {
-          // If it's a project .env file, skip loading excluded variables.
-          if (isProjectEnvFile && excludedVars.includes(key)) {
-            continue;
-          }
-
-          // Load variable only if it's not already set in the environment.
-          if (!Object.hasOwn(process.env, key)) {
-            process.env[key] = parsedEnv[key];
-          }
-        }
-      }
-    } catch (_e) {
-      // Errors are ignored to match the behavior of `dotenv.config({ quiet: true })`.
-    }
+    loadEnvFile(envFilePath, resolvedSettings);
   }
 }
 

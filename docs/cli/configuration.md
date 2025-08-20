@@ -343,11 +343,25 @@ The CLI keeps a history of shell commands you run. To avoid conflicts between di
 
 Environment variables are a common way to configure applications, especially for sensitive information like API keys or for settings that might change between environments.
 
-The CLI automatically loads environment variables from an `.env` file. The loading order is:
+The CLI automatically loads environment variables from files in the following precedence order (higher precedence overrides lower):
+
+1. **Shell environment variables** - Already set in the shell before CLI execution (highest precedence)
+2. **`.env` file variables** - Project-specific configuration
+3. **`.qwen.env` file variables** - User-specific fallback configuration (lowest precedence)
+
+The file search order for `.env` files is:
 
 1.  `.env` file in the current working directory.
 2.  If not found, it searches upwards in parent directories until it finds an `.env` file or reaches the project root (identified by a `.git` folder) or the home directory.
 3.  If still not found, it looks for `~/.env` (in the user's home directory).
+
+The file search order for `.qwen.env` files is:
+
+1.  `.qwen.env` file in the current working directory.
+2.  If not found, it searches upwards in parent directories until it finds a `.qwen.env` file or reaches the project root (identified by a `.git` folder) or the home directory.
+3.  If still not found, it looks for `~/.qwen.env` (in the user's home directory).
+
+Additionally, users can save OpenAI credentials to a `.qwen.env` file through the interactive prompt when manually entering credentials. This file is intended as a fallback configuration mechanism.
 
 **Environment Variable Exclusion:** Some environment variables (like `DEBUG` and `DEBUG_MODE`) are automatically excluded from being loaded from project `.env` files to prevent interference with gemini-cli behavior. Variables from `.gemini/.env` files are never excluded. You can customize this behavior using the `excludedProjectEnvVars` setting in your `settings.json` file.
 

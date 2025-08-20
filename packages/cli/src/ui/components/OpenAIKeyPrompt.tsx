@@ -7,6 +7,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Colors } from '../colors.js';
+import { saveToQwenEnv } from '../../config/auth.js';
 
 interface OpenAIKeyPromptProps {
   onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
@@ -23,8 +24,46 @@ export function OpenAIKeyPrompt({
   const [currentField, setCurrentField] = useState<
     'apiKey' | 'baseUrl' | 'model'
   >('apiKey');
+  const [showSavePrompt, setShowSavePrompt] = useState(false);
+  const [savedApiKey, setSavedApiKey] = useState('');
+  const [savedBaseUrl, setSavedBaseUrl] = useState('');
+  const [savedModel, setSavedModel] = useState('');
 
   useInput((input, key) => {
+    // Handle save prompt
+    if (showSavePrompt) {
+      if (key.escape) {
+        // Don't save and continue
+        onSubmit(savedApiKey, savedBaseUrl, savedModel);
+        return;
+      }
+
+      const cleanInput = input.trim().toLowerCase();
+      if (
+        cleanInput === 'y' ||
+        cleanInput === 'yes' ||
+        input.includes('\n') ||
+        input.includes('\r')
+      ) {
+        // Save and continue
+        saveToQwenEnv(savedApiKey, savedBaseUrl, savedModel)
+          .then(() => {
+            onSubmit(savedApiKey, savedBaseUrl, savedModel);
+          })
+          .catch((error) => {
+            console.warn('Failed to save credentials to .qwen.env:', error);
+            // Even if save fails, continue with the session
+            onSubmit(savedApiKey, savedBaseUrl, savedModel);
+          });
+        return;
+      } else if (cleanInput === 'n' || cleanInput === 'no') {
+        // Don't save and continue
+        onSubmit(savedApiKey, savedBaseUrl, savedModel);
+        return;
+      }
+      return;
+    }
+
     // 过滤粘贴相关的控制序列
     let cleanInput = (input || '')
       // 过滤 ESC 开头的控制序列（如 \u001b[200~、\u001b[201~ 等）
@@ -65,7 +104,11 @@ export function OpenAIKeyPrompt({
       } else if (currentField === 'model') {
         // 只有在提交时才检查 API key 是否为空
         if (apiKey.trim()) {
-          onSubmit(apiKey.trim(), baseUrl.trim(), model.trim());
+          // Store the values and show save prompt
+          setSavedApiKey(apiKey.trim());
+          setSavedBaseUrl(baseUrl.trim());
+          setSavedModel(model.trim());
+          setShowSavePrompt(true);
         } else {
           // 如果 API key 为空，回到 API key 字段
           setCurrentField('apiKey');
@@ -122,6 +165,35 @@ export function OpenAIKeyPrompt({
       return;
     }
   });
+
+  if (showSavePrompt) {
+    return (
+      <Box
+        borderStyle="round"
+        borderColor={Colors.AccentBlue}
+        flexDirection="column"
+        padding={1}
+        width="100%"
+      >
+        <Text bold color={Colors.AccentBlue}>
+          Save Configuration?
+        </Text>
+        <Box marginTop={1}>
+          <Text>Save these credentials to .qwen.env for future use? [Y/n]</Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={Colors.AccentYellow}>
+            Note: .qwen.env is already in .gitignore to prevent accidental commits
+          </Text>
+        </Box>
+        <Box marginTop={1}>
+          <Text color={Colors.Gray}>
+            Press Enter or Y to save, N for session-only, Esc to use session-only
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
 
   return (
     <Box

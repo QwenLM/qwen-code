@@ -1,6 +1,7 @@
 # API keys and secrets
 .env
 .env~
+.qwen.env
 
 # gemini-cli settings
 .gemini/
