@@ -84,6 +84,11 @@ jobs:
           echo "RELEASE_TAG=$(echo $VERSION_JSON | jq -r .releaseTag)" >> $GITHUB_OUTPUT
           echo "RELEASE_VERSION=$(echo $VERSION_JSON | jq -r .releaseVersion)" >> $GITHUB_OUTPUT
           echo "NPM_TAG=$(echo $VERSION_JSON | jq -r .npmTag)" >> $GITHUB_OUTPUT
+
+          # Get the previous tag for release notes generation
+          CURRENT_TAG=$(echo $VERSION_JSON | jq -r .releaseTag)
+          PREVIOUS_TAG=$(node scripts/get-previous-tag.js "$CURRENT_TAG" || echo "")
+          echo "PREVIOUS_TAG=${PREVIOUS_TAG}" >> $GITHUB_OUTPUT
         env:
           IS_NIGHTLY: ${{ steps.vars.outputs.is_nightly }}
           MANUAL_VERSION: ${{ inputs.version }}
@@ -158,11 +163,20 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_BRANCH: ${{ steps.release_branch.outputs.BRANCH_NAME }}
         run: |
-          gh release create ${{ steps.version.outputs.RELEASE_TAG }} \
-            bundle/gemini.js \
-            --target "$RELEASE_BRANCH" \
-            --title "Release ${{ steps.version.outputs.RELEASE_TAG }}" \
-            --generate-notes
+          # Build the gh release create command with appropriate options
+          RELEASE_CMD="gh release create ${{ steps.version.outputs.RELEASE_TAG }} bundle/gemini.js --target \"$RELEASE_BRANCH\" --title \"Release ${{ steps.version.outputs.RELEASE_TAG }}\""
+
+          # Add previous tag for release notes if available
+          if [[ -n "${{ steps.version.outputs.PREVIOUS_TAG }}" ]]; then
+            echo "Generating release notes from previous tag: ${{ steps.version.outputs.PREVIOUS_TAG }}"
+            RELEASE_CMD="$RELEASE_CMD --generate-notes --notes-start-tag ${{ steps.version.outputs.PREVIOUS_TAG }}"
+          else
+            echo "No previous tag found, generating release notes from repository history"
+            RELEASE_CMD="$RELEASE_CMD --generate-notes"
+          fi
+
+          # Execute the release command
+          eval $RELEASE_CMD
 
       - name: Create Issue on Failure
         if: failure()

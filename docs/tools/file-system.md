@@ -1,6 +1,6 @@
-# Gemini CLI file system tools
+# Qwen Code file system tools
 
-The Gemini CLI provides a comprehensive suite of tools for interacting with the local file system. These tools allow the Gemini model to read from, write to, list, search, and modify files and directories, all under your control and typically with confirmation for sensitive operations.
+Qwen Code provides a comprehensive suite of tools for interacting with the local file system. These tools allow the model to read from, write to, list, search, and modify files and directories, all under your control and typically with confirmation for sensitive operations.
 
 **Note:** All file system tools operate within a `rootDirectory` (usually the current working directory where you launched the CLI) for security. Paths that you provide to these tools are generally expected to be absolute or are resolved relative to this root directory.
 
@@ -140,4 +140,4 @@ The Gemini CLI provides a comprehensive suite of tools for interacting with the 
   - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit, expected 1 occurrences but found 2...`).
 - **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
 
-These file system tools provide a foundation for the Gemini CLI to understand and interact with your local project context.
+These file system tools provide a foundation for Qwen Code to understand and interact with your local project context.
