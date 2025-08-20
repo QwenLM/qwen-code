@@ -15,6 +15,7 @@ import {
   createUserContent,
   Part,
   Tool,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { retryWithBackoff } from '../utils/retry.js';
 import { isFunctionResponse } from '../utils/messageInspectors.js';
@@ -23,6 +24,16 @@ import { Config } from '../config/config.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { StructuredError } from './turn.js';
+import { 
+  logApiRequest, 
+  logApiResponse, 
+  logApiError
+} from '../telemetry/loggers.js';
+import {
+  ApiRequestEvent, 
+  ApiResponseEvent, 
+  ApiErrorEvent 
+} from '../telemetry/types.js';
 
 /**
  * Returns true if the response is valid, false otherwise.
