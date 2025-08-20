@@ -22,6 +22,7 @@ import {
   FileDiscoveryService,
   TelemetryTarget,
   FileFilteringOptions,
+  AuthType,
 } from '@qwen-code/qwen-code-core';
 import { Settings } from './settings.js';
 
@@ -329,15 +330,8 @@ export async function loadCliConfig(
   const activeExtensions = extensions.filter(
     (_, i) => allExtensions[i].isActive,
   );
-  // Handle OpenAI API key from command line
-  if (argv.openaiApiKey) {
-    process.env.OPENAI_API_KEY = argv.openaiApiKey;
-  }
-
-  // Handle OpenAI base URL from command line
-  if (argv.openaiBaseUrl) {
-    process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
-  }
+  // Set up OpenAI configuration from CLI arguments
+  setupOpenAIFromCliArgs(argv);
 
   // Handle Tavily API key from command line
   if (argv.tavilyApiKey) {
@@ -560,4 +554,50 @@ function mergeExcludeTools(
     }
   }
   return [...allExcludeTools];
+}
+
+/**
+ * Apply OpenAI configuration from CLI arguments to environment.
+ * Following the existing pattern for environment setup.
+ * @param argv - Command line arguments
+ */
+function setupOpenAIFromCliArgs(argv: CliArgs): void {
+  // Following existing pattern for environment variable setup
+  if (argv.openaiApiKey) {
+    process.env.OPENAI_API_KEY = argv.openaiApiKey;
+  }
+  
+  if (argv.openaiBaseUrl) {
+    process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
+  }
+  
+  // Set model if using OpenAI
+  if (argv.model && process.env.OPENAI_API_KEY) {
+    process.env.OPENAI_MODEL = argv.model;
+  }
+}
+
+/**
+ * Get the effective auth type based on configuration hierarchy.
+ * Environment variables take precedence over settings.
+ * @param settings - Loaded settings
+ * @returns The auth type to use
+ */
+export function getEffectiveAuthType(settings: Settings): AuthType | undefined {
+  // Check environment variables first (highest precedence)
+  if (process.env.OPENAI_API_KEY) {
+    return AuthType.USE_OPENAI;
+  }
+  if (process.env.GEMINI_API_KEY) {
+    return AuthType.USE_GEMINI;
+  }
+  if (process.env.GOOGLE_GENAI_USE_VERTEXAI === 'true') {
+    return AuthType.USE_VERTEX_AI;
+  }
+  if (process.env.GOOGLE_GENAI_USE_GCA === 'true') {
+    return AuthType.LOGIN_WITH_GOOGLE;
+  }
+  
+  // Fall back to settings
+  return settings.selectedAuthType;
 }

@@ -25,6 +25,7 @@ import {
   toFriendlyError,
 } from '../utils/errors.js';
 import { GeminiChat } from './geminiChat.js';
+import { getBackendName } from './contentGenerator.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -270,10 +271,15 @@ export class Turn {
         return;
       }
 
+      // Get the backend name for better error messages
+      const authType = this.chat.getConfig()?.getContentGeneratorConfig()?.authType;
+      const backendName = getBackendName(authType);
+      
       const contextForReport = [...this.chat.getHistory(/*curated*/ true), req];
+      
       await reportError(
         error,
-        'Error when talking to Gemini API',
+        `Error when talking to ${backendName}`,
         contextForReport,
         'Turn.run-sendMessageStream',
       );

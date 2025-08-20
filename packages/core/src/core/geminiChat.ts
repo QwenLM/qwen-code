@@ -137,6 +137,10 @@ export class GeminiChat {
     validateHistory(history);
   }
 
+  getConfig(): Config {
+    return this.config;
+  }
+
   private _getRequestTextFromContents(contents: Content[]): string {
     return JSON.stringify(contents);
   }
