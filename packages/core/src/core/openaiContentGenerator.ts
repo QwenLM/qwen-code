@@ -82,6 +82,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   protected client: OpenAI;
   private model: string;
   private config: Config;
+  private isOpenRouter: boolean;
   private streamingToolCalls: Map<
     number,
     {
@@ -137,6 +138,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
       maxRetries: timeoutConfig.maxRetries,
       defaultHeaders,
     });
+
+    this.isOpenRouter = isOpenRouter;
   }
 
   /**
@@ -246,6 +249,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
         messages,
         ...samplingParams,
         ...(this.buildMetadata(userPromptId) || {}),
+        // Add quantizations parameter for OpenRouter to avoid quantized models
+        ...(this.isOpenRouter
+          ? {
+              provider: {
+                quantizations: ['fp8', 'fp16', 'bf16'],
+              },
+            }
+          : {}),
       };
 
       if (request.config?.tools) {
@@ -358,6 +369,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
         stream: true,
         stream_options: { include_usage: true },
         ...(this.buildMetadata(userPromptId) || {}),
+        // Add quantizations parameter for OpenRouter to avoid quantized models
+        ...(this.isOpenRouter
+          ? {
+              provider: {
+                quantizations: ['fp8', 'fp16', 'bf16'],
+              },
+            }
+          : {}),
       };
 
       if (request.config?.tools) {
