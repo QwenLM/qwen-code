@@ -74,7 +74,7 @@ function parseTag(tag) {
 function findLastStableTag(currentTagInfo) {
   // For nightly releases, find the stable version of the same version number first
   const baseVersion = `v${currentTagInfo.version}`;
-  
+
   // Check if the stable version of the current version exists
   if (tagExists(baseVersion)) {
     return baseVersion;
