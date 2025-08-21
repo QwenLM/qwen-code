@@ -43,12 +43,6 @@ const RETRY_CONFIG = {
 
 // Dynamic import of undici to handle missing dependency gracefully
 let Agent: typeof import('undici').Agent | undefined;
-try {
-  const undici = await import('undici');
-  Agent = undici.Agent;
-} catch (error) {
-  // undici not available, will use default fetch without custom agent
-}
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
@@ -303,6 +297,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // Initialize undici Agent if not already done
+    if (!Agent) {
+      try {
+        const undici = await import('undici');
+        Agent = undici.Agent;
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] Successfully loaded undici for HTTP agent optimization');
+        }
+      } catch (error) {
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] undici not available, using default fetch:', error instanceof Error ? error.message : error);
+        }
+      }
+    }
+    
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
@@ -424,6 +433,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    // Initialize undici Agent if not already done
+    if (!Agent) {
+      try {
+        const undici = await import('undici');
+        Agent = undici.Agent;
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] Successfully loaded undici for HTTP agent optimization');
+        }
+      } catch (error) {
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] undici not available, using default fetch:', error instanceof Error ? error.message : error);
+        }
+      }
+    }
+    
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
