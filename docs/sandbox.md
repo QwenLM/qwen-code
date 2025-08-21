@@ -1,19 +1,19 @@
-# Sandboxing in the Gemini CLI
+# Sandboxing in Qwen Code
 
-This document provides a guide to sandboxing in the Gemini CLI, including prerequisites, quickstart, and configuration.
+This document provides a guide to sandboxing in Qwen Code, including prerequisites, quickstart, and configuration.
 
 ## Prerequisites
 
-Before using sandboxing, you need to install and set up the Gemini CLI:
+Before using sandboxing, you need to install and set up Qwen Code:
 
 ```bash
-npm install -g @google/gemini-cli
+npm install -g @qwen-code/qwen-code
 ```
 
 To verify the installation
 
 ```bash
-gemini --version
+qwen --version
 ```
 
 ## Overview of sandboxing
@@ -47,11 +47,11 @@ Cross-platform sandboxing with complete process isolation.
 
 ```bash
 # Enable sandboxing with command flag
-gemini -s -p "analyze the code structure"
+qwen -s -p "analyze the code structure"
 
 # Use environment variable
 export GEMINI_SANDBOX=true
-gemini -p "run the test suite"
+qwen -p "run the test suite"
 
 # Configure in settings.json
 {
@@ -126,19 +126,19 @@ export SANDBOX_SET_UID_GID=false  # Disable UID/GID mapping
 ### Debug mode
 
 ```bash
-DEBUG=1 gemini -s -p "debug command"
+DEBUG=1 qwen -s -p "debug command"
 ```
 
-**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect gemini-cli due to automatic exclusion. Use `.gemini/.env` files for gemini-cli specific debug settings.
+**Note:** If you have `DEBUG=true` in a project's `.env` file, it won't affect the CLI due to automatic exclusion. Use `.qwen/.env` files for Qwen Code-specific debug settings.
 
 ### Inspect sandbox
 
 ```bash
 # Check environment
-gemini -s -p "run shell command: env | grep SANDBOX"
+qwen -s -p "run shell command: env | grep SANDBOX"
 
 # List mounts
-gemini -s -p "run shell command: mount | grep workspace"
+qwen -s -p "run shell command: mount | grep workspace"
 ```
 
 ## Security notes

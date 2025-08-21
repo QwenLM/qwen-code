@@ -14,24 +14,15 @@ import {
   SendMessageParameters,
   createUserContent,
   Part,
-  GenerateContentResponseUsageMetadata,
   Tool,
 } from '@google/genai';
 import { retryWithBackoff } from '../utils/retry.js';
 import { isFunctionResponse } from '../utils/messageInspectors.js';
 import { ContentGenerator, AuthType } from './contentGenerator.js';
 import { Config } from '../config/config.js';
-import {
-  logApiRequest,
-  logApiResponse,
-  logApiError,
-} from '../telemetry/loggers.js';
-import {
-  ApiErrorEvent,
-  ApiRequestEvent,
-  ApiResponseEvent,
-} from '../telemetry/types.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
+import { hasCycleInSchema } from '../tools/tools.js';
+import { StructuredError } from './turn.js';
 
 /**
  * Returns true if the response is valid, false otherwise.
@@ -137,80 +128,6 @@ export class GeminiChat {
     validateHistory(history);
   }
 
-  private _getRequestTextFromContents(contents: Content[]): string {
-    return JSON.stringify(contents);
-  }
-
-  private async _logApiRequest(
-    contents: Content[],
-    model: string,
-    prompt_id: string,
-  ): Promise<void> {
-    const requestText = this._getRequestTextFromContents(contents);
-    logApiRequest(
-      this.config,
-      new ApiRequestEvent(model, prompt_id, requestText),
-    );
-  }
-
-  private async _logApiResponse(
-    durationMs: number,
-    prompt_id: string,
-    usageMetadata?: GenerateContentResponseUsageMetadata,
-    responseText?: string,
-    responseId?: string,
-  ): Promise<void> {
-    const authType = this.config.getContentGeneratorConfig()?.authType;
-
-    // Don't log API responses for openaiContentGenerator
-    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
-      return;
-    }
-
-    logApiResponse(
-      this.config,
-      new ApiResponseEvent(
-        responseId || `gemini-${Date.now()}`,
-        this.config.getModel(),
-        durationMs,
-        prompt_id,
-        authType,
-        usageMetadata,
-        responseText,
-      ),
-    );
-  }
-
-  private _logApiError(
-    durationMs: number,
-    error: unknown,
-    prompt_id: string,
-    responseId?: string,
-  ): void {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorType = error instanceof Error ? error.name : 'unknown';
-
-    const authType = this.config.getContentGeneratorConfig()?.authType;
-
-    // Don't log API errors for openaiContentGenerator
-    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
-      return;
-    }
-
-    logApiError(
-      this.config,
-      new ApiErrorEvent(
-        responseId,
-        this.config.getModel(),
-        errorMessage,
-        durationMs,
-        prompt_id,
-        authType,
-        errorType,
-      ),
-    );
-  }
-
   /**
    * Handles falling back to Flash model when persistent 429 errors occur for OAuth users.
    * Uses a fallback handler if provided by the config; otherwise, returns null.
@@ -263,6 +180,9 @@ export class GeminiChat {
     return null;
   }
 
+  setSystemInstruction(sysInstr: string) {
+    this.generationConfig.systemInstruction = sysInstr;
+  }
   /**
    * Sends a message to the model and returns the response.
    *
@@ -291,9 +211,6 @@ export class GeminiChat {
     const userContent = createUserContent(params.message);
     const requestContents = this.getHistory(true).concat(userContent);
 
-    this._logApiRequest(requestContents, this.config.getModel(), prompt_id);
-
-    const startTime = Date.now();
     let response: GenerateContentResponse;
 
     try {
@@ -321,25 +238,19 @@ export class GeminiChat {
       };
 
       response = await retryWithBackoff(apiCall, {
-        shouldRetry: (error: Error) => {
-          if (error && error.message) {
+        shouldRetry: (error: unknown) => {
+          // Check for known error messages and codes.
+          if (error instanceof Error && error.message) {
+            if (isSchemaDepthError(error.message)) return false;
             if (error.message.includes('429')) return true;
             if (error.message.match(/5\d{2}/)) return true;
           }
-          return false;
+          return false; // Don't retry other errors by default
         },
         onPersistent429: async (authType?: string, error?: unknown) =>
           await this.handleFlashFallback(authType, error),
         authType: this.config.getContentGeneratorConfig()?.authType,
       });
-      const durationMs = Date.now() - startTime;
-      await this._logApiResponse(
-        durationMs,
-        prompt_id,
-        response.usageMetadata,
-        JSON.stringify(response),
-        response.responseId,
-      );
 
       this.sendPromise = (async () => {
         const outputContent = response.candidates?.[0]?.content;
@@ -367,8 +278,6 @@ export class GeminiChat {
       });
       return response;
     } catch (error) {
-      const durationMs = Date.now() - startTime;
-      this._logApiError(durationMs, error, prompt_id);
       this.sendPromise = Promise.resolve();
       throw error;
     }
@@ -403,9 +312,6 @@ export class GeminiChat {
     await this.sendPromise;
     const userContent = createUserContent(params.message);
     const requestContents = this.getHistory(true).concat(userContent);
-    this._logApiRequest(requestContents, this.config.getModel(), prompt_id);
-
-    const startTime = Date.now();
 
     try {
       const apiCall = () => {
@@ -436,9 +342,10 @@ export class GeminiChat {
       // the stream. For simple 429/500 errors on initial call, this is fine.
       // If errors occur mid-stream, this setup won't resume the stream; it will restart it.
       const streamResponse = await retryWithBackoff(apiCall, {
-        shouldRetry: (error: Error) => {
-          // Check error messages for status codes, or specific error names if known
-          if (error && error.message) {
+        shouldRetry: (error: unknown) => {
+          // Check for known error messages and codes.
+          if (error instanceof Error && error.message) {
+            if (isSchemaDepthError(error.message)) return false;
             if (error.message.includes('429')) return true;
             if (error.message.match(/5\d{2}/)) return true;
           }
@@ -456,16 +363,9 @@ export class GeminiChat {
         .then(() => undefined)
         .catch(() => undefined);
 
-      const result = this.processStreamResponse(
-        streamResponse,
-        userContent,
-        startTime,
-        prompt_id,
-      );
+      const result = this.processStreamResponse(streamResponse, userContent);
       return result;
     } catch (error) {
-      const durationMs = Date.now() - startTime;
-      this._logApiError(durationMs, error, prompt_id);
       this.sendPromise = Promise.resolve();
       throw error;
     }
@@ -526,22 +426,37 @@ export class GeminiChat {
     this.generationConfig.tools = tools;
   }
 
-  getFinalUsageMetadata(
-    chunks: GenerateContentResponse[],
-  ): GenerateContentResponseUsageMetadata | undefined {
-    const lastChunkWithMetadata = chunks
-      .slice()
-      .reverse()
-      .find((chunk) => chunk.usageMetadata);
-
-    return lastChunkWithMetadata?.usageMetadata;
+  async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {
+    // Check for potentially problematic cyclic tools with cyclic schemas
+    // and include a recommendation to remove potentially problematic tools.
+    if (
+      isSchemaDepthError(error.message) ||
+      isInvalidArgumentError(error.message)
+    ) {
+      const tools = (await this.config.getToolRegistry()).getAllTools();
+      const cyclicSchemaTools: string[] = [];
+      for (const tool of tools) {
+        if (
+          (tool.schema.parametersJsonSchema &&
+            hasCycleInSchema(tool.schema.parametersJsonSchema)) ||
+          (tool.schema.parameters && hasCycleInSchema(tool.schema.parameters))
+        ) {
+          cyclicSchemaTools.push(tool.displayName);
+        }
+      }
+      if (cyclicSchemaTools.length > 0) {
+        const extraDetails =
+          `\n\nThis error was probably caused by cyclic schema references in one of the following tools, try disabling them with excludeTools:\n\n - ` +
+          cyclicSchemaTools.join(`\n - `) +
+          `\n`;
+        error.message += extraDetails;
+      }
+    }
   }
 
   private async *processStreamResponse(
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     inputContent: Content,
-    startTime: number,
-    prompt_id: string,
   ) {
     const outputContent: Content[] = [];
     const chunks: GenerateContentResponse[] = [];
@@ -564,26 +479,16 @@ export class GeminiChat {
       }
     } catch (error) {
       errorOccurred = true;
-      const durationMs = Date.now() - startTime;
-      this._logApiError(durationMs, error, prompt_id);
       throw error;
     }
 
     if (!errorOccurred) {
-      const durationMs = Date.now() - startTime;
       const allParts: Part[] = [];
       for (const content of outputContent) {
         if (content.parts) {
           allParts.push(...content.parts);
         }
       }
-      await this._logApiResponse(
-        durationMs,
-        prompt_id,
-        this.getFinalUsageMetadata(chunks),
-        JSON.stringify(chunks),
-        chunks[chunks.length - 1]?.responseId,
-      );
     }
     this.recordHistory(inputContent, outputContent);
   }
@@ -754,4 +659,13 @@ export class GeminiChat {
     // For other errors, don't handle them specially
     return null;
   }
+}
+
+/** Visible for Testing */
+export function isSchemaDepthError(errorMessage: string): boolean {
+  return errorMessage.includes('maximum schema depth exceeded');
+}
+
+export function isInvalidArgumentError(errorMessage: string): boolean {
+  return errorMessage.includes('Request contains an invalid argument');
 }

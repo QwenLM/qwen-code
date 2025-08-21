@@ -18,6 +18,7 @@ import { DEFAULT_GEMINI_MODEL, DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { Config } from '../config/config.js';
 import { getEffectiveModel } from './modelCheck.js';
 import { UserTierId } from '../code_assist/types.js';
+import { LoggingContentGenerator } from './loggingContentGenerator.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -161,11 +162,14 @@ export async function createContentGenerator(
     config.authType === AuthType.LOGIN_WITH_GOOGLE ||
     config.authType === AuthType.CLOUD_SHELL
   ) {
-    return createCodeAssistContentGenerator(
-      httpOptions,
-      config.authType,
+    return new LoggingContentGenerator(
+      await createCodeAssistContentGenerator(
+        httpOptions,
+        config.authType,
+        gcConfig,
+        sessionId,
+      ),
       gcConfig,
-      sessionId,
     );
   }
 
@@ -178,8 +182,7 @@ export async function createContentGenerator(
       vertexai: config.vertexai,
       httpOptions,
     });
-
-    return googleGenAI.models;
+    return new LoggingContentGenerator(googleGenAI.models, gcConfig);
   }
 
   if (config.authType === AuthType.USE_OPENAI) {

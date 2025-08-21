@@ -24,6 +24,7 @@ import {
   createCustomTheme,
   validateCustomTheme,
 } from './theme.js';
+import { SemanticColors } from './semantic-tokens.js';
 import { ANSI } from './ansi.js';
 import { ANSILight } from './ansi-light.js';
 import { NoColorTheme } from './no-color.js';
@@ -136,6 +137,14 @@ class ThemeManager {
       this.activeTheme = DEFAULT_THEME;
     }
     return this.activeTheme;
+  }
+
+  /**
+   * Gets the semantic colors for the active theme.
+   * @returns The semantic colors.
+   */
+  getSemanticColors(): SemanticColors {
+    return this.getActiveTheme().semanticColors;
   }
 
   /**

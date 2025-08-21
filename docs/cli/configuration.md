@@ -1,6 +1,6 @@
-# Gemini CLI Configuration
+# Qwen Code Configuration
 
-Gemini CLI offers several ways to configure its behavior, including environment variables, command-line arguments, and settings files. This document outlines the different configuration methods and available settings.
+Qwen Code offers several ways to configure its behavior, including environment variables, command-line arguments, and settings files. This document outlines the different configuration methods and available settings.
 
 ## Configuration layers
 
@@ -15,23 +15,23 @@ Configuration is applied in the following order of precedence (lower numbers are
 
 ## Settings files
 
-Gemini CLI uses `settings.json` files for persistent configuration. There are three locations for these files:
+Qwen Code uses `settings.json` files for persistent configuration. There are three locations for these files:
 
 - **User settings file:**
   - **Location:** `~/.qwen/settings.json` (where `~` is your home directory).
-  - **Scope:** Applies to all Gemini CLI sessions for the current user.
+  - **Scope:** Applies to all Qwen Code sessions for the current user.
 - **Project settings file:**
   - **Location:** `.qwen/settings.json` within your project's root directory.
-  - **Scope:** Applies only when running Gemini CLI from that specific project. Project settings override user settings.
+  - **Scope:** Applies only when running Qwen Code from that specific project. Project settings override user settings.
 - **System settings file:**
   - **Location:** `/etc/gemini-cli/settings.json` (Linux), `C:\ProgramData\gemini-cli\settings.json` (Windows) or `/Library/Application Support/GeminiCli/settings.json` (macOS). The path can be overridden using the `GEMINI_CLI_SYSTEM_SETTINGS_PATH` environment variable.
-  - **Scope:** Applies to all Gemini CLI sessions on the system, for all users. System settings override user and project settings. May be useful for system administrators at enterprises to have controls over users' Gemini CLI setups.
+  - **Scope:** Applies to all Qwen Code sessions on the system, for all users. System settings override user and project settings. May be useful for system administrators at enterprises to have controls over users' Qwen Code setups.
 
 **Note on environment variables in settings:** String values within your `settings.json` files can reference environment variables using either `$VAR_NAME` or `${VAR_NAME}` syntax. These variables will be automatically resolved when the settings are loaded. For example, if you have an environment variable `MY_API_TOKEN`, you could use it in `settings.json` like this: `"apiKey": "$MY_API_TOKEN"`.
 
-### The `.gemini` directory in your project
+### The `.qwen` directory in your project
 
-In addition to a project settings file, a project's `.gemini` directory can contain other project-specific files related to Gemini CLI's operation, such as:
+In addition to a project settings file, a project's `.qwen` directory can contain other project-specific files related to Qwen Code's operation, such as:
 
 - [Custom sandbox profiles](#sandboxing) (e.g., `.qwen/sandbox-macos-custom.sb`, `.qwen/sandbox.Dockerfile`).
 
@@ -44,7 +44,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
 
 - **`bugCommand`** (object):
   - **Description:** Overrides the default URL for the `/bug` command.
-  - **Default:** `"urlTemplate": "https://github.com/google-gemini/gemini-cli/issues/new?template=bug_report.yml&title={title}&info={info}"`
+  - **Default:** `"urlTemplate": "https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title={title}&info={info}"`
   - **Properties:**
     - **`urlTemplate`** (string): A URL that can contain `{title}` and `{info}` placeholders.
   - **Example:**
@@ -70,7 +70,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
 
 - **`coreTools`** (array of strings):
   - **Description:** Allows you to specify a list of core tool names that should be made available to the model. This can be used to restrict the set of built-in tools. See [Built-in Tools](../core/tools-api.md#built-in-tools) for a list of core tools. You can also specify command-specific restrictions for tools that support it, like the `ShellTool`. For example, `"coreTools": ["ShellTool(ls -l)"]` will only allow the `ls -l` command to be executed.
-  - **Default:** All tools available for use by the Gemini model.
+  - **Default:** All tools available for use by the model.
   - **Example:** `"coreTools": ["ReadFileTool", "GlobTool", "ShellTool(ls)"]`.
 
 - **`excludeTools`** (array of strings):
@@ -83,7 +83,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
 
 - **`allowMCPServers`** (array of strings):
   - **Description:** Allows you to specify a list of MCP server names that should be made available to the model. This can be used to restrict the set of MCP servers to connect to. Note that this will be ignored if `--allowed-mcp-server-names` is set.
-  - **Default:** All MCP servers are available for use by the Gemini model.
+  - **Default:** All MCP servers are available for use by the model.
   - **Example:** `"allowMCPServers": ["myPythonServer"]`.
   - **Security Note:** This uses simple string matching on MCP server names, which can be modified. If you're a system administrator looking to prevent users from bypassing this, consider configuring the `mcpServers` at the system settings level such that the user will not be able to configure any MCP servers of their own. This should not be used as an airtight security mechanism.
 
@@ -99,7 +99,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   - **Example:** `"autoAccept": true`
 
 - **`theme`** (string):
-  - **Description:** Sets the visual [theme](./themes.md) for Gemini CLI.
+  - **Description:** Sets the visual [theme](./themes.md) for Qwen Code.
   - **Default:** `"Default"`
   - **Example:** `"theme": "GitHub"`
 
@@ -109,7 +109,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   - **Example:** `"vimMode": true`
 
 - **`sandbox`** (boolean or string):
-  - **Description:** Controls whether and how to use sandboxing for tool execution. If set to `true`, Gemini CLI uses a pre-built `gemini-cli-sandbox` Docker image. For more information, see [Sandboxing](#sandboxing).
+  - **Description:** Controls whether and how to use sandboxing for tool execution. If set to `true`, Qwen Code uses a pre-built `qwen-code-sandbox` Docker image. For more information, see [Sandboxing](#sandboxing).
   - **Default:** `false`
   - **Example:** `"sandbox": "docker"`
 
@@ -127,7 +127,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   - **Example:** `"toolCallCommand": "bin/call_tool"`
 
 - **`mcpServers`** (object):
-  - **Description:** Configures connections to one or more Model-Context Protocol (MCP) servers for discovering and using custom tools. Gemini CLI attempts to connect to each configured MCP server to discover available tools. If multiple MCP servers expose a tool with the same name, the tool names will be prefixed with the server alias you defined in the configuration (e.g., `serverAlias__actualToolName`) to avoid conflicts. Note that the system might strip certain schema properties from MCP tool definitions for compatibility.
+  - **Description:** Configures connections to one or more Model-Context Protocol (MCP) servers for discovering and using custom tools. Qwen Code attempts to connect to each configured MCP server to discover available tools. If multiple MCP servers expose a tool with the same name, the tool names will be prefixed with the server alias you defined in the configuration (e.g., `serverAlias__actualToolName`) to avoid conflicts. Note that the system might strip certain schema properties from MCP tool definitions for compatibility.
   - **Default:** Empty
   - **Properties:**
     - **`<SERVER_NAME>`** (object): The server parameters for the named server.
@@ -177,7 +177,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   - **Example:** `"preferredEditor": "vscode"`
 
 - **`telemetry`** (object)
-  - **Description:** Configures logging and metrics collection for Gemini CLI. For more information, see [Telemetry](../telemetry.md).
+  - **Description:** Configures logging and metrics collection for Qwen Code. For more information, see [Telemetry](../telemetry.md).
   - **Default:** `{"enabled": false, "target": "local", "otlpEndpoint": "http://localhost:4317", "logPrompts": true}`
   - **Properties:**
     - **`enabled`** (boolean): Whether or not telemetry is enabled.
@@ -241,7 +241,7 @@ In addition to a project settings file, a project's `.gemini` directory can cont
     ```
 
 - **`excludedProjectEnvVars`** (array of strings):
-  - **Description:** Specifies environment variables that should be excluded from being loaded from project `.env` files. This prevents project-specific environment variables (like `DEBUG=true`) from interfering with gemini-cli behavior. Variables from `.gemini/.env` files are never excluded.
+  - **Description:** Specifies environment variables that should be excluded from being loaded from project `.env` files. This prevents project-specific environment variables (like `DEBUG=true`) from interfering with the CLI behavior. Variables from `.qwen/.env` files are never excluded.
   - **Default:** `["DEBUG", "DEBUG_MODE"]`
   - **Example:**
     ```json
@@ -272,6 +272,25 @@ In addition to a project settings file, a project's `.gemini` directory can cont
   - **Description:** API key for Tavily web search service. Required to enable the `web_search` tool functionality. If not configured, the web search tool will be disabled and skipped.
   - **Default:** `undefined` (web search disabled)
   - **Example:** `"tavilyApiKey": "tvly-your-api-key-here"`
+- **`chatCompression`** (object):
+  - **Description:** Controls the settings for chat history compression, both automatic and
+    when manually invoked through the /compress command.
+  - **Properties:**
+    - **`contextPercentageThreshold`** (number): A value between 0 and 1 that specifies the token threshold for compression as a percentage of the model's total token limit. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit.
+  - **Example:**
+    ```json
+    "chatCompression": {
+      "contextPercentageThreshold": 0.6
+    }
+    ```
+
+- **`showLineNumbers`** (boolean):
+  - **Description:** Controls whether line numbers are displayed in code blocks in the CLI output.
+  - **Default:** `true`
+  - **Example:**
+    ```json
+    "showLineNumbers": false
+    ```
 
 ### Example `settings.json`:
 
@@ -330,7 +349,7 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
 2.  If not found, it searches upwards in parent directories until it finds an `.env` file or reaches the project root (identified by a `.git` folder) or the home directory.
 3.  If still not found, it looks for `~/.env` (in the user's home directory).
 
-**Environment Variable Exclusion:** Some environment variables (like `DEBUG` and `DEBUG_MODE`) are automatically excluded from being loaded from project `.env` files to prevent interference with gemini-cli behavior. Variables from `.gemini/.env` files are never excluded. You can customize this behavior using the `excludedProjectEnvVars` setting in your `settings.json` file.
+**Environment Variable Exclusion:** Some environment variables (like `DEBUG` and `DEBUG_MODE`) are automatically excluded from project `.env` files by default to prevent interference with the CLI behavior. Variables from `.qwen/.env` files are never excluded. You can customize this behavior using the `excludedProjectEnvVars` setting in your `settings.json` file.
 
 - **`GEMINI_API_KEY`** (Required):
   - Your API key for the Gemini API.
@@ -371,7 +390,7 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
   - `<profile_name>`: Uses a custom profile. To define a custom profile, create a file named `sandbox-macos-<profile_name>.sb` in your project's `.qwen/` directory (e.g., `my-project/.qwen/sandbox-macos-custom.sb`).
 - **`DEBUG` or `DEBUG_MODE`** (often used by underlying libraries or the CLI itself):
   - Set to `true` or `1` to enable verbose debug logging, which can be helpful for troubleshooting.
-  - **Note:** These variables are automatically excluded from project `.env` files by default to prevent interference with gemini-cli behavior. Use `.gemini/.env` files if you need to set these for gemini-cli specifically.
+  - **Note:** These variables are automatically excluded from project `.env` files by default to prevent interference with the CLI behavior. Use `.qwen/.env` files if you need to set these for Qwen Code specifically.
 - **`NO_COLOR`**:
   - Set to any value to disable all color output in the CLI.
 - **`CLI_TITLE`**:
@@ -393,12 +412,12 @@ Arguments passed directly when running the CLI can override other configurations
   - Specifies the Gemini model to use for this session.
   - Example: `npm start -- --model gemini-1.5-pro-latest`
 - **`--prompt <your_prompt>`** (**`-p <your_prompt>`**):
-  - Used to pass a prompt directly to the command. This invokes Gemini CLI in a non-interactive mode.
+  - Used to pass a prompt directly to the command. This invokes Qwen Code in a non-interactive mode.
 - **`--prompt-interactive <your_prompt>`** (**`-i <your_prompt>`**):
   - Starts an interactive session with the provided prompt as the initial input.
   - The prompt is processed within the interactive session, not before it.
   - Cannot be used when piping input from stdin.
-  - Example: `gemini -i "explain this code"`
+  - Example: `qwen -i "explain this code"`
 - **`--sandbox`** (**`-s`**):
   - Enables sandbox mode for this session.
 - **`--sandbox-image`**:
@@ -425,8 +444,8 @@ Arguments passed directly when running the CLI can override other configurations
   - Enables [checkpointing](../checkpointing.md).
 - **`--extensions <extension_name ...>`** (**`-e <extension_name ...>`**):
   - Specifies a list of extensions to use for the session. If not provided, all available extensions are used.
-  - Use the special term `gemini -e none` to disable all extensions.
-  - Example: `gemini -e my-extension -e my-other-extension`
+  - Use the special term `qwen -e none` to disable all extensions.
+  - Example: `qwen -e my-extension -e my-other-extension`
 - **`--list-extensions`** (**`-l`**):
   - Lists all available extensions and exits.
 - **`--proxy`**:
@@ -443,11 +462,11 @@ Arguments passed directly when running the CLI can override other configurations
   - Enables logging of OpenAI API calls for debugging and analysis. This flag overrides the `enableOpenAILogging` setting in `settings.json`.
 - **`--tavily-api-key <api_key>`**:
   - Sets the Tavily API key for web search functionality for this session.
-  - Example: `gemini --tavily-api-key tvly-your-api-key-here`
+  - Example: `qwen --tavily-api-key tvly-your-api-key-here`
 
 ## Context Files (Hierarchical Instructional Context)
 
-While not strictly configuration for the CLI's _behavior_, context files (defaulting to `GEMINI.md` but configurable via the `contextFileName` setting) are crucial for configuring the _instructional context_ (also referred to as "memory") provided to the Gemini model. This powerful feature allows you to give project-specific instructions, coding style guides, or any relevant background information to the AI, making its responses more tailored and accurate to your needs. The CLI includes UI elements, such as an indicator in the footer showing the number of loaded context files, to keep you informed about the active context.
+While not strictly configuration for the CLI's _behavior_, context files (defaulting to `QWEN.md` but configurable via the `contextFileName` setting) are crucial for configuring the _instructional context_ (also referred to as "memory"). This powerful feature allows you to give project-specific instructions, coding style guides, or any relevant background information to the AI, making its responses more tailored and accurate to your needs. The CLI includes UI elements, such as an indicator in the footer showing the number of loaded context files, to keep you informed about the active context.
 
 - **Purpose:** These Markdown files contain instructions, guidelines, or context that you want the Gemini model to be aware of during your interactions. The system is designed to manage this instructional context hierarchically.
 
@@ -496,18 +515,18 @@ This example demonstrates how you can provide general project context, specific 
   3.  **Sub-directory Context Files (Contextual/Local):**
       - Location: The CLI also scans for the configured context file in subdirectories _below_ the current working directory (respecting common ignore patterns like `node_modules`, `.git`, etc.). The breadth of this search is limited to 200 directories by default, but can be configured with a `memoryDiscoveryMaxDirs` field in your `settings.json` file.
       - Scope: Allows for highly specific instructions relevant to a particular component, module, or subsection of your project.
-- **Concatenation & UI Indication:** The contents of all found context files are concatenated (with separators indicating their origin and path) and provided as part of the system prompt to the Gemini model. The CLI footer displays the count of loaded context files, giving you a quick visual cue about the active instructional context.
+- **Concatenation & UI Indication:** The contents of all found context files are concatenated (with separators indicating their origin and path) and provided as part of the system prompt. The CLI footer displays the count of loaded context files, giving you a quick visual cue about the active instructional context.
 - **Importing Content:** You can modularize your context files by importing other Markdown files using the `@path/to/file.md` syntax. For more details, see the [Memory Import Processor documentation](../core/memport.md).
 - **Commands for Memory Management:**
   - Use `/memory refresh` to force a re-scan and reload of all context files from all configured locations. This updates the AI's instructional context.
   - Use `/memory show` to display the combined instructional context currently loaded, allowing you to verify the hierarchy and content being used by the AI.
   - See the [Commands documentation](./commands.md#memory) for full details on the `/memory` command and its sub-commands (`show` and `refresh`).
 
-By understanding and utilizing these configuration layers and the hierarchical nature of context files, you can effectively manage the AI's memory and tailor the Gemini CLI's responses to your specific needs and projects.
+By understanding and utilizing these configuration layers and the hierarchical nature of context files, you can effectively manage the AI's memory and tailor Qwen Code's responses to your specific needs and projects.
 
 ## Sandboxing
 
-The Gemini CLI can execute potentially unsafe operations (like shell commands and file modifications) within a sandboxed environment to protect your system.
+Qwen Code can execute potentially unsafe operations (like shell commands and file modifications) within a sandboxed environment to protect your system.
 
 Sandboxing is disabled by default, but you can enable it in a few ways:
 
@@ -515,12 +534,12 @@ Sandboxing is disabled by default, but you can enable it in a few ways:
 - Setting `GEMINI_SANDBOX` environment variable.
 - Sandbox is enabled in `--yolo` mode by default.
 
-By default, it uses a pre-built `gemini-cli-sandbox` Docker image.
+By default, it uses a pre-built `qwen-code-sandbox` Docker image.
 
-For project-specific sandboxing needs, you can create a custom Dockerfile at `.gemini/sandbox.Dockerfile` in your project's root directory. This Dockerfile can be based on the base sandbox image:
+For project-specific sandboxing needs, you can create a custom Dockerfile at `.qwen/sandbox.Dockerfile` in your project's root directory. This Dockerfile can be based on the base sandbox image:
 
 ```dockerfile
-FROM gemini-cli-sandbox
+FROM qwen-code-sandbox
 
 # Add your custom dependencies or configurations here
 # For example:
@@ -528,26 +547,26 @@ FROM gemini-cli-sandbox
 # COPY ./my-config /app/my-config
 ```
 
-When `.gemini/sandbox.Dockerfile` exists, you can use `BUILD_SANDBOX` environment variable when running Gemini CLI to automatically build the custom sandbox image:
+When `.qwen/sandbox.Dockerfile` exists, you can use `BUILD_SANDBOX` environment variable when running Qwen Code to automatically build the custom sandbox image:
 
 ```bash
-BUILD_SANDBOX=1 gemini -s
+BUILD_SANDBOX=1 qwen -s
 ```
 
 ## Usage Statistics
 
-To help us improve the Gemini CLI, we collect anonymized usage statistics. This data helps us understand how the CLI is used, identify common issues, and prioritize new features.
+To help us improve Qwen Code, we collect anonymized usage statistics. This data helps us understand how the CLI is used, identify common issues, and prioritize new features.
 
 **What we collect:**
 
 - **Tool Calls:** We log the names of the tools that are called, whether they succeed or fail, and how long they take to execute. We do not collect the arguments passed to the tools or any data returned by them.
-- **API Requests:** We log the Gemini model used for each request, the duration of the request, and whether it was successful. We do not collect the content of the prompts or responses.
+- **API Requests:** We log the model used for each request, the duration of the request, and whether it was successful. We do not collect the content of the prompts or responses.
 - **Session Information:** We collect information about the configuration of the CLI, such as the enabled tools and the approval mode.
 
 **What we DON'T collect:**
 
 - **Personally Identifiable Information (PII):** We do not collect any personal information, such as your name, email address, or API keys.
-- **Prompt and Response Content:** We do not log the content of your prompts or the responses from the Gemini model.
+- **Prompt and Response Content:** We do not log the content of your prompts or the responses from the model.
 - **File Content:** We do not log the content of any files that are read or written by the CLI.
 
 **How to opt out:**
