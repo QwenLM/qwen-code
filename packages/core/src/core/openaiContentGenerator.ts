@@ -21,7 +21,7 @@ import {
   FunctionResponse,
 } from '@google/genai';
 import { AuthType, ContentGenerator } from './contentGenerator.js';
-import OpenAI from 'openai';
+import { TinfoilAI } from 'tinfoil';
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
@@ -79,7 +79,7 @@ interface OpenAIResponseFormat {
 }
 
 export class OpenAIContentGenerator implements ContentGenerator {
-  protected client: OpenAI;
+  protected client: TinfoilAI;
   private model: string;
   private config: Config;
   private streamingToolCalls: Map<
@@ -130,7 +130,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         : {}),
     };
 
-    this.client = new OpenAI({
+    this.client = new TinfoilAI({
       apiKey,
       baseURL,
       timeout: timeoutConfig.timeout,
@@ -256,7 +256,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
       // console.log('createParams', createParams);
       const completion = (await this.client.chat.completions.create(
         createParams,
-      )) as OpenAI.Chat.ChatCompletion;
+      )) as TinfoilAI.Chat.ChatCompletion;
 
       const response = this.convertToGeminiFormat(completion);
       const durationMs = Date.now() - startTime;
@@ -368,7 +368,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       const stream = (await this.client.chat.completions.create(
         createParams,
-      )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+      )) as AsyncIterable<TinfoilAI.Chat.ChatCompletionChunk>;
 
       const originalStream = this.streamGenerator(stream);
 
@@ -516,7 +516,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private async *streamGenerator(
-    stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
+    stream: AsyncIterable<TinfoilAI.Chat.ChatCompletionChunk>,
   ): AsyncGenerator<GenerateContentResponse> {
     // Reset the accumulator for each new stream
     this.streamingToolCalls.clear();
@@ -752,8 +752,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
    */
   private async convertGeminiToolsToOpenAI(
     geminiTools: ToolListUnion,
-  ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
-    const openAITools: OpenAI.Chat.ChatCompletionTool[] = [];
+  ): Promise<TinfoilAI.Chat.ChatCompletionTool[]> {
+    const openAITools: TinfoilAI.Chat.ChatCompletionTool[] = [];
 
     for (const tool of geminiTools) {
       let actualTool: Tool;
@@ -811,8 +811,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
   private convertToOpenAIFormat(
     request: GenerateContentParameters,
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+  ): TinfoilAI.Chat.ChatCompletionMessageParam[] {
+    const messages: TinfoilAI.Chat.ChatCompletionMessageParam[] = [];
 
     // Handle system instruction from config
     if (request.config?.systemInstruction) {
@@ -951,9 +951,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
    * Clean up orphaned tool calls from message history to prevent OpenAI API errors
    */
   private cleanOrphanedToolCalls(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+    messages: TinfoilAI.Chat.ChatCompletionMessageParam[],
+  ): TinfoilAI.Chat.ChatCompletionMessageParam[] {
+    const cleaned: TinfoilAI.Chat.ChatCompletionMessageParam[] = [];
     const toolCallIds = new Set<string>();
     const toolResponseIds = new Set<string>();
 
@@ -994,8 +994,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
           // Keep the message but only with valid tool calls
           const cleanedMessage = { ...message };
           (
-            cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+            cleanedMessage as TinfoilAI.Chat.ChatCompletionMessageParam & {
+              tool_calls?: TinfoilAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls = validToolCalls;
           cleaned.push(cleanedMessage);
@@ -1006,8 +1006,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
           // Keep the message if it has text content, but remove tool calls
           const cleanedMessage = { ...message };
           delete (
-            cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+            cleanedMessage as TinfoilAI.Chat.ChatCompletionMessageParam & {
+              tool_calls?: TinfoilAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls;
           cleaned.push(cleanedMessage);
@@ -1029,7 +1029,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
     }
 
     // Final validation: ensure every assistant message with tool_calls has corresponding tool responses
-    const finalCleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+    const finalCleaned: TinfoilAI.Chat.ChatCompletionMessageParam[] = [];
     const finalToolCallIds = new Set<string>();
 
     // Collect all remaining tool call IDs
@@ -1073,8 +1073,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
         if (finalValidToolCalls.length > 0) {
           const cleanedMessage = { ...message };
           (
-            cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+            cleanedMessage as TinfoilAI.Chat.ChatCompletionMessageParam & {
+              tool_calls?: TinfoilAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls = finalValidToolCalls;
           finalCleaned.push(cleanedMessage);
@@ -1084,8 +1084,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ) {
           const cleanedMessage = { ...message };
           delete (
-            cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+            cleanedMessage as TinfoilAI.Chat.ChatCompletionMessageParam & {
+              tool_calls?: TinfoilAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls;
           finalCleaned.push(cleanedMessage);
@@ -1102,9 +1102,9 @@ export class OpenAIContentGenerator implements ContentGenerator {
    * Merge consecutive assistant messages to combine split text and tool calls
    */
   private mergeConsecutiveAssistantMessages(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    const merged: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+    messages: TinfoilAI.Chat.ChatCompletionMessageParam[],
+  ): TinfoilAI.Chat.ChatCompletionMessageParam[] {
+    const merged: TinfoilAI.Chat.ChatCompletionMessageParam[] = [];
 
     for (const message of messages) {
       if (message.role === 'assistant' && merged.length > 0) {
@@ -1129,16 +1129,16 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
           // Update the last message with combined data
           (
-            lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
+            lastMessage as TinfoilAI.Chat.ChatCompletionMessageParam & {
               content: string | null;
-              tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+              tool_calls?: TinfoilAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).content = combinedContent || null;
           if (combinedToolCalls.length > 0) {
             (
-              lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
+              lastMessage as TinfoilAI.Chat.ChatCompletionMessageParam & {
                 content: string | null;
-                tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
+                tool_calls?: TinfoilAI.Chat.ChatCompletionMessageToolCall[];
               }
             ).tool_calls = combinedToolCalls;
           }
@@ -1155,7 +1155,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private convertToGeminiFormat(
-    openaiResponse: OpenAI.Chat.ChatCompletion,
+    openaiResponse: TinfoilAI.Chat.ChatCompletion,
   ): GenerateContentResponse {
     const choice = openaiResponse.choices[0];
     const response = new GenerateContentResponse();
@@ -1174,7 +1174,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
     // Handle tool calls
     if (choice.message.tool_calls) {
       for (const toolCall of choice.message.tool_calls) {
-        if (toolCall.function) {
+        if ('function' in toolCall && toolCall.function) {
           let args: Record<string, unknown> = {};
           if (toolCall.function.arguments) {
             args = safeJsonParse(toolCall.function.arguments, {});
@@ -1243,7 +1243,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   private convertStreamChunkToGeminiFormat(
-    chunk: OpenAI.Chat.ChatCompletionChunk,
+    chunk: TinfoilAI.Chat.ChatCompletionChunk,
   ): GenerateContentResponse {
     const choice = chunk.choices?.[0];
     const response = new GenerateContentResponse();
