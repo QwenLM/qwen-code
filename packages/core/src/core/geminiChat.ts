@@ -15,6 +15,7 @@ import {
   createUserContent,
   Part,
   Tool,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { retryWithBackoff } from '../utils/retry.js';
 import { isFunctionResponse } from '../utils/messageInspectors.js';
@@ -23,6 +24,16 @@ import { Config } from '../config/config.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { StructuredError } from './turn.js';
+import { 
+  logApiRequest, 
+  logApiResponse, 
+  logApiError
+} from '../telemetry/loggers.js';
+import {
+  ApiRequestEvent, 
+  ApiResponseEvent, 
+  ApiErrorEvent 
+} from '../telemetry/types.js';
 
 /**
  * Returns true if the response is valid, false otherwise.
@@ -128,6 +139,83 @@ export class GeminiChat {
     validateHistory(history);
   }
 
+  getConfig(): Config {
+    return this.config;
+  }
+
+  private _getRequestTextFromContents(contents: Content[]): string {
+    return JSON.stringify(contents);
+  }
+
+  private async _logApiRequest(
+    contents: Content[],
+    model: string,
+    prompt_id: string,
+  ): Promise<void> {
+    const requestText = this._getRequestTextFromContents(contents);
+    logApiRequest(
+      this.config,
+      new ApiRequestEvent(model, prompt_id, requestText),
+    );
+  }
+
+  private async _logApiResponse(
+    durationMs: number,
+    prompt_id: string,
+    usageMetadata?: GenerateContentResponseUsageMetadata,
+    responseText?: string,
+    responseId?: string,
+  ): Promise<void> {
+    const authType = this.config.getContentGeneratorConfig()?.authType;
+
+    // Don't log API responses for openaiContentGenerator
+    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
+      return;
+    }
+
+    logApiResponse(
+      this.config,
+      new ApiResponseEvent(
+        responseId || `gemini-${Date.now()}`,
+        this.config.getModel(),
+        durationMs,
+        prompt_id,
+        authType,
+        usageMetadata,
+        responseText,
+      ),
+    );
+  }
+
+  private _logApiError(
+    durationMs: number,
+    error: unknown,
+    prompt_id: string,
+    responseId?: string,
+  ): void {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorType = error instanceof Error ? error.name : 'unknown';
+
+    const authType = this.config.getContentGeneratorConfig()?.authType;
+
+    // Don't log API errors for openaiContentGenerator
+    if (authType === AuthType.QWEN_OAUTH || authType === AuthType.USE_OPENAI) {
+      return;
+    }
+
+    logApiError(
+      this.config,
+      new ApiErrorEvent(
+        responseId,
+        this.config.getModel(),
+        errorMessage,
+        durationMs,
+        prompt_id,
+        authType,
+        errorType,
+      ),
+    );
+  }
   /**
    * Handles falling back to Flash model when persistent 429 errors occur for OAuth users.
    * Uses a fallback handler if provided by the config; otherwise, returns null.

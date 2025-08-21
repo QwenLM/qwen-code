@@ -62,7 +62,24 @@ You can use custom endpoints by setting the `OPENAI_BASE_URL` environment variab
 
 - Using Azure OpenAI
 - Using other OpenAI-compatible APIs
-- Using local OpenAI-compatible servers
+- Using local OpenAI-compatible servers (e.g., LM Studio, Ollama, llama.cpp)
+
+### Local OpenAI-Compatible Servers
+
+Run Qwen Code with local OpenAI-compatible servers for offline development:
+
+```bash
+# For local OpenAI-compatible servers
+export OPENAI_API_KEY="any-value"  # Required but can be any non-empty value
+export OPENAI_BASE_URL="http://localhost:1234/v1"  # Your local server URL
+export OPENAI_MODEL="your-model-name"  # Model name from your server
+export OPENAI_STREAMING="false"  # Optional: disable streaming for better reliability
+
+qwen
+```
+
+**Notes:**
+- Some local servers may have streaming reliability issues. Set `OPENAI_STREAMING=false` for improved stability
 
 ## Switching Authentication Methods
 

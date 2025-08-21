@@ -39,12 +39,49 @@ import {
   IdeConnectionType,
 } from '@qwen-code/qwen-code-core';
 import { validateAuthMethod } from './config/auth.js';
+import { getEffectiveAuthType } from './config/config.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
+
+/**
+ * Initialize authentication for the config based on settings and environment.
+ * Centralizes auth initialization to follow DRY principle.
+ * @param config - The Config instance to initialize auth for
+ * @param settings - The loaded settings containing selectedAuthType
+ * @returns Promise<void>
+ */
+async function initializeAuth(
+  config: Config,
+  settings: LoadedSettings,
+): Promise<void> {
+  // Skip if using external auth
+  if (settings.merged.useExternalAuth) {
+    return;
+  }
+
+  // Get the effective auth type based on configuration hierarchy
+  const effectiveAuthType = getEffectiveAuthType(settings.merged);
+  
+  if (!effectiveAuthType) {
+    return;
+  }
+
+  try {
+    const err = validateAuthMethod(effectiveAuthType);
+    if (!err) {
+      await config.refreshAuth(effectiveAuthType);
+    }
+  } catch (err) {
+    // Log auth errors but don't exit - let the appropriate handler deal with auth errors
+    if (config.getDebugMode()) {
+      console.error('Auth initialization error:', err);
+    }
+  }
+}
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -191,6 +228,12 @@ export async function main() {
 
   await config.initialize();
 
+  // Initialize auth after config.initialize() to ensure correct backend is used
+  // In sandbox mode, auth is handled separately below to avoid OAuth redirect issues
+  if (!process.env.SANDBOX) {
+    await initializeAuth(config, settings);
+  }
+
   if (config.getIdeMode() && config.getIdeModeFeature()) {
     await config.getIdeClient().connect();
     logIdeConnection(config, new IdeConnectionEvent(IdeConnectionType.START));
@@ -214,21 +257,12 @@ export async function main() {
       : [];
     const sandboxConfig = config.getSandbox();
     if (sandboxConfig) {
-      if (
-        settings.merged.selectedAuthType &&
-        !settings.merged.useExternalAuth
-      ) {
-        // Validate authentication here because the sandbox will interfere with the Oauth2 web redirect.
-        try {
-          const err = validateAuthMethod(settings.merged.selectedAuthType);
-          if (err) {
-            throw new Error(err);
-          }
-          await config.refreshAuth(settings.merged.selectedAuthType);
-        } catch (err) {
-          console.error('Error authenticating:', err);
-          process.exit(1);
-        }
+      // Initialize auth before entering sandbox to avoid OAuth redirect issues
+      try {
+        await initializeAuth(config, settings);
+      } catch (err) {
+        console.error('Error authenticating:', err);
+        process.exit(1);
       }
       await start_sandbox(sandboxConfig, memoryArgs, config);
       process.exit(0);

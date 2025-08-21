@@ -40,6 +40,10 @@ export async function runNonInteractive(
     });
 
     const geminiClient = config.getGeminiClient();
+  if (config.getDebugMode()) {
+    const contentGen = config.getContentGeneratorConfig();
+    console.debug(`NonInteractive using content generator: ${JSON.stringify(contentGen)}`);
+  }
     const toolRegistry: ToolRegistry = await config.getToolRegistry();
 
     const abortController = new AbortController();

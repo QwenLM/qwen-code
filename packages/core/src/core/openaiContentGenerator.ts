@@ -22,11 +22,33 @@ import {
 } from '@google/genai';
 import { AuthType, ContentGenerator } from './contentGenerator.js';
 import OpenAI from 'openai';
+// HTTP Agent configuration constants
+const HTTP_AGENT_DEFAULTS = {
+  CONNECTION_TIMEOUT: 30000,     // 30s connection timeout
+  BODY_TIMEOUT_DEFAULT: 600000,  // 10min for non-streaming
+  BODY_TIMEOUT_STREAMING: 300000,// 5min for streaming  
+  HEADERS_TIMEOUT: 30000,        // 30s for headers
+  KEEP_ALIVE_TIMEOUT: 4000,      // 4s (under LM Studio's 5s limit)
+  KEEP_ALIVE_MAX_TIMEOUT: 60000, // 1min max
+  MAX_CONNECTIONS: 2,             // Conservative pooling
+  PIPELINING: 0,                  // Disabled for compatibility
+};
+
+// Retry configuration
+const RETRY_CONFIG = {
+  MAX_ATTEMPTS: 3,
+  INITIAL_DELAY_MS: 1000,
+  MAX_DELAY_MS: 5000,
+};
+
+// Dynamic import of undici to handle missing dependency gracefully
+let Agent: typeof import('undici').Agent | undefined;
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
 import { safeJsonParse } from '../utils/safeJsonParse.js';
+import { retryWithBackoff } from '../utils/retry.js';
 
 // OpenAI API type definitions for logging
 interface OpenAIToolCall {
@@ -95,25 +117,26 @@ export class OpenAIContentGenerator implements ContentGenerator {
     this.model = model;
     this.config = config;
     const baseURL = process.env.OPENAI_BASE_URL || '';
-
-    // Configure timeout settings - using progressive timeouts
-    const timeoutConfig = {
-      // Base timeout for most requests (2 minutes)
-      timeout: 120000,
-      // Maximum retries for failed requests
-      maxRetries: 3,
-      // HTTP client options
-      httpAgent: undefined, // Let the client use default agent
-    };
-
-    // Allow config to override timeout settings
     const contentGeneratorConfig = this.config.getContentGeneratorConfig();
-    if (contentGeneratorConfig?.timeout) {
-      timeoutConfig.timeout = contentGeneratorConfig.timeout;
-    }
-    if (contentGeneratorConfig?.maxRetries !== undefined) {
-      timeoutConfig.maxRetries = contentGeneratorConfig.maxRetries;
-    }
+    
+    // Check if streaming is disabled via environment
+    const streamingDisabled = process.env.OPENAI_STREAMING === 'false';
+    
+    // Use config values if provided, otherwise use sensible defaults
+    const timeout = contentGeneratorConfig?.timeout || 600000;  // 10 minutes default
+    const maxRetries = contentGeneratorConfig?.maxRetries ?? 2; // 2 retries default
+    
+    const fetchOptions = Agent ? {
+      dispatcher: new Agent({
+        connect: { timeout: HTTP_AGENT_DEFAULTS.CONNECTION_TIMEOUT },
+        bodyTimeout: streamingDisabled ? timeout : HTTP_AGENT_DEFAULTS.BODY_TIMEOUT_STREAMING,
+        headersTimeout: HTTP_AGENT_DEFAULTS.HEADERS_TIMEOUT,
+        keepAliveTimeout: HTTP_AGENT_DEFAULTS.KEEP_ALIVE_TIMEOUT,
+        keepAliveMaxTimeout: HTTP_AGENT_DEFAULTS.KEEP_ALIVE_MAX_TIMEOUT,
+        connections: HTTP_AGENT_DEFAULTS.MAX_CONNECTIONS,
+        pipelining: HTTP_AGENT_DEFAULTS.PIPELINING,
+      })
+    } : {};
 
     const version = config.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
@@ -133,9 +156,10 @@ export class OpenAIContentGenerator implements ContentGenerator {
     this.client = new OpenAI({
       apiKey,
       baseURL,
-      timeout: timeoutConfig.timeout,
-      maxRetries: timeoutConfig.maxRetries,
+      timeout,
+      maxRetries,
       defaultHeaders,
+      fetchOptions,
     });
   }
 
@@ -153,6 +177,52 @@ export class OpenAIContentGenerator implements ContentGenerator {
   }
 
   /**
+   * Determine if an error should be retried
+   * Handles connection failures, timeouts, and transient errors
+   */
+  private shouldRetryError(error: unknown): boolean {
+    if (!error) return false;
+    
+    const errorMessage = error instanceof Error 
+      ? error.message.toLowerCase() 
+      : String(error).toLowerCase();
+    
+    // Connection failures that should be retried
+    const connectionErrors = [
+      'econnreset',
+      'econnrefused', 
+      'epipe',
+      'socket hang up',
+      'socket closed',
+      'terminated',
+      'network error',
+      'fetch failed',
+    ];
+    
+    for (const connError of connectionErrors) {
+      if (errorMessage.includes(connError)) {
+        return true;
+      }
+    }
+    
+    // Timeout errors should be retried with backoff
+    if (this.isTimeoutError(error)) {
+      return true;
+    }
+    
+    // Check for HTTP status codes that indicate retry
+    const errorCode = (error as { code?: string })?.code;
+    const errorStatus = (error as { status?: number })?.status;
+    
+    // Retry on 429 (rate limit) and 5xx (server errors)
+    if (errorStatus && (errorStatus === 429 || (errorStatus >= 500 && errorStatus < 600))) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
    * Check if an error is a timeout error
    */
   private isTimeoutError(error: unknown): boolean {
@@ -162,10 +232,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
       error instanceof Error
         ? error.message.toLowerCase()
         : String(error).toLowerCase();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const errorCode = (error as any)?.code;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const errorType = (error as any)?.type;
+    const errorCode = (error as { code?: string })?.code;
+    const errorType = (error as { type?: string })?.type;
 
     // Check for common timeout indicators
     return (
@@ -229,6 +297,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // Initialize undici Agent if not already done
+    if (!Agent) {
+      try {
+        const undici = await import('undici');
+        Agent = undici.Agent;
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] Successfully loaded undici for HTTP agent optimization');
+        }
+      } catch (error) {
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] undici not available, using default fetch:', error instanceof Error ? error.message : error);
+        }
+      }
+    }
+    
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
@@ -253,10 +336,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
           request.config.tools,
         );
       }
-      // console.log('createParams', createParams);
-      const completion = (await this.client.chat.completions.create(
-        createParams,
-      )) as OpenAI.Chat.ChatCompletion;
+      // Wrap API call with retry logic for connection failures
+      const completion = await retryWithBackoff(
+        async () => {
+          return (await this.client.chat.completions.create(
+            createParams,
+          )) as OpenAI.Chat.ChatCompletion;
+        },
+        {
+          maxAttempts: RETRY_CONFIG.MAX_ATTEMPTS,
+          initialDelayMs: RETRY_CONFIG.INITIAL_DELAY_MS,
+          maxDelayMs: RETRY_CONFIG.MAX_DELAY_MS,
+          shouldRetry: (error) => this.shouldRetryError(error),
+          authType: this.config.getContentGeneratorConfig()?.authType,
+        }
+      );
 
       const response = this.convertToGeminiFormat(completion);
       const durationMs = Date.now() - startTime;
@@ -294,17 +388,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Log API error event for UI telemetry
       const errorEvent = new ApiErrorEvent(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (error as any).requestID || 'unknown',
+        (error as { requestID?: string }).requestID || 'unknown',
         this.model,
         errorMessage,
         durationMs,
         userPromptId,
         this.config.getContentGeneratorConfig()?.authType,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (error as any).type,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (error as any).code,
+        (error as { type?: string }).type,
+        (error as { code?: string }).code,
       );
       logApiError(this.config, errorEvent);
 
@@ -342,8 +433,35 @@ export class OpenAIContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    // Initialize undici Agent if not already done
+    if (!Agent) {
+      try {
+        const undici = await import('undici');
+        Agent = undici.Agent;
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] Successfully loaded undici for HTTP agent optimization');
+        }
+      } catch (error) {
+        if (this.config?.getDebugMode()) {
+          console.debug('[OpenAI] undici not available, using default fetch:', error instanceof Error ? error.message : error);
+        }
+      }
+    }
+    
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
+
+    // Check if streaming is disabled via environment variable
+    const streamingDisabled = process.env.OPENAI_STREAMING === 'false';
+    
+    if (streamingDisabled) {
+      // Use non-streaming generateContent and convert to a single-yield generator
+      const response = await this.generateContent(request, userPromptId);
+      const singleYieldGenerator = async function* () {
+        yield response;
+      };
+      return singleYieldGenerator();
+    }
 
     try {
       // Build sampling parameters with clear priority
@@ -366,9 +484,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
         );
       }
 
-      const stream = (await this.client.chat.completions.create(
-        createParams,
-      )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+      // Wrap streaming API call with retry logic for initial connection
+      const stream = await retryWithBackoff(
+        async () => {
+          return (await this.client.chat.completions.create(
+            createParams,
+          )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
+        },
+        {
+          maxAttempts: RETRY_CONFIG.MAX_ATTEMPTS,
+          initialDelayMs: RETRY_CONFIG.INITIAL_DELAY_MS,
+          maxDelayMs: RETRY_CONFIG.MAX_DELAY_MS,
+          shouldRetry: (error) => this.shouldRetryError(error),
+          authType: this.config.getContentGeneratorConfig()?.authType,
+        }
+      );
 
       const originalStream = this.streamGenerator(stream);
 
@@ -427,17 +557,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
           // Log API error event for UI telemetry
           const errorEvent = new ApiErrorEvent(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (error as any).requestID || 'unknown',
+            (error as { requestID?: string }).requestID || 'unknown',
             this.model,
             errorMessage,
             durationMs,
             userPromptId,
             this.config.getContentGeneratorConfig()?.authType,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (error as any).type,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (error as any).code,
+            (error as { type?: string }).type,
+            (error as { code?: string }).code,
           );
           logApiError(this.config, errorEvent);
 
@@ -481,17 +608,14 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Log API error event for UI telemetry
       const errorEvent = new ApiErrorEvent(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (error as any).requestID || 'unknown',
+        (error as { requestID?: string }).requestID || 'unknown',
         this.model,
         errorMessage,
         durationMs,
         userPromptId,
         this.config.getContentGeneratorConfig()?.authType,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (error as any).type,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (error as any).code,
+        (error as { type?: string }).type,
+        (error as { code?: string }).code,
       );
       logApiError(this.config, errorEvent);
 
@@ -802,10 +926,6 @@ export class OpenAIContentGenerator implements ContentGenerator {
       }
     }
 
-    // console.log(
-    //   'OpenAI Tools Parameters:',
-    //   JSON.stringify(openAITools, null, 2),
-    // );
     return openAITools;
   }
 

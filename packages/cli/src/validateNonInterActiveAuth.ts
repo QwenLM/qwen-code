@@ -7,32 +7,25 @@
 import { AuthType, Config } from '@qwen-code/qwen-code-core';
 import { USER_SETTINGS_PATH } from './config/settings.js';
 import { validateAuthMethod } from './config/auth.js';
-
-function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env.GOOGLE_GENAI_USE_GCA === 'true') {
-    return AuthType.LOGIN_WITH_GOOGLE;
-  }
-  if (process.env.GOOGLE_GENAI_USE_VERTEXAI === 'true') {
-    return AuthType.USE_VERTEX_AI;
-  }
-  if (process.env.GEMINI_API_KEY) {
-    return AuthType.USE_GEMINI;
-  }
-  if (process.env.OPENAI_API_KEY) {
-    return AuthType.USE_OPENAI;
-  }
-  if (process.env.QWEN_OAUTH_TOKEN) {
-    return AuthType.QWEN_OAUTH;
-  }
-  return undefined;
-}
+import { getEffectiveAuthType } from './config/config.js';
 
 export async function validateNonInteractiveAuth(
   configuredAuthType: AuthType | undefined,
   useExternalAuth: boolean | undefined,
   nonInteractiveConfig: Config,
 ) {
-  const effectiveAuthType = configuredAuthType || getAuthTypeFromEnv();
+  const debug = nonInteractiveConfig.getDebugMode() || process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+  
+  // Use the configuration hierarchy from config module
+  // This ensures CLI args > env vars > settings.json precedence
+  const effectiveAuthType = getEffectiveAuthType({ selectedAuthType: configuredAuthType });
+
+  if (debug) {
+    console.debug('[DEBUG:validateNonInteractiveAuth] Called\n' +
+      `  configuredAuthType: ${configuredAuthType}\n` +
+      `  useExternalAuth: ${useExternalAuth}\n` +
+      `  effectiveAuthType: ${effectiveAuthType}`);
+  }
 
   if (!effectiveAuthType) {
     console.error(
@@ -49,6 +42,18 @@ export async function validateNonInteractiveAuth(
     }
   }
 
+  if (debug) {
+    console.debug('[DEBUG:validateNonInteractiveAuth] Before refreshAuth:', effectiveAuthType);
+  }
+  
   await nonInteractiveConfig.refreshAuth(effectiveAuthType);
+  
+  if (debug) {
+    const contentGen = nonInteractiveConfig.getContentGeneratorConfig();
+    console.debug('[DEBUG:validateNonInteractiveAuth] Auth refreshed\n' +
+      `  effectiveAuthType: ${effectiveAuthType}\n` +
+      `  contentGenerator: ${JSON.stringify(contentGen)}`);
+  }
+  
   return nonInteractiveConfig;
 }

@@ -50,6 +50,36 @@ export enum AuthType {
   QWEN_OAUTH = 'qwen-oauth',
 }
 
+/**
+ * Get a human-readable backend name based on the auth type.
+ * @param authType - The authentication type being used
+ * @returns A human-readable backend name for error messages
+ */
+export function getBackendName(authType?: AuthType | string): string {
+  switch (authType) {
+    case AuthType.USE_OPENAI:
+    case 'openai':
+      return 'OpenAI API';
+    case AuthType.QWEN_OAUTH:
+    case 'qwen-oauth':
+      return 'Qwen API';
+    case AuthType.USE_VERTEX_AI:
+    case 'vertex-ai':
+      return 'Vertex AI';
+    case AuthType.USE_GEMINI:
+    case 'gemini-api-key':
+      return 'Gemini API';
+    case AuthType.CLOUD_SHELL:
+    case 'cloud-shell':
+      return 'Cloud Shell';
+    case AuthType.LOGIN_WITH_GOOGLE:
+    case 'oauth-personal':
+      return 'Google OAuth';
+    default:
+      return 'AI API';
+  }
+}
+
 export type ContentGeneratorConfig = {
   model: string;
   apiKey?: string;
@@ -76,6 +106,15 @@ export function createContentGeneratorConfig(
   config: Config,
   authType: AuthType | undefined,
 ): ContentGeneratorConfig {
+  const debug = config.getDebugMode() || process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+  if (debug) {
+    console.debug(
+      '[DEBUG:createContentGeneratorConfig] Called\n' +
+      `  authType: ${authType}\n` +
+      `  Caller stack: ${new Error().stack?.split('\n').slice(2, 4).join('\n')}`
+    );
+  }
+  
   const geminiApiKey = process.env.GEMINI_API_KEY || undefined;
   const googleApiKey = process.env.GOOGLE_API_KEY || undefined;
   const googleCloudProject = process.env.GOOGLE_CLOUD_PROJECT || undefined;
@@ -84,6 +123,15 @@ export function createContentGeneratorConfig(
 
   // Use runtime model from config if available; otherwise, fall back to parameter or default
   const effectiveModel = config.getModel() || DEFAULT_GEMINI_MODEL;
+  
+  if (debug) {
+    console.debug(
+      '[DEBUG:createContentGeneratorConfig] Environment:\n' +
+      `  OPENAI_API_KEY: ${openaiApiKey ? 'SET' : 'NOT SET'}\n` +
+      `  GEMINI_API_KEY: ${geminiApiKey ? 'SET' : 'NOT SET'}\n` +
+      `  Effective model: ${effectiveModel}`
+    );
+  }
 
   const contentGeneratorConfig: ContentGeneratorConfig = {
     model: effectiveModel,
@@ -129,6 +177,14 @@ export function createContentGeneratorConfig(
     contentGeneratorConfig.apiKey = openaiApiKey;
     contentGeneratorConfig.model =
       process.env.OPENAI_MODEL || DEFAULT_GEMINI_MODEL;
+    
+    if (debug) {
+      console.debug(
+        '[DEBUG:createContentGeneratorConfig] Configured for OpenAI\n' +
+        `  Final model: ${contentGeneratorConfig.model}\n` +
+        `  Returning config with authType: ${contentGeneratorConfig.authType}`
+      );
+    }
 
     return contentGeneratorConfig;
   }
