@@ -21,7 +21,7 @@ import {
 } from '@google/genai';
 import { QwenContentGenerator } from './qwenContentGenerator.js';
 import { Config } from '../config/config.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, ContentGeneratorConfig } from '../core/contentGenerator.js';
 
 // Mock the OpenAIContentGenerator parent class
 vi.mock('../core/openaiContentGenerator.js', () => ({
@@ -31,7 +31,7 @@ vi.mock('../core/openaiContentGenerator.js', () => ({
       baseURL: string;
     };
 
-    constructor(contentGeneratorConfig: any, _config: Config) {
+    constructor(contentGeneratorConfig: ContentGeneratorConfig, _config: Config) {
       this.client = {
         apiKey: contentGeneratorConfig.apiKey || 'test-key',
         baseURL: contentGeneratorConfig.baseUrl || 'https://api.openai.com/v1',
