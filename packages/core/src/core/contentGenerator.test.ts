@@ -84,6 +84,7 @@ describe('createContentGeneratorConfig', () => {
     getSamplingParams: vi.fn().mockReturnValue(undefined),
     getContentGeneratorTimeout: vi.fn().mockReturnValue(undefined),
     getContentGeneratorMaxRetries: vi.fn().mockReturnValue(undefined),
+    getContentGeneratorSamplingParams: vi.fn().mockReturnValue(undefined),
     getCliVersion: vi.fn().mockReturnValue('1.0.0'),
   } as unknown as Config;
 

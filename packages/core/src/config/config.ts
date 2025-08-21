@@ -204,7 +204,6 @@ export interface ConfigParameters {
   folderTrust?: boolean;
   ideMode?: boolean;
   enableOpenAILogging?: boolean;
-  sampling_params?: Record<string, unknown>;
   systemPromptMappings?: Array<{
     baseUrls: string[];
     modelNames: string[];
@@ -213,6 +212,9 @@ export interface ConfigParameters {
   contentGenerator?: {
     timeout?: number;
     maxRetries?: number;
+    samplingParams?: {
+      [key: string]: unknown;
+    };
   };
   cliVersion?: string;
   loadMemoryFromIncludeDirectories?: boolean;
@@ -289,10 +291,10 @@ export class Config {
     | undefined;
   private readonly experimentalAcp: boolean = false;
   private readonly enableOpenAILogging: boolean;
-  private readonly sampling_params?: Record<string, unknown>;
   private readonly contentGenerator?: {
     timeout?: number;
     maxRetries?: number;
+    samplingParams?: Record<string, unknown>;
   };
   private readonly cliVersion?: string;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -367,7 +369,6 @@ export class Config {
     this.ideClient = IdeClient.getInstance();
     this.systemPromptMappings = params.systemPromptMappings;
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
-    this.sampling_params = params.sampling_params;
     this.contentGenerator = params.contentGenerator;
     this.cliVersion = params.cliVersion;
 
@@ -757,16 +758,18 @@ export class Config {
     return this.enableOpenAILogging;
   }
 
-  getSamplingParams(): Record<string, unknown> | undefined {
-    return this.sampling_params;
-  }
-
   getContentGeneratorTimeout(): number | undefined {
     return this.contentGenerator?.timeout;
   }
 
   getContentGeneratorMaxRetries(): number | undefined {
     return this.contentGenerator?.maxRetries;
+  }
+
+  getContentGeneratorSamplingParams(): ContentGeneratorConfig['samplingParams'] {
+    return this.contentGenerator?.samplingParams as
+      | ContentGeneratorConfig['samplingParams']
+      | undefined;
   }
 
   getCliVersion(): string | undefined {

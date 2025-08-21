@@ -517,7 +517,6 @@ export async function loadCliConfig(
       (typeof argv.openaiLogging === 'undefined'
         ? settings.enableOpenAILogging
         : argv.openaiLogging) ?? false,
-    sampling_params: settings.sampling_params,
     systemPromptMappings: (settings.systemPromptMappings ?? [
       {
         baseUrls: [
