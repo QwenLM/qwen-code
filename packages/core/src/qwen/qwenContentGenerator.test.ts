@@ -31,7 +31,10 @@ vi.mock('../core/openaiContentGenerator.js', () => ({
       baseURL: string;
     };
 
-    constructor(contentGeneratorConfig: ContentGeneratorConfig, _config: Config) {
+    constructor(
+      contentGeneratorConfig: ContentGeneratorConfig,
+      _config: Config,
+    ) {
       this.client = {
         apiKey: contentGeneratorConfig.apiKey || 'test-key',
         baseURL: contentGeneratorConfig.baseUrl || 'https://api.openai.com/v1',
