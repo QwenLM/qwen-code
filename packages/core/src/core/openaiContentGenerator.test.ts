@@ -113,7 +113,7 @@ describe('OpenAIContentGenerator', () => {
         timeout: 120000,
         maxRetries: 3,
         defaultHeaders: {
-          'User-Agent': 'QwenCode/1.0.0 (darwin; arm64)',
+          'User-Agent': expect.stringMatching(/^QwenCode/),
         },
       });
     });
@@ -136,7 +136,7 @@ describe('OpenAIContentGenerator', () => {
         timeout: 120000,
         maxRetries: 3,
         defaultHeaders: {
-          'User-Agent': 'QwenCode/1.0.0 (darwin; arm64)',
+          'User-Agent': expect.stringMatching(/^QwenCode/),
         },
       });
     });
@@ -159,7 +159,7 @@ describe('OpenAIContentGenerator', () => {
         timeout: 120000,
         maxRetries: 3,
         defaultHeaders: {
-          'User-Agent': 'QwenCode/1.0.0 (darwin; arm64)',
+          'User-Agent': expect.stringMatching(/^QwenCode/),
           'HTTP-Referer': 'https://github.com/QwenLM/qwen-code.git',
           'X-Title': 'Qwen Code',
         },
@@ -190,7 +190,7 @@ describe('OpenAIContentGenerator', () => {
         timeout: 300000,
         maxRetries: 5,
         defaultHeaders: {
-          'User-Agent': 'QwenCode/1.0.0 (darwin; arm64)',
+          'User-Agent': expect.stringMatching(/^QwenCode/),
         },
       });
     });
