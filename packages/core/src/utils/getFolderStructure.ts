@@ -140,10 +140,7 @@ async function readFullStructure(
             }
           } catch (error) {
             // If ignore file checking fails, just continue processing the file
-            console.warn(
-              `Warning: Could not check ignore status for file ${filePath}:`,
-              error,
-            );
+            console.warn(`Warning: Could not check ignore status for file ${filePath}:`, error);
           }
         }
         if (
@@ -185,10 +182,7 @@ async function readFullStructure(
                 options.fileService.shouldGeminiIgnoreFile(subFolderPath));
           } catch (error) {
             // If ignore file checking fails, treat as not ignored and continue
-            console.warn(
-              `Warning: Could not check ignore status for directory ${subFolderPath}:`,
-              error,
-            );
+            console.warn(`Warning: Could not check ignore status for directory ${subFolderPath}:`, error);
             isIgnored = false;
           }
         }
