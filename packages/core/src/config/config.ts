@@ -672,7 +672,14 @@ export class Config {
 
   getFileService(): FileDiscoveryService {
     if (!this.fileDiscoveryService) {
-      this.fileDiscoveryService = new FileDiscoveryService(this.targetDir);
+      // Use the primary workspace directory for FileDiscoveryService
+      // This ensures compatibility with existing ignore file patterns
+      const workspaceDirectories = this.workspaceContext.getDirectories();
+      const primaryDirectory =
+        workspaceDirectories.length > 0
+          ? workspaceDirectories[0]
+          : this.targetDir;
+      this.fileDiscoveryService = new FileDiscoveryService(primaryDirectory);
     }
     return this.fileDiscoveryService;
   }

@@ -134,7 +134,7 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
     const workspaceContext = this.config.getWorkspaceContext();
     if (!workspaceContext.isPathWithinWorkspace(params.path)) {
       const directories = workspaceContext.getDirectories();
-      return `Path must be within one of the workspace directories: ${directories.join(', ')}`;
+      return `Directory access restricted. I can only access files within the configured workspace directories: ${directories.join(', ')}. The requested path "${params.path}" is outside these allowed directories.`;
     }
     return null;
   }
@@ -252,13 +252,31 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
         }
 
         const fullPath = path.join(params.path, file);
-        const relativePath = path.relative(
-          this.config.getTargetDir(),
-          fullPath,
-        );
+
+        // Find the appropriate workspace directory for calculating relative path
+        const workspaceContext = this.config.getWorkspaceContext();
+        const workspaceDirectories = workspaceContext.getDirectories();
+
+        let relativePath = fullPath;
+        // Find which workspace directory contains this file
+        for (const workspaceDir of workspaceDirectories) {
+          if (fullPath.startsWith(workspaceDir)) {
+            relativePath = path.relative(workspaceDir, fullPath);
+            break;
+          }
+        }
+
+        // If no workspace directory contains this file, fall back to target dir
+        if (relativePath === fullPath) {
+          relativePath = path.relative(this.config.getTargetDir(), fullPath);
+        }
 
         // Check if this file should be ignored based on git or gemini ignore rules
+        // Only apply ignore rules if the file is within the main project directory
+        const isInMainProject = fullPath.startsWith(this.config.getTargetDir());
+
         if (
+          isInMainProject &&
           fileFilteringOptions.respectGitIgnore &&
           fileDiscovery.shouldGitIgnoreFile(relativePath)
         ) {
@@ -266,6 +284,7 @@ export class LSTool extends BaseTool<LSToolParams, ToolResult> {
           continue;
         }
         if (
+          isInMainProject &&
           fileFilteringOptions.respectGeminiIgnore &&
           fileDiscovery.shouldGeminiIgnoreFile(relativePath)
         ) {
