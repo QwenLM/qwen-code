@@ -69,6 +69,24 @@ describe('getDirectoryContextString', () => {
       'Here is the folder structure of the current working directories:\n\nStructure 1\nStructure 2',
     );
   });
+
+  it('should handle errors gracefully when getFolderStructure fails for some directories', async () => {
+    (
+      vi.mocked(mockConfig.getWorkspaceContext!)().getDirectories as Mock
+    ).mockReturnValue(['/test/dir1', '/test/dir2', '/test/dir3']);
+    vi.mocked(getFolderStructure)
+      .mockResolvedValueOnce('Structure 1')
+      .mockRejectedValueOnce(new Error('Permission denied'))
+      .mockResolvedValueOnce('Structure 3');
+
+    const contextString = await getDirectoryContextString(mockConfig as Config);
+    expect(contextString).toContain(
+      "I'm currently working in the following directories:\n  - /test/dir1\n  - /test/dir2\n  - /test/dir3",
+    );
+    expect(contextString).toContain('Structure 1');
+    expect(contextString).toContain('Error: Could not read directory "/test/dir2". Check path and permissions.');
+    expect(contextString).toContain('Structure 3');
+  });
 });
 
 describe('getEnvironmentContext', () => {

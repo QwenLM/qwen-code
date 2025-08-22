@@ -20,11 +20,16 @@ export async function getDirectoryContextString(
   const workspaceDirectories = workspaceContext.getDirectories();
 
   const folderStructures = await Promise.all(
-    workspaceDirectories.map((dir) =>
-      getFolderStructure(dir, {
-        fileService: config.getFileService(),
-      }),
-    ),
+    workspaceDirectories.map(async (dir) => {
+      try {
+        return await getFolderStructure(dir, {
+          fileService: config.getFileService(),
+        });
+      } catch (error) {
+        console.warn(`Warning: Could not get folder structure for ${dir}:`, error);
+        return `Error: Could not read directory "${dir}". Check path and permissions.`;
+      }
+    }),
   );
 
   const folderStructure = folderStructures.join('\n');
