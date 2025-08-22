@@ -159,11 +159,22 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
         }
       }
 
-      const finalSuggestions = potentialSuggestions.map((cmd) => ({
-        label: cmd.name,
-        value: cmd.name,
-        description: cmd.description,
-      }));
+      const finalSuggestions = potentialSuggestions.map((cmd) => {
+        // If the partial matches an altName, suggest the altName instead of the primary name
+        const matchingAltName = cmd.altNames?.find((alt) => alt.startsWith(partial));
+        if (matchingAltName && !cmd.name.startsWith(partial)) {
+          return {
+            label: matchingAltName,
+            value: matchingAltName,
+            description: cmd.description,
+          };
+        }
+        return {
+          label: cmd.name,
+          value: cmd.name,
+          description: cmd.description,
+        };
+      });
 
       setSuggestions(finalSuggestions);
       return;
