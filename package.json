@@ -92,6 +92,8 @@
     "yargs": "^17.7.2"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2"
+
+    "node-fetch": "^3.3.2",
+    "fzf": "^0.5.2"
   }
 }
