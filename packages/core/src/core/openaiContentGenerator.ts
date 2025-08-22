@@ -24,21 +24,21 @@ import { AuthType, ContentGenerator } from './contentGenerator.js';
 import OpenAI from 'openai';
 // HTTP Agent configuration constants
 const HTTP_AGENT_DEFAULTS = {
-  CONNECTION_TIMEOUT: 30000,     // 30s connection timeout
+  CONNECTION_TIMEOUT: 90000,     // 90s connection timeout
   BODY_TIMEOUT_DEFAULT: 600000,  // 10min for non-streaming
-  BODY_TIMEOUT_STREAMING: 300000,// 5min for streaming  
-  HEADERS_TIMEOUT: 30000,        // 30s for headers
+  BODY_TIMEOUT_STREAMING: 300000,// 5min for streaming
+  HEADERS_TIMEOUT: 90000,        // 90s for headers
   KEEP_ALIVE_TIMEOUT: 4000,      // 4s (under LM Studio's 5s limit)
   KEEP_ALIVE_MAX_TIMEOUT: 60000, // 1min max
   MAX_CONNECTIONS: 2,             // Conservative pooling
-  PIPELINING: 0,                  // Disabled for compatibility
+  PIPELINING: 1,                  // Enable pipelining for better performance
 };
 
 // Retry configuration
 const RETRY_CONFIG = {
   MAX_ATTEMPTS: 3,
-  INITIAL_DELAY_MS: 1000,
-  MAX_DELAY_MS: 5000,
+  INITIAL_DELAY_MS: 1000,    // 1 second initial delay (was 100s!)
+  MAX_DELAY_MS: 5000,        // 5 second max delay (was 50s!)
 };
 
 // Dynamic import of undici to handle missing dependency gracefully
@@ -49,6 +49,7 @@ import { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
 import { safeJsonParse } from '../utils/safeJsonParse.js';
 import { retryWithBackoff } from '../utils/retry.js';
+import { configureLocalAIClientOptions, isLocalServerUrl } from '../utils/localAI.js';
 
 // OpenAI API type definitions for logging
 interface OpenAIToolCall {
@@ -118,15 +119,18 @@ export class OpenAIContentGenerator implements ContentGenerator {
     this.config = config;
     const baseURL = process.env.OPENAI_BASE_URL || '';
     const contentGeneratorConfig = this.config.getContentGeneratorConfig();
-    
+
     // Check if streaming is disabled via environment
     const streamingDisabled = process.env.OPENAI_STREAMING === 'false';
-    
+
     // Use config values if provided, otherwise use sensible defaults
     const timeout = contentGeneratorConfig?.timeout || 600000;  // 10 minutes default
     const maxRetries = contentGeneratorConfig?.maxRetries ?? 2; // 2 retries default
+
+    // Determine if using local AI server for enhanced configuration
+    const isLocalServer = isLocalServerUrl(baseURL);
     
-    const fetchOptions = Agent ? {
+    const fetchOptions = Agent && !isLocalServer ? {
       dispatcher: new Agent({
         connect: { timeout: HTTP_AGENT_DEFAULTS.CONNECTION_TIMEOUT },
         bodyTimeout: streamingDisabled ? timeout : HTTP_AGENT_DEFAULTS.BODY_TIMEOUT_STREAMING,
@@ -153,14 +157,20 @@ export class OpenAIContentGenerator implements ContentGenerator {
         : {}),
     };
 
-    this.client = new OpenAI({
+    // Configure client options with local AI optimizations if applicable  
+    const clientOptions = {
       apiKey,
       baseURL,
       timeout,
       maxRetries,
       defaultHeaders,
-      fetchOptions,
-    });
+      ...fetchOptions,
+    };
+    
+    // Apply local AI server optimizations (socket configuration, timeouts, etc.)
+    configureLocalAIClientOptions(clientOptions, baseURL, 'OpenAIContentGenerator.constructor');
+    
+    this.client = new OpenAI(clientOptions);
   }
 
   /**
@@ -182,15 +192,15 @@ export class OpenAIContentGenerator implements ContentGenerator {
    */
   private shouldRetryError(error: unknown): boolean {
     if (!error) return false;
-    
-    const errorMessage = error instanceof Error 
-      ? error.message.toLowerCase() 
+
+    const errorMessage = error instanceof Error
+      ? error.message.toLowerCase()
       : String(error).toLowerCase();
-    
+
     // Connection failures that should be retried
     const connectionErrors = [
       'econnreset',
-      'econnrefused', 
+      'econnrefused',
       'epipe',
       'socket hang up',
       'socket closed',
@@ -198,27 +208,27 @@ export class OpenAIContentGenerator implements ContentGenerator {
       'network error',
       'fetch failed',
     ];
-    
+
     for (const connError of connectionErrors) {
       if (errorMessage.includes(connError)) {
         return true;
       }
     }
-    
+
     // Timeout errors should be retried with backoff
     if (this.isTimeoutError(error)) {
       return true;
     }
-    
+
     // Check for HTTP status codes that indicate retry
     const errorCode = (error as { code?: string })?.code;
     const errorStatus = (error as { status?: number })?.status;
-    
+
     // Retry on 429 (rate limit) and 5xx (server errors)
     if (errorStatus && (errorStatus === 429 || (errorStatus >= 500 && errorStatus < 600))) {
       return true;
     }
-    
+
     return false;
   }
 
@@ -311,7 +321,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         }
       }
     }
-    
+
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
@@ -447,13 +457,13 @@ export class OpenAIContentGenerator implements ContentGenerator {
         }
       }
     }
-    
+
     const startTime = Date.now();
     const messages = this.convertToOpenAIFormat(request);
 
     // Check if streaming is disabled via environment variable
     const streamingDisabled = process.env.OPENAI_STREAMING === 'false';
-    
+
     if (streamingDisabled) {
       // Use non-streaming generateContent and convert to a single-yield generator
       const response = await this.generateContent(request, userPromptId);

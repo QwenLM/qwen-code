@@ -100,3 +100,12 @@ export { sessionId } from './utils/session.js';
 export * from './utils/browser.js';
 // OpenAI Logging Utilities
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
+
+// Local AI server utilities
+export {
+  isLocalServerUrl,
+  configureLocalAIClientOptions,
+  getConfiguredAgents,
+  LOCAL_AI_DEFAULT_KEY,
+  getApiKeyForUrl,
+} from './utils/localAI.js';
