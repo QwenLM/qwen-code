@@ -21,6 +21,7 @@ import {
 } from '@google/genai';
 import { QwenContentGenerator } from './qwenContentGenerator.js';
 import { Config } from '../config/config.js';
+import { AuthType, ContentGeneratorConfig } from '../core/contentGenerator.js';
 
 // Mock the OpenAIContentGenerator parent class
 vi.mock('../core/openaiContentGenerator.js', () => ({
@@ -30,10 +31,13 @@ vi.mock('../core/openaiContentGenerator.js', () => ({
       baseURL: string;
     };
 
-    constructor(apiKey: string, _model: string, _config: Config) {
+    constructor(
+      contentGeneratorConfig: ContentGeneratorConfig,
+      _config: Config,
+    ) {
       this.client = {
-        apiKey,
-        baseURL: 'https://api.openai.com/v1',
+        apiKey: contentGeneratorConfig.apiKey || 'test-key',
+        baseURL: contentGeneratorConfig.baseUrl || 'https://api.openai.com/v1',
       };
     }
 
@@ -131,9 +135,13 @@ describe('QwenContentGenerator', () => {
     };
 
     // Create QwenContentGenerator instance
+    const contentGeneratorConfig = {
+      model: 'qwen-turbo',
+      authType: AuthType.QWEN_OAUTH,
+    };
     qwenContentGenerator = new QwenContentGenerator(
       mockQwenClient,
-      'qwen-turbo',
+      contentGeneratorConfig,
       mockConfig,
     );
   });

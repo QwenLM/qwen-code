@@ -1,12 +1,12 @@
 # Checkpointing
 
-The Gemini CLI includes a Checkpointing feature that automatically saves a snapshot of your project's state before any file modifications are made by AI-powered tools. This allows you to safely experiment with and apply code changes, knowing you can instantly revert back to the state before the tool was run.
+Qwen Code includes a Checkpointing feature that automatically saves a snapshot of your project's state before any file modifications are made by AI-powered tools. This allows you to safely experiment with and apply code changes, knowing you can instantly revert back to the state before the tool was run.
 
 ## How It Works
 
 When you approve a tool that modifies the file system (like `write_file` or `replace`), the CLI automatically creates a "checkpoint." This checkpoint includes:
 
-1.  **A Git Snapshot:** A commit is made in a special, shadow Git repository located in your home directory (`~/.gemini/history/<project_hash>`). This snapshot captures the complete state of your project files at that moment. It does **not** interfere with your own project's Git repository.
+1.  **A Git Snapshot:** A commit is made in a special, shadow Git repository located in your home directory (`~/.qwen/history/<project_hash>`). This snapshot captures the complete state of your project files at that moment. It does **not** interfere with your own project's Git repository.
 2.  **Conversation History:** The entire conversation you've had with the agent up to that point is saved.
 3.  **The Tool Call:** The specific tool call that was about to be executed is also stored.
 
@@ -16,7 +16,7 @@ If you want to undo the change or simply go back, you can use the `/restore` com
 - Restore the conversation history in the CLI.
 - Re-propose the original tool call, allowing you to run it again, modify it, or simply ignore it.
 
-All checkpoint data, including the Git snapshot and conversation history, is stored locally on your machine. The Git snapshot is stored in the shadow repository while the conversation history and tool calls are saved in a JSON file in your project's temporary directory, typically located at `~/.gemini/tmp/<project_hash>/checkpoints`.
+All checkpoint data, including the Git snapshot and conversation history, is stored locally on your machine. The Git snapshot is stored in the shadow repository while the conversation history and tool calls are saved in a JSON file in your project's temporary directory, typically located at `~/.qwen/tmp/<project_hash>/checkpoints`.
 
 ## Enabling the Feature
 
@@ -24,10 +24,10 @@ The Checkpointing feature is disabled by default. To enable it, you can either u
 
 ### Using the Command-Line Flag
 
-You can enable checkpointing for the current session by using the `--checkpointing` flag when starting the Gemini CLI:
+You can enable checkpointing for the current session by using the `--checkpointing` flag when starting Qwen Code:
 
 ```bash
-gemini --checkpointing
+qwen --checkpointing
 ```
 
 ### Using the `settings.json` File

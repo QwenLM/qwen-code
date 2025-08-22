@@ -52,6 +52,7 @@ export * from './ide/ide-client.js';
 export * from './ide/ideContext.js';
 export * from './ide/ide-installer.js';
 export { getIdeDisplayName, DetectedIde } from './ide/detect-ide.js';
+export * from './ide/constants.js';
 
 // Export Shell Execution Service
 export * from './services/shellExecutionService.js';
@@ -99,5 +100,3 @@ export { sessionId } from './utils/session.js';
 export * from './utils/browser.js';
 // OpenAI Logging Utilities
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
-export { default as OpenAILogViewer } from './utils/openaiLogViewer.js';
-export { default as OpenAIAnalytics } from './utils/openaiAnalytics.js';

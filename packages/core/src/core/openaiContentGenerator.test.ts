@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import { Config } from '../config/config.js';
+import { AuthType } from './contentGenerator.js';
 import OpenAI from 'openai';
 import type {
   GenerateContentParameters,
@@ -84,7 +85,20 @@ describe('OpenAIContentGenerator', () => {
     vi.mocked(OpenAI).mockImplementation(() => mockOpenAIClient);
 
     // Create generator instance
-    generator = new OpenAIContentGenerator('test-key', 'gpt-4', mockConfig);
+    const contentGeneratorConfig = {
+      model: 'gpt-4',
+      apiKey: 'test-key',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+      timeout: 120000,
+      maxRetries: 3,
+      samplingParams: {
+        temperature: 0.7,
+        max_tokens: 1000,
+        top_p: 0.9,
+      },
+    };
+    generator = new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
   });
 
   afterEach(() => {
@@ -95,7 +109,7 @@ describe('OpenAIContentGenerator', () => {
     it('should initialize with basic configuration', () => {
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
-        baseURL: '',
+        baseURL: undefined,
         timeout: 120000,
         maxRetries: 3,
         defaultHeaders: {
@@ -105,9 +119,16 @@ describe('OpenAIContentGenerator', () => {
     });
 
     it('should handle custom base URL', () => {
-      vi.stubEnv('OPENAI_BASE_URL', 'https://api.custom.com');
-
-      new OpenAIContentGenerator('test-key', 'gpt-4', mockConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.custom.com',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+        timeout: 120000,
+        maxRetries: 3,
+      };
+      new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
 
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
@@ -121,9 +142,16 @@ describe('OpenAIContentGenerator', () => {
     });
 
     it('should configure OpenRouter headers when using OpenRouter', () => {
-      vi.stubEnv('OPENAI_BASE_URL', 'https://openrouter.ai/api/v1');
-
-      new OpenAIContentGenerator('test-key', 'gpt-4', mockConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        baseUrl: 'https://openrouter.ai/api/v1',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+        timeout: 120000,
+        maxRetries: 3,
+      };
+      new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
 
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
@@ -147,11 +175,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
-      new OpenAIContentGenerator('test-key', 'gpt-4', customConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        timeout: 300000,
+        maxRetries: 5,
+      };
+      new OpenAIContentGenerator(contentGeneratorConfig, customConfig);
 
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
-        baseURL: '',
+        baseURL: undefined,
         timeout: 300000,
         maxRetries: 5,
         defaultHeaders: {
@@ -906,9 +941,14 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      };
       const loggingGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         loggingConfig,
       );
 
@@ -1029,9 +1069,14 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      };
       const loggingGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         loggingConfig,
       );
 
@@ -1587,7 +1632,23 @@ describe('OpenAIContentGenerator', () => {
         }
       }
 
-      const testGenerator = new TestGenerator('test-key', 'gpt-4', mockConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+        timeout: 120000,
+        maxRetries: 3,
+        samplingParams: {
+          temperature: 0.7,
+          max_tokens: 1000,
+          top_p: 0.9,
+        },
+      };
+      const testGenerator = new TestGenerator(
+        contentGeneratorConfig,
+        mockConfig,
+      );
       const consoleSpy = vi
         .spyOn(console, 'error')
         .mockImplementation(() => {});
@@ -1908,9 +1969,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+        samplingParams: {
+          temperature: 0.8,
+          max_tokens: 500,
+        },
+      };
       const loggingGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         loggingConfig,
       );
 
@@ -2093,9 +2163,14 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      };
       const loggingGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         loggingConfig,
       );
 
@@ -2350,9 +2425,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        samplingParams: {
+          temperature: undefined,
+          max_tokens: undefined,
+          top_p: undefined,
+        },
+      };
       const testGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         configWithUndefined,
       );
 
@@ -2408,9 +2492,22 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        samplingParams: {
+          temperature: 0.8,
+          max_tokens: 1500,
+          top_p: 0.95,
+          top_k: 40,
+          repetition_penalty: 1.1,
+          presence_penalty: 0.5,
+          frequency_penalty: 0.3,
+        },
+      };
       const testGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         fullSamplingConfig,
       );
 
@@ -2489,9 +2586,14 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'qwen-turbo',
+        apiKey: 'test-key',
+        authType: AuthType.QWEN_OAUTH,
+        enableOpenAILogging: false,
+      };
       const qwenGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'qwen-turbo',
+        contentGeneratorConfig,
         qwenConfig,
       );
 
@@ -2528,12 +2630,6 @@ describe('OpenAIContentGenerator', () => {
     });
 
     it('should include metadata when baseURL is dashscope openai compatible mode', async () => {
-      // Mock environment to set dashscope base URL BEFORE creating the generator
-      vi.stubEnv(
-        'OPENAI_BASE_URL',
-        'https://dashscope.aliyuncs.com/compatible-mode/v1',
-      );
-
       const dashscopeConfig = {
         getContentGeneratorConfig: vi.fn().mockReturnValue({
           authType: 'openai', // Not QWEN_OAUTH
@@ -2543,9 +2639,15 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'qwen-turbo',
+        apiKey: 'test-key',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      };
       const dashscopeGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'qwen-turbo',
+        contentGeneratorConfig,
         dashscopeConfig,
       );
 
@@ -2604,9 +2706,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const regularGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         regularConfig,
       );
 
@@ -2650,9 +2761,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const otherGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         otherAuthConfig,
       );
 
@@ -2699,9 +2819,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const otherBaseUrlGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         otherBaseUrlConfig,
       );
 
@@ -2748,9 +2877,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'qwen-turbo',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.QWEN_OAUTH,
+
+        enableOpenAILogging: false,
+      };
+
       const qwenGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'qwen-turbo',
+        contentGeneratorConfig,
         qwenConfig,
       );
 
@@ -2804,8 +2942,6 @@ describe('OpenAIContentGenerator', () => {
             sessionId: 'streaming-session-id',
             promptId: 'streaming-prompt-id',
           },
-          stream: true,
-          stream_options: { include_usage: true },
         }),
       );
 
@@ -2827,9 +2963,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const regularGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         regularConfig,
       );
 
@@ -2901,9 +3046,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'qwen-turbo',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.QWEN_OAUTH,
+
+        enableOpenAILogging: false,
+      };
+
       const qwenGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'qwen-turbo',
+        contentGeneratorConfig,
         qwenConfig,
       );
 
@@ -2955,9 +3109,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const noBaseUrlGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         noBaseUrlConfig,
       );
 
@@ -3004,9 +3167,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const undefinedAuthGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         undefinedAuthConfig,
       );
 
@@ -3050,9 +3222,18 @@ describe('OpenAIContentGenerator', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
       const undefinedConfigGenerator = new OpenAIContentGenerator(
-        'test-key',
-        'gpt-4',
+        contentGeneratorConfig,
         undefinedConfig,
       );
 
@@ -3085,6 +3266,234 @@ describe('OpenAIContentGenerator', () => {
       expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
         expect.not.objectContaining({
           metadata: expect.any(Object),
+        }),
+      );
+    });
+  });
+
+  describe('cache control for DashScope', () => {
+    it('should add cache control to system message for DashScope providers', async () => {
+      // Mock environment to set dashscope base URL
+      vi.stubEnv(
+        'OPENAI_BASE_URL',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+
+      const dashscopeConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('dashscope-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const contentGeneratorConfig = {
+        model: 'qwen-turbo',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.QWEN_OAUTH,
+
+        enableOpenAILogging: false,
+      };
+
+      const dashscopeGenerator = new OpenAIContentGenerator(
+        contentGeneratorConfig,
+        dashscopeConfig,
+      );
+
+      // Mock the client's baseURL property to return the expected value
+      Object.defineProperty(dashscopeGenerator['client'], 'baseURL', {
+        value: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        writable: true,
+      });
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'qwen-turbo',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          systemInstruction: 'You are a helpful assistant.',
+        },
+        model: 'qwen-turbo',
+      };
+
+      await dashscopeGenerator.generateContent(request, 'dashscope-prompt-id');
+
+      // Should include cache control in system message
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: 'system',
+              content: expect.arrayContaining([
+                expect.objectContaining({
+                  type: 'text',
+                  text: 'You are a helpful assistant.',
+                  cache_control: { type: 'ephemeral' },
+                }),
+              ]),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it('should add cache control to last message for DashScope providers', async () => {
+      // Mock environment to set dashscope base URL
+      vi.stubEnv(
+        'OPENAI_BASE_URL',
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      );
+
+      const dashscopeConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('dashscope-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const contentGeneratorConfig = {
+        model: 'qwen-turbo',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.QWEN_OAUTH,
+
+        enableOpenAILogging: false,
+      };
+
+      const dashscopeGenerator = new OpenAIContentGenerator(
+        contentGeneratorConfig,
+        dashscopeConfig,
+      );
+
+      // Mock the client's baseURL property to return the expected value
+      Object.defineProperty(dashscopeGenerator['client'], 'baseURL', {
+        value: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        writable: true,
+      });
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'qwen-turbo',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello, how are you?' }] }],
+        model: 'qwen-turbo',
+      };
+
+      await dashscopeGenerator.generateContent(request, 'dashscope-prompt-id');
+
+      // Should include cache control in last message
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: 'user',
+              content: expect.arrayContaining([
+                expect.objectContaining({
+                  type: 'text',
+                  text: 'Hello, how are you?',
+                  cache_control: { type: 'ephemeral' },
+                }),
+              ]),
+            }),
+          ]),
+        }),
+      );
+    });
+
+    it('should NOT add cache control for non-DashScope providers', async () => {
+      const regularConfig = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          authType: 'openai',
+          enableOpenAILogging: false,
+        }),
+        getSessionId: vi.fn().mockReturnValue('regular-session-id'),
+        getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      } as unknown as Config;
+
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+
+        apiKey: 'test-key',
+
+        authType: AuthType.USE_OPENAI,
+
+        enableOpenAILogging: false,
+      };
+
+      const regularGenerator = new OpenAIContentGenerator(
+        contentGeneratorConfig,
+        regularConfig,
+      );
+
+      const mockResponse = {
+        id: 'chatcmpl-123',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Response' },
+            finish_reason: 'stop',
+          },
+        ],
+        created: 1677652288,
+        model: 'gpt-4',
+      };
+
+      mockOpenAIClient.chat.completions.create.mockResolvedValue(mockResponse);
+
+      const request: GenerateContentParameters = {
+        contents: [{ role: 'user', parts: [{ text: 'Hello' }] }],
+        config: {
+          systemInstruction: 'You are a helpful assistant.',
+        },
+        model: 'gpt-4',
+      };
+
+      await regularGenerator.generateContent(request, 'regular-prompt-id');
+
+      // Should NOT include cache control (messages should be strings, not arrays)
+      expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({
+              role: 'system',
+              content: 'You are a helpful assistant.',
+            }),
+            expect.objectContaining({
+              role: 'user',
+              content: 'Hello',
+            }),
+          ]),
         }),
       );
     });

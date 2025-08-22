@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAIContentGenerator } from '../openaiContentGenerator.js';
 import { Config } from '../../config/config.js';
+import { AuthType } from '../contentGenerator.js';
 import OpenAI from 'openai';
 
 // Mock OpenAI
@@ -41,9 +42,6 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
     mockConfig = {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         authType: 'openai',
-        enableOpenAILogging: false,
-        timeout: 120000,
-        maxRetries: 3,
       }),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     } as unknown as Config;
@@ -60,7 +58,12 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
     vi.mocked(OpenAI).mockImplementation(() => mockOpenAIClient);
 
     // Create generator instance
-    generator = new OpenAIContentGenerator('test-key', 'gpt-4', mockConfig);
+    const contentGeneratorConfig = {
+      model: 'gpt-4',
+      apiKey: 'test-key',
+      authType: AuthType.USE_OPENAI,
+    };
+    generator = new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
   });
 
   afterEach(() => {
@@ -237,12 +240,18 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
 
   describe('timeout configuration', () => {
     it('should use default timeout configuration', () => {
-      new OpenAIContentGenerator('test-key', 'gpt-4', mockConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'http://localhost:8080',
+      };
+      new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
 
       // Verify OpenAI client was created with timeout config
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
-        baseURL: '',
+        baseURL: 'http://localhost:8080',
         timeout: 120000,
         maxRetries: 3,
         defaultHeaders: {
@@ -253,18 +262,23 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
 
     it('should use custom timeout from config', () => {
       const customConfig = {
-        getContentGeneratorConfig: vi.fn().mockReturnValue({
-          timeout: 300000, // 5 minutes
-          maxRetries: 5,
-        }),
+        getContentGeneratorConfig: vi.fn().mockReturnValue({}),
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
-      new OpenAIContentGenerator('test-key', 'gpt-4', customConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        baseUrl: 'http://localhost:8080',
+        authType: AuthType.USE_OPENAI,
+        timeout: 300000,
+        maxRetries: 5,
+      };
+      new OpenAIContentGenerator(contentGeneratorConfig, customConfig);
 
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
-        baseURL: '',
+        baseURL: 'http://localhost:8080',
         timeout: 300000,
         maxRetries: 5,
         defaultHeaders: {
@@ -279,11 +293,17 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
-      new OpenAIContentGenerator('test-key', 'gpt-4', noTimeoutConfig);
+      const contentGeneratorConfig = {
+        model: 'gpt-4',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'http://localhost:8080',
+      };
+      new OpenAIContentGenerator(contentGeneratorConfig, noTimeoutConfig);
 
       expect(OpenAI).toHaveBeenCalledWith({
         apiKey: 'test-key',
-        baseURL: '',
+        baseURL: 'http://localhost:8080',
         timeout: 120000, // default
         maxRetries: 3, // default
         defaultHeaders: {

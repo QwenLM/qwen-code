@@ -5,6 +5,7 @@
  */
 
 import { type ColorsTheme, Theme } from './theme.js';
+import { lightSemanticColors } from './semantic-tokens.js';
 
 const qwenLightColors: ColorsTheme = {
   type: 'light',
@@ -134,4 +135,5 @@ export const QwenLight: Theme = new Theme(
     },
   },
   qwenLightColors,
+  lightSemanticColors,
 );
