@@ -41,6 +41,8 @@ const defaultProps = {
   showMemoryUsage: false,
   promptTokenCount: 100,
   nightly: false,
+  showPromptEnhanceHint: false,
+  isEnhancingPrompt: false,
 };
 
 const renderWithWidth = (width: number, props = defaultProps) => {
@@ -95,7 +97,7 @@ describe('<Footer />', () => {
       ...defaultProps,
       branchName: undefined,
     });
-    expect(lastFrame()).not.toContain(`(${defaultProps.branchName}*)`);
+    expect(lastFrame()).not.toContain('(main*)');
   });
 
   it('displays the model name and context percentage', () => {

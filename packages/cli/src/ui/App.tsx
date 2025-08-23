@@ -196,6 +196,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isEnhancingPrompt, setIsEnhancingPrompt] = useState<boolean>(false);
 
   useEffect(() => {
     const unsubscribe = ideContext.subscribeToIdeContext(setIdeContextState);
@@ -232,6 +233,10 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
 
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
     setShowEscapePrompt(showPrompt);
+  }, []);
+
+  const handleEnhancingChange = useCallback((isEnhancing: boolean) => {
+    setIsEnhancingPrompt(isEnhancing);
   }, []);
 
   const initialPromptSubmitted = useRef(false);
@@ -1186,6 +1191,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                   shellModeActive={shellModeActive}
                   setShellModeActive={setShellModeActive}
                   onEscapePromptChange={handleEscapePromptChange}
+                  onEnhancingChange={handleEnhancingChange}
                   focus={isFocused}
                   vimHandleInput={vimHandleInput}
                   placeholder={placeholder}
@@ -1241,6 +1247,8 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
             promptTokenCount={sessionStats.lastPromptTokenCount}
             nightly={nightly}
             vimMode={vimModeEnabled ? vimMode : undefined}
+            showPromptEnhanceHint={true}
+            isEnhancingPrompt={isEnhancingPrompt}
           />
         </Box>
       </Box>
