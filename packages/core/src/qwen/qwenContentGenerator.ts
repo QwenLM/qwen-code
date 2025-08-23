@@ -20,6 +20,7 @@ import {
   EmbedContentParameters,
   EmbedContentResponse,
 } from '@google/genai';
+import { ContentGeneratorConfig } from '../core/contentGenerator.js';
 
 // Default fallback base URL if no endpoint is provided
 const DEFAULT_QWEN_BASE_URL =
@@ -36,9 +37,13 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
   private currentEndpoint: string | null = null;
   private refreshPromise: Promise<string> | null = null;
 
-  constructor(qwenClient: IQwenOAuth2Client, model: string, config: Config) {
+  constructor(
+    qwenClient: IQwenOAuth2Client,
+    contentGeneratorConfig: ContentGeneratorConfig,
+    config: Config,
+  ) {
     // Initialize with empty API key, we'll override it dynamically
-    super('', model, config);
+    super(contentGeneratorConfig, config);
     this.qwenClient = qwenClient;
 
     // Set default base URL, will be updated dynamically

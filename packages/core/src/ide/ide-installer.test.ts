@@ -24,6 +24,11 @@ describe('ide-installer', () => {
       expect(installer).toBeInstanceOf(Object);
     });
 
+    it('should return null for "vscodium" (not implemented)', () => {
+      const installer = getIdeInstaller(DetectedIde.VSCodium);
+      expect(installer).toBeNull();
+    });
+
     it('should return null for an unknown IDE', () => {
       const installer = getIdeInstaller('unknown' as DetectedIde);
       expect(installer).toBeNull();

@@ -12,7 +12,6 @@ import {
   ToolConfirmationOutcome,
   Icon,
 } from './tools.js';
-import { Type } from '@google/genai';
 import { Config, ApprovalMode } from '../config/config.js';
 import { getResponseText } from '../utils/generateContentResponseUtilities.js';
 import { fetchWithTimeout } from '../utils/fetch.js';
@@ -52,15 +51,15 @@ export class WebFetchTool extends BaseTool<WebFetchToolParams, ToolResult> {
         properties: {
           url: {
             description: 'The URL to fetch content from',
-            type: Type.STRING,
+            type: 'string',
           },
           prompt: {
             description: 'The prompt to run on the fetched content',
-            type: Type.STRING,
+            type: 'string',
           },
         },
         required: ['url', 'prompt'],
-        type: Type.OBJECT,
+        type: 'object',
       },
     );
     const proxy = config.getProxy();
@@ -127,7 +126,10 @@ ${textContent}
   }
 
   validateParams(params: WebFetchToolParams): string | null {
-    const errors = SchemaValidator.validate(this.schema.parameters, params);
+    const errors = SchemaValidator.validate(
+      this.schema.parametersJsonSchema,
+      params,
+    );
     if (errors) {
       return errors;
     }

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -25,12 +25,13 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.7"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.8"
   },
   "dependencies": {
     "@google/genai": "1.9.0",
     "@iarna/toml": "^2.2.5",
     "@qwen-code/qwen-code-core": "file:../core",
+    "@modelcontextprotocol/sdk": "^1.15.1",
     "@types/update-notifier": "^6.0.8",
     "command-exists": "^1.2.9",
     "diff": "^7.0.0",
@@ -53,7 +54,7 @@
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",
     "strip-json-comments": "^3.1.1",
-    "tiktoken": "^1.0.21",
+    "undici": "^7.10.0",
     "update-notifier": "^7.3.1",
     "yargs": "^17.7.2",
     "zod": "^3.23.8"

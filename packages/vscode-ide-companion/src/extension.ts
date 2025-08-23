@@ -9,8 +9,9 @@ import { IDEServer } from './ide-server.js';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
 import { createLogger } from './utils/logger.js';
 
-const IDE_WORKSPACE_PATH_ENV_VAR = 'GEMINI_CLI_IDE_WORKSPACE_PATH';
-export const DIFF_SCHEME = 'gemini-diff';
+const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
+const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
+export const DIFF_SCHEME = 'qwen-diff';
 
 let ideServer: IDEServer;
 let logger: vscode.OutputChannel;
@@ -34,14 +35,14 @@ function updateWorkspacePath(context: vscode.ExtensionContext) {
 }
 
 export async function activate(context: vscode.ExtensionContext) {
-  logger = vscode.window.createOutputChannel('Gemini CLI IDE Companion');
+  logger = vscode.window.createOutputChannel('Qwen Code Companion');
   log = createLogger(context, logger);
   log('Extension activated');
 
   updateWorkspacePath(context);
 
   const diffContentProvider = new DiffContentProvider();
-  const diffManager = new DiffManager(logger, diffContentProvider);
+  const diffManager = new DiffManager(log, diffContentProvider);
 
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
@@ -53,24 +54,18 @@ export async function activate(context: vscode.ExtensionContext) {
       DIFF_SCHEME,
       diffContentProvider,
     ),
-    vscode.commands.registerCommand(
-      'gemini.diff.accept',
-      (uri?: vscode.Uri) => {
-        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-        if (docUri && docUri.scheme === DIFF_SCHEME) {
-          diffManager.acceptDiff(docUri);
-        }
-      },
-    ),
-    vscode.commands.registerCommand(
-      'gemini.diff.cancel',
-      (uri?: vscode.Uri) => {
-        const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
-        if (docUri && docUri.scheme === DIFF_SCHEME) {
-          diffManager.cancelDiff(docUri);
-        }
-      },
-    ),
+    vscode.commands.registerCommand('qwen.diff.accept', (uri?: vscode.Uri) => {
+      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (docUri && docUri.scheme === DIFF_SCHEME) {
+        diffManager.acceptDiff(docUri);
+      }
+    }),
+    vscode.commands.registerCommand('qwen.diff.cancel', (uri?: vscode.Uri) => {
+      const docUri = uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (docUri && docUri.scheme === DIFF_SCHEME) {
+        diffManager.cancelDiff(docUri);
+      }
+    }),
   );
 
   ideServer = new IDEServer(log, diffManager);
@@ -81,17 +76,36 @@ export async function activate(context: vscode.ExtensionContext) {
     log(`Failed to start IDE server: ${message}`);
   }
 
+  if (!context.globalState.get(INFO_MESSAGE_SHOWN_KEY)) {
+    void vscode.window
+      .showInformationMessage(
+        'Qwen Code Companion extension successfully installed. Please restart your terminal to enable full IDE integration.',
+        'Run Qwen Code',
+      )
+      .then(
+        (selection) => {
+          if (selection === 'Run Qwen Code') {
+            void vscode.commands.executeCommand('qwen-code.runQwenCode');
+          }
+        },
+        (err) => {
+          log(`Failed to show information message: ${String(err)}`);
+        },
+      );
+    context.globalState.update(INFO_MESSAGE_SHOWN_KEY, true);
+  }
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       updateWorkspacePath(context);
     }),
-    vscode.commands.registerCommand('gemini-cli.runGeminiCLI', () => {
-      const geminiCmd = 'gemini';
-      const terminal = vscode.window.createTerminal(`Gemini CLI`);
+    vscode.commands.registerCommand('qwen-code.runQwenCode', () => {
+      const qwenCmd = 'qwen';
+      const terminal = vscode.window.createTerminal(`Qwen Code`);
       terminal.show();
-      terminal.sendText(geminiCmd);
+      terminal.sendText(qwenCmd);
     }),
-    vscode.commands.registerCommand('gemini-cli.showNotices', async () => {
+    vscode.commands.registerCommand('qwen-code.showNotices', async () => {
       const noticePath = vscode.Uri.joinPath(
         context.extensionUri,
         'NOTICES.txt',

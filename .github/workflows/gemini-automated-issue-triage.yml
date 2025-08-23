@@ -2,19 +2,38 @@ name: Qwen Automated Issue Triage
 
 on:
   issues:
-    types: [opened, reopened]
+    types:
+      - 'opened'
+      - 'reopened'
+  issue_comment:
+    types:
+      - 'created'
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: 'issue number to triage'
+        required: true
+        type: 'number'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.issue.number }}'
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: 'bash'
+
+permissions:
+  contents: 'read'
+  id-token: 'write'
+  issues: 'write'
+  statuses: 'write'
+  packages: 'read'
 
 jobs:
   triage-issue:
     timeout-minutes: 5
     if: ${{ github.repository == 'QwenLM/qwen-code' }}
-    permissions:
-      issues: write
-      contents: read
-      id-token: write
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.event.issue.number }}
-      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Run Qwen Issue Triage
@@ -24,34 +43,44 @@ jobs:
           ISSUE_TITLE: ${{ github.event.issue.title }}
           ISSUE_BODY: ${{ github.event.issue.body }}
         with:
-          version: 0.0.7
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
           settings_json: |
             {
+              "maxSessionTurns": 25,
               "coreTools": [
+                "run_shell_command(echo)",
                 "run_shell_command(gh label list)",
                 "run_shell_command(gh issue edit)",
                 "run_shell_command(gh issue list)"
               ],
               "sandbox": false
             }
-          prompt: |
-            You are an issue triage assistant. Analyze the current GitHub issues apply the most appropriate existing labels. Do not remove labels titled help wanted or good first issue.
-            Steps:
+          prompt: |-
+            ## Role
+
+            You are an issue triage assistant. Analyze the current GitHub issue and apply the most appropriate existing labels. Use the available
+            tools to gather information; do not ask for information to be provided. Do not remove labels titled help wanted or good first issue.
+
+            ## Steps
+
             1. Run: `gh label list --repo ${{ github.repository }} --limit 100` to get all available labels.
-            2. Review the issue title, body and any comments provided in the environment variables.
+            2. Use right tool to review the issue title and body provided in the environment variables: "${ISSUE_TITLE}" and "${ISSUE_BODY}".
             3. Ignore any existing priorities or tags on the issue. Just report your findings.
             4. Select the most relevant labels from the existing labels, focusing on kind/*, area/*, sub-area/* and priority/*. For area/* and kind/* limit yourself to only the single most applicable label in each case. 
-            6. Apply the selected labels to this issue using: `gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "label1,label2"`
-            7. For each issue please check if CLI version is present, this is usually in the output of the /about command  and will look like 0.1.5 for anything more than 6 versions older than the most recent should add the status/need-retesting label
-            8. If you see that the issue doesn’t look like it has sufficient information recommend the status/need-information label
-            9. Use Area definitions mentioned below to help you narrow down issues
-            Guidelines:
+            6. Apply the selected labels to this issue using: `gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "label1,label2"`.
+            7. For each issue please check if CLI version is present, this is usually in the output of the /about command  and will look like 0.1.5 for anything more than 6 versions older than the most recent should add the status/need-retesting label.
+            8. If you see that the issue doesn’t look like it has sufficient information recommend the status/need-information label.
+            9. Use Area definitions mentioned below to help you narrow down issues.
+
+            ## Guidelines
+
             - Only use labels that already exist in the repository.
             - Do not add comments or modify the issue content.
             - Triage only the current issue.
-            - Apply only one area/ label
-            - Apply only one kind/ label
+            - Apply only one area/ label.
+            - Apply only one kind/ label.
             - Apply all applicable sub-area/* and priority/* labels based on the issue content. It's ok to have multiple of these.
             - Once you categorize the issue if it needs information bump down the priority by 1 eg.. a p0 would become a p1 a p1 would become a p2. P2 and P3 can stay as is in this scenario.
             Categorization Guidelines: 
@@ -130,3 +159,17 @@ jobs:
             - could also pertain to latency,
             - other general software performance like, memory usage, CPU consumption, and algorithmic efficiency.
             - Switching models from one to the other unexpectedly.
+
+      - name: 'Post Issue Triage Failure Comment'
+        if: |-
+          ${{ failure() && steps.gemini_issue_triage.outcome == 'failure' }}
+        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea'
+        with:
+          github-token: '${{ steps.generate_token.outputs.token }}'
+          script: |-
+            github.rest.issues.createComment({
+              owner: '${{ github.repository }}'.split('/')[0],
+              repo: '${{ github.repository }}'.split('/')[1],
+              issue_number: '${{ github.event.issue.number }}',
+              body: 'There is a problem with the Qwen Code issue triaging. Please check the [action logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.'
+            })

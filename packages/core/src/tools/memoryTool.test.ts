@@ -199,7 +199,7 @@ describe('MemoryTool', () => {
       );
       expect(memoryTool.schema).toBeDefined();
       expect(memoryTool.schema.name).toBe('save_memory');
-      expect(memoryTool.schema.parameters?.properties?.fact).toBeDefined();
+      expect(memoryTool.schema.parametersJsonSchema).toBeDefined();
     });
 
     it('should call performAddMemoryEntry with correct parameters and return success', async () => {
