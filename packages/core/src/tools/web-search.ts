@@ -5,7 +5,6 @@
  */
 
 import { BaseTool, Icon, ToolResult } from './tools.js';
-import { Type } from '@google/genai';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { Config } from '../config/config.js';
@@ -57,10 +56,10 @@ export class WebSearchTool extends BaseTool<
       'Performs a web search using the Tavily API and returns a concise answer with sources. Requires the TAVILY_API_KEY environment variable.',
       Icon.Globe,
       {
-        type: Type.OBJECT,
+        type: 'object',
         properties: {
           query: {
-            type: Type.STRING,
+            type: 'string',
             description: 'The search query to find information on the web.',
           },
         },
@@ -75,7 +74,10 @@ export class WebSearchTool extends BaseTool<
    * @returns An error message string if validation fails, null if valid
    */
   validateParams(params: WebSearchToolParams): string | null {
-    const errors = SchemaValidator.validate(this.schema.parameters, params);
+    const errors = SchemaValidator.validate(
+      this.schema.parametersJsonSchema,
+      params,
+    );
     if (errors) {
       return errors;
     }

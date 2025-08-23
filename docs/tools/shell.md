@@ -1,6 +1,6 @@
 # Shell Tool (`run_shell_command`)
 
-This document describes the `run_shell_command` tool for the Gemini CLI.
+This document describes the `run_shell_command` tool for Qwen Code.
 
 ## Description
 
@@ -14,7 +14,7 @@ Use `run_shell_command` to interact with the underlying system, run scripts, or 
 - `description` (string, optional): A brief description of the command's purpose, which will be shown to the user.
 - `directory` (string, optional): The directory (relative to the project root) in which to execute the command. If not provided, the command runs in the project root.
 
-## How to use `run_shell_command` with the Gemini CLI
+## How to use `run_shell_command` with Qwen Code
 
 When using `run_shell_command`, the command is executed as a subprocess. `run_shell_command` can start background processes using `&`. The tool returns detailed information about the execution, including:
 
@@ -62,7 +62,7 @@ run_shell_command(command="npm run dev &", description="Start development server
 
 ## Environment Variables
 
-When `run_shell_command` executes a command, it sets the `GEMINI_CLI=1` environment variable in the subprocess's environment. This allows scripts or tools to detect if they are being run from within the Gemini CLI.
+When `run_shell_command` executes a command, it sets the `QWEN_CODE=1` environment variable in the subprocess's environment. This allows scripts or tools to detect if they are being run from within the CLI.
 
 ## Command Restrictions
 

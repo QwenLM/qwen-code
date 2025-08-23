@@ -1,6 +1,6 @@
 # Memory Tool (`save_memory`)
 
-This document describes the `save_memory` tool for the Gemini CLI.
+This document describes the `save_memory` tool for Qwen Code.
 
 ## Description
 
@@ -12,7 +12,7 @@ Use `save_memory` to save and recall information across your Qwen Code sessions.
 
 - `fact` (string, required): The specific fact or piece of information to remember. This should be a clear, self-contained statement written in natural language.
 
-## How to use `save_memory` with the Gemini CLI
+## How to use `save_memory` with Qwen Code
 
 The tool appends the provided `fact` to your context file in the user's home directory (`~/.qwen/QWEN.md` by default). This filename can be configured via `contextFileName`.
 

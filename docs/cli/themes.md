@@ -1,10 +1,10 @@
 # Themes
 
-Gemini CLI supports a variety of themes to customize its color scheme and appearance. You can change the theme to suit your preferences via the `/theme` command or `"theme":` configuration setting.
+Qwen Code supports a variety of themes to customize its color scheme and appearance. You can change the theme to suit your preferences via the `/theme` command or `"theme":` configuration setting.
 
 ## Available Themes
 
-Gemini CLI comes with a selection of pre-defined themes, which you can list using the `/theme` command within Gemini CLI:
+Qwen Code comes with a selection of pre-defined themes, which you can list using the `/theme` command within the CLI:
 
 - **Dark Themes:**
   - `ANSI`
@@ -23,20 +23,20 @@ Gemini CLI comes with a selection of pre-defined themes, which you can list usin
 
 ### Changing Themes
 
-1.  Enter `/theme` into Gemini CLI.
+1.  Enter `/theme` into Qwen Code.
 2.  A dialog or selection prompt appears, listing the available themes.
 3.  Using the arrow keys, select a theme. Some interfaces might offer a live preview or highlight as you select.
 4.  Confirm your selection to apply the theme.
 
 ### Theme Persistence
 
-Selected themes are saved in Gemini CLI's [configuration](./configuration.md) so your preference is remembered across sessions.
+Selected themes are saved in Qwen Code's [configuration](./configuration.md) so your preference is remembered across sessions.
 
 ---
 
 ## Custom Color Themes
 
-Gemini CLI allows you to create your own custom color themes by specifying them in your `settings.json` file. This gives you full control over the color palette used in the CLI.
+Qwen Code allows you to create your own custom color themes by specifying them in your `settings.json` file. This gives you full control over the color palette used in the CLI.
 
 ### How to Define a Custom Theme
 
@@ -111,7 +111,7 @@ You can define multiple custom themes by adding more entries to the `customTheme
 
 ### Using Your Custom Theme
 
-- Select your custom theme using the `/theme` command in Gemini CLI. Your custom theme will appear in the theme selection dialog.
+- Select your custom theme using the `/theme` command in Qwen Code. Your custom theme will appear in the theme selection dialog.
 - Or, set it as the default by adding `"theme": "MyCustomTheme"` to your `settings.json`.
 - Custom themes can be set at the user, project, or system level, and follow the same [configuration precedence](./configuration.md) as other settings.
 

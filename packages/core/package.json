@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -34,6 +34,7 @@
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",
     "fdir": "^6.4.6",
+    "fzf": "^0.5.2",
     "glob": "^10.4.5",
     "google-auth-library": "^9.11.0",
     "html-to-text": "^9.0.5",
@@ -42,6 +43,7 @@
     "jsonrepair": "^3.13.0",
     "marked": "^15.0.12",
     "micromatch": "^4.0.8",
+    "mnemonist": "^0.40.3",
     "open": "^10.1.2",
     "openai": "5.11.0",
     "picomatch": "^4.0.1",
@@ -50,6 +52,7 @@
     "strip-ansi": "^7.1.0",
     "tiktoken": "^1.0.21",
     "undici": "^7.10.0",
+    "uuid": "^9.0.1",
     "ws": "^8.18.0"
   },
   "devDependencies": {

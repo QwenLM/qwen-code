@@ -1,8 +1,8 @@
 # Ignoring Files
 
-This document provides an overview of the Gemini Ignore (`.geminiignore`) feature of the Gemini CLI.
+This document provides an overview of the Gemini Ignore (`.geminiignore`) feature of Qwen Code.
 
-The Gemini CLI includes the ability to automatically ignore files, similar to `.gitignore` (used by Git) and `.aiexclude` (used by Gemini Code Assist). Adding paths to your `.geminiignore` file will exclude them from tools that support this feature, although they will still be visible to other services (such as Git).
+Qwen Code includes the ability to automatically ignore files, similar to `.gitignore` (used by Git) and `.aiexclude` (used by Gemini Code Assist). Adding paths to your `.geminiignore` file will exclude them from tools that support this feature, although they will still be visible to other services (such as Git).
 
 ## How it works
 
@@ -16,7 +16,7 @@ For the most part, `.geminiignore` follows the conventions of `.gitignore` files
 - Putting a `/` at the beginning anchors the path relative to the `.geminiignore` file.
 - `!` negates a pattern.
 
-You can update your `.geminiignore` file at any time. To apply the changes, you must restart your Gemini CLI session.
+You can update your `.geminiignore` file at any time. To apply the changes, you must restart your Qwen Code session.
 
 ## How to use `.geminiignore`
 

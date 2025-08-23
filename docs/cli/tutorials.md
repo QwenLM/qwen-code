@@ -1,6 +1,6 @@
 # Tutorials
 
-This page contains tutorials for interacting with Gemini CLI.
+This page contains tutorials for interacting with Qwen Code.
 
 ## Setting up a Model Context Protocol (MCP) server
 
@@ -58,11 +58,11 @@ Use an environment variable to store your GitHub PAT:
 GITHUB_PERSONAL_ACCESS_TOKEN="pat_YourActualGitHubTokenHere"
 ```
 
-Gemini CLI uses this value in the `mcpServers` configuration that you defined in the `settings.json` file.
+Qwen Code uses this value in the `mcpServers` configuration that you defined in the `settings.json` file.
 
-#### Launch Gemini CLI and verify the connection
+#### Launch Qwen Code and verify the connection
 
-When you launch Gemini CLI, it automatically reads your configuration and launches the GitHub MCP server in the background. You can then use natural language prompts to ask Gemini CLI to perform GitHub actions. For example:
+When you launch Qwen Code, it automatically reads your configuration and launches the GitHub MCP server in the background. You can then use natural language prompts to ask Qwen Code to perform GitHub actions. For example:
 
 ```bash
 "get all open issues assigned to me in the 'foo/bar' repo and prioritize them"

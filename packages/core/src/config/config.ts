@@ -69,6 +69,10 @@ export interface BugCommandSettings {
   urlTemplate: string;
 }
 
+export interface ChatCompressionSettings {
+  contextPercentageThreshold?: number;
+}
+
 export interface SummarizeToolOutputSettings {
   tokenBudget?: number;
 }
@@ -189,7 +193,6 @@ export interface ConfigParameters {
   extensionContextFilePaths?: string[];
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
-  maxFolderItems?: number;
   experimentalAcp?: boolean;
   listExtensions?: boolean;
   extensions?: GeminiCLIExtension[];
@@ -197,9 +200,10 @@ export interface ConfigParameters {
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
   ideModeFeature?: boolean;
+  folderTrustFeature?: boolean;
+  folderTrust?: boolean;
   ideMode?: boolean;
   enableOpenAILogging?: boolean;
-  sampling_params?: Record<string, unknown>;
   systemPromptMappings?: Array<{
     baseUrls: string[];
     modelNames: string[];
@@ -208,6 +212,9 @@ export interface ConfigParameters {
   contentGenerator?: {
     timeout?: number;
     maxRetries?: number;
+    samplingParams?: {
+      [key: string]: unknown;
+    };
   };
   resume?: string;
   save?: string;
@@ -215,6 +222,8 @@ export interface ConfigParameters {
   loadMemoryFromIncludeDirectories?: boolean;
   // Web search providers
   tavilyApiKey?: string;
+  chatCompression?: ChatCompressionSettings;
+  interactive?: boolean;
 }
 
 export class Config {
@@ -259,6 +268,8 @@ export class Config {
   private readonly extensionContextFilePaths: string[];
   private readonly noBrowser: boolean;
   private readonly ideModeFeature: boolean;
+  private readonly folderTrustFeature: boolean;
+  private readonly folderTrust: boolean;
   private ideMode: boolean;
   private ideClient: IdeClient;
   private inFallbackMode = false;
@@ -269,7 +280,6 @@ export class Config {
   }>;
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
-  private readonly maxFolderItems: number;
   private readonly listExtensions: boolean;
   private readonly _extensions: GeminiCLIExtension[];
   private readonly _blockedMcpServers: Array<{
@@ -283,16 +293,19 @@ export class Config {
     | undefined;
   private readonly experimentalAcp: boolean = false;
   private readonly enableOpenAILogging: boolean;
-  private readonly sampling_params?: Record<string, unknown>;
   private readonly contentGenerator?: {
     timeout?: number;
     maxRetries?: number;
+    samplingParams?: Record<string, unknown>;
   };
   private readonly resume: string | undefined;
   private readonly save: string | undefined;
   private readonly cliVersion?: string;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly tavilyApiKey?: string;
+  private readonly chatCompression: ChatCompressionSettings | undefined;
+  private readonly interactive: boolean;
+  private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -347,7 +360,6 @@ export class Config {
     this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
-    this.maxFolderItems = params.maxFolderItems ?? 20;
     this.experimentalAcp = params.experimentalAcp ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this._extensions = params.extensions ?? [];
@@ -355,15 +367,12 @@ export class Config {
     this.noBrowser = params.noBrowser ?? false;
     this.summarizeToolOutput = params.summarizeToolOutput;
     this.ideModeFeature = params.ideModeFeature ?? false;
+    this.folderTrustFeature = params.folderTrustFeature ?? false;
+    this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.ideClient = IdeClient.getInstance();
-    if (this.ideMode && this.ideModeFeature) {
-      this.ideClient.connect();
-      logIdeConnection(this, new IdeConnectionEvent(IdeConnectionType.START));
-    }
     this.systemPromptMappings = params.systemPromptMappings;
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
-    this.sampling_params = params.sampling_params;
     this.contentGenerator = params.contentGenerator;
     this.resume = params.resume;
     this.save = params.save;
@@ -371,6 +380,8 @@ export class Config {
 
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
+    this.chatCompression = params.chatCompression;
+    this.interactive = params.interactive ?? false;
 
     // Web search
     this.tavilyApiKey = params.tavilyApiKey;
@@ -392,7 +403,14 @@ export class Config {
     }
   }
 
+  /**
+   * Must only be called once, throws if called again.
+   */
   async initialize(): Promise<void> {
+    if (this.initialized) {
+      throw Error('Config was already initialized');
+    }
+    this.initialized = true;
     // Initialize centralized FileDiscoveryService
     this.getFileService();
     if (this.getCheckpointingEnabled()) {
@@ -472,10 +490,6 @@ export class Config {
 
   getSessionTokenLimit(): number {
     return this.sessionTokenLimit;
-  }
-
-  getMaxFolderItems(): number {
-    return this.maxFolderItems;
   }
 
   setQuotaErrorOccurred(value: boolean): void {
@@ -724,6 +738,14 @@ export class Config {
     return this.ideMode;
   }
 
+  getFolderTrustFeature(): boolean {
+    return this.folderTrustFeature;
+  }
+
+  getFolderTrust(): boolean {
+    return this.folderTrust;
+  }
+
   setIdeMode(value: boolean): void {
     this.ideMode = value;
   }
@@ -734,16 +756,12 @@ export class Config {
       await this.ideClient.connect();
       logIdeConnection(this, new IdeConnectionEvent(IdeConnectionType.SESSION));
     } else {
-      this.ideClient.disconnect();
+      await this.ideClient.disconnect();
     }
   }
 
   getEnableOpenAILogging(): boolean {
     return this.enableOpenAILogging;
-  }
-
-  getSamplingParams(): Record<string, unknown> | undefined {
-    return this.sampling_params;
   }
 
   getContentGeneratorTimeout(): number | undefined {
@@ -754,6 +772,12 @@ export class Config {
     return this.contentGenerator?.maxRetries;
   }
 
+  getContentGeneratorSamplingParams(): ContentGeneratorConfig['samplingParams'] {
+    return this.contentGenerator?.samplingParams as
+      | ContentGeneratorConfig['samplingParams']
+      | undefined;
+  }
+
   getResume(): string | undefined {
     return this.resume;
   }
@@ -761,6 +785,7 @@ export class Config {
   getSave(): string | undefined {
     return this.save;
   }
+
   getCliVersion(): string | undefined {
     return this.cliVersion;
   }
@@ -773,6 +798,14 @@ export class Config {
       }>
     | undefined {
     return this.systemPromptMappings;
+  }
+
+  getChatCompression(): ChatCompressionSettings | undefined {
+    return this.chatCompression;
+  }
+
+  isInteractive(): boolean {
+    return this.interactive;
   }
 
   async getGitService(): Promise<GitService> {

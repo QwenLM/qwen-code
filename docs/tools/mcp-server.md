@@ -1,22 +1,22 @@
-# MCP servers with the Gemini CLI
+# MCP servers with Qwen Code
 
-This document provides a guide to configuring and using Model Context Protocol (MCP) servers with the Gemini CLI.
+This document provides a guide to configuring and using Model Context Protocol (MCP) servers with Qwen Code.
 
 ## What is an MCP server?
 
-An MCP server is an application that exposes tools and resources to the Gemini CLI through the Model Context Protocol, allowing it to interact with external systems and data sources. MCP servers act as a bridge between the Gemini model and your local environment or other services like APIs.
+An MCP server is an application that exposes tools and resources to the CLI through the Model Context Protocol, allowing it to interact with external systems and data sources. MCP servers act as a bridge between the model and your local environment or other services like APIs.
 
-An MCP server enables the Gemini CLI to:
+An MCP server enables the CLI to:
 
 - **Discover tools:** List available tools, their descriptions, and parameters through standardized schema definitions.
 - **Execute tools:** Call specific tools with defined arguments and receive structured responses.
-- **Access resources:** Read data from specific resources (though the Gemini CLI primarily focuses on tool execution).
+- **Access resources:** Read data from specific resources (though the CLI primarily focuses on tool execution).
 
-With an MCP server, you can extend the Gemini CLI's capabilities to perform actions beyond its built-in features, such as interacting with databases, APIs, custom scripts, or specialized workflows.
+With an MCP server, you can extend the CLI's capabilities to perform actions beyond its built-in features, such as interacting with databases, APIs, custom scripts, or specialized workflows.
 
 ## Core Integration Architecture
 
-The Gemini CLI integrates with MCP servers through a sophisticated discovery and execution system built into the core package (`packages/core/src/tools/`):
+Qwen Code integrates with MCP servers through a sophisticated discovery and execution system built into the core package (`packages/core/src/tools/`):
 
 ### Discovery Layer (`mcp-client.ts`)
 
@@ -39,7 +39,7 @@ Each discovered MCP tool is wrapped in a `DiscoveredMCPTool` instance that:
 
 ### Transport Mechanisms
 
-The Gemini CLI supports three MCP transport types:
+The CLI supports three MCP transport types:
 
 - **Stdio Transport:** Spawns a subprocess and communicates via stdin/stdout
 - **SSE Transport:** Connects to Server-Sent Events endpoints
@@ -47,11 +47,11 @@ The Gemini CLI supports three MCP transport types:
 
 ## How to set up your MCP server
 
-The Gemini CLI uses the `mcpServers` configuration in your `settings.json` file to locate and connect to MCP servers. This configuration supports multiple servers with different transport mechanisms.
+Qwen Code uses the `mcpServers` configuration in your `settings.json` file to locate and connect to MCP servers. This configuration supports multiple servers with different transport mechanisms.
 
 ### Configure the MCP server in settings.json
 
-You can configure MCP servers at the global level in the `~/.gemini/settings.json` file or in your project's root directory, create or open the `.gemini/settings.json` file. Within the file, add the `mcpServers` configuration block.
+You can configure MCP servers at the global level in the `~/.qwen/settings.json` file or in your project's root directory, create or open the `.qwen/settings.json` file. Within the file, add the `mcpServers` configuration block.
 
 ### Configuration Structure
 
@@ -97,7 +97,7 @@ Each server configuration supports the following properties:
 
 ### OAuth Support for Remote MCP Servers
 
-The Gemini CLI supports OAuth 2.0 authentication for remote MCP servers using SSE or HTTP transports. This enables secure access to MCP servers that require authentication.
+Qwen Code supports OAuth 2.0 authentication for remote MCP servers using SSE or HTTP transports. This enables secure access to MCP servers that require authentication.
 
 #### Automatic OAuth Discovery
 
@@ -175,7 +175,7 @@ Use the `/mcp auth` command to manage OAuth authentication:
 
 OAuth tokens are automatically:
 
-- **Stored securely** in `~/.gemini/mcp-oauth-tokens.json`
+- **Stored securely** in `~/.qwen/mcp-oauth-tokens.json`
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 - **Cleaned up** when invalid or expired
@@ -312,7 +312,7 @@ You can specify the authentication provider type using the `authProviderType` pr
 
 ## Discovery Process Deep Dive
 
-When the Gemini CLI starts, it performs MCP server discovery through the following detailed process:
+When Qwen Code starts, it performs MCP server discovery through the following detailed process:
 
 ### 1. Server Iteration and Connection
 
@@ -347,7 +347,7 @@ When multiple servers expose tools with the same name:
 
 ### 4. Schema Processing
 
-Tool parameter schemas undergo sanitization for Gemini API compatibility:
+Tool parameter schemas undergo sanitization for API compatibility:
 
 - **`$schema` properties** are removed
 - **`additionalProperties`** are stripped
@@ -364,7 +364,7 @@ After discovery:
 
 ## Tool Execution Flow
 
-When the Gemini model decides to use an MCP tool, the following execution flow occurs:
+When the model decides to use an MCP tool, the following execution flow occurs:
 
 ### 1. Tool Invocation
 
@@ -570,7 +570,7 @@ The MCP integration tracks several states:
 - **Name sanitization:** Tool names are automatically sanitized to meet API requirements
 - **Conflict resolution:** Tool name conflicts between servers are resolved through automatic prefixing
 
-This comprehensive integration makes MCP servers a powerful way to extend the Gemini CLI's capabilities while maintaining security, reliability, and ease of use.
+This comprehensive integration makes MCP servers a powerful way to extend the CLI's capabilities while maintaining security, reliability, and ease of use.
 
 ## Returning Rich Content from Tools
 
@@ -580,7 +580,7 @@ All data returned from the tool is processed and sent to the model as context fo
 
 ### How It Works
 
-To return rich content, your tool's response must adhere to the MCP specification for a [`CallToolResult`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result). The `content` field of the result should be an array of `ContentBlock` objects. The Gemini CLI will correctly process this array, separating text from binary data and packaging it for the model.
+To return rich content, your tool's response must adhere to the MCP specification for a [`CallToolResult`](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result). The `content` field of the result should be an array of `ContentBlock` objects. The CLI will correctly process this array, separating text from binary data and packaging it for the model.
 
 You can mix and match different content block types in the `content` array. The supported block types include:
 
@@ -614,7 +614,7 @@ Here is an example of a valid JSON response from an MCP tool that returns both a
 }
 ```
 
-When the Gemini CLI receives this response, it will:
+When Qwen Code receives this response, it will:
 
 1.  Extract all the text and combine it into a single `functionResponse` part for the model.
 2.  Present the image data as a separate `inlineData` part.
@@ -624,7 +624,7 @@ This enables you to build sophisticated tools that can provide rich, multi-modal
 
 ## MCP Prompts as Slash Commands
 
-In addition to tools, MCP servers can expose predefined prompts that can be executed as slash commands within the Gemini CLI. This allows you to create shortcuts for common or complex queries that can be easily invoked by name.
+In addition to tools, MCP servers can expose predefined prompts that can be executed as slash commands within Qwen Code. This allows you to create shortcuts for common or complex queries that can be easily invoked by name.
 
 ### Defining Prompts on the Server
 
@@ -678,13 +678,124 @@ This can be included in `settings.json` under `mcpServers` with:
 Once a prompt is discovered, you can invoke it using its name as a slash command. The CLI will automatically handle parsing arguments.
 
 ```bash
-/poem-writer --title="Gemini CLI" --mood="reverent"
+/poem-writer --title="Qwen Code" --mood="reverent"
 ```
 
 or, using positional arguments:
 
 ```bash
-/poem-writer "Gemini CLI" reverent
+/poem-writer "Qwen Code" reverent
 ```
 
-When you run this command, the Gemini CLI executes the `prompts/get` method on the MCP server with the provided arguments. The server is responsible for substituting the arguments into the prompt template and returning the final prompt text. The CLI then sends this prompt to the model for execution. This provides a convenient way to automate and share common workflows.
+When you run this command, the CLI executes the `prompts/get` method on the MCP server with the provided arguments. The server is responsible for substituting the arguments into the prompt template and returning the final prompt text. The CLI then sends this prompt to the model for execution. This provides a convenient way to automate and share common workflows.
+
+## Managing MCP Servers with `qwen mcp`
+
+While you can always configure MCP servers by manually editing your `settings.json` file, the CLI provides a convenient set of commands to manage your server configurations programmatically. These commands streamline the process of adding, listing, and removing MCP servers without needing to directly edit JSON files.
+
+### Adding a Server (`qwen mcp add`)
+
+The `add` command configures a new MCP server in your `settings.json`. Based on the scope (`-s, --scope`), it will be added to either the user config `~/.qwen/settings.json` or the project config `.qwen/settings.json` file.
+
+**Command:**
+
+```bash
+qwen mcp add [options] <name> <commandOrUrl> [args...]
+```
+
+- `<name>`: A unique name for the server.
+- `<commandOrUrl>`: The command to execute (for `stdio`) or the URL (for `http`/`sse`).
+- `[args...]`: Optional arguments for a `stdio` command.
+
+**Options (Flags):**
+
+- `-s, --scope`: Configuration scope (user or project). [default: "project"]
+- `-t, --transport`: Transport type (stdio, sse, http). [default: "stdio"]
+- `-e, --env`: Set environment variables (e.g. -e KEY=value).
+- `-H, --header`: Set HTTP headers for SSE and HTTP transports (e.g. -H "X-Api-Key: abc123" -H "Authorization: Bearer abc123").
+- `--timeout`: Set connection timeout in milliseconds.
+- `--trust`: Trust the server (bypass all tool call confirmation prompts).
+- `--description`: Set the description for the server.
+- `--include-tools`: A comma-separated list of tools to include.
+- `--exclude-tools`: A comma-separated list of tools to exclude.
+
+#### Adding an stdio server
+
+This is the default transport for running local servers.
+
+```bash
+# Basic syntax
+qwen mcp add <name> <command> [args...]
+
+# Example: Adding a local server
+qwen mcp add my-stdio-server -e API_KEY=123 /path/to/server arg1 arg2 arg3
+
+# Example: Adding a local python server
+qwen mcp add python-server python server.py --port 8080
+```
+
+#### Adding an HTTP server
+
+This transport is for servers that use the streamable HTTP transport.
+
+```bash
+# Basic syntax
+qwen mcp add --transport http <name> <url>
+
+# Example: Adding an HTTP server
+qwen mcp add --transport http http-server https://api.example.com/mcp/
+
+# Example: Adding an HTTP server with an authentication header
+qwen mcp add --transport http secure-http https://api.example.com/mcp/ --header "Authorization: Bearer abc123"
+```
+
+#### Adding an SSE server
+
+This transport is for servers that use Server-Sent Events (SSE).
+
+```bash
+# Basic syntax
+qwen mcp add --transport sse <name> <url>
+
+# Example: Adding an SSE server
+qwen mcp add --transport sse sse-server https://api.example.com/sse/
+
+# Example: Adding an SSE server with an authentication header
+qwen mcp add --transport sse secure-sse https://api.example.com/sse/ --header "Authorization: Bearer abc123"
+```
+
+### Listing Servers (`qwen mcp list`)
+
+To view all MCP servers currently configured, use the `list` command. It displays each server's name, configuration details, and connection status.
+
+**Command:**
+
+```bash
+qwen mcp list
+```
+
+**Example Output:**
+
+```sh
+✓ stdio-server: command: python3 server.py (stdio) - Connected
+✓ http-server: https://api.example.com/mcp (http) - Connected
+✗ sse-server: https://api.example.com/sse (sse) - Disconnected
+```
+
+### Removing a Server (`qwen mcp remove`)
+
+To delete a server from your configuration, use the `remove` command with the server's name.
+
+**Command:**
+
+```bash
+qwen mcp remove <name>
+```
+
+**Example:**
+
+```bash
+qwen mcp remove my-server
+```
+
+This will find and delete the "my-server" entry from the `mcpServers` object in the appropriate `settings.json` file based on the scope (`-s, --scope`).

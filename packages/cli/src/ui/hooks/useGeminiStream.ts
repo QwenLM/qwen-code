@@ -94,6 +94,7 @@ export const useGeminiStream = (
   modelSwitchedFromQuotaError: boolean,
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
   onEditorClose: () => void,
+  onCancelSubmit: () => void,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -183,25 +184,40 @@ export const useGeminiStream = (
     return StreamingState.Idle;
   }, [isResponding, toolCalls]);
 
+  const cancelOngoingRequest = useCallback(() => {
+    if (streamingState !== StreamingState.Responding) {
+      return;
+    }
+    if (turnCancelledRef.current) {
+      return;
+    }
+    turnCancelledRef.current = true;
+    isSubmittingQueryRef.current = false;
+    abortControllerRef.current?.abort();
+    if (pendingHistoryItemRef.current) {
+      addItem(pendingHistoryItemRef.current, Date.now());
+    }
+    addItem(
+      {
+        type: MessageType.INFO,
+        text: 'Request cancelled.',
+      },
+      Date.now(),
+    );
+    setPendingHistoryItem(null);
+    onCancelSubmit();
+    setIsResponding(false);
+  }, [
+    streamingState,
+    addItem,
+    setPendingHistoryItem,
+    onCancelSubmit,
+    pendingHistoryItemRef,
+  ]);
+
   useInput((_input, key) => {
-    if (streamingState === StreamingState.Responding && key.escape) {
-      if (turnCancelledRef.current) {
-        return;
-      }
-      turnCancelledRef.current = true;
-      abortControllerRef.current?.abort();
-      if (pendingHistoryItemRef.current) {
-        addItem(pendingHistoryItemRef.current, Date.now());
-      }
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: 'Request cancelled.',
-        },
-        Date.now(),
-      );
-      setPendingHistoryItem(null);
-      setIsResponding(false);
+    if (key.escape) {
+      cancelOngoingRequest();
     }
   });
 
@@ -985,5 +1001,6 @@ export const useGeminiStream = (
     initError,
     pendingHistoryItems,
     thought,
+    cancelOngoingRequest,
   };
 };

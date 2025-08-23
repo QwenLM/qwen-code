@@ -5,6 +5,7 @@
  */
 
 import {
+  AnyToolInvocation,
   AuthType,
   CompletedToolCall,
   ContentGeneratorConfig,
@@ -34,11 +35,11 @@ import {
   logToolCall,
   logFlashFallback,
 } from './loggers.js';
+import { ToolCallDecision } from './tool-call-decision.js';
 import {
   ApiRequestEvent,
   ApiResponseEvent,
   StartSessionEvent,
-  ToolCallDecision,
   ToolCallEvent,
   UserPromptEvent,
   FlashFallbackEvent,
@@ -435,6 +436,7 @@ describe('loggers', () => {
     });
 
     it('should log a tool call with all fields', () => {
+      const tool = new EditTool(mockConfig);
       const call: CompletedToolCall = {
         status: 'success',
         request: {
@@ -454,7 +456,8 @@ describe('loggers', () => {
           error: undefined,
           errorType: undefined,
         },
-        tool: new EditTool(mockConfig),
+        tool,
+        invocation: {} as AnyToolInvocation,
         durationMs: 100,
         outcome: ToolConfirmationOutcome.ProceedOnce,
       };
@@ -584,6 +587,7 @@ describe('loggers', () => {
         },
         outcome: ToolConfirmationOutcome.ModifyWithEditor,
         tool: new EditTool(mockConfig),
+        invocation: {} as AnyToolInvocation,
         durationMs: 100,
       };
       const event = new ToolCallEvent(call);
@@ -648,6 +652,7 @@ describe('loggers', () => {
           errorType: undefined,
         },
         tool: new EditTool(mockConfig),
+        invocation: {} as AnyToolInvocation,
         durationMs: 100,
       };
       const event = new ToolCallEvent(call);

@@ -1,6 +1,6 @@
 # Web Fetch Tool (`web_fetch`)
 
-This document describes the `web_fetch` tool for the Gemini CLI.
+This document describes the `web_fetch` tool for Qwen Code.
 
 ## Description
 
@@ -13,9 +13,9 @@ Use `web_fetch` to fetch content from a specified URL and process it using an AI
 - `url` (string, required): The URL to fetch content from. Must be a fully-formed valid URL starting with `http://` or `https://`.
 - `prompt` (string, required): The prompt describing what information you want to extract from the page content.
 
-## How to use `web_fetch` with the Gemini CLI
+## How to use `web_fetch` with Qwen Code
 
-To use `web_fetch` with the Gemini CLI, provide a URL and a prompt describing what you want to extract from that URL. The tool will ask for confirmation before fetching the URL. Once confirmed, the tool will fetch the content directly and process it using an AI model.
+To use `web_fetch` with Qwen Code, provide a URL and a prompt describing what you want to extract from that URL. The tool will ask for confirmation before fetching the URL. Once confirmed, the tool will fetch the content directly and process it using an AI model.
 
 The tool automatically converts HTML to text, handles GitHub blob URLs (converting them to raw URLs), and upgrades HTTP URLs to HTTPS for security.
 
