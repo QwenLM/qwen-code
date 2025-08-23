@@ -242,117 +242,28 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Tavily API key for web search functionality',
         })
-            .option('yolo', {
-      alias: 'y',
-      type: 'boolean',
-      description:
-        'Automatically accept all actions (aka YOLO mode, see https://www.youtube.com/watch?v=xvFZjo5PgG0 for more details)?',
-      default: false,
-    })
-    .option('telemetry', {
-      type: 'boolean',
-      description:
-        'Enable telemetry? This flag specifically controls if telemetry is sent. Other --telemetry-* flags set specific values but do not enable telemetry on their own.',
-    })
-    .option('telemetry-target', {
-      type: 'string',
-      choices: ['local', 'gcp'],
-      description:
-        'Set the telemetry target (local or gcp). Overrides settings files.',
-    })
-    .option('telemetry-otlp-endpoint', {
-      type: 'string',
-      description:
-        'Set the OTLP endpoint for telemetry. Overrides environment variables and settings files.',
-    })
-    .option('telemetry-log-prompts', {
-      type: 'boolean',
-      description:
-        'Enable or disable logging of user prompts for telemetry. Overrides settings files.',
-    })
-    .option('telemetry-outfile', {
-      type: 'string',
-      description: 'Redirect all telemetry output to the specified file.',
-    })
-    .option('checkpointing', {
-      alias: 'c',
-      type: 'boolean',
-      description: 'Enables checkpointing of file edits',
-      default: false,
-    })
-    .option('experimental-acp', {
-      type: 'boolean',
-      description: 'Starts the agent in ACP mode',
-    })
-    .option('allowed-mcp-server-names', {
-      type: 'array',
-      string: true,
-      description: 'Allowed MCP server names',
-    })
-    .option('extensions', {
-      alias: 'e',
-      type: 'array',
-      string: true,
-      description:
-        'A list of extensions to use. If not provided, all extensions are used.',
-    })
-    .option('list-extensions', {
-      alias: 'l',
-      type: 'boolean',
-      description: 'List all available extensions and exit.',
-    })
-    .option('ide-mode-feature', {
-      type: 'boolean',
-      description: 'Run in IDE mode?',
-    })
-    .option('openai-logging', {
-      type: 'boolean',
-      description:
-        'Enable logging of OpenAI API calls for debugging and analysis',
-    })
-    .option('openai-api-key', {
-      type: 'string',
-      description: 'OpenAI API key to use for authentication',
-    })
-    .option('openai-base-url', {
-      type: 'string',
-      description: 'OpenAI base URL (for custom endpoints)',
-    })
-    .option('tavily-api-key', {
-      type: 'string',
-      description: 'Tavily API key for web search functionality',
-    })
-    .option('proxy', {
-      type: 'string',
-      description:
-        'Proxy for gemini client, like schema://user:password@host:port',
-    })
-    .option('resume', {
-      type: 'string',
-      description:
-        'Resume a checkpoint',
-    })
-    .option('save', {
-      type: 'string',
-      description:
-        'Save conversation history to a checkpoint',
-    })
-    .option('include-directories', {
-      type: 'array',
-      string: true,
-      description:
-        'Additional directories to include in the workspace (comma-separated or multiple --include-directories)',
-      coerce: (dirs: string[]) =>
-        // Handle comma-separated values
-        dirs.flatMap((dir) => dir.split(',').map((d) => d.trim())),
-    })
-    .option('load-memory-from-include-directories', {
-      type: 'boolean',
-      description:
-        'If true, when refreshing memory, QWEN.md files should be loaded from all directories that are added. If false, QWEN.md files should only be loaded from the primary working directory.',
-      default: false,
-    })
-        .check((argv) => {
+        .option('proxy', {
+          type: 'string',
+          description:
+            'Proxy for gemini client, like schema://user:password@host:port',
+        })
+        .option('resume', {
+          type: 'string',
+          description:
+            'Resume a checkpoint',
+        })
+        .option('save', {
+          type: 'string',
+          description:
+            'Save conversation history to a checkpoint',
+        })
+        .option('load-memory-from-include-directories', {
+          type: 'boolean',
+          description:
+            'If true, when refreshing memory, QWEN.md files should be loaded from all directories that are added. If false, QWEN.md files should only be loaded from the primary working directory.',
+          default: false,
+        })
+        .check((argv: any) => {
           if (argv.prompt && argv.promptInteractive) {
             throw new Error(
               'Cannot use both --prompt (-p) and --prompt-interactive (-i) together',
