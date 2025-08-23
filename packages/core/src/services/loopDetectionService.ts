@@ -84,6 +84,11 @@ export class LoopDetectionService {
    * @returns true if a loop is detected, false otherwise
    */
   addAndCheck(event: ServerGeminiStreamEvent): boolean {
+    // Disable loop detection to prevent false positives with repetitive content
+    // like tables and formatted output
+    return false;
+    
+    /* Original loop detection logic - disabled
     if (this.loopDetected) {
       return true;
     }
@@ -102,6 +107,7 @@ export class LoopDetectionService {
         break;
     }
     return this.loopDetected;
+    */
   }
 
   /**
