@@ -193,13 +193,12 @@ export interface ConfigParameters {
   extensionContextFilePaths?: string[];
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
-  experimentalAcp?: boolean;
+  experimentalZedIntegration?: boolean;
   listExtensions?: boolean;
   extensions?: GeminiCLIExtension[];
   blockedMcpServers?: Array<{ name: string; extensionName: string }>;
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
-  ideModeFeature?: boolean;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
   ideMode?: boolean;
@@ -222,6 +221,7 @@ export interface ConfigParameters {
   tavilyApiKey?: string;
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
+  trustedFolder?: boolean;
 }
 
 export class Config {
@@ -265,7 +265,6 @@ export class Config {
   private readonly model: string;
   private readonly extensionContextFilePaths: string[];
   private readonly noBrowser: boolean;
-  private readonly ideModeFeature: boolean;
   private readonly folderTrustFeature: boolean;
   private readonly folderTrust: boolean;
   private ideMode: boolean;
@@ -289,7 +288,6 @@ export class Config {
   private readonly summarizeToolOutput:
     | Record<string, SummarizeToolOutputSettings>
     | undefined;
-  private readonly experimentalAcp: boolean = false;
   private readonly enableOpenAILogging: boolean;
   private readonly contentGenerator?: {
     timeout?: number;
@@ -297,10 +295,12 @@ export class Config {
     samplingParams?: Record<string, unknown>;
   };
   private readonly cliVersion?: string;
+  private readonly experimentalZedIntegration: boolean = false;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly tavilyApiKey?: string;
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
+  private readonly trustedFolder: boolean | undefined;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -356,13 +356,13 @@ export class Config {
     this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
-    this.experimentalAcp = params.experimentalAcp ?? false;
+    this.experimentalZedIntegration =
+      params.experimentalZedIntegration ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this._extensions = params.extensions ?? [];
     this._blockedMcpServers = params.blockedMcpServers ?? [];
     this.noBrowser = params.noBrowser ?? false;
     this.summarizeToolOutput = params.summarizeToolOutput;
-    this.ideModeFeature = params.ideModeFeature ?? false;
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
@@ -376,6 +376,7 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
+    this.trustedFolder = params.trustedFolder;
 
     // Web search
     this.tavilyApiKey = params.tavilyApiKey;
@@ -431,13 +432,21 @@ export class Config {
     const newGeminiClient = new GeminiClient(this);
     await newGeminiClient.initialize(newContentGeneratorConfig);
 
+    // Vertex and Genai have incompatible encryption and sending history with
+    // throughtSignature from Genai to Vertex will fail, we need to strip them
+    const fromGenaiToVertex =
+      this.contentGeneratorConfig?.authType === AuthType.USE_GEMINI &&
+      authMethod === AuthType.LOGIN_WITH_GOOGLE;
+
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.geminiClient = newGeminiClient;
 
     // Restore the conversation history to the new client
     if (existingHistory.length > 0) {
-      this.geminiClient.setHistory(existingHistory);
+      this.geminiClient.setHistory(existingHistory, {
+        stripThoughts: fromGenaiToVertex,
+      });
     }
 
     // Reset the session flag since we're explicitly changing auth and using default model
@@ -685,8 +694,8 @@ export class Config {
     return this.extensionContextFilePaths;
   }
 
-  getExperimentalAcp(): boolean {
-    return this.experimentalAcp;
+  getExperimentalZedIntegration(): boolean {
+    return this.experimentalZedIntegration;
   }
 
   getListExtensions(): boolean {
@@ -720,10 +729,6 @@ export class Config {
     return this.tavilyApiKey;
   }
 
-  getIdeModeFeature(): boolean {
-    return this.ideModeFeature;
-  }
-
   getIdeClient(): IdeClient {
     return this.ideClient;
   }
@@ -738,6 +743,10 @@ export class Config {
 
   getFolderTrust(): boolean {
     return this.folderTrust;
+  }
+
+  isTrustedFolder(): boolean | undefined {
+    return this.trustedFolder;
   }
 
   setIdeMode(value: boolean): void {

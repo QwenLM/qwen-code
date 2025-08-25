@@ -223,17 +223,9 @@ describe('Type Guards', () => {
 
 describe('QwenOAuth2Client', () => {
   let client: QwenOAuth2Client;
-  let _mockConfig: Config;
   let originalFetch: typeof global.fetch;
 
   beforeEach(() => {
-    // Setup mock config
-    _mockConfig = {
-      getQwenClientId: vi.fn().mockReturnValue('test-client-id'),
-      isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
-      getProxy: vi.fn().mockReturnValue(undefined),
-    } as unknown as Config;
-
     // Create client instance
     client = new QwenOAuth2Client({ proxy: undefined });
 
@@ -1010,7 +1002,6 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
 describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
   let mockConfig: Config;
   let originalFetch: typeof global.fetch;
-  let _client: QwenOAuth2Client;
 
   beforeEach(() => {
     mockConfig = {
@@ -1018,7 +1009,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
-    _client = new QwenOAuth2Client({ proxy: undefined });
+    new QwenOAuth2Client({ proxy: undefined });
     originalFetch = global.fetch;
     global.fetch = vi.fn();
 

@@ -16,7 +16,7 @@ import {
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
 import { DEFAULT_GEMINI_MODEL, DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { Config } from '../config/config.js';
-import { getEffectiveModel } from './modelCheck.js';
+
 import { UserTierId } from '../code_assist/types.js';
 import { LoggingContentGenerator } from './loggingContentGenerator.js';
 
@@ -71,6 +71,7 @@ export type ContentGeneratorConfig = {
     max_tokens?: number;
   };
   proxy?: string | undefined;
+  userAgent?: string;
 };
 
 export function createContentGeneratorConfig(
@@ -112,11 +113,6 @@ export function createContentGeneratorConfig(
   if (authType === AuthType.USE_GEMINI && geminiApiKey) {
     contentGeneratorConfig.apiKey = geminiApiKey;
     contentGeneratorConfig.vertexai = false;
-    getEffectiveModel(
-      contentGeneratorConfig.apiKey,
-      contentGeneratorConfig.model,
-      contentGeneratorConfig.proxy,
-    );
 
     return contentGeneratorConfig;
   }

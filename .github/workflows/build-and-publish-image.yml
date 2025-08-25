@@ -1,4 +1,4 @@
-name: Build and Publish Docker Image
+name: 'Build and Publish Docker Image'
 
 on:
   push:
@@ -8,35 +8,35 @@ on:
     inputs:
       publish:
         description: 'Publish to GHCR (only works on main branch)'
-        type: boolean
+        type: 'boolean'
         default: false
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  REGISTRY: 'ghcr.io'
+  IMAGE_NAME: '${{ github.repository }}'
 
 jobs:
   build-and-push-to-ghcr:
-    runs-on: ubuntu-latest
+    runs-on: 'ubuntu-latest'
     permissions:
-      contents: read
-      packages: write
+      contents: 'read'
+      packages: 'write'
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: 'Set up QEMU'
+        uses: 'docker/setup-qemu-action@v3' # ratchet:exclude
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: 'Set up Docker Buildx'
+        uses: 'docker/setup-buildx-action@v3' # ratchet:exclude
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
+      - name: 'Extract metadata (tags, labels) for Docker'
+        id: 'meta'
+        uses: 'docker/metadata-action@v5' # ratchet:exclude
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}'
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -44,22 +44,24 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-,format=short
 
-      - name: Log in to the Container registry
-        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-        uses: docker/login-action@v3
+      - name: 'Log in to the Container registry'
+        if: |-
+          ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+        uses: 'docker/login-action@v3' # ratchet:exclude
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: '${{ env.REGISTRY }}'
+          username: '${{ github.actor }}'
+          password: '${{ secrets.GITHUB_TOKEN }}'
 
-      - name: Build and push Docker image
-        id: build-and-push
-        uses: docker/build-push-action@v6
+      - name: 'Build and push Docker image'
+        id: 'build-and-push'
+        uses: 'docker/build-push-action@v6' # ratchet:exclude
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true') }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          context: '.'
+          platforms: 'linux/amd64,linux/arm64'
+          push: |-
+            ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true') }}
+          tags: '${{ steps.meta.outputs.tags }}'
+          labels: '${{ steps.meta.outputs.labels }}'
           build-args: |
             CLI_VERSION_ARG=${{ github.sha }}

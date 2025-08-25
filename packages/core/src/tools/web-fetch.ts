@@ -6,15 +6,18 @@
 
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import {
-  BaseTool,
-  ToolResult,
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
-  Icon,
+  ToolInvocation,
+  ToolResult,
 } from './tools.js';
+
 import { Config, ApprovalMode } from '../config/config.js';
 import { getResponseText } from '../utils/generateContentResponseUtilities.js';
-import { fetchWithTimeout } from '../utils/fetch.js';
+import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
 import { convert } from 'html-to-text';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
@@ -36,17 +39,157 @@ export interface WebFetchToolParams {
 }
 
 /**
+ * Implementation of the WebFetch tool invocation logic
+ */
+class WebFetchToolInvocation extends BaseToolInvocation<
+  WebFetchToolParams,
+  ToolResult
+> {
+  constructor(
+    private readonly config: Config,
+    params: WebFetchToolParams,
+  ) {
+    super(params);
+  }
+
+  private async executeDirectFetch(signal: AbortSignal): Promise<ToolResult> {
+    let url = this.params.url;
+
+    // Convert GitHub blob URL to raw URL
+    if (url.includes('github.com') && url.includes('/blob/')) {
+      url = url
+        .replace('github.com', 'raw.githubusercontent.com')
+        .replace('/blob/', '/');
+      console.debug(
+        `[WebFetchTool] Converted GitHub blob URL to raw URL: ${url}`,
+      );
+    }
+
+    try {
+      console.debug(`[WebFetchTool] Fetching content from: ${url}`);
+      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
+
+      if (!response.ok) {
+        const errorMessage = `Request failed with status code ${response.status} ${response.statusText}`;
+        console.error(`[WebFetchTool] ${errorMessage}`);
+        throw new Error(errorMessage);
+      }
+
+      console.debug(`[WebFetchTool] Successfully fetched content from ${url}`);
+      const html = await response.text();
+      const textContent = convert(html, {
+        wordwrap: false,
+        selectors: [
+          { selector: 'a', options: { ignoreHref: true } },
+          { selector: 'img', format: 'skip' },
+        ],
+      }).substring(0, MAX_CONTENT_LENGTH);
+
+      console.debug(
+        `[WebFetchTool] Converted HTML to text (${textContent.length} characters)`,
+      );
+
+      const geminiClient = this.config.getGeminiClient();
+      const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
+
+I have fetched the content from ${this.params.url}. Please use the following content to answer the user's request.
+
+---
+${textContent}
+---`;
+
+      console.debug(
+        `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
+      );
+
+      const result = await geminiClient.generateContent(
+        [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
+        {},
+        signal,
+      );
+      const resultText = getResponseText(result) || '';
+
+      console.debug(
+        `[WebFetchTool] Successfully processed content from ${this.params.url}`,
+      );
+
+      return {
+        llmContent: resultText,
+        returnDisplay: `Content from ${this.params.url} processed successfully.`,
+      };
+    } catch (e) {
+      const error = e as Error;
+      const errorMessage = `Error during fetch for ${url}: ${error.message}`;
+      console.error(`[WebFetchTool] ${errorMessage}`, error);
+      return {
+        llmContent: `Error: ${errorMessage}`,
+        returnDisplay: `Error: ${errorMessage}`,
+      };
+    }
+  }
+
+  override getDescription(): string {
+    const displayPrompt =
+      this.params.prompt.length > 100
+        ? this.params.prompt.substring(0, 97) + '...'
+        : this.params.prompt;
+    return `Fetching content from ${this.params.url} and processing with prompt: "${displayPrompt}"`;
+  }
+
+  override async shouldConfirmExecute(): Promise<
+    ToolCallConfirmationDetails | false
+  > {
+    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
+      return false;
+    }
+
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'info',
+      title: `Confirm Web Fetch`,
+      prompt: `Fetch content from ${this.params.url} and process with: ${this.params.prompt}`,
+      urls: [this.params.url],
+      onConfirm: async (outcome: ToolConfirmationOutcome) => {
+        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+          this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+        }
+      },
+    };
+    return confirmationDetails;
+  }
+
+  async execute(signal: AbortSignal): Promise<ToolResult> {
+    // Check if URL is private/localhost
+    const isPrivate = isPrivateIp(this.params.url);
+
+    if (isPrivate) {
+      console.debug(
+        `[WebFetchTool] Private IP detected for ${this.params.url}, using direct fetch`,
+      );
+    } else {
+      console.debug(
+        `[WebFetchTool] Public URL detected for ${this.params.url}, using direct fetch`,
+      );
+    }
+
+    return this.executeDirectFetch(signal);
+  }
+}
+
+/**
  * Implementation of the WebFetch tool logic
  */
-export class WebFetchTool extends BaseTool<WebFetchToolParams, ToolResult> {
+export class WebFetchTool extends BaseDeclarativeTool<
+  WebFetchToolParams,
+  ToolResult
+> {
   static readonly Name: string = 'web_fetch';
 
   constructor(private readonly config: Config) {
     super(
       WebFetchTool.Name,
       'WebFetch',
-      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Fetches the URL content, converts HTML to markdown\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large',
-      Icon.Globe,
+      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Fetches the URL content, converts HTML to markdown\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
+      Kind.Fetch,
       {
         properties: {
           url: {
@@ -68,64 +211,9 @@ export class WebFetchTool extends BaseTool<WebFetchToolParams, ToolResult> {
     }
   }
 
-  private async executeFetch(
+  protected override validateToolParams(
     params: WebFetchToolParams,
-    signal: AbortSignal,
-  ): Promise<ToolResult> {
-    let url = params.url;
-
-    // Convert GitHub blob URL to raw URL
-    if (url.includes('github.com') && url.includes('/blob/')) {
-      url = url
-        .replace('github.com', 'raw.githubusercontent.com')
-        .replace('/blob/', '/');
-    }
-
-    try {
-      const response = await fetchWithTimeout(url, URL_FETCH_TIMEOUT_MS);
-      if (!response.ok) {
-        throw new Error(
-          `Request failed with status code ${response.status} ${response.statusText}`,
-        );
-      }
-      const html = await response.text();
-      const textContent = convert(html, {
-        wordwrap: false,
-        selectors: [
-          { selector: 'a', options: { ignoreHref: true } },
-          { selector: 'img', format: 'skip' },
-        ],
-      }).substring(0, MAX_CONTENT_LENGTH);
-
-      const geminiClient = this.config.getGeminiClient();
-      const fallbackPrompt = `The user requested the following: "${params.prompt}".
-
-I have fetched the content from ${params.url}. Please use the following content to answer the user's request.
-
----
-${textContent}
----`;
-      const result = await geminiClient.generateContent(
-        [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        {},
-        signal,
-      );
-      const resultText = getResponseText(result) || '';
-      return {
-        llmContent: resultText,
-        returnDisplay: `Content from ${params.url} processed successfully.`,
-      };
-    } catch (e) {
-      const error = e as Error;
-      const errorMessage = `Error during fetch for ${url}: ${error.message}`;
-      return {
-        llmContent: `Error: ${errorMessage}`,
-        returnDisplay: `Error: ${errorMessage}`,
-      };
-    }
-  }
-
-  validateParams(params: WebFetchToolParams): string | null {
+  ): string | null {
     const errors = SchemaValidator.validate(
       this.schema.parametersJsonSchema,
       params,
@@ -148,52 +236,9 @@ ${textContent}
     return null;
   }
 
-  getDescription(params: WebFetchToolParams): string {
-    const displayPrompt =
-      params.prompt.length > 100
-        ? params.prompt.substring(0, 97) + '...'
-        : params.prompt;
-    return `Fetching content from ${params.url} and processing with prompt: "${displayPrompt}"`;
-  }
-
-  async shouldConfirmExecute(
+  protected createInvocation(
     params: WebFetchToolParams,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
-    }
-
-    const validationError = this.validateParams(params);
-    if (validationError) {
-      return false;
-    }
-
-    const confirmationDetails: ToolCallConfirmationDetails = {
-      type: 'info',
-      title: `Confirm Web Fetch`,
-      prompt: `Fetch content from ${params.url} and process with: ${params.prompt}`,
-      urls: [params.url],
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
-        }
-      },
-    };
-    return confirmationDetails;
-  }
-
-  async execute(
-    params: WebFetchToolParams,
-    signal: AbortSignal,
-  ): Promise<ToolResult> {
-    const validationError = this.validateParams(params);
-    if (validationError) {
-      return {
-        llmContent: `Error: Invalid parameters provided. Reason: ${validationError}`,
-        returnDisplay: validationError,
-      };
-    }
-
-    return this.executeFetch(params, signal);
+  ): ToolInvocation<WebFetchToolParams, ToolResult> {
+    return new WebFetchToolInvocation(this.config, params);
   }
 }

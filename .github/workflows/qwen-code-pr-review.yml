@@ -1,24 +1,24 @@
-name: 🧐 Qwen Pull Request Review
+name: '🧐 Qwen Pull Request Review'
 
 on:
   pull_request_target:
-    types: [opened]
+    types: ['opened']
   pull_request_review_comment:
-    types: [created]
+    types: ['created']
   pull_request_review:
-    types: [submitted]
+    types: ['submitted']
   workflow_dispatch:
     inputs:
       pr_number:
         description: 'PR number to review'
         required: true
-        type: number
+        type: 'number'
 
 jobs:
   review-pr:
     if: >
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request_target' && 
+      (github.event_name == 'pull_request_target' &&
        github.event.action == 'opened' &&
        (github.event.pull_request.author_association == 'OWNER' ||
         github.event.pull_request.author_association == 'MEMBER' ||
@@ -40,24 +40,25 @@ jobs:
          github.event.review.author_association == 'MEMBER' ||
          github.event.review.author_association == 'COLLABORATOR'))
     timeout-minutes: 15
-    runs-on: ubuntu-latest
+    runs-on: 'ubuntu-latest'
     permissions:
-      contents: read
-      id-token: write
-      pull-requests: write
-      issues: write
+      contents: 'read'
+      id-token: 'write'
+      pull-requests: 'write'
+      issues: 'write'
     steps:
-      - name: Checkout PR code
-        uses: actions/checkout@v4
+      - name: 'Checkout PR code'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: '${{ secrets.GITHUB_TOKEN }}'
           fetch-depth: 0
 
-      - name: Get PR details (pull_request_target & workflow_dispatch)
-        id: get_pr
-        if: github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch'
+      - name: 'Get PR details (pull_request_target & workflow_dispatch)'
+        id: 'get_pr'
+        if: |-
+          ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER=${{ github.event.inputs.pr_number }}
@@ -74,12 +75,13 @@ jobs:
           echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Get PR details (issue_comment)
-        id: get_pr_comment
-        if: github.event_name == 'issue_comment'
+      - name: 'Get PR details (issue_comment)'
+        id: 'get_pr_comment'
+        if: |-
+          ${{ github.event_name == 'issue_comment' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
         run: |
           PR_NUMBER=${{ github.event.issue.number }}
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
@@ -95,19 +97,19 @@ jobs:
           echo "$CHANGED_FILES" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Run Qwen PR Review
-        uses: QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2
+      - name: 'Run Qwen PR Review'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.get_pr.outputs.pr_number || steps.get_pr_comment.outputs.pr_number }}
-          PR_DATA: ${{ steps.get_pr.outputs.pr_data || steps.get_pr_comment.outputs.pr_data }}
-          CHANGED_FILES: ${{ steps.get_pr.outputs.changed_files || steps.get_pr_comment.outputs.changed_files }}
-          ADDITIONAL_INSTRUCTIONS: ${{ steps.get_pr.outputs.additional_instructions || steps.get_pr_comment.outputs.additional_instructions }}
-          REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ steps.get_pr.outputs.pr_number || steps.get_pr_comment.outputs.pr_number }}'
+          PR_DATA: '${{ steps.get_pr.outputs.pr_data || steps.get_pr_comment.outputs.pr_data }}'
+          CHANGED_FILES: '${{ steps.get_pr.outputs.changed_files || steps.get_pr_comment.outputs.changed_files }}'
+          ADDITIONAL_INSTRUCTIONS: '${{ steps.get_pr.outputs.additional_instructions || steps.get_pr_comment.outputs.additional_instructions }}'
+          REPOSITORY: '${{ github.repository }}'
         with:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           settings_json: |
             {
               "coreTools": [

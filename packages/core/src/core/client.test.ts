@@ -708,7 +708,7 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('sendMessageStream', () => {
-    it('should include editor context when ideModeFeature is enabled', async () => {
+    it('should include editor context when ideMode is enabled', async () => {
       // Arrange
       vi.mocked(ideContext.getIdeContext).mockReturnValue({
         workspaceState: {
@@ -732,7 +732,7 @@ describe('Gemini Client (client.ts)', () => {
         },
       });
 
-      vi.spyOn(client['config'], 'getIdeModeFeature').mockReturnValue(true);
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -792,7 +792,7 @@ ${JSON.stringify(
       });
     });
 
-    it('should not add context if ideModeFeature is enabled but no open files', async () => {
+    it('should not add context if ideMode is enabled but no open files', async () => {
       // Arrange
       vi.mocked(ideContext.getIdeContext).mockReturnValue({
         workspaceState: {
@@ -800,7 +800,7 @@ ${JSON.stringify(
         },
       });
 
-      vi.spyOn(client['config'], 'getIdeModeFeature').mockReturnValue(true);
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -839,7 +839,7 @@ ${JSON.stringify(
       );
     });
 
-    it('should add context if ideModeFeature is enabled and there is one active file', async () => {
+    it('should add context if ideMode is enabled and there is one active file', async () => {
       // Arrange
       vi.mocked(ideContext.getIdeContext).mockReturnValue({
         workspaceState: {
@@ -855,7 +855,7 @@ ${JSON.stringify(
         },
       });
 
-      vi.spyOn(client['config'], 'getIdeModeFeature').mockReturnValue(true);
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -914,7 +914,7 @@ ${JSON.stringify(
       });
     });
 
-    it('should add context if ideModeFeature is enabled and there are open files but no active file', async () => {
+    it('should add context if ideMode is enabled and there are open files but no active file', async () => {
       // Arrange
       vi.mocked(ideContext.getIdeContext).mockReturnValue({
         workspaceState: {
@@ -931,7 +931,7 @@ ${JSON.stringify(
         },
       });
 
-      vi.spyOn(client['config'], 'getIdeModeFeature').mockReturnValue(true);
+      vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -1267,7 +1267,7 @@ ${JSON.stringify(
       beforeEach(() => {
         client['forceFullIdeContext'] = false; // Reset before each delta test
         vi.spyOn(client, 'tryCompressChat').mockResolvedValue(null);
-        vi.spyOn(client['config'], 'getIdeModeFeature').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getIdeMode').mockReturnValue(true);
         mockTurnRunFn.mockReturnValue(mockStream);
 
         const mockChat: Partial<GeminiChat> = {
@@ -1635,6 +1635,75 @@ ${JSON.stringify(
         fallbackModel,
         undefined,
       );
+    });
+  });
+
+  describe('setHistory', () => {
+    it('should strip thought signatures when stripThoughts is true', () => {
+      const mockChat = {
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as unknown as GeminiChat;
+
+      const historyWithThoughts: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'hello' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            { text: 'thinking...', thoughtSignature: 'thought-123' },
+            {
+              functionCall: { name: 'test', args: {} },
+              thoughtSignature: 'thought-456',
+            },
+          ],
+        },
+      ];
+
+      client.setHistory(historyWithThoughts, { stripThoughts: true });
+
+      const expectedHistory: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'hello' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            { text: 'thinking...' },
+            { functionCall: { name: 'test', args: {} } },
+          ],
+        },
+      ];
+
+      expect(mockChat.setHistory).toHaveBeenCalledWith(expectedHistory);
+    });
+
+    it('should not strip thought signatures when stripThoughts is false', () => {
+      const mockChat = {
+        setHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as unknown as GeminiChat;
+
+      const historyWithThoughts: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'hello' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            { text: 'thinking...', thoughtSignature: 'thought-123' },
+            { text: 'ok', thoughtSignature: 'thought-456' },
+          ],
+        },
+      ];
+
+      client.setHistory(historyWithThoughts, { stripThoughts: false });
+
+      expect(mockChat.setHistory).toHaveBeenCalledWith(historyWithThoughts);
     });
   });
 });

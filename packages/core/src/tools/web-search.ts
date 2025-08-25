@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BaseTool, Icon, ToolResult } from './tools.js';
-import { Type } from '@google/genai';
+import { BaseTool, Kind, ToolResult } from './tools.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { Config } from '../config/config.js';
@@ -55,12 +54,12 @@ export class WebSearchTool extends BaseTool<
       WebSearchTool.Name,
       'TavilySearch',
       'Performs a web search using the Tavily API and returns a concise answer with sources. Requires the TAVILY_API_KEY environment variable.',
-      Icon.Globe,
+      Kind.Search,
       {
-        type: Type.OBJECT,
+        type: 'object',
         properties: {
           query: {
-            type: Type.STRING,
+            type: 'string',
             description: 'The search query to find information on the web.',
           },
         },
@@ -89,7 +88,7 @@ export class WebSearchTool extends BaseTool<
     return null;
   }
 
-  getDescription(params: WebSearchToolParams): string {
+  override getDescription(params: WebSearchToolParams): string {
     return `Searching the web for: "${params.query}"`;
   }
 

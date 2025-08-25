@@ -129,6 +129,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         : isDashScopeProvider
           ? {
               'X-DashScope-CacheControl': 'enable',
+              'X-DashScope-UserAgent': userAgent,
             }
           : {}),
     };

@@ -1,26 +1,37 @@
 # Changelog
 
+## 0.0.8
+
+- Synced upstream `gemini-cli` to v0.1.19.
+- Updated documentation branding from **Gemini CLI** to **Qwen Code**.
+- Added multilingual docs links in `README.md`.
+- Added deterministic cache control for the DashScope provider.
+- Added option to choose a project-level or global save location.
+- Limited `grep` results to 25 items by default.
+- `grep` now respects `.geminiignore`.
+- Miscellaneous improvements and bug fixes.
+
 ## 0.0.7
 
-- Fix MCP tools
-- Fix Web Fetch tool
-- Fix Web Search tool, by replacing web search from Google/Gemini to Tavily API
-- Fix: Compatible with occasional tool call parameters returned by LLM that are invalid JSON
-- Fix: prevent concurrent query submissions on some rare cases
-- Fix: incorrect qwen logger exit handler setup
-- Fix: seperate static QR code and dynamic spin components
-- Sync gemini-cli to v0.1.18
+- Synced upstream `gemini-cli` to v0.1.18.
+- Fixed MCP tools.
+- Fixed Web Fetch tool.
+- Fixed Web Search tool by switching from Google/Gemini to the Tavily API.
+- Made tool calls tolerant of invalid-JSON parameters occasionally returned by the LLM.
+- Prevented concurrent query submissions in rare cases.
+- Corrected Qwen logger exit-handler setup.
+- Separated static QR code and dynamic spinner components.
 
 ## 0.0.6
 
-- Add usage statistics logging for Qwen integration
-- Make `/init` command respect configured context filename and align docs with QWEN.md
-- Fix EPERM error when run `qwen --sandbox` in macOS
-- Fix terminal flicker when waiting for login
-- Fix `glm-4.5` model request error
+- Added usage statistics logging for Qwen integration.
+- Made `/init` respect the configured context filename and aligned docs with `QWEN.md`.
+- Fixed `EPERM` error when running `qwen --sandbox` on macOS.
+- Fixed terminal flicker while waiting for login.
+- Fixed `glm-4.5` model request error.
 
 ## 0.0.5
 
-- Support Qwen OAuth login and provide up to 2000 free requests per day
-- Sync gemini-cli to v0.1.17
-- Add systemPromptMappings Configuration Feature
+- Added Qwen OAuth login and up to 2,000 free requests per day.
+- Synced upstream `gemini-cli` to v0.1.17.
+- Added the `systemPromptMappings` configuration option.

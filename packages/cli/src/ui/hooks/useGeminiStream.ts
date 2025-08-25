@@ -4,57 +4,57 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
-import { useInput } from 'ink';
-import {
-  Config,
-  GeminiClient,
-  GeminiEventType as ServerGeminiEventType,
-  ServerGeminiStreamEvent as GeminiEvent,
-  ServerGeminiContentEvent as ContentEvent,
-  ServerGeminiErrorEvent as ErrorEvent,
-  ServerGeminiChatCompressedEvent,
-  ServerGeminiFinishedEvent,
-  getErrorMessage,
-  isNodeError,
-  MessageSenderType,
-  ToolCallRequestInfo,
-  logUserPrompt,
-  GitService,
-  EditorType,
-  ThoughtSummary,
-  UnauthorizedError,
-  UserPromptEvent,
-  DEFAULT_GEMINI_FLASH_MODEL,
-} from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import {
-  StreamingState,
+  Config,
+  ServerGeminiContentEvent as ContentEvent,
+  DEFAULT_GEMINI_FLASH_MODEL,
+  EditorType,
+  ServerGeminiErrorEvent as ErrorEvent,
+  GeminiClient,
+  ServerGeminiStreamEvent as GeminiEvent,
+  getErrorMessage,
+  GitService,
+  isNodeError,
+  logUserPrompt,
+  MessageSenderType,
+  parseAndFormatApiError,
+  ServerGeminiChatCompressedEvent,
+  GeminiEventType as ServerGeminiEventType,
+  ServerGeminiFinishedEvent,
+  ThoughtSummary,
+  ToolCallRequestInfo,
+  UnauthorizedError,
+  UserPromptEvent,
+} from '@qwen-code/qwen-code-core';
+import { promises as fs } from 'fs';
+import path from 'path';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSessionStats } from '../contexts/SessionContext.js';
+import {
   HistoryItem,
-  HistoryItemWithoutId,
   HistoryItemToolGroup,
+  HistoryItemWithoutId,
   MessageType,
   SlashCommandProcessorResult,
+  StreamingState,
   ToolCallStatus,
 } from '../types.js';
 import { isAtCommand } from '../utils/commandUtils.js';
-import { parseAndFormatApiError } from '../utils/errorParsing.js';
-import { useShellCommandProcessor } from './shellCommandProcessor.js';
-import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
-import { useStateAndRef } from './useStateAndRef.js';
+import { handleAtCommand } from './atCommandProcessor.js';
+import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import { UseHistoryManagerReturn } from './useHistoryManager.js';
+import { useKeypress } from './useKeypress.js';
 import { useLogger } from './useLogger.js';
-import { promises as fs } from 'fs';
-import path from 'path';
 import {
-  useReactToolScheduler,
   mapToDisplay as mapTrackedToolCallsToDisplay,
-  TrackedToolCall,
-  TrackedCompletedToolCall,
   TrackedCancelledToolCall,
+  TrackedCompletedToolCall,
+  TrackedToolCall,
+  useReactToolScheduler,
 } from './useReactToolScheduler.js';
-import { useSessionStats } from '../contexts/SessionContext.js';
+import { useStateAndRef } from './useStateAndRef.js';
 
 export function mergePartListUnions(list: PartListUnion[]): PartListUnion {
   const resultParts: PartListUnion = [];
@@ -215,11 +215,14 @@ export const useGeminiStream = (
     pendingHistoryItemRef,
   ]);
 
-  useInput((_input, key) => {
-    if (key.escape) {
-      cancelOngoingRequest();
-    }
-  });
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape') {
+        cancelOngoingRequest();
+      }
+    },
+    { isActive: streamingState === StreamingState.Responding },
+  );
 
   const prepareQueryForGemini = useCallback(
     async (

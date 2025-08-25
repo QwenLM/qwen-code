@@ -23,7 +23,10 @@ describe('WebFetchTool', () => {
         url: 'https://example.com',
         prompt: 'summarize this page',
       };
-      const confirmationDetails = await tool.shouldConfirmExecute(params);
+      const invocation = tool.build(params);
+      const confirmationDetails = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
 
       expect(confirmationDetails).toEqual({
         type: 'info',
@@ -41,7 +44,10 @@ describe('WebFetchTool', () => {
         url: 'https://github.com/google/gemini-react/blob/main/README.md',
         prompt: 'summarize the README',
       };
-      const confirmationDetails = await tool.shouldConfirmExecute(params);
+      const invocation = tool.build(params);
+      const confirmationDetails = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
 
       expect(confirmationDetails).toEqual({
         type: 'info',
@@ -62,7 +68,10 @@ describe('WebFetchTool', () => {
         url: 'https://example.com',
         prompt: 'summarize this page',
       };
-      const confirmationDetails = await tool.shouldConfirmExecute(params);
+      const invocation = tool.build(params);
+      const confirmationDetails = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
 
       expect(confirmationDetails).toBe(false);
     });
@@ -77,7 +86,10 @@ describe('WebFetchTool', () => {
         url: 'https://example.com',
         prompt: 'summarize this page',
       };
-      const confirmationDetails = await tool.shouldConfirmExecute(params);
+      const invocation = tool.build(params);
+      const confirmationDetails = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
 
       if (
         confirmationDetails &&

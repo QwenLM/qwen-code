@@ -234,11 +234,8 @@ export interface IQwenOAuth2Client {
  */
 export class QwenOAuth2Client implements IQwenOAuth2Client {
   private credentials: QwenCredentials = {};
-  private proxy?: string;
 
-  constructor(options: { proxy?: string }) {
-    this.proxy = options.proxy;
-  }
+  constructor(_options?: { proxy?: string }) {}
 
   setCredentials(credentials: QwenCredentials): void {
     this.credentials = credentials;
