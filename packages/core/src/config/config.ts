@@ -222,6 +222,7 @@ export interface ConfigParameters {
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
+  readAfterEdit?: boolean;
 }
 
 export class Config {
@@ -301,6 +302,7 @@ export class Config {
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
+  private readonly readAfterEdit: boolean;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -377,6 +379,7 @@ export class Config {
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
+    this.readAfterEdit = params.readAfterEdit ?? true;
 
     // Web search
     this.tavilyApiKey = params.tavilyApiKey;
@@ -801,6 +804,10 @@ export class Config {
 
   isInteractive(): boolean {
     return this.interactive;
+  }
+
+  getReadAfterEdit(): boolean {
+    return this.readAfterEdit;
   }
 
   async getGitService(): Promise<GitService> {

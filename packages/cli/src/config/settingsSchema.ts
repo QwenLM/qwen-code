@@ -540,6 +540,16 @@ export const SETTINGS_SCHEMA = {
     description: 'The API key for the Tavily API.',
     showInDialog: false,
   },
+  readAfterEdit: {
+    type: 'boolean',
+    label: 'Read After Edit',
+    category: 'Tools',
+    requiresRestart: false,
+    default: true,
+    description:
+      'Automatically read file content after editing to provide context to the AI.',
+    showInDialog: true,
+  },
 } as const;
 
 type InferSettings<T extends SettingsSchema> = {

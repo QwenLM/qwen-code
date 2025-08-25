@@ -167,6 +167,7 @@ search_file_content(pattern="function", include="*.js", maxResults=10)
   - `old_string` is found multiple times, and the self-correction mechanism cannot resolve it to a single, unambiguous match.
 - **Output (`llmContent`):**
   - On success: `Successfully modified file: /path/to/file.txt (1 replacements).` or `Created new file: /path/to/new_file.txt with provided content.`
+  - When the `readAfterEdit` configuration is enabled (default), the updated file content is also included in the response to provide context to the AI.
   - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit, expected 1 occurrences but found 2...`).
 - **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
 
