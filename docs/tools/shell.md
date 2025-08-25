@@ -13,10 +13,35 @@ Use `run_shell_command` to interact with the underlying system, run scripts, or 
 - `command` (string, required): The exact shell command to execute.
 - `description` (string, optional): A brief description of the command's purpose, which will be shown to the user.
 - `directory` (string, optional): The directory (relative to the project root) in which to execute the command. If not provided, the command runs in the project root.
+- `is_background` (boolean, optional): Whether to run the command in background. Default is false. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.
 
 ## How to use `run_shell_command` with Qwen Code
 
-When using `run_shell_command`, the command is executed as a subprocess. `run_shell_command` can start background processes using `&`. The tool returns detailed information about the execution, including:
+When using `run_shell_command`, the command is executed as a subprocess. You can control whether commands run in background or foreground using the `is_background` parameter, or by explicitly adding `&` to commands. The tool returns detailed information about the execution, including:
+
+### Background vs Foreground Execution
+
+The tool intelligently handles background and foreground execution:
+
+**Use background execution (`is_background: true`) for:**
+
+- Long-running development servers: `npm run start`, `npm run dev`, `yarn dev`
+- Build watchers: `npm run watch`, `webpack --watch`
+- Database servers: `mongod`, `mysql`, `redis-server`
+- Web servers: `python -m http.server`, `php -S localhost:8000`
+- Any command expected to run indefinitely until manually stopped
+
+**Use foreground execution (`is_background: false`, default) for:**
+
+- One-time commands: `ls`, `cat`, `grep`
+- Build commands: `npm run build`, `make`
+- Installation commands: `npm install`, `pip install`
+- Git operations: `git commit`, `git push`
+- Test runs: `npm test`, `pytest`
+
+### Execution Information
+
+The tool returns detailed information about the execution, including:
 
 - `Command`: The command that was executed.
 - `Directory`: The directory where the command was run.
@@ -30,7 +55,7 @@ When using `run_shell_command`, the command is executed as a subprocess. `run_sh
 Usage:
 
 ```
-run_shell_command(command="Your commands.", description="Your description of the command.", directory="Your execution directory.")
+run_shell_command(command="Your commands.", description="Your description of the command.", directory="Your execution directory.", is_background=false)
 ```
 
 ## `run_shell_command` examples
@@ -47,10 +72,28 @@ Run a script in a specific directory:
 run_shell_command(command="./my_script.sh", directory="scripts", description="Run my custom script")
 ```
 
-Start a background server:
+Start a background development server (recommended approach):
+
+```
+run_shell_command(command="npm run dev", description="Start development server in background", is_background=true)
+```
+
+Start a background server (alternative with explicit &):
 
 ```
 run_shell_command(command="npm run dev &", description="Start development server in background")
+```
+
+Run a build command in foreground:
+
+```
+run_shell_command(command="npm run build", description="Build the project", is_background=false)
+```
+
+Start multiple background services:
+
+```
+run_shell_command(command="docker-compose up", description="Start all services", is_background=true)
 ```
 
 ## Important notes
@@ -58,7 +101,9 @@ run_shell_command(command="npm run dev &", description="Start development server
 - **Security:** Be cautious when executing commands, especially those constructed from user input, to prevent security vulnerabilities.
 - **Interactive commands:** Avoid commands that require interactive user input, as this can cause the tool to hang. Use non-interactive flags if available (e.g., `npm init -y`).
 - **Error handling:** Check the `Stderr`, `Error`, and `Exit Code` fields to determine if a command executed successfully.
-- **Background processes:** When a command is run in the background with `&`, the tool will return immediately and the process will continue to run in the background. The `Background PIDs` field will contain the process ID of the background process.
+- **Background processes:** When `is_background=true` or when a command contains `&`, the tool will return immediately and the process will continue to run in the background. The `Background PIDs` field will contain the process ID of the background process.
+- **Background execution choices:** Use `is_background=true` for explicit control, or add `&` to the command for manual background execution. The `is_background` parameter provides clearer intent and automatically handles the background execution setup.
+- **Command descriptions:** When using `is_background=true`, the command description will include a `[background]` indicator to clearly show the execution mode.
 
 ## Environment Variables
 
