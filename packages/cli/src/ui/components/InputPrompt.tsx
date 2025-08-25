@@ -27,6 +27,7 @@ import {
   cleanupOldClipboardImages,
 } from '../utils/clipboardUtils.js';
 import * as path from 'path';
+import { usePromptEnhancement } from '../hooks/usePromptEnhancement.js';
 
 export interface InputPromptProps {
   buffer: TextBuffer;
@@ -44,6 +45,7 @@ export interface InputPromptProps {
   setShellModeActive: (value: boolean) => void;
   onEscapePromptChange?: (showPrompt: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
+  onEnhancingChange?: (isEnhancing: boolean) => void;
 }
 
 export const InputPrompt: React.FC<InputPromptProps> = ({
@@ -62,6 +64,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   setShellModeActive,
   onEscapePromptChange,
   vimHandleInput,
+  onEnhancingChange,
 }) => {
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
@@ -105,6 +108,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const resetReverseSearchCompletionState =
     reverseSearchCompletion.resetCompletionState;
 
+  // Prompt enhancement hook
+  const { enhancePrompt, isEnhancing } = usePromptEnhancement({ config });
+
   const resetEscapeState = useCallback(() => {
     if (escapeTimerRef.current) {
       clearTimeout(escapeTimerRef.current);
@@ -120,6 +126,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       onEscapePromptChange(showEscapePrompt);
     }
   }, [showEscapePrompt, onEscapePromptChange]);
+
+  // Notify parent component about enhancing state changes
+  useEffect(() => {
+    if (onEnhancingChange) {
+      onEnhancingChange(isEnhancing);
+    }
+  }, [isEnhancing, onEnhancingChange]);
 
   // Clear escape prompt timer on unmount
   useEffect(
@@ -185,6 +198,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setJustNavigatedHistory,
     resetReverseSearchCompletionState,
   ]);
+
+  // Handle prompt enhancement
+  const handlePromptEnhancement = useCallback(async () => {
+    if (!buffer.text.trim() || isEnhancing) {
+      return;
+    }
+
+    try {
+      const enhancedText = await enhancePrompt(buffer.text);
+      if (enhancedText && enhancedText !== buffer.text) {
+        buffer.setText(enhancedText);
+        // Move cursor to end of enhanced text
+        buffer.moveToOffset(cpLen(enhancedText));
+      }
+    } catch (error) {
+      console.error('Failed to enhance prompt:', error);
+    }
+  }, [buffer, enhancePrompt, isEnhancing]);
 
   // Handle clipboard image pasting with Ctrl+V
   const handleClipboardImage = useCallback(async () => {
@@ -501,6 +532,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
+      // Prompt enhancement
+      if (keyMatchers[Command.ENHANCE_PROMPT](key)) {
+        handlePromptEnhancement();
+        return;
+      }
+
       // Fall back to the text buffer's default input handling for all other keys
       buffer.handleInput(key);
     },
@@ -516,6 +553,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellHistory,
       reverseSearchCompletion,
       handleClipboardImage,
+      handlePromptEnhancement,
       resetCompletionState,
       escPressCount,
       showEscapePrompt,

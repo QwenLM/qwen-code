@@ -128,6 +128,7 @@ export const ansiTheme: ColorsTheme = {
   DiffRemoved: 'red',
   Comment: 'gray',
   Gray: 'gray',
+  GradientColors: ['blue', 'magenta', 'cyan'],
 };
 
 export class Theme {

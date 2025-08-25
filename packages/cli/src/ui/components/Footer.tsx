@@ -32,6 +32,8 @@ interface FooterProps {
   promptTokenCount: number;
   nightly: boolean;
   vimMode?: string;
+  showPromptEnhanceHint?: boolean;
+  isEnhancingPrompt?: boolean;
 }
 
 export const Footer: React.FC<FooterProps> = ({
@@ -47,6 +49,8 @@ export const Footer: React.FC<FooterProps> = ({
   promptTokenCount,
   nightly,
   vimMode,
+  showPromptEnhanceHint = true,
+  isEnhancingPrompt = false,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
@@ -69,12 +73,19 @@ export const Footer: React.FC<FooterProps> = ({
         {debugMode && <DebugProfiler />}
         {vimMode && <Text color={theme.text.secondary}>[{vimMode}] </Text>}
         {nightly ? (
-          <Gradient colors={theme.ui.gradient}>
-            <Text>
+          theme.ui.gradient && theme.ui.gradient.length >= 2 ? (
+            <Gradient colors={theme.ui.gradient}>
+              <Text>
+                {displayPath}
+                {branchName && <Text> ({branchName}*)</Text>}
+              </Text>
+            </Gradient>
+          ) : (
+            <Text color={theme.text.accent}>
               {displayPath}
               {branchName && <Text> ({branchName}*)</Text>}
             </Text>
-          </Gradient>
+          )
         ) : (
           <Text color={theme.text.link}>
             {displayPath}
@@ -141,6 +152,27 @@ export const Footer: React.FC<FooterProps> = ({
           <Box>
             <Text color={theme.ui.symbol}>| </Text>
             <ConsoleSummaryDisplay errorCount={errorCount} />
+          </Box>
+        )}
+        {showPromptEnhanceHint && (
+          <Box>
+            <Text color={theme.ui.symbol}>| </Text>
+            {isEnhancingPrompt ? (
+              theme.ui.gradient && theme.ui.gradient.length >= 2 ? (
+                <Gradient colors={theme.ui.gradient}> Enhancing...</Gradient>
+              ) : (
+                <Text color={theme.text.accent}> Enhancing...</Text>
+              )
+            ) : (
+              <Text>
+                {theme.ui.gradient && theme.ui.gradient.length >= 2 ? (
+                  <Gradient colors={theme.ui.gradient}>Enhance Prompt</Gradient>
+                ) : (
+                  <Text color={theme.text.accent}>Enhance Prompt</Text>
+                )}
+                <Text color={theme.text.secondary}> (Ctrl+B)</Text>
+              </Text>
+            )}
           </Box>
         )}
         {showMemoryUsage && <MemoryUsageDisplay />}
