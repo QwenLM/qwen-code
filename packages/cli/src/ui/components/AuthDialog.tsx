@@ -69,10 +69,6 @@ export function AuthDialog({
         return item.value === AuthType.USE_GEMINI;
       }
 
-      if (process.env.QWEN_OAUTH_TOKEN) {
-        return item.value === AuthType.QWEN_OAUTH;
-      }
-
       return item.value === AuthType.LOGIN_WITH_GOOGLE;
     }),
   );
