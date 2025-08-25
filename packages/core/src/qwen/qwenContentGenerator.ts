@@ -5,12 +5,8 @@
  */
 
 import { OpenAIContentGenerator } from '../core/openaiContentGenerator.js';
-import {
-  IQwenOAuth2Client,
-  type TokenRefreshData,
-  type ErrorData,
-  isErrorResponse,
-} from './qwenOAuth2.js';
+import { IQwenOAuth2Client } from './qwenOAuth2.js';
+import { SharedTokenManager } from './sharedTokenManager.js';
 import { Config } from '../config/config.js';
 import {
   GenerateContentParameters,
@@ -31,11 +27,8 @@ const DEFAULT_QWEN_BASE_URL =
  */
 export class QwenContentGenerator extends OpenAIContentGenerator {
   private qwenClient: IQwenOAuth2Client;
-
-  // Token management (integrated from QwenTokenManager)
-  private currentToken: string | null = null;
-  private currentEndpoint: string | null = null;
-  private refreshPromise: Promise<string> | null = null;
+  private sharedManager: SharedTokenManager;
+  private currentToken?: string;
 
   constructor(
     qwenClient: IQwenOAuth2Client,
@@ -45,6 +38,7 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
     // Initialize with empty API key, we'll override it dynamically
     super(contentGeneratorConfig, config);
     this.qwenClient = qwenClient;
+    this.sharedManager = SharedTokenManager.getInstance();
 
     // Set default base URL, will be updated dynamically
     this.client.baseURL = DEFAULT_QWEN_BASE_URL;
@@ -53,8 +47,8 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
   /**
    * Get the current endpoint URL with proper protocol and /v1 suffix
    */
-  private getCurrentEndpoint(): string {
-    const baseEndpoint = this.currentEndpoint || DEFAULT_QWEN_BASE_URL;
+  private getCurrentEndpoint(resourceUrl?: string): string {
+    const baseEndpoint = resourceUrl || DEFAULT_QWEN_BASE_URL;
     const suffix = '/v1';
 
     // Normalize the URL: add protocol if missing, ensure /v1 suffix
@@ -79,237 +73,149 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
   }
 
   /**
-   * Override to use dynamic token and endpoint
+   * Get valid token and endpoint using the shared token manager
    */
-  override async generateContent(
-    request: GenerateContentParameters,
-    userPromptId: string,
-  ): Promise<GenerateContentResponse> {
-    return this.withValidToken(async (token) => {
-      // Temporarily update the API key and base URL
-      const originalApiKey = this.client.apiKey;
-      const originalBaseURL = this.client.baseURL;
-      this.client.apiKey = token;
-      this.client.baseURL = this.getCurrentEndpoint();
+  private async getValidToken(): Promise<{ token: string; endpoint: string }> {
+    try {
+      // Use SharedTokenManager for consistent token/endpoint pairing and automatic refresh
+      const credentials = await this.sharedManager.getValidCredentials(
+        this.qwenClient,
+      );
 
-      try {
-        return await super.generateContent(request, userPromptId);
-      } finally {
-        // Restore original values
-        this.client.apiKey = originalApiKey;
-        this.client.baseURL = originalBaseURL;
+      if (!credentials.access_token) {
+        throw new Error('No access token available');
       }
-    });
-  }
 
-  /**
-   * Override to use dynamic token and endpoint
-   */
-  override async generateContentStream(
-    request: GenerateContentParameters,
-    userPromptId: string,
-  ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    return this.withValidTokenForStream(async (token) => {
-      // Update the API key and base URL before streaming
-      const originalApiKey = this.client.apiKey;
-      const originalBaseURL = this.client.baseURL;
-      this.client.apiKey = token;
-      this.client.baseURL = this.getCurrentEndpoint();
-
-      try {
-        return await super.generateContentStream(request, userPromptId);
-      } catch (error) {
-        // Restore original values on error
-        this.client.apiKey = originalApiKey;
-        this.client.baseURL = originalBaseURL;
+      return {
+        token: credentials.access_token,
+        endpoint: this.getCurrentEndpoint(credentials.resource_url),
+      };
+    } catch (error) {
+      // Propagate auth errors as-is for retry logic
+      if (this.isAuthError(error)) {
         throw error;
       }
-      // Note: We don't restore the values in finally for streaming because
-      // the generator may continue to be used after this method returns
-    });
-  }
-
-  /**
-   * Override to use dynamic token and endpoint
-   */
-  override async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    return this.withValidToken(async (token) => {
-      const originalApiKey = this.client.apiKey;
-      const originalBaseURL = this.client.baseURL;
-      this.client.apiKey = token;
-      this.client.baseURL = this.getCurrentEndpoint();
-
-      try {
-        return await super.countTokens(request);
-      } finally {
-        this.client.apiKey = originalApiKey;
-        this.client.baseURL = originalBaseURL;
-      }
-    });
-  }
-
-  /**
-   * Override to use dynamic token and endpoint
-   */
-  override async embedContent(
-    request: EmbedContentParameters,
-  ): Promise<EmbedContentResponse> {
-    return this.withValidToken(async (token) => {
-      const originalApiKey = this.client.apiKey;
-      const originalBaseURL = this.client.baseURL;
-      this.client.apiKey = token;
-      this.client.baseURL = this.getCurrentEndpoint();
-
-      try {
-        return await super.embedContent(request);
-      } finally {
-        this.client.apiKey = originalApiKey;
-        this.client.baseURL = originalBaseURL;
-      }
-    });
-  }
-
-  /**
-   * Execute operation with a valid token, with retry on auth failure
-   */
-  private async withValidToken<T>(
-    operation: (token: string) => Promise<T>,
-  ): Promise<T> {
-    const token = await this.getTokenWithRetry();
-
-    try {
-      return await operation(token);
-    } catch (error) {
-      // Check if this is an authentication error
-      if (this.isAuthError(error)) {
-        // Refresh token and retry once silently
-        const newToken = await this.refreshToken();
-        return await operation(newToken);
-      }
-
-      throw error;
-    }
-  }
-
-  /**
-   * Execute operation with a valid token for streaming, with retry on auth failure
-   */
-  private async withValidTokenForStream<T>(
-    operation: (token: string) => Promise<T>,
-  ): Promise<T> {
-    const token = await this.getTokenWithRetry();
-
-    try {
-      return await operation(token);
-    } catch (error) {
-      // Check if this is an authentication error
-      if (this.isAuthError(error)) {
-        // Refresh token and retry once silently
-        const newToken = await this.refreshToken();
-        return await operation(newToken);
-      }
-
-      throw error;
-    }
-  }
-
-  /**
-   * Get token with retry logic
-   */
-  private async getTokenWithRetry(): Promise<string> {
-    try {
-      return await this.getValidToken();
-    } catch (error) {
-      console.error('Failed to get valid token:', error);
+      console.warn('Failed to get token from shared manager:', error);
       throw new Error(
         'Failed to obtain valid Qwen access token. Please re-authenticate.',
       );
     }
   }
 
-  // Token management methods (integrated from QwenTokenManager)
-
   /**
-   * Get a valid access token, refreshing if necessary
+   * Execute an operation with automatic credential management and retry logic.
+   * This method handles:
+   * - Dynamic token and endpoint retrieval
+   * - Temporary client configuration updates
+   * - Automatic restoration of original configuration
+   * - Retry logic on authentication errors with token refresh
+   *
+   * @param operation - The operation to execute with updated client configuration
+   * @param restoreOnCompletion - Whether to restore original config after operation completes
+   * @returns The result of the operation
    */
-  private async getValidToken(): Promise<string> {
-    // If there's already a refresh in progress, wait for it
-    if (this.refreshPromise) {
-      return this.refreshPromise;
-    }
+  private async executeWithCredentialManagement<T>(
+    operation: () => Promise<T>,
+    restoreOnCompletion: boolean = true,
+  ): Promise<T> {
+    // Attempt the operation with credential management and retry logic
+    const attemptOperation = async (): Promise<T> => {
+      const { token, endpoint } = await this.getValidToken();
 
-    try {
-      const { token } = await this.qwenClient.getAccessToken();
-      if (token) {
-        this.currentToken = token;
-        // Also update endpoint from current credentials
-        const credentials = this.qwenClient.getCredentials();
-        if (credentials.resource_url) {
-          this.currentEndpoint = credentials.resource_url;
+      // Store original configuration
+      const originalApiKey = this.client.apiKey;
+      const originalBaseURL = this.client.baseURL;
+
+      // Apply dynamic configuration
+      this.client.apiKey = token;
+      this.client.baseURL = endpoint;
+
+      try {
+        const result = await operation();
+
+        // For streaming operations, we may need to keep the configuration active
+        if (restoreOnCompletion) {
+          this.client.apiKey = originalApiKey;
+          this.client.baseURL = originalBaseURL;
         }
-        return token;
+
+        return result;
+      } catch (error) {
+        // Always restore on error
+        this.client.apiKey = originalApiKey;
+        this.client.baseURL = originalBaseURL;
+        throw error;
       }
-    } catch (error) {
-      console.warn('Failed to get access token, attempting refresh:', error);
-    }
+    };
 
-    // Start a new refresh operation
-    this.refreshPromise = this.performTokenRefresh();
-
+    // Execute with retry logic for auth errors
     try {
-      const newToken = await this.refreshPromise;
-      return newToken;
-    } finally {
-      this.refreshPromise = null;
+      return await attemptOperation();
+    } catch (error) {
+      if (this.isAuthError(error)) {
+        try {
+          // Use SharedTokenManager to properly refresh and persist the token
+          // This ensures the refreshed token is saved to oauth_creds.json
+          await this.sharedManager.getValidCredentials(this.qwenClient, true);
+          // Retry the operation once with fresh credentials
+          return await attemptOperation();
+        } catch (_refreshError) {
+          throw new Error(
+            'Failed to obtain valid Qwen access token. Please re-authenticate.',
+          );
+        }
+      }
+      throw error;
     }
   }
 
   /**
-   * Force refresh the access token
+   * Override to use dynamic token and endpoint with automatic retry
    */
-  private async refreshToken(): Promise<string> {
-    this.refreshPromise = this.performTokenRefresh();
-
-    try {
-      const newToken = await this.refreshPromise;
-      return newToken;
-    } finally {
-      this.refreshPromise = null;
-    }
+  override async generateContent(
+    request: GenerateContentParameters,
+    userPromptId: string,
+  ): Promise<GenerateContentResponse> {
+    return this.executeWithCredentialManagement(() =>
+      super.generateContent(request, userPromptId),
+    );
   }
 
-  private async performTokenRefresh(): Promise<string> {
-    try {
-      const response = await this.qwenClient.refreshAccessToken();
+  /**
+   * Override to use dynamic token and endpoint with automatic retry.
+   * Note: For streaming, the client configuration is not restored immediately
+   * since the generator may continue to be used after this method returns.
+   */
+  override async generateContentStream(
+    request: GenerateContentParameters,
+    userPromptId: string,
+  ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    return this.executeWithCredentialManagement(
+      () => super.generateContentStream(request, userPromptId),
+      false, // Don't restore immediately for streaming
+    );
+  }
 
-      if (isErrorResponse(response)) {
-        const errorData = response as ErrorData;
-        throw new Error(
-          `${errorData?.error || 'Unknown error'} - ${errorData?.error_description || 'No details provided'}`,
-        );
-      }
+  /**
+   * Override to use dynamic token and endpoint with automatic retry
+   */
+  override async countTokens(
+    request: CountTokensParameters,
+  ): Promise<CountTokensResponse> {
+    return this.executeWithCredentialManagement(() =>
+      super.countTokens(request),
+    );
+  }
 
-      const tokenData = response as TokenRefreshData;
-
-      if (!tokenData.access_token) {
-        throw new Error('Failed to refresh access token: no token returned');
-      }
-
-      this.currentToken = tokenData.access_token;
-
-      // Update endpoint if provided
-      if (tokenData.resource_url) {
-        this.currentEndpoint = tokenData.resource_url;
-      }
-
-      return tokenData.access_token;
-    } catch (error) {
-      throw new Error(
-        `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+  /**
+   * Override to use dynamic token and endpoint with automatic retry
+   */
+  override async embedContent(
+    request: EmbedContentParameters,
+  ): Promise<EmbedContentResponse> {
+    return this.executeWithCredentialManagement(() =>
+      super.embedContent(request),
+    );
   }
 
   /**
@@ -331,9 +237,10 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
     const errorCode = errorWithCode?.status || errorWithCode?.code;
 
     return (
-      errorCode === 400 ||
       errorCode === 401 ||
       errorCode === 403 ||
+      errorCode === '401' ||
+      errorCode === '403' ||
       errorMessage.includes('unauthorized') ||
       errorMessage.includes('forbidden') ||
       errorMessage.includes('invalid api key') ||
@@ -349,15 +256,22 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
    * Get the current cached token (may be expired)
    */
   getCurrentToken(): string | null {
-    return this.currentToken;
+    // First check internal state for backwards compatibility with tests
+    if (this.currentToken) {
+      return this.currentToken;
+    }
+    // Fall back to SharedTokenManager
+    const credentials = this.sharedManager.getCurrentCredentials();
+    return credentials?.access_token || null;
   }
 
   /**
-   * Clear the cached token and endpoint
+   * Clear the cached token
    */
   clearToken(): void {
-    this.currentToken = null;
-    this.currentEndpoint = null;
-    this.refreshPromise = null;
+    // Clear internal state for backwards compatibility with tests
+    this.currentToken = undefined;
+    // Also clear SharedTokenManager
+    this.sharedManager.clearCache();
   }
 }
