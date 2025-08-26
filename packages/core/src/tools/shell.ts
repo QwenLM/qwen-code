@@ -39,7 +39,7 @@ export interface ShellToolParams {
   command: string;
   description?: string;
   directory?: string;
-  is_background?: boolean;
+  is_background: boolean;
 }
 
 class ShellToolInvocation extends BaseToolInvocation<
