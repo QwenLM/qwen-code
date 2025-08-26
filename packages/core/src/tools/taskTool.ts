@@ -487,26 +487,25 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
       return 'No tasks';
     }
     
-    // Clean markdown table format
+    // Clean markdown table format - QwenCode will render this beautifully
     let output = '| # | Status | Task |\n';
     output += '|---|--------|------|\n';
     
     let foundActiveTask = false;
     
     taskList.tasks.forEach((task, index) => {
-      const status = task.status === 'complete' ? '(x)' : 
-                     task.status === 'in_progress' ? '(-)' : '( )';
+      const status = task.status === 'complete' ? '✅' : 
+                     task.status === 'in_progress' ? '🔄' : '⏳';
       
       let taskName = task.name;
       
-      // Dark yellow for THE ACTIVE task (first in-progress only)
+      // Use markdown formatting that QwenCode will render properly
       if (task.status === 'in_progress' && !foundActiveTask) {
-        taskName = `\u001b[33m${task.name}\u001b[0m`;
+        taskName = `**${task.name}**`; // Bold for active task
         foundActiveTask = true;
       }
-      // Darker grey for completed tasks
       else if (task.status === 'complete') {
-        taskName = `\u001b[90m${task.name}\u001b[0m`;
+        taskName = `~~${task.name}~~`; // Strikethrough for completed
       }
       
       output += `| ${index + 1} | ${status} | ${taskName} |\n`;
