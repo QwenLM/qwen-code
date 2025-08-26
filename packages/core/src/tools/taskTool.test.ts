@@ -61,15 +61,11 @@ describe('TaskTool', () => {
       const result = await invocation.execute(new AbortController().signal);
 
       expect(result.returnDisplay).toContain('✅ Added task: "Fix login bug"');
-      // Check atomic write: first writes to temp file, then renames
+      // Check direct write to tasks.json
       expect(mockWriteFile).toHaveBeenCalledWith(
-        path.join(mockCwd, 'tasks.json.tmp'),
+        path.join(mockCwd, 'tasks.json'),
         expect.stringContaining('Fix login bug'),
         'utf-8'
-      );
-      expect(mockRename).toHaveBeenCalledWith(
-        path.join(mockCwd, 'tasks.json.tmp'),
-        path.join(mockCwd, 'tasks.json')
       );
 
       // Check the JSON structure
@@ -459,15 +455,11 @@ describe('TaskTool', () => {
 
       await invocation.execute(new AbortController().signal);
 
-      // Check atomic write: first writes to temp file, then renames
+      // Check direct write to tasks.json
       expect(mockWriteFile).toHaveBeenCalledWith(
-        path.join(mockCwd, 'tasks.json.tmp'),
+        path.join(mockCwd, 'tasks.json'),
         expect.any(String),
         'utf-8'
-      );
-      expect(mockRename).toHaveBeenCalledWith(
-        path.join(mockCwd, 'tasks.json.tmp'),
-        path.join(mockCwd, 'tasks.json')
       );
     });
 

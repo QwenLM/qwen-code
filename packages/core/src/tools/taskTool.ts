@@ -494,51 +494,24 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
     }
   }
 
-  private static fileLocks = new Map<string, Promise<void>>();
 
   private async saveTaskList(tasksPath: string, taskList: TaskList): Promise<void> {
-    // Implement simple file locking to prevent race conditions
-    const existingLock = TaskToolInvocation.fileLocks.get(tasksPath);
-    if (existingLock) {
-      await existingLock;
-    }
-
-    const savePromise = this._saveTaskListAtomically(tasksPath, taskList);
-    TaskToolInvocation.fileLocks.set(tasksPath, savePromise);
-    
-    try {
-      await savePromise;
-    } finally {
-      TaskToolInvocation.fileLocks.delete(tasksPath);
-    }
-  }
-
-  private async _saveTaskListAtomically(tasksPath: string, taskList: TaskList): Promise<void> {
+    // Simplified save - direct write with better error handling
     const content = JSON.stringify(taskList, null, 2);
-    const tempPath = `${tasksPath}.tmp`;
     
     try {
-      // Write to temporary file first
-      await fs.writeFile(tempPath, content, 'utf-8');
-      
-      // Atomic rename to final location
-      await fs.rename(tempPath, tasksPath);
+      await fs.writeFile(tasksPath, content, 'utf-8');
     } catch (error) {
-      // Clean up temp file if it exists
-      try {
-        await fs.unlink(tempPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw error;
+      console.error('Failed to save tasks:', error);
+      throw new Error(`Failed to save tasks: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   private formatTaskList(taskList: TaskList): string {
     if (taskList.tasks.length === 0) {
-      return `┌─ 📝 Task List ─┐
-│ No tasks found │
-└─────────────────┘`;
+      return `┌─ 📝 No Tasks Found ─┐
+│ Create your first task │
+└─────────────────────────┘`;
     }
     
     const completed = taskList.tasks.filter(t => t.status === 'complete').length;
@@ -547,23 +520,33 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
     const total = taskList.tasks.length;
     const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
     
-    let output = `┌─ 📋 Current Tasks (${percentage}% complete) ─┐\n`;
+    const header = `┌─ 📋 Tasks (${percentage}% complete) ─┐`;
+    const footer = `└${'─'.repeat(header.length - 2)}┘`;
+    
+    let output = header + '\n';
     
     taskList.tasks.forEach((task, index) => {
       const statusIcon = task.status === 'complete' ? '✅' : 
                         task.status === 'in_progress' ? '🔄' : '⏳';
-      const statusBadge = task.status === 'in_progress' ? '[in_progress]' : 
-                         task.status === 'complete' ? '[completed]' : '[pending]';
+      const taskLine = `│ ${(index + 1).toString().padStart(2)}. ${statusIcon} ${task.name}`;
+      const paddedLine = taskLine.padEnd(header.length - 1) + '│';
+      output += paddedLine + '\n';
       
-      output += `│ ${index + 1}. ${statusIcon} ${statusBadge} ${task.name}\n`;
       if (task.context) {
-        output += `│    ↳ ${task.context}\n`;
+        const contextLine = `│     ↳ ${task.context}`;
+        const paddedContext = contextLine.padEnd(header.length - 1) + '│';
+        output += paddedContext + '\n';
       }
     });
     
-    output += `├─ 📊 Summary ─────────────────────────────────┤\n`;
-    output += `│ ✅ ${completed} completed │ 🔄 ${inProgress} in progress │ ⏳ ${pending} pending │\n`;
-    output += `└──────────────────────────────────────────────┘`;
+    const summaryHeader = `├─ 📊 Summary ${'─'.repeat(header.length - 13)}┤`;
+    output += summaryHeader + '\n';
+    
+    const summaryLine = `│ ✅ ${completed} done │ 🔄 ${inProgress} active │ ⏳ ${pending} pending`;
+    const paddedSummary = summaryLine.padEnd(header.length - 1) + '│';
+    output += paddedSummary + '\n';
+    
+    output += footer;
     
     return output;
   }
