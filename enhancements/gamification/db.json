@@ -1,0 +1,37 @@
+{
+  "users": {
+    "user123": {
+      "points": 150,
+      "achievements": [
+        "First Command",
+        "Code Explorer"
+      ]
+    },
+    "dev456": {
+      "points": 50,
+      "achievements": [
+        "First Command"
+      ]
+    }
+  },
+  "achievements": [
+    {
+      "id": "first-command",
+      "name": "First Command",
+      "description": "Run your first command in Qwen Code.",
+      "points": 50
+    },
+    {
+      "id": "code-explorer",
+      "name": "Code Explorer",
+      "description": "Use Qwen Code to explore a codebase.",
+      "points": 100
+    },
+    {
+        "id": "refactor-master",
+        "name": "Refactor Master",
+        "description": "Refactor a function using Qwen Code.",
+        "points": 150
+    }
+  ]
+}
