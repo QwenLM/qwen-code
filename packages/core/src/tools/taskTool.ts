@@ -176,7 +176,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           await this.saveTaskList(tasksPath, taskList);
           
           // Auto-display task list after adding
-          const addTaskListDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -185,7 +184,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: newTask,
               taskList: taskList,
             }),
-            returnDisplay: `✅ Added: "${task_name}"`,
+            returnDisplay: `Added: ${task_name}`,
           };
 
         case 'complete':
@@ -218,7 +217,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           await this.saveTaskList(tasksPath, taskList);
           
           // Auto-display task list after completing
-          const completeTaskListDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -227,7 +225,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: taskToComplete,
               taskList: taskList,
             }),
-            returnDisplay: `✅ Completed: "${taskToComplete.name}"`,
+            returnDisplay: `Completed: ${taskToComplete.name}`,
           };
 
         case 'in_progress':
@@ -263,7 +261,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           await this.saveTaskList(tasksPath, taskList);
           
           // Auto-display task list after starting work
-          const progressTaskListDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -272,7 +269,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: taskToProgress,
               taskList: taskList,
             }),
-            returnDisplay: `🔄 Started: "${taskToProgress.name}"`,
+            returnDisplay: `Started: ${taskToProgress.name}`,
           };
 
         case 'remove':
@@ -304,7 +301,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           await this.saveTaskList(tasksPath, taskList);
           
           // Auto-display task list after removing
-          const removeTaskListDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -313,30 +309,11 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: removedTask,
               taskList: taskList,
             }),
-            returnDisplay: `🗑️ Removed: "${removedTask.name}"`,
+            returnDisplay: `Removed: ${removedTask.name}`,
           };
 
         case 'list':
-          if (taskList.tasks.length === 0) {
-            return {
-              llmContent: JSON.stringify({
-                success: true,
-                action: 'list',
-                tasks: [],
-                total: 0,
-              }),
-              returnDisplay: '📝 No tasks found. Add your first task with add action!',
-            };
-          }
-          
-          const taskDisplay = taskList.tasks.map((task, index) => {
-            const statusIcon = task.status === 'complete' ? '[✓]' : '[ ]';
-            const statusText = task.status === 'in_progress' ? ' (In Progress)' : 
-                              task.status === 'complete' ? ' (Complete)' : ' (Pending)';
-            const contextText = task.context ? ` - ${task.context}` : '';
-            
-            return `${index + 1} ${statusIcon} ${task.name}${statusText}${contextText}`;
-          }).join('\n');
+          const taskDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -413,7 +390,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           }
 
           await this.saveTaskList(tasksPath, taskList);
-          const batchAddDisplay = this.formatTaskList(taskList);
 
           return {
             llmContent: JSON.stringify({
@@ -422,7 +398,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               addedCount,
               taskList: taskList,
             }),
-            returnDisplay: `✅ Added ${addedCount} tasks`,
+            returnDisplay: `Added ${addedCount} tasks`,
           };
 
         case 'batch_update':
@@ -462,7 +438,6 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           }
 
           await this.saveTaskList(tasksPath, taskList);
-          const batchUpdateDisplay = this.formatTaskList(taskList);
 
           return {
             llmContent: JSON.stringify({
@@ -471,7 +446,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               updatedCount,
               taskList: taskList,
             }),
-            returnDisplay: `🔄 Updated ${updatedCount} tasks`,
+            returnDisplay: `Updated ${updatedCount} tasks`,
           };
 
         default:
@@ -509,19 +484,29 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
 
   private formatTaskList(taskList: TaskList): string {
     if (taskList.tasks.length === 0) {
-      return '📝 No tasks';
+      return 'No tasks';
     }
     
-    const completed = taskList.tasks.filter(t => t.status === 'complete').length;
-    const total = taskList.tasks.length;
-    const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
-    
-    let output = `📋 Tasks (${percentage}%)`;
+    let output = 'Tasks:';
+    let foundActiveTask = false;
     
     taskList.tasks.forEach((task, index) => {
-      const statusIcon = task.status === 'complete' ? '✅' : 
-                        task.status === 'in_progress' ? '🔄' : '⏳';
-      output += `\n${index + 1}. ${statusIcon} ${task.name}`;
+      const status = task.status === 'complete' ? '(x)' : 
+                     task.status === 'in_progress' ? '(-)' : '( )';
+      
+      let taskLine = `${index + 1}. ${status} ${task.name}`;
+      
+      // Dark yellow for THE ACTIVE task (first in-progress only)
+      if (task.status === 'in_progress' && !foundActiveTask) {
+        taskLine = `\u001b[33m${taskLine}\u001b[0m`;
+        foundActiveTask = true;
+      }
+      // Darker grey for completed tasks
+      else if (task.status === 'complete') {
+        taskLine = `\u001b[90m${taskLine}\u001b[0m`;
+      }
+      
+      output += `\n${taskLine}`;
     });
     
     return output;
