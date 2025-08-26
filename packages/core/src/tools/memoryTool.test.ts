@@ -203,7 +203,7 @@ describe('MemoryTool', () => {
     });
 
     it('should call performAddMemoryEntry with correct parameters and return success for global scope', async () => {
-      const params = { fact: 'The sky is blue', scope: 'global' as const };
+      const params = { fact: 'The sky is blue', memoryStorage: 'global' as const };
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
@@ -234,7 +234,7 @@ describe('MemoryTool', () => {
     });
 
     it('should call performAddMemoryEntry with correct parameters and return success for project scope', async () => {
-      const params = { fact: 'The sky is blue', scope: 'project' as const };
+      const params = { fact: 'The sky is blue', memoryStorage: 'project' as const };
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
@@ -274,7 +274,7 @@ describe('MemoryTool', () => {
     });
 
     it('should handle errors from performAddMemoryEntry', async () => {
-      const params = { fact: 'This will fail', scope: 'global' as const };
+      const params = { fact: 'This will fail', memoryStorage: 'global' as const };
       const underlyingError = new Error(
         '[MemoryTool] Failed to add memory entry: Disk full',
       );
@@ -294,16 +294,13 @@ describe('MemoryTool', () => {
       );
     });
 
-    it('should return error when executing without scope parameter', async () => {
+    it('should use default memoryStorage when parameter is not specified', async () => {
       const params = { fact: 'Test fact' };
       const invocation = memoryTool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(result.llmContent).toContain(
-        'Please specify where to save this memory',
-      );
-      expect(result.returnDisplay).toContain('Global:');
-      expect(result.returnDisplay).toContain('Project:');
+      expect(result.llmContent).toContain('success":true');
+      expect(result.llmContent).toContain('global memory');
     });
   });
 
@@ -316,13 +313,13 @@ describe('MemoryTool', () => {
       vi.mocked(fs.readFile).mockResolvedValue('');
 
       // Clear allowlist before each test to ensure clean state
-      const invocation = memoryTool.build({ fact: 'test', scope: 'global' });
+      const invocation = memoryTool.build({ fact: 'test', memoryStorage: 'global' });
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (invocation.constructor as any).allowlist.clear();
     });
 
     it('should return confirmation details when memory file is not allowlisted for global scope', async () => {
-      const params = { fact: 'Test fact', scope: 'global' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'global' as const };
       const invocation = memoryTool.build(params);
       const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
@@ -346,7 +343,7 @@ describe('MemoryTool', () => {
     });
 
     it('should return confirmation details when memory file is not allowlisted for project scope', async () => {
-      const params = { fact: 'Test fact', scope: 'project' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'project' as const };
       const invocation = memoryTool.build(params);
       const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
@@ -369,7 +366,7 @@ describe('MemoryTool', () => {
     });
 
     it('should return false when memory file is already allowlisted for global scope', async () => {
-      const params = { fact: 'Test fact', scope: 'global' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
@@ -387,7 +384,7 @@ describe('MemoryTool', () => {
     });
 
     it('should return false when memory file is already allowlisted for project scope', async () => {
-      const params = { fact: 'Test fact', scope: 'project' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'project' as const };
       const memoryFilePath = path.join(
         process.cwd(),
         getCurrentGeminiMdFilename(),
@@ -406,7 +403,7 @@ describe('MemoryTool', () => {
     });
 
     it('should add memory file to allowlist when ProceedAlways is confirmed for global scope', async () => {
-      const params = { fact: 'Test fact', scope: 'global' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
@@ -434,7 +431,7 @@ describe('MemoryTool', () => {
     });
 
     it('should add memory file to allowlist when ProceedAlways is confirmed for project scope', async () => {
-      const params = { fact: 'Test fact', scope: 'project' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'project' as const };
       const memoryFilePath = path.join(
         process.cwd(),
         getCurrentGeminiMdFilename(),
@@ -461,7 +458,7 @@ describe('MemoryTool', () => {
     });
 
     it('should not add memory file to allowlist when other outcomes are confirmed', async () => {
-      const params = { fact: 'Test fact', scope: 'global' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
@@ -487,7 +484,7 @@ describe('MemoryTool', () => {
     });
 
     it('should handle existing memory file with content for global scope', async () => {
-      const params = { fact: 'New fact', scope: 'global' as const };
+      const params = { fact: 'New fact', memoryStorage: 'global' as const };
       const existingContent =
         'Some existing content.\n\n## Qwen Added Memories\n- Old fact\n';
 
@@ -560,7 +557,7 @@ describe('MemoryTool', () => {
     });
 
     it('should return correct description for global scope', () => {
-      const params = { fact: 'Test fact', scope: 'global' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'global' as const };
       const invocation = memoryTool.build(params);
       const description = invocation.getDescription();
 
@@ -569,7 +566,7 @@ describe('MemoryTool', () => {
     });
 
     it('should return correct description for project scope', () => {
-      const params = { fact: 'Test fact', scope: 'project' as const };
+      const params = { fact: 'Test fact', memoryStorage: 'project' as const };
       const invocation = memoryTool.build(params);
       const description = invocation.getDescription();
 
