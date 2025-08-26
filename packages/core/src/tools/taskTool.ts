@@ -487,26 +487,29 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
       return 'No tasks';
     }
     
-    let output = 'Tasks:';
+    // Clean markdown table format
+    let output = '| # | Status | Task |\n';
+    output += '|---|--------|------|\n';
+    
     let foundActiveTask = false;
     
     taskList.tasks.forEach((task, index) => {
       const status = task.status === 'complete' ? '(x)' : 
                      task.status === 'in_progress' ? '(-)' : '( )';
       
-      let taskLine = `${index + 1}. ${status} ${task.name}`;
+      let taskName = task.name;
       
       // Dark yellow for THE ACTIVE task (first in-progress only)
       if (task.status === 'in_progress' && !foundActiveTask) {
-        taskLine = `\u001b[33m${taskLine}\u001b[0m`;
+        taskName = `\u001b[33m${task.name}\u001b[0m`;
         foundActiveTask = true;
       }
       // Darker grey for completed tasks
       else if (task.status === 'complete') {
-        taskLine = `\u001b[90m${taskLine}\u001b[0m`;
+        taskName = `\u001b[90m${task.name}\u001b[0m`;
       }
       
-      output += `\n${taskLine}`;
+      output += `| ${index + 1} | ${status} | ${taskName} |\n`;
     });
     
     return output;
