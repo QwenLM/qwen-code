@@ -185,7 +185,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: newTask,
               taskList: taskList,
             }),
-            returnDisplay: `✅ Added task: "${task_name}"\n\n${addTaskListDisplay}`,
+            returnDisplay: `✅ Added: "${task_name}"`,
           };
 
         case 'complete':
@@ -227,7 +227,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: taskToComplete,
               taskList: taskList,
             }),
-            returnDisplay: `✅ Completed task: "${taskToComplete.name}"\n\n${completeTaskListDisplay}`,
+            returnDisplay: `✅ Completed: "${taskToComplete.name}"`,
           };
 
         case 'in_progress':
@@ -272,7 +272,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: taskToProgress,
               taskList: taskList,
             }),
-            returnDisplay: `🔄 Started working on: "${taskToProgress.name}"\n\n${progressTaskListDisplay}`,
+            returnDisplay: `🔄 Started: "${taskToProgress.name}"`,
           };
 
         case 'remove':
@@ -313,7 +313,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: removedTask,
               taskList: taskList,
             }),
-            returnDisplay: `🗑️ Removed task: "${removedTask.name}"\n\n${removeTaskListDisplay}`,
+            returnDisplay: `🗑️ Removed: "${removedTask.name}"`,
           };
 
         case 'list':
@@ -345,7 +345,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               tasks: taskList.tasks,
               total: taskList.tasks.length,
             }),
-            returnDisplay: `📋 **Current Tasks:**\n\n${taskDisplay}`,
+            returnDisplay: taskDisplay,
           };
 
         case 'show_progress':
@@ -422,7 +422,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               addedCount,
               taskList: taskList,
             }),
-            returnDisplay: `✅ Added ${addedCount} tasks\n\n${batchAddDisplay}`,
+            returnDisplay: `✅ Added ${addedCount} tasks`,
           };
 
         case 'batch_update':
@@ -471,7 +471,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               updatedCount,
               taskList: taskList,
             }),
-            returnDisplay: `🔄 Updated ${updatedCount} tasks\n\n${batchUpdateDisplay}`,
+            returnDisplay: `🔄 Updated ${updatedCount} tasks`,
           };
 
         default:
@@ -509,44 +509,20 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
 
   private formatTaskList(taskList: TaskList): string {
     if (taskList.tasks.length === 0) {
-      return `┌─ 📝 No Tasks Found ─┐
-│ Create your first task │
-└─────────────────────────┘`;
+      return '📝 No tasks';
     }
     
     const completed = taskList.tasks.filter(t => t.status === 'complete').length;
-    const inProgress = taskList.tasks.filter(t => t.status === 'in_progress').length;
-    const pending = taskList.tasks.filter(t => t.status === 'pending').length;
     const total = taskList.tasks.length;
     const percentage = total > 0 ? Math.round((completed / total) * 100) : 0;
     
-    const header = `┌─ 📋 Tasks (${percentage}% complete) ─┐`;
-    const footer = `└${'─'.repeat(header.length - 2)}┘`;
-    
-    let output = header + '\n';
+    let output = `📋 Tasks (${percentage}%)`;
     
     taskList.tasks.forEach((task, index) => {
       const statusIcon = task.status === 'complete' ? '✅' : 
                         task.status === 'in_progress' ? '🔄' : '⏳';
-      const taskLine = `│ ${(index + 1).toString().padStart(2)}. ${statusIcon} ${task.name}`;
-      const paddedLine = taskLine.padEnd(header.length - 1) + '│';
-      output += paddedLine + '\n';
-      
-      if (task.context) {
-        const contextLine = `│     ↳ ${task.context}`;
-        const paddedContext = contextLine.padEnd(header.length - 1) + '│';
-        output += paddedContext + '\n';
-      }
+      output += `\n${index + 1}. ${statusIcon} ${task.name}`;
     });
-    
-    const summaryHeader = `├─ 📊 Summary ${'─'.repeat(header.length - 13)}┤`;
-    output += summaryHeader + '\n';
-    
-    const summaryLine = `│ ✅ ${completed} done │ 🔄 ${inProgress} active │ ⏳ ${pending} pending`;
-    const paddedSummary = summaryLine.padEnd(header.length - 1) + '│';
-    output += paddedSummary + '\n';
-    
-    output += footer;
     
     return output;
   }
