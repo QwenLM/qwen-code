@@ -82,6 +82,24 @@ class RAGToolInvocation extends BaseToolInvocation<RAGToolParams, ToolResult> {
     return description;
   }
 
+  private formatRAGResults(results: string, query: string, collection?: string): string {
+    if (!results || results.trim() === '') {
+      return `┌─ 🔍 RAG Search Results ─┐
+│ No results found         │
+└──────────────────────────┘`;
+    }
+
+    const collectionText = collection ? ` from "${collection}"` : '';
+    const header = `┌─ 🔍 RAG Search: "${query}"${collectionText} ─┐`;
+    const footer = `└${'─'.repeat(header.length - 2)}┘`;
+    
+    // Add border to each line of results
+    const lines = results.split('\n');
+    const borderedLines = lines.map(line => `│ ${line.padEnd(header.length - 4)} │`);
+    
+    return `${header}\n${borderedLines.join('\n')}\n${footer}`;
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     const { query, collection, limit, file_filter } = this.params;
 
@@ -128,6 +146,7 @@ class RAGToolInvocation extends BaseToolInvocation<RAGToolParams, ToolResult> {
       success = executionResult.exitCode === 0;
 
       if (success) {
+        const formattedResults = this.formatRAGResults(stdout, query, collection);
         return {
           llmContent: JSON.stringify({
             success: true,
@@ -135,7 +154,7 @@ class RAGToolInvocation extends BaseToolInvocation<RAGToolParams, ToolResult> {
             query,
             collection: collection || 'default',
           }),
-          returnDisplay: stdout || 'No results found',
+          returnDisplay: formattedResults,
         };
       } else {
         // Fallback to knowledge base search if specific collection fails
@@ -170,7 +189,7 @@ class RAGToolInvocation extends BaseToolInvocation<RAGToolParams, ToolResult> {
                 collection: 'knowledge-base (fallback)',
                 note: `Collection "${collection}" not found, searched knowledge base instead`,
               }),
-              returnDisplay: fallbackStdout || 'No results found',
+              returnDisplay: this.formatRAGResults(fallbackStdout, query, 'knowledge-base (fallback)'),
             };
           }
         }

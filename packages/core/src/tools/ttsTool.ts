@@ -15,7 +15,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 
 const ttsToolSchemaData: FunctionDeclaration = {
-  name: 'text_to_speech',
+  name: 'tts_speak',
   description:
     'Converts text to speech using the local TTS system. Useful for providing audio feedback, reading results aloud, or announcing progress updates.',
   parametersJsonSchema: {
