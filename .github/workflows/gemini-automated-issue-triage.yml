@@ -48,7 +48,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-          settings_json: |
+          settings_json: |-
             {
               "maxSessionTurns": 25,
               "coreTools": [
@@ -68,7 +68,7 @@ jobs:
             ## Steps
 
             1. Run: `gh label list --repo ${{ github.repository }} --limit 100` to get all available labels.
-            2. Use right tool to review the issue title and body provided in the environment variables: "${ISSUE_TITLE}" and "${ISSUE_BODY}".
+            2. Use shell command `echo` to check the issue title and body provided in the environment variables: "${ISSUE_TITLE}" and "${ISSUE_BODY}".
             3. Ignore any existing priorities or tags on the issue. Just report your findings.
             4. Select the most relevant labels from the existing labels, focusing on kind/*, area/*, sub-area/* and priority/*. For area/* and kind/* limit yourself to only the single most applicable label in each case.
             6. Apply the selected labels to this issue using: `gh issue edit ${{ github.event.issue.number }} --repo ${{ github.repository }} --add-label "label1,label2"`.
