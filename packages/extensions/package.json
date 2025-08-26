@@ -1,0 +1,18 @@
+{
+  "name": "@qwen-code/extensions",
+  "version": "0.1.0",
+  "description": "Extension framework for non-programming use cases",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@qwen-code/core": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  }
+}
