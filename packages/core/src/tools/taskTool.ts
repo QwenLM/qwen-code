@@ -484,32 +484,68 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
 
   private formatTaskList(taskList: TaskList): string {
     if (taskList.tasks.length === 0) {
-      return 'No tasks';
+      return '🎯 No tasks yet - use qwen_tasks to add some!';
     }
     
-    // Clean markdown table format - QwenCode will render this beautifully
-    let output = '| # | Status | Task |\n';
-    output += '|---|--------|------|\n';
+    // Calculate metrics
+    const completed = taskList.tasks.filter(t => t.status === 'complete').length;
+    const inProgress = taskList.tasks.filter(t => t.status === 'in_progress').length;
+    const pending = taskList.tasks.filter(t => t.status === 'pending').length;
+    const total = taskList.tasks.length;
+    const percentage = Math.round((completed / total) * 100);
     
-    let foundActiveTask = false;
+    // Use format that works well in QwenCode's text rendering
+    let output = '┌─────────────────────────────────────────────────────────────────┐\n';
+    output += '│                        📋 TASK DASHBOARD                        │\n';
+    output += '├─────────────────────────────────────────────────────────────────┤\n';
+    output += `│ 📊 Progress: ${completed}/${total} complete (${percentage}%)${' '.repeat(Math.max(0, 35 - `Progress: ${completed}/${total} complete (${percentage}%)`.length))}│\n`;
+    output += `│ 📈 Status: ✅ ${completed} • 🔄 ${inProgress} • ⏳ ${pending}${' '.repeat(Math.max(0, 41 - `Status: ✅ ${completed} • 🔄 ${inProgress} • ⏳ ${pending}`.length))}│\n`;
+    output += '├─────────────────────────────────────────────────────────────────┤\n';
     
     taskList.tasks.forEach((task, index) => {
-      const status = task.status === 'complete' ? '✅' : 
-                     task.status === 'in_progress' ? '🔄' : '⏳';
+      let statusIcon: string;
+      let statusText: string; 
+      let taskDisplay: string = task.name;
       
-      let taskName = task.name;
-      
-      // Use markdown formatting that QwenCode will render properly
-      if (task.status === 'in_progress' && !foundActiveTask) {
-        taskName = `**${task.name}**`; // Bold for active task
-        foundActiveTask = true;
+      switch (task.status) {
+        case 'complete':
+          statusIcon = '✅';
+          statusText = 'DONE';
+          break;
+        case 'in_progress':
+          statusIcon = '🔄';
+          statusText = 'WORK';
+          taskDisplay = `► ${task.name}`;  // Arrow for active
+          break;
+        case 'pending':
+          statusIcon = '⏳';
+          statusText = 'TODO';
+          break;
       }
-      else if (task.status === 'complete') {
-        taskName = `~~${task.name}~~`; // Strikethrough for completed
+      
+      // Format task line with consistent spacing
+      const taskNum = `${index + 1}.`.padEnd(3);
+      const status = `${statusIcon} ${statusText}`.padEnd(8);
+      
+      // Truncate task name if too long (leave room for borders and formatting)
+      const maxTaskLength = 40;
+      if (taskDisplay.length > maxTaskLength) {
+        taskDisplay = taskDisplay.substring(0, maxTaskLength - 3) + '...';
       }
       
-      output += `| ${index + 1} | ${status} | ${taskName} |\n`;
+      output += `│ ${taskNum}${status} ${taskDisplay}${' '.repeat(Math.max(0, 55 - taskNum.length - status.length - taskDisplay.length))}│\n`;
+      
+      // Add context line if present
+      if (task.context) {
+        const contextText = `💡 ${task.context}`;
+        const truncatedContext = contextText.length > 60 ? contextText.substring(0, 57) + '...' : contextText;
+        output += `│      ${truncatedContext}${' '.repeat(Math.max(0, 59 - truncatedContext.length))}│\n`;
+      }
     });
+    
+    output += '├─────────────────────────────────────────────────────────────────┤\n';
+    output += '│ 💡 Commands: add | complete | in_progress | remove | list      │\n';
+    output += '└─────────────────────────────────────────────────────────────────┘';
     
     return output;
   }
