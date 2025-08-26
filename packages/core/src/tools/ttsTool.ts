@@ -104,10 +104,13 @@ class TTSToolInvocation extends BaseToolInvocation<TTSToolParams, ToolResult> {
       } else {
         const baseCommand = output === 'bluetooth' ? 'tts-bluetooth' : 'tts-speak';
         
+        // Properly escape text for shell execution
+        const escapedText = text.replace(/"/g, '\\"').replace(/\\/g, '\\\\');
+        
         if (voice) {
-          command = `${baseCommand} --voice "${voice}" "${text}"`;
+          command = `${baseCommand} --voice "${voice}" "${escapedText}"`;
         } else {
-          command = `${baseCommand} "${text}"`;
+          command = `${baseCommand} "${escapedText}"`;
         }
       }
 
