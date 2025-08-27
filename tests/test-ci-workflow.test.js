@@ -163,11 +163,12 @@ describe('GitHub Actions - Test CI Workflow', () => {
   it('should define a "test" job running on ubuntu-latest', () => {
     if (doc) {
       expectLike(doc.jobs).toBeDefined();
-      expectLike(typeof doc.jobs.test).toBeTruthy();
+      expectLike(doc.jobs.test).toBeDefined();
       expectLike(doc.jobs.test['runs-on']).toBe('ubuntu-latest');
     } else {
       expectLike(/jobs:\s*\n\s*test:\s*\n(?:[\s\S]*?)runs-on:\s*['"]?ubuntu-latest['"]?/m.test(raw)).toBeTruthy();
     }
+  });
   });
 
   it('should include a pinned actions/checkout step with the expected commit SHA', () => {
