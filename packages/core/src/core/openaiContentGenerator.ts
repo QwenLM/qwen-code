@@ -518,17 +518,64 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Provide helpful timeout-specific error message for streaming setup
       if (isTimeoutError) {
-        throw new Error(
-          `${errorMessage}\n\nStreaming setup timeout troubleshooting:\n` +
-            `- Reduce input length or complexity\n` +
-            `- Increase timeout in config: contentGenerator.timeout\n` +
-            `- Check network connectivity and firewall settings\n` +
-            `- Consider using non-streaming mode for very long inputs`,
+        // Use our enhanced timeout handling
+        const enhancedErrorMessage = this.getEnhancedTimeoutMessage(
+          errorMessage,
+          durationMs,
+          request,
         );
+        throw new Error(enhancedErrorMessage);
       }
 
       throw error;
     }
+  }
+
+  /**
+   * Generate an enhanced timeout error message with more specific troubleshooting
+   */
+  private getEnhancedTimeoutMessage(
+    baseMessage: string,
+    durationMs: number,
+    request: GenerateContentParameters,
+  ): string {
+    // Estimate request complexity
+    let estimatedTokens = 0;
+    if (request.contents) {
+      const contentString = JSON.stringify(request.contents);
+      // Rough approximation: 1 token ≈ 4 characters
+      estimatedTokens = Math.ceil(contentString.length / 4);
+    }
+
+    // Determine if this is likely a large request
+    const isLargeRequest = estimatedTokens > 2000;
+
+    let enhancedMessage =
+      `${baseMessage}\n\nStreaming setup timeout troubleshooting:\n` +
+      `- Reduce input length or complexity\n` +
+      `- Increase timeout in config: contentGenerator.timeout\n` +
+      `- Check network connectivity and firewall settings\n` +
+      `- Consider using non-streaming mode for very long inputs`;
+
+    // Add size-specific recommendations
+    if (isLargeRequest) {
+      enhancedMessage +=
+        `\n\nAdditional recommendations for large requests:\n` +
+        `- Consider breaking your request into smaller chunks\n` +
+        `- Use progressive summarization for context\n` +
+        `- Enable checkpointing if available`;
+    }
+
+    // Add adaptive timeout suggestion
+    if (this.contentGeneratorConfig.timeout) {
+      const currentTimeout = this.contentGeneratorConfig.timeout;
+      const suggestedTimeout = Math.min(currentTimeout * 2, 300000); // Cap at 5 minutes
+      if (suggestedTimeout > currentTimeout) {
+        enhancedMessage += `\n\nSuggested timeout adjustment: Current ${currentTimeout}ms, Suggested ${suggestedTimeout}ms`;
+      }
+    }
+
+    return enhancedMessage;
   }
 
   private async *streamGenerator(
