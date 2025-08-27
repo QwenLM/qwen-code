@@ -1,0 +1,22 @@
+name: Test CI Workflow
+
+on:
+  push:
+    branches:
+      - 'ci-test-branch'
+  pull_request:
+    branches:
+      - 'ci-test-branch'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Run a simple test
+        run: |
+          echo "CI is working!"
+          echo "Branch: ${{ github.ref }}"
+          echo "Repository: ${{ github.repository }}"
