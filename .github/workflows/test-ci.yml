@@ -6,9 +6,9 @@ on:
       - 'ci-test-branch'
   pull_request:
     branches:
+      - 'main'
       - 'ci-test-branch'
   workflow_dispatch:
-
 jobs:
   test:
     runs-on: 'ubuntu-latest'
