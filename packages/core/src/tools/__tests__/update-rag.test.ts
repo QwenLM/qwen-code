@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { UpdateRAGTool } from '../update-rag';
-import { RAGService } from '../../rag/RAGService';
+import { UpdateRAGTool } from '../update-rag.js';
+import { RAGService } from '../../rag/RAGService.js';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import * as fs from 'fs';
 

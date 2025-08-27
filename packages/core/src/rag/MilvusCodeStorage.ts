@@ -26,7 +26,7 @@ export class MilvusCodeStorage {
   ) {
     this.client = new MilvusClient({ address: milvusAddress });
     this.collectionName = collectionName;
-    this.chunker = new SimpleCodeChunker(1000, 200);
+    this.chunker = new SimpleCodeChunker(1000);
   }
 
   async initialize(): Promise<void> {

@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { RetrieveCodeTool } from '../retrieve-code';
-import { RAGService } from '../../rag/RAGService';
-import { Config } from '../../config/config';
+import { RetrieveCodeTool } from '../retrieve-code.js';
+import { RAGService } from '../../rag/RAGService.js';
+import { Config } from '../../config/config.js';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('../../rag/RAGService');

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { FileWatcherService } from '../FileWatcherService';
-import { RAGService } from '../../rag/RAGService';
+import { FileWatcherService } from '../FileWatcherService.js';
+import { RAGService } from '../../rag/RAGService.js';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import * as fs from 'fs';
 

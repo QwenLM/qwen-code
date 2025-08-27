@@ -93,6 +93,7 @@
   },
   "dependencies": {
     "@zilliz/milvus2-sdk-node": "^2.6.0",
+    "chonkie": "^0.3.0",
     "node-fetch": "^3.3.2"
   }
 }

@@ -11,7 +11,7 @@ export interface Chunk {
 }
 
 export class SimpleCodeChunker {
-  constructor(private chunkSize: number, private overlapSize: number) {}
+  constructor(private chunkSize: number) {}
 
   chunk(content: string): Chunk[] {
     const chunks: Chunk[] = [];
