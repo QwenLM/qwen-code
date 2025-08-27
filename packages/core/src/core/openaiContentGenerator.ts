@@ -31,7 +31,6 @@ import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
 import { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
 import { safeJsonParse } from '../utils/safeJsonParse.js';
-import { get_encoding } from 'tiktoken';
 
 // Extended types to support cache_control
 interface ChatCompletionContentPartTextWithCache
@@ -597,6 +596,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
     let totalTokens = 0;
 
     try {
+      const { get_encoding } = await import('tiktoken');
       const encoding = get_encoding('cl100k_base'); // GPT-4 encoding, but estimate for qwen
       totalTokens = encoding.encode(content).length;
       encoding.free();

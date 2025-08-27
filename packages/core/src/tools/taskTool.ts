@@ -494,58 +494,31 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
     const total = taskList.tasks.length;
     const percentage = Math.round((completed / total) * 100);
     
-    // Use format that works well in QwenCode's text rendering
-    let output = '┌─────────────────────────────────────────────────────────────────┐\n';
-    output += '│                        📋 TASK DASHBOARD                        │\n';
-    output += '├─────────────────────────────────────────────────────────────────┤\n';
-    output += `│ 📊 Progress: ${completed}/${total} complete (${percentage}%)${' '.repeat(Math.max(0, 35 - `Progress: ${completed}/${total} complete (${percentage}%)`.length))}│\n`;
-    output += `│ 📈 Status: ✅ ${completed} • 🔄 ${inProgress} • ⏳ ${pending}${' '.repeat(Math.max(0, 41 - `Status: ✅ ${completed} • 🔄 ${inProgress} • ⏳ ${pending}`.length))}│\n`;
-    output += '├─────────────────────────────────────────────────────────────────┤\n';
+    // Modern CLI approach - clean, minimal formatting
+    let output = `📋 Tasks (${total} total • ${completed} done • ${inProgress} active • ${pending} pending) — ${percentage}% complete\n\n`;
     
     taskList.tasks.forEach((task, index) => {
       let statusIcon: string;
-      let statusText: string; 
-      let taskDisplay: string = task.name;
+      let statusLabel: string = '';
       
       switch (task.status) {
         case 'complete':
-          statusIcon = '✅';
-          statusText = 'DONE';
+          statusIcon = '✓';
           break;
         case 'in_progress':
-          statusIcon = '🔄';
-          statusText = 'WORK';
-          taskDisplay = `► ${task.name}`;  // Arrow for active
+          statusIcon = '►';
+          statusLabel = '  [ACTIVE]';
           break;
         case 'pending':
-          statusIcon = '⏳';
-          statusText = 'TODO';
+          statusIcon = '•';  // Simple bullet instead of hourglass
           break;
       }
       
-      // Format task line with consistent spacing
-      const taskNum = `${index + 1}.`.padEnd(3);
-      const status = `${statusIcon} ${statusText}`.padEnd(8);
-      
-      // Truncate task name if too long (leave room for borders and formatting)
-      const maxTaskLength = 40;
-      if (taskDisplay.length > maxTaskLength) {
-        taskDisplay = taskDisplay.substring(0, maxTaskLength - 3) + '...';
-      }
-      
-      output += `│ ${taskNum}${status} ${taskDisplay}${' '.repeat(Math.max(0, 55 - taskNum.length - status.length - taskDisplay.length))}│\n`;
-      
-      // Add context line if present
-      if (task.context) {
-        const contextText = `💡 ${task.context}`;
-        const truncatedContext = contextText.length > 60 ? contextText.substring(0, 57) + '...' : contextText;
-        output += `│      ${truncatedContext}${' '.repeat(Math.max(0, 59 - truncatedContext.length))}│\n`;
-      }
+      // Clean list format - just the task name, no context bullshit
+      output += `  ${statusIcon} ${index + 1}. ${task.name}${statusLabel}\n`;
     });
     
-    output += '├─────────────────────────────────────────────────────────────────┤\n';
-    output += '│ 💡 Commands: add | complete | in_progress | remove | list      │\n';
-    output += '└─────────────────────────────────────────────────────────────────┘';
+    // No commands footer - keep it clean
     
     return output;
   }

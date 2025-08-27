@@ -29,9 +29,10 @@ import {
 } from '../tools/memoryTool.js';
 import { WebSearchTool } from '../tools/web-search.js';
 import { RAGTool } from '../tools/ragTool.js';
+import { RAGIndexTool } from '../tools/ragIndexTool.js';
 import { TTSTool } from '../tools/ttsTool.js';
 import { TaskTool } from '../tools/taskTool.js';
-import { SearchaTool } from '../tools/searchaTool.js';
+import { WebscraperTool } from '../tools/webscraperTool.js';
 import { GeminiClient } from '../core/client.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { GitService } from '../services/gitService.js';
@@ -861,11 +862,12 @@ export class Config {
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
-    // Register RAG, TTS, Task, and Searcha tools for enhanced local integration
+    // Register RAG, TTS, Task, and Webscraper tools for enhanced local integration
     registerCoreTool(RAGTool);
+    registerCoreTool(RAGIndexTool);
     registerCoreTool(TTSTool);
     registerCoreTool(TaskTool);
-    registerCoreTool(SearchaTool);
+    registerCoreTool(WebscraperTool);
     // Conditionally register web search tool only if Tavily API key is set
     if (this.getTavilyApiKey()) {
       registerCoreTool(WebSearchTool, this);
