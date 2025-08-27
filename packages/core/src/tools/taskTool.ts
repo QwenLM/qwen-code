@@ -17,7 +17,7 @@ import * as path from 'path';
 const taskToolSchemaData: FunctionDeclaration = {
   name: 'qwen_tasks',
   description:
-    'Manage persistent task lists with automatic state tracking. Add, complete, list, and update tasks without manual tracking.',
+    'Manage task lists efficiently. Visual indicators: ● complete, 🟡 active, ○ pending. Always show task list after modifications for immediate visual feedback.',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -129,25 +129,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
 
     try {
       const tasksPath = path.join(process.cwd(), 'tasks.json');
-      let taskList: TaskList = { tasks: [] };
-
-      // Load existing tasks with better error handling
-      try {
-        const content = await fs.readFile(tasksPath, 'utf-8');
-        const parsed = JSON.parse(content);
-        
-        // Validate the structure
-        if (parsed && typeof parsed === 'object' && Array.isArray(parsed.tasks)) {
-          taskList = parsed;
-        } else {
-          console.warn('Invalid task file structure, starting fresh');
-          taskList = { tasks: [] };
-        }
-      } catch (error) {
-        // File doesn't exist, is corrupted, or has invalid JSON - start fresh
-        console.warn('Task file not found or corrupted, starting fresh:', error instanceof Error ? error.message : 'Unknown error');
-        taskList = { tasks: [] };
-      }
+      let taskList = await this.loadTaskList(tasksPath);
 
       const now = new Date().toISOString();
 
@@ -164,7 +146,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           }
           
           const newTask: Task = {
-            id: Date.now().toString(),
+            id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
             name: task_name,
             status: 'pending',
             context,
@@ -173,9 +155,12 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           };
           
           taskList.tasks.push(newTask);
+          console.log(`[DEBUG] Adding task: ${newTask.name}`);
+          console.log(`[DEBUG] Task list now has ${taskList.tasks.length} tasks`);
           await this.saveTaskList(tasksPath, taskList);
           
-          // Auto-display task list after adding
+          // Auto-display updated task list 
+          const addedTaskDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -184,7 +169,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: newTask,
               taskList: taskList,
             }),
-            returnDisplay: `Added: ${task_name}`,
+            returnDisplay: `Added: ${task_name}\n\n${addedTaskDisplay}`,
           };
 
         case 'complete':
@@ -198,9 +183,15 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
             };
           }
           
+          // Reload task list to ensure we have the most current state
+          taskList = await this.loadTaskList(tasksPath);
+          
           const taskToComplete = taskList.tasks.find(t => 
             t.name.toLowerCase().includes(task_name.toLowerCase()) && t.status !== 'complete'
           );
+          
+          console.log(`[DEBUG] Looking for task to complete: "${task_name}"`);
+          console.log(`[DEBUG] Available tasks:`, taskList.tasks.map(t => `${t.name} (${t.status}, id: ${t.id})`));
           
           if (!taskToComplete) {
             return {
@@ -216,7 +207,8 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           taskToComplete.updated = now;
           await this.saveTaskList(tasksPath, taskList);
           
-          // Auto-display task list after completing
+          // Auto-display updated task list
+          const completedTaskDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -225,7 +217,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: taskToComplete,
               taskList: taskList,
             }),
-            returnDisplay: `Completed: ${taskToComplete.name}`,
+            returnDisplay: `Completed: ${taskToComplete.name}\n\n${completedTaskDisplay}`,
           };
 
         case 'in_progress':
@@ -239,9 +231,15 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
             };
           }
           
+          // Reload task list to ensure we have the most current state
+          taskList = await this.loadTaskList(tasksPath);
+          
           const taskToProgress = taskList.tasks.find(t => 
             t.name.toLowerCase().includes(task_name.toLowerCase())
           );
+          
+          console.log(`[DEBUG] Looking for task to set in progress: "${task_name}"`);
+          console.log(`[DEBUG] Available tasks:`, taskList.tasks.map(t => `${t.name} (${t.status}, id: ${t.id})`));
           
           if (!taskToProgress) {
             return {
@@ -260,7 +258,8 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           }
           await this.saveTaskList(tasksPath, taskList);
           
-          // Auto-display task list after starting work
+          // Auto-display updated task list
+          const progressTaskDisplay = this.formatTaskList(taskList);
           
           return {
             llmContent: JSON.stringify({
@@ -269,7 +268,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               task: taskToProgress,
               taskList: taskList,
             }),
-            returnDisplay: `Started: ${taskToProgress.name}`,
+            returnDisplay: `Started: ${taskToProgress.name}\n\n${progressTaskDisplay}`,
           };
 
         case 'remove':
@@ -313,15 +312,18 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
           };
 
         case 'list':
+          console.log(`[DEBUG] List action: Found ${taskList.tasks.length} tasks`);
+          console.log(`[DEBUG] Task list contents:`, taskList.tasks.map(t => `${t.name} (${t.status})`));
+          
           const taskDisplay = this.formatTaskList(taskList);
           
+          // Count tasks by status for clear context
+          const completed = taskList.tasks.filter(t => t.status === 'complete').length;
+          const inProgress = taskList.tasks.filter(t => t.status === 'in_progress').length;
+          const pending = taskList.tasks.filter(t => t.status === 'pending').length;
+          
           return {
-            llmContent: JSON.stringify({
-              success: true,
-              action: 'list',
-              tasks: taskList.tasks,
-              total: taskList.tasks.length,
-            }),
+            llmContent: `Task list displayed with visual indicators: ● complete (${completed}), 🟡 active (${inProgress}), ○ pending (${pending}). The visual display shows the current status - no need to repeat it.`,
             returnDisplay: taskDisplay,
           };
 
@@ -341,27 +343,27 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
             };
           }
           
-          const completed = taskList.tasks.filter(t => t.status === 'complete').length;
-          const inProgress = taskList.tasks.filter(t => t.status === 'in_progress').length;
-          const pending = taskList.tasks.filter(t => t.status === 'pending').length;
+          const progressCompleted = taskList.tasks.filter(t => t.status === 'complete').length;
+          const progressInProgress = taskList.tasks.filter(t => t.status === 'in_progress').length;
+          const progressPending = taskList.tasks.filter(t => t.status === 'pending').length;
           const total = taskList.tasks.length;
-          const percentage = Math.round((completed / total) * 100);
+          const percentage = Math.round((progressCompleted / total) * 100);
           
           return {
             llmContent: JSON.stringify({
               success: true,
               action: 'show_progress',
-              completed,
-              inProgress,
-              pending,
+              completed: progressCompleted,
+              inProgress: progressInProgress,
+              pending: progressPending,
               total,
               percentage,
             }),
             returnDisplay: `📊 **Progress Summary:**\n\n` +
-                          `✅ Complete: ${completed}\n` +
-                          `🔄 In Progress: ${inProgress}\n` +
-                          `⏳ Pending: ${pending}\n` +
-                          `📈 **Overall Progress: ${percentage}% (${completed}/${total})**`,
+                          `✅ Complete: ${progressCompleted}\n` +
+                          `🔄 In Progress: ${progressInProgress}\n` +
+                          `⏳ Pending: ${progressPending}\n` +
+                          `📈 **Overall Progress: ${percentage}% (${progressCompleted}/${total})**`,
           };
 
         case 'batch_add':
@@ -391,6 +393,9 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
 
           await this.saveTaskList(tasksPath, taskList);
 
+          // Auto-display updated task list
+          const batchAddDisplay = this.formatTaskList(taskList);
+          
           return {
             llmContent: JSON.stringify({
               success: true,
@@ -398,7 +403,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               addedCount,
               taskList: taskList,
             }),
-            returnDisplay: `Added ${addedCount} tasks`,
+            returnDisplay: `Added ${addedCount} tasks\n\n${batchAddDisplay}`,
           };
 
         case 'batch_update':
@@ -439,6 +444,9 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
 
           await this.saveTaskList(tasksPath, taskList);
 
+          // Auto-display updated task list
+          const batchUpdateDisplay = this.formatTaskList(taskList);
+          
           return {
             llmContent: JSON.stringify({
               success: true,
@@ -446,7 +454,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
               updatedCount,
               taskList: taskList,
             }),
-            returnDisplay: `Updated ${updatedCount} tasks`,
+            returnDisplay: `Updated ${updatedCount} tasks\n\n${batchUpdateDisplay}`,
           };
 
         default:
@@ -469,63 +477,136 @@ class TaskToolInvocation extends BaseToolInvocation<TaskToolParams, ToolResult> 
     }
   }
 
+  private async loadTaskList(tasksPath: string): Promise<TaskList> {
+    try {
+      const content = await fs.readFile(tasksPath, 'utf-8');
+      
+      // Check for obviously corrupted content
+      if (!content.trim() || content.trim().length < 10) {
+        console.warn('Task file appears empty or too short, starting fresh');
+        return { tasks: [] };
+      }
+      
+      // Try to parse JSON with better error handling
+      let parsed;
+      try {
+        parsed = JSON.parse(content);
+      } catch (jsonError) {
+        console.warn('JSON parsing failed, attempting to recover by cleaning content');
+        
+        // Try to find the last complete JSON structure
+        const lastBraceIndex = content.lastIndexOf('}');
+        if (lastBraceIndex > 0) {
+          const cleanContent = content.substring(0, lastBraceIndex + 1);
+          try {
+            parsed = JSON.parse(cleanContent);
+            console.log('Successfully recovered from partial JSON corruption');
+          } catch {
+            console.warn('Recovery failed, starting fresh');
+            return { tasks: [] };
+          }
+        } else {
+          console.warn('No recoverable JSON structure found, starting fresh');
+          return { tasks: [] };
+        }
+      }
+      
+      console.log(`[DEBUG] Loading tasks from ${tasksPath}`);
+      console.log(`[DEBUG] Loaded ${parsed?.tasks?.length || 0} existing tasks`);
+      
+      // Validate the structure
+      if (parsed && typeof parsed === 'object' && Array.isArray(parsed.tasks)) {
+        return parsed;
+      } else {
+        console.warn('Invalid task file structure, starting fresh');
+        return { tasks: [] };
+      }
+    } catch (error) {
+      // File doesn't exist, is corrupted, or has invalid JSON - start fresh
+      console.warn('Task file not found or corrupted, starting fresh:', error instanceof Error ? error.message : 'Unknown error');
+      return { tasks: [] };
+    }
+  }
 
   private async saveTaskList(tasksPath: string, taskList: TaskList): Promise<void> {
-    // Simplified save - direct write with better error handling
-    const content = JSON.stringify(taskList, null, 2);
+    // Use file locking to prevent concurrent writes
+    TaskTool.fileLockPromise = TaskTool.fileLockPromise.then(async () => {
+      const content = JSON.stringify(taskList, null, 2);
+      const tempPath = `${tasksPath}.tmp.${Date.now()}.${Math.random().toString(36).substr(2, 9)}`;
+      
+      try {
+        console.log(`[DEBUG] Acquiring file lock for save operation`);
+        
+        // Write to temporary file first
+        await fs.writeFile(tempPath, content, 'utf-8');
+        
+        // Validate the written content by parsing it
+        const written = await fs.readFile(tempPath, 'utf-8');
+        const parsed = JSON.parse(written);
+        
+        if (!parsed.tasks || !Array.isArray(parsed.tasks)) {
+          throw new Error('Invalid task structure written to file');
+        }
+        
+        // Ensure we have the exact number of tasks expected
+        if (parsed.tasks.length !== taskList.tasks.length) {
+          throw new Error(`Task count mismatch: expected ${taskList.tasks.length}, got ${parsed.tasks.length}`);
+        }
+        
+        // Atomic rename to final file
+        await fs.rename(tempPath, tasksPath);
+        
+        console.log(`[DEBUG] Successfully saved ${taskList.tasks.length} tasks atomically`);
+        
+      } catch (error) {
+        // Clean up temp file if it exists
+        try {
+          await fs.unlink(tempPath);
+        } catch {
+          // Ignore cleanup errors
+        }
+        
+        console.error('Failed to save tasks:', error);
+        throw new Error(`Failed to save tasks: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      }
+    });
     
-    try {
-      await fs.writeFile(tasksPath, content, 'utf-8');
-    } catch (error) {
-      console.error('Failed to save tasks:', error);
-      throw new Error(`Failed to save tasks: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
+    return TaskTool.fileLockPromise;
   }
 
   private formatTaskList(taskList: TaskList): string {
     if (taskList.tasks.length === 0) {
-      return '🎯 No tasks yet - use qwen_tasks to add some!';
+      return '📋 No tasks yet';
     }
     
-    // Calculate metrics
-    const completed = taskList.tasks.filter(t => t.status === 'complete').length;
-    const inProgress = taskList.tasks.filter(t => t.status === 'in_progress').length;
-    const pending = taskList.tasks.filter(t => t.status === 'pending').length;
-    const total = taskList.tasks.length;
-    const percentage = Math.round((completed / total) * 100);
-    
-    // Modern CLI approach - clean, minimal formatting
-    let output = `📋 Tasks (${total} total • ${completed} done • ${inProgress} active • ${pending} pending) — ${percentage}% complete\n\n`;
+    let output = '';
     
     taskList.tasks.forEach((task, index) => {
-      let statusIcon: string;
-      let statusLabel: string = '';
+      let radioButton: string;
       
       switch (task.status) {
         case 'complete':
-          statusIcon = '✓';
+          radioButton = '●';  // Solid filled circle - completed
           break;
-        case 'in_progress':
-          statusIcon = '►';
-          statusLabel = '  [ACTIVE]';
+        case 'in_progress': 
+          radioButton = '🟡'; // Yellow circle - active/in progress
           break;
         case 'pending':
-          statusIcon = '•';  // Simple bullet instead of hourglass
+          radioButton = '○';  // Empty circle - not started
           break;
       }
       
-      // Clean list format - just the task name, no context bullshit
-      output += `  ${statusIcon} ${index + 1}. ${task.name}${statusLabel}\n`;
+      // Single compact row per task
+      output += `${radioButton} ${task.name}\n`;
     });
     
-    // No commands footer - keep it clean
-    
-    return output;
+    return output.trim();
   }
 }
 
 export class TaskTool extends BaseDeclarativeTool<TaskToolParams, ToolResult> {
   static readonly Name: string = taskToolSchemaData.name!;
+  static fileLockPromise: Promise<void> = Promise.resolve();
 
   constructor() {
     super(
