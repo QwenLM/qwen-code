@@ -623,6 +623,8 @@ export class SharedTokenManager {
    */
   cleanup(): void {
     if (this.cleanupFunction && this.cleanupHandlersRegistered) {
+      this.cleanupFunction();
+
       process.removeListener('exit', this.cleanupFunction);
       process.removeListener('SIGINT', this.cleanupFunction);
       process.removeListener('SIGTERM', this.cleanupFunction);
