@@ -47,7 +47,7 @@ try {
   for (let i = 0; i < builds.length; i++) {
     const build = builds[i];
     const index = i + 1;
-    const command = `npx bun build bundle/gemini.js --compile --target=${build.target} --outfile=dist/${build.output} --minify --sourcemap`;
+    const command = `npx bun@1.2.20 build bundle/gemini.js --compile --target=${build.target} --outfile=dist/${build.output} --minify --sourcemap`;
 
     console.log(
       `\n[${index}/${total}] Building ${build.platform} (${build.target}) -> dist/${build.output}`,
