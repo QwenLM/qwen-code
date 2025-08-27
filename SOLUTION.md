@@ -11,6 +11,7 @@ We've implemented a comprehensive mathematical modeling approach to understand a
 ### 1. Mathematical Modeling
 
 We created a model that calculates expected streaming request times based on:
+
 - Data size and complexity
 - System load factors
 - Processing rates
@@ -21,16 +22,18 @@ This allows us to predict when timeouts will occur and recommend appropriate sol
 ### 2. Adaptive Timeout Calculation
 
 Instead of fixed timeouts, we now calculate adaptive timeouts based on request characteristics:
+
 ```
-Adaptive Timeout = Base Timeout + 
-                   (Data Size × 0.05) + 
-                   (Complexity × 0.1) + 
+Adaptive Timeout = Base Timeout +
+                   (Data Size × 0.05) +
+                   (Complexity × 0.1) +
                    (System Load × 20)
 ```
 
 ### 3. Enhanced Error Messaging
 
 When timeouts occur, we now provide more specific troubleshooting guidance based on the request characteristics:
+
 - For large requests: Suggestions to break into smaller chunks
 - For complex requests: Recommendations for progressive summarization
 - Configuration suggestions: Current vs. recommended timeout values
@@ -38,12 +41,14 @@ When timeouts occur, we now provide more specific troubleshooting guidance based
 ### 4. CLI Configuration Options
 
 New CLI options allow users to configure:
+
 - `--openai-timeout`: Set API timeout in milliseconds
 - `--openai-max-retries`: Set maximum retry attempts
 
 ### 5. Configuration Recommendations
 
 The system now provides configuration recommendations based on analysis of current settings, including:
+
 - Optimal timeout values
 - Sampling parameter adjustments
 - Retry policy optimization
@@ -68,6 +73,7 @@ The system now provides configuration recommendations based on analysis of curre
 ## Usage Examples
 
 ### CLI Usage
+
 ```bash
 # Increase timeout for large requests
 qwen --openai-timeout 300000 --prompt "Analyze this large codebase"
@@ -77,6 +83,7 @@ qwen --openai-max-retries 5 --prompt "Complex analysis task"
 ```
 
 ### Configuration File
+
 ```json
 {
   "contentGenerator": {
@@ -93,6 +100,7 @@ qwen --openai-max-retries 5 --prompt "Complex analysis task"
 ## Testing
 
 All tests pass, including new tests for the streaming timeout model:
+
 - Unit tests for mathematical calculations
 - Integration tests with the OpenAI content generator
 - CLI configuration tests
