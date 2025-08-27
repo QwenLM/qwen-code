@@ -9,9 +9,22 @@ import { HippoRAG } from './HippoRAG.js';
 export class RAGService {
   private hippoRAG: HippoRAG;
   private initialized: boolean = false;
+  private workspacePath: string;
 
-    constructor(milvusAddress: string) {
-    this.hippoRAG = new HippoRAG(milvusAddress);
+  constructor(milvusAddress: string, workspacePath: string = process.cwd()) {
+    this.workspacePath = workspacePath;
+    this.hippoRAG = new HippoRAG(milvusAddress, this.getWorkspaceCollectionName());
+  }
+
+  private getWorkspaceCollectionName(): string {
+    // Sanitize workspace path to create unique collection name
+    const workspaceName = this.workspacePath
+      .replace(/[^a-zA-Z0-9]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '')
+      .toLowerCase();
+    
+    return `rag_${workspaceName}`;
   }
 
   async initialize(): Promise<void> {
@@ -26,7 +39,7 @@ export class RAGService {
       await this.initialize();
     }
     
-    // Add or update the code in the RAG system
+    // Add or update the code in the workspace-specific RAG system
     await this.hippoRAG.updateCode(filePath, content, {
       lastModified: new Date().toISOString(),
       fileSize: content.length,
@@ -61,5 +74,9 @@ export class RAGService {
 
   async close(): Promise<void> {
     await this.hippoRAG.close();
+  }
+
+  getCollectionName(): string {
+    return this.getWorkspaceCollectionName();
   }
 }
