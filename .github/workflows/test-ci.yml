@@ -1,4 +1,4 @@
-name: Test CI Workflow
+name: 'Test CI Workflow'
 
 on:
   push:
@@ -11,13 +11,13 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: 'ubuntu-latest'
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      
-      - name: Run a simple test
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v4
+
+      - name: 'Run a simple test'
         run: |
-          echo "CI is working!"
+          echo 'CI is working!'
           echo "Branch: ${{ github.ref }}"
           echo "Repository: ${{ github.repository }}"
