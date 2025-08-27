@@ -29,6 +29,7 @@ import {
   getStructuredResponse,
   getStructuredResponseFromParts,
 } from '../utils/generateContentResponseUtilities.js';
+import { logUsageData } from '../utils/fileLogger.js';
 import {
   ApiErrorEvent,
   ApiRequestEvent,
@@ -165,6 +166,7 @@ export class GeminiChat {
     prompt_id: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
+    userContent?: Content,
   ): Promise<void> {
     logApiResponse(
       this.config,
@@ -177,6 +179,11 @@ export class GeminiChat {
         responseText,
       ),
     );
+
+    if (this.config.getLogUsageDataForDashboard()) {
+        const command = userContent?.parts.map(p => p.text).join('') || '';
+        logUsageData(command, usageMetadata);
+    }
   }
 
   private _logApiError(
@@ -318,6 +325,7 @@ export class GeminiChat {
         prompt_id,
         response.usageMetadata,
         getStructuredResponse(response),
+        userContent,
       );
 
       this.sendPromise = (async () => {
@@ -555,6 +563,7 @@ export class GeminiChat {
         prompt_id,
         this.getFinalUsageMetadata(chunks),
         fullText,
+        inputContent,
       );
     }
     this.recordHistory(inputContent, outputContent);

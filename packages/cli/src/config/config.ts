@@ -407,6 +407,7 @@ export async function loadCliConfig(
           'SYSTEM_TEMPLATE:{"name":"qwen3_coder","params":{"is_git_repository":{RUNTIME_VARS_IS_GIT_REPO},"sandbox":"{RUNTIME_VARS_SANDBOX}"}}',
       },
     ],
+    logUsageDataForDashboard: settings.logUsageDataForDashboard,
   });
 }
 

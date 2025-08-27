@@ -42,6 +42,16 @@ li:hover {
     background-color: #eee;
 }
 
+li.completed {
+    color: #5a5a5a;
+    text-decoration: line-through;
+}
+
+li.completed::before {
+    content: '✓ ';
+    color: green;
+}
+
 section {
     padding: 1rem;
     flex: 1;

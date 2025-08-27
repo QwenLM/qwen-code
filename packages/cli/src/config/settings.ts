@@ -111,6 +111,7 @@ export interface Settings {
 
   // Add other settings here.
   ideMode?: boolean;
+  logUsageDataForDashboard?: boolean;
 }
 
 export interface SettingsError {

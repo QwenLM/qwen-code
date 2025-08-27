@@ -159,6 +159,7 @@ export interface ConfigParameters {
     modelNames?: string[];
     template?: string;
   }>;
+  logUsageDataForDashboard?: boolean;
 }
 
 export class Config {
@@ -214,6 +215,7 @@ export class Config {
     modelNames?: string[];
     template?: string;
   }>;
+  private readonly logUsageDataForDashboard: boolean;
   private modelSwitchedDuringSession: boolean = false;
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
@@ -273,6 +275,7 @@ export class Config {
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
     this.sampling_params = params.sampling_params;
     this.systemPromptMappings = params.systemPromptMappings;
+    this.logUsageDataForDashboard = params.logUsageDataForDashboard ?? false;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -562,6 +565,10 @@ export class Config {
 
   getEnableOpenAILogging(): boolean {
     return this.enableOpenAILogging;
+  }
+
+  getLogUsageDataForDashboard(): boolean {
+    return this.logUsageDataForDashboard;
   }
 
   getSystemPromptMappings():

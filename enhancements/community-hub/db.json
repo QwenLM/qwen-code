@@ -1,4 +1,10 @@
 {
+  "users": [
+    {
+      "username": "user123",
+      "password": "password123"
+    }
+  ],
   "threads": [
     {
       "id": 1,
