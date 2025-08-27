@@ -89,7 +89,7 @@ The verbose output is formatted to clearly identify the source of the logs:
 
 ```
 --- TEST: <log dir>:<test-name> ---
-... output from the gemini command ...
+... output from the qwen command ...
 --- END TEST: <log dir>:<test-name> ---
 ```
 

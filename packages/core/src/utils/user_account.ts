@@ -7,7 +7,7 @@
 import path from 'node:path';
 import { promises as fsp, existsSync, readFileSync } from 'node:fs';
 import * as os from 'os';
-import { GEMINI_DIR, GOOGLE_ACCOUNTS_FILENAME } from './paths.js';
+import { QWEN_DIR, GOOGLE_ACCOUNTS_FILENAME } from './paths.js';
 
 interface UserAccounts {
   active: string | null;
@@ -15,7 +15,7 @@ interface UserAccounts {
 }
 
 function getGoogleAccountsCachePath(): string {
-  return path.join(os.homedir(), GEMINI_DIR, GOOGLE_ACCOUNTS_FILENAME);
+  return path.join(os.homedir(), QWEN_DIR, GOOGLE_ACCOUNTS_FILENAME);
 }
 
 async function readAccounts(filePath: string): Promise<UserAccounts> {

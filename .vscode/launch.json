@@ -67,6 +67,19 @@
       "console": "integratedTerminal",
       "internalConsoleOptions": "neverOpen",
       "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Launch CLI Non-Interactive",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start", "--", "-p", "${input:prompt}", "-y"],
+      "skipFiles": ["<node_internals>/**"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "env": {
+        "GEMINI_SANDBOX": "false"
+      }
     }
   ],
   "inputs": [
@@ -75,6 +88,12 @@
       "type": "promptString",
       "description": "Enter the path to the test file (e.g., ${workspaceFolder}/packages/cli/src/ui/components/LoadingIndicator.test.tsx)",
       "default": "${workspaceFolder}/packages/cli/src/ui/components/LoadingIndicator.test.tsx"
+    },
+    {
+      "id": "prompt",
+      "type": "promptString",
+      "description": "Enter your prompt for non-interactive mode",
+      "default": "Explain this code"
     }
   ]
 }

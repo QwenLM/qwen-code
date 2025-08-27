@@ -41,7 +41,7 @@ For security and isolation, Qwen Code can be run inside a container. This is the
   You can run the published sandbox image directly. This is useful for environments where you only have Docker and want to run the CLI.
   ```bash
   # Run the published sandbox image
-  docker run --rm -it ghcr.io/qwenlm/qwen-code:0.0.8
+  docker run --rm -it ghcr.io/qwenlm/qwen-code:0.0.9
   ```
 - **Using the `--sandbox` flag:**
   If you have Qwen Code installed locally (using the standard installation described above), you can instruct it to run inside the sandbox container.

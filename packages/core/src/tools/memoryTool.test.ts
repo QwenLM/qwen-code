@@ -522,13 +522,16 @@ describe('MemoryTool', () => {
       expect(result).not.toBe(false);
 
       if (result && result.type === 'edit') {
-        expect(result.title).toBe('Choose Memory Storage Location');
-        expect(result.fileName).toBe('Memory Storage Options');
-        expect(result.fileDiff).toContain('Choose where to save this memory');
+        expect(result.title).toContain('Choose Memory Location');
+        expect(result.title).toContain('GLOBAL');
+        expect(result.title).toContain('PROJECT');
+        expect(result.fileName).toBe('QWEN.md');
         expect(result.fileDiff).toContain('Test fact');
-        expect(result.fileDiff).toContain('Global:');
-        expect(result.fileDiff).toContain('Project:');
-        expect(result.originalContent).toBe('');
+        expect(result.fileDiff).toContain('--- QWEN.md');
+        expect(result.fileDiff).toContain('+++ QWEN.md');
+        expect(result.fileDiff).toContain('+- Test fact');
+        expect(result.originalContent).toContain('scope: global');
+        expect(result.originalContent).toContain('INSTRUCTIONS:');
       }
     });
 
@@ -577,13 +580,16 @@ describe('MemoryTool', () => {
       expect(description).toBe(`${expectedPath} (project)`);
     });
 
-    it('should default to global scope when scope is not specified', () => {
+    it('should show choice prompt when scope is not specified', () => {
       const params = { fact: 'Test fact' };
       const invocation = memoryTool.build(params);
       const description = invocation.getDescription();
 
-      const expectedPath = path.join('~', '.qwen', 'QWEN.md');
-      expect(description).toBe(`${expectedPath} (global)`);
+      const globalPath = path.join('~', '.qwen', 'QWEN.md');
+      const projectPath = path.join(process.cwd(), 'QWEN.md');
+      expect(description).toBe(
+        `CHOOSE: ${globalPath} (global) OR ${projectPath} (project)`,
+      );
     });
   });
 });

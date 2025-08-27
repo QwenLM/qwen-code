@@ -8,10 +8,10 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
-import { GEMINI_DIR } from './paths.js';
+import { QWEN_DIR } from './paths.js';
 
 const homeDir = os.homedir() ?? '';
-const geminiDir = path.join(homeDir, GEMINI_DIR);
+const geminiDir = path.join(homeDir, QWEN_DIR);
 const installationIdFile = path.join(geminiDir, 'installation_id');
 
 function ensureGeminiDirExists() {

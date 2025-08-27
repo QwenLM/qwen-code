@@ -36,7 +36,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GITHUB_REPOSITORY: '${{ github.repository }}'
-        run: |
+        run: |-
           echo "🔍 Finding issues without labels..."
           NO_LABEL_ISSUES=$(gh issue list --repo ${{ github.repository }} --search "is:open is:issue no:label" --json number,title,body)
 
@@ -66,7 +66,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-          settings_json: |
+          settings_json: |-
             {
               "maxSessionTurns": 25,
               "coreTools": [
@@ -88,7 +88,7 @@ jobs:
             ## Steps
 
             1. Run: `gh label list --repo ${{ github.repository }} --limit 100` to get all available labels.
-            2. Use right tool to check environment variable for issues to triage: $ISSUES_TO_TRIAGE (JSON array of issues)
+            2. Use shell command `echo` to check environment variable for issues to triage: $ISSUES_TO_TRIAGE (JSON array of issues)
             3. Review the issue title, body and any comments provided in the environment variables.
             4. Ignore any existing priorities or tags on the issue.
             5. Select the most relevant labels from the existing labels, focusing on kind/*, area/*, sub-area/* and priority/*.

@@ -140,7 +140,7 @@ describe('getInstallationInfo', () => {
     const info = getInstallationInfo(projectRoot, false);
 
     expect(mockedExecSync).toHaveBeenCalledWith(
-      'brew list -1 | grep -q "^gemini-cli$"',
+      'brew list -1 | grep -q "^qwen-code$"',
       { stdio: 'ignore' },
     );
     expect(info.packageManager).toBe(PackageManager.HOMEBREW);
@@ -162,7 +162,7 @@ describe('getInstallationInfo', () => {
     const info = getInstallationInfo(projectRoot, false);
 
     expect(mockedExecSync).toHaveBeenCalledWith(
-      'brew list -1 | grep -q "^gemini-cli$"',
+      'brew list -1 | grep -q "^qwen-code$"',
       { stdio: 'ignore' },
     );
     // Should fall back to default global npm

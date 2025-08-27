@@ -16,7 +16,7 @@ on:
 
 jobs:
   review-pr:
-    if: >
+    if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
        github.event.action == 'opened' &&
@@ -59,7 +59,7 @@ jobs:
           ${{ github.event_name == 'pull_request_target' || github.event_name == 'workflow_dispatch' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-        run: |
+        run: |-
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER=${{ github.event.inputs.pr_number }}
           else
@@ -82,7 +82,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
-        run: |
+        run: |-
           PR_NUMBER=${{ github.event.issue.number }}
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           # Extract additional instructions from comment
@@ -110,22 +110,15 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-          settings_json: |
+          settings_json: |-
             {
               "coreTools": [
-                "run_shell_command(echo)",
-                "run_shell_command(gh pr view)",
-                "run_shell_command(gh pr diff)",
-                "run_shell_command(gh pr comment)",
-                "run_shell_command(cat)",
-                "run_shell_command(head)",
-                "run_shell_command(tail)",
-                "run_shell_command(grep)",
+                "run_shell_command",
                 "write_file"
               ],
               "sandbox": false
             }
-          prompt: |
+          prompt: |-
             You are an expert code reviewer. You have access to shell commands to gather PR information and perform the review.
 
             IMPORTANT: Use the available shell commands to gather information. Do not ask for information to be provided.

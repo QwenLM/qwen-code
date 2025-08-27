@@ -644,8 +644,9 @@ export const useGeminiStream = (
       options?: { isContinuation: boolean },
       prompt_id?: string,
     ) => {
-      // Prevent concurrent executions of submitQuery
-      if (isSubmittingQueryRef.current) {
+      // Prevent concurrent executions of submitQuery, but allow continuations
+      // which are part of the same logical flow (tool responses)
+      if (isSubmittingQueryRef.current && !options?.isContinuation) {
         return;
       }
 

@@ -8,12 +8,23 @@
  * Integration test to verify circular reference handling with proxy agents
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { RumEvent } from './qwen-logger/event-types.js';
 import { Config } from '../config/config.js';
 
 describe('Circular Reference Integration Test', () => {
+  beforeEach(() => {
+    // Clear singleton instance before each test
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (QwenLogger as any).instance = undefined;
+  });
+
+  afterEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (QwenLogger as any).instance = undefined;
+  });
+
   it('should handle HttpsProxyAgent-like circular references in qwen logging', () => {
     // Create a mock config with proxy
     const mockConfig = {
@@ -62,6 +73,38 @@ describe('Circular Reference Integration Test', () => {
 
     expect(() => {
       logger?.enqueueLogEvent(problematicEvent);
+    }).not.toThrow();
+  });
+
+  it('should handle event overflow without memory leaks', () => {
+    const mockConfig = {
+      getTelemetryEnabled: () => true,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session',
+      getDebugMode: () => true,
+    } as unknown as Config;
+
+    const logger = QwenLogger.getInstance(mockConfig);
+
+    // Add more events than the maximum capacity
+    for (let i = 0; i < 1100; i++) {
+      logger?.enqueueLogEvent({
+        timestamp: Date.now(),
+        event_type: 'action',
+        type: 'test',
+        name: `overflow-test-${i}`,
+      });
+    }
+
+    // Logger should still be functional
+    expect(logger).toBeDefined();
+    expect(() => {
+      logger?.enqueueLogEvent({
+        timestamp: Date.now(),
+        event_type: 'action',
+        type: 'test',
+        name: 'final-test',
+      });
     }).not.toThrow();
   });
 });
