@@ -172,12 +172,17 @@ describe('GitHub Actions - Test CI Workflow', () => {
 
   it('should include a pinned actions/checkout step with the expected commit SHA', () => {
     const pinnedSha = '08c6903cd8c0fde910a37f88322edcfb5dd907a8';
-    const pinnedPattern = new RegExp(`actions/checkout@${pinnedSha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+    const pinnedPattern = new RegExp(`actions/checkout@${pinnedSha.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}`);
     expectLike(pinnedPattern.test(raw)).toBeTruthy();
 
     // Also ensure it's pinned (40-hex SHA), not a floating tag like v4
     const unpinnedPattern = /\bactions\/checkout@v?\d+(?:\.\d+)*\b/;
-    expectLike(unpinnedPattern.test(raw)).toBe(false);
+    // Strip YAML comments before checking for unpinned refs
+    const codeOnly = raw
+      .split('\n')
+      .map((l) => l.split('#')[0])
+      .join('\n');
+    expectLike(unpinnedPattern.test(codeOnly)).toBe(false);
   });
 
   it('should include the ratchet comment documenting the pinned source', () => {
