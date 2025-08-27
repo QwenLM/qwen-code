@@ -292,6 +292,14 @@ export async function main() {
         }
       });
 
+    // Register cleanup function to close the file watcher service
+    registerCleanup(async () => {
+      const geminiClient = config.getGeminiClient();
+      if (geminiClient && typeof geminiClient.close === 'function') {
+        await geminiClient.close();
+      }
+    });
+    
     registerCleanup(() => instance.unmount());
     return;
   }

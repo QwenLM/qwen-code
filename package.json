@@ -92,6 +92,7 @@
     "yargs": "^17.7.2"
   },
   "dependencies": {
+    "@zilliz/milvus2-sdk-node": "^2.6.0",
     "node-fetch": "^3.3.2"
   }
 }

@@ -18,7 +18,8 @@
     "dist",
     "src/**/*.test.ts",
     "src/**/*.test.tsx",
-    "src/test-utils"
+    "src/test-utils",
+    "**/*.node"
   ],
   "references": [{ "path": "../core" }]
 }
