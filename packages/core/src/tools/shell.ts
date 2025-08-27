@@ -37,9 +37,9 @@ export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 
 export interface ShellToolParams {
   command: string;
+  is_background: boolean;
   description?: string;
   directory?: string;
-  is_background: boolean;
 }
 
 class ShellToolInvocation extends BaseToolInvocation<
@@ -122,8 +122,7 @@ class ShellToolInvocation extends BaseToolInvocation<
       // Add co-author to git commit commands
       const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
 
-      // Handle background execution based on is_background parameter
-      const shouldRunInBackground = this.params.is_background || false;
+      const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
 
       // If explicitly marked as background and doesn't already end with &, add it
@@ -369,7 +368,7 @@ export class ShellTool extends BaseDeclarativeTool<
       - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
       - Any command expected to run indefinitely until manually stopped
       
-      **Use foreground execution (is_background: false, default) for:**
+      **Use foreground execution (is_background: false) for:**
       - One-time commands: \`ls\`, \`cat\`, \`grep\`
       - Build commands: \`npm run build\`, \`make\`
       - Installation commands: \`npm install\`, \`pip install\`

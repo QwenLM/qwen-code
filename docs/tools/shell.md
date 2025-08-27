@@ -13,15 +13,19 @@ Use `run_shell_command` to interact with the underlying system, run scripts, or 
 - `command` (string, required): The exact shell command to execute.
 - `description` (string, optional): A brief description of the command's purpose, which will be shown to the user.
 - `directory` (string, optional): The directory (relative to the project root) in which to execute the command. If not provided, the command runs in the project root.
-- `is_background` (boolean, optional): Whether to run the command in background. Default is false. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.
+- `is_background` (boolean, required): Whether to run the command in background. This parameter is required to ensure explicit decision-making about command execution mode. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands. Set to false for one-time commands that should complete before proceeding.
 
 ## How to use `run_shell_command` with Qwen Code
 
 When using `run_shell_command`, the command is executed as a subprocess. You can control whether commands run in background or foreground using the `is_background` parameter, or by explicitly adding `&` to commands. The tool returns detailed information about the execution, including:
 
+### Required Background Parameter
+
+The `is_background` parameter is **required** for all command executions. This design ensures that the LLM (and users) must explicitly decide whether each command should run in the background or foreground, promoting intentional and predictable command execution behavior. By making this parameter mandatory, we avoid unintended fallback to foreground execution, which could block subsequent operations when dealing with long-running processes.
+
 ### Background vs Foreground Execution
 
-The tool intelligently handles background and foreground execution:
+The tool intelligently handles background and foreground execution based on your explicit choice:
 
 **Use background execution (`is_background: true`) for:**
 
@@ -31,7 +35,7 @@ The tool intelligently handles background and foreground execution:
 - Web servers: `python -m http.server`, `php -S localhost:8000`
 - Any command expected to run indefinitely until manually stopped
 
-**Use foreground execution (`is_background: false`, default) for:**
+**Use foreground execution (`is_background: false`) for:**
 
 - One-time commands: `ls`, `cat`, `grep`
 - Build commands: `npm run build`, `make`
@@ -54,45 +58,47 @@ The tool returns detailed information about the execution, including:
 
 Usage:
 
-```
+```bash
 run_shell_command(command="Your commands.", description="Your description of the command.", directory="Your execution directory.", is_background=false)
 ```
+
+**Note:** The `is_background` parameter is required and must be explicitly specified for every command execution.
 
 ## `run_shell_command` examples
 
 List files in the current directory:
 
-```
-run_shell_command(command="ls -la")
+```bash
+run_shell_command(command="ls -la", is_background=false)
 ```
 
 Run a script in a specific directory:
 
-```
-run_shell_command(command="./my_script.sh", directory="scripts", description="Run my custom script")
+```bash
+run_shell_command(command="./my_script.sh", directory="scripts", description="Run my custom script", is_background=false)
 ```
 
 Start a background development server (recommended approach):
 
-```
+```bash
 run_shell_command(command="npm run dev", description="Start development server in background", is_background=true)
 ```
 
 Start a background server (alternative with explicit &):
 
-```
-run_shell_command(command="npm run dev &", description="Start development server in background")
+```bash
+run_shell_command(command="npm run dev &", description="Start development server in background", is_background=false)
 ```
 
 Run a build command in foreground:
 
-```
+```bash
 run_shell_command(command="npm run build", description="Build the project", is_background=false)
 ```
 
 Start multiple background services:
 
-```
+```bash
 run_shell_command(command="docker-compose up", description="Start all services", is_background=true)
 ```
 
@@ -102,7 +108,7 @@ run_shell_command(command="docker-compose up", description="Start all services",
 - **Interactive commands:** Avoid commands that require interactive user input, as this can cause the tool to hang. Use non-interactive flags if available (e.g., `npm init -y`).
 - **Error handling:** Check the `Stderr`, `Error`, and `Exit Code` fields to determine if a command executed successfully.
 - **Background processes:** When `is_background=true` or when a command contains `&`, the tool will return immediately and the process will continue to run in the background. The `Background PIDs` field will contain the process ID of the background process.
-- **Background execution choices:** Use `is_background=true` for explicit control, or add `&` to the command for manual background execution. The `is_background` parameter provides clearer intent and automatically handles the background execution setup.
+- **Background execution choices:** The `is_background` parameter is required and provides explicit control over execution mode. You can also add `&` to the command for manual background execution, but the `is_background` parameter must still be specified. The parameter provides clearer intent and automatically handles the background execution setup.
 - **Command descriptions:** When using `is_background=true`, the command description will include a `[background]` indicator to clearly show the execution mode.
 
 ## Environment Variables
