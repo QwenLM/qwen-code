@@ -130,6 +130,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
           ? {
               'X-DashScope-CacheControl': 'enable',
               'X-DashScope-UserAgent': userAgent,
+              'X-DashScope-AuthType': contentGeneratorConfig.authType,
             }
           : {}),
     };
@@ -235,8 +236,18 @@ export class OpenAIContentGenerator implements ContentGenerator {
   private async buildCreateParams(
     request: GenerateContentParameters,
     userPromptId: string,
+    streaming: boolean = false,
   ): Promise<Parameters<typeof this.client.chat.completions.create>[0]> {
-    const messages = this.convertToOpenAIFormat(request);
+    let messages = this.convertToOpenAIFormat(request);
+
+    // Add cache control to system and last messages for DashScope providers
+    // Only add cache control to system message for non-streaming requests
+    if (this.isDashScopeProvider()) {
+      messages = this.addDashScopeCacheControl(
+        messages,
+        streaming ? 'both' : 'system',
+      );
+    }
 
     // Build sampling parameters with clear priority:
     // 1. Request-level parameters (highest priority)
@@ -259,6 +270,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
       );
     }
 
+    if (streaming) {
+      createParams.stream = true;
+      createParams.stream_options = { include_usage: true };
+    }
+
     return createParams;
   }
 
@@ -267,7 +283,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const startTime = Date.now();
-    const createParams = await this.buildCreateParams(request, userPromptId);
+    const createParams = await this.buildCreateParams(
+      request,
+      userPromptId,
+      false,
+    );
 
     try {
       const completion = (await this.client.chat.completions.create(
@@ -358,10 +378,11 @@ export class OpenAIContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
-    const createParams = await this.buildCreateParams(request, userPromptId);
-
-    createParams.stream = true;
-    createParams.stream_options = { include_usage: true };
+    const createParams = await this.buildCreateParams(
+      request,
+      userPromptId,
+      true,
+    );
 
     try {
       const stream = (await this.client.chat.completions.create(
@@ -942,14 +963,13 @@ export class OpenAIContentGenerator implements ContentGenerator {
     const mergedMessages =
       this.mergeConsecutiveAssistantMessages(cleanedMessages);
 
-    // Add cache control to system and last messages for DashScope providers
-    return this.addCacheControlFlag(mergedMessages, 'both');
+    return mergedMessages;
   }
 
   /**
    * Add cache control flag to specified message(s) for DashScope providers
    */
-  private addCacheControlFlag(
+  private addDashScopeCacheControl(
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
     target: 'system' | 'last' | 'both' = 'both',
   ): OpenAI.Chat.ChatCompletionMessageParam[] {

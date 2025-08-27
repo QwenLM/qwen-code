@@ -8,7 +8,6 @@ import { LogAttributes, LogRecord, logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import { Config } from '../config/config.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { ClearcutLogger } from './clearcut-logger/clearcut-logger.js';
 import {
   EVENT_API_ERROR,
   EVENT_API_REQUEST,
@@ -150,7 +149,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
 }
 
 export function logApiRequest(config: Config, event: ApiRequestEvent): void {
-  QwenLogger.getInstance(config)?.logApiRequestEvent(event);
+  // QwenLogger.getInstance(config)?.logApiRequestEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -364,6 +363,7 @@ export function logIdeConnection(
   config: Config,
   event: IdeConnectionEvent,
 ): void {
+  QwenLogger.getInstance(config)?.logIdeConnectionEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
@@ -384,7 +384,7 @@ export function logKittySequenceOverflow(
   config: Config,
   event: KittySequenceOverflowEvent,
 ): void {
-  ClearcutLogger.getInstance(config)?.logKittySequenceOverflowEvent(event);
+  QwenLogger.getInstance(config)?.logKittySequenceOverflowEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
     ...getCommonAttributes(config),

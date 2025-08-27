@@ -3410,7 +3410,10 @@ describe('OpenAIContentGenerator', () => {
         model: 'qwen-turbo',
       };
 
-      await dashscopeGenerator.generateContent(request, 'dashscope-prompt-id');
+      await dashscopeGenerator.generateContentStream(
+        request,
+        'dashscope-prompt-id',
+      );
 
       // Should include cache control in last message
       expect(mockOpenAIClient.chat.completions.create).toHaveBeenCalledWith(
@@ -3422,7 +3425,6 @@ describe('OpenAIContentGenerator', () => {
                 expect.objectContaining({
                   type: 'text',
                   text: 'Hello, how are you?',
-                  cache_control: { type: 'ephemeral' },
                 }),
               ]),
             }),

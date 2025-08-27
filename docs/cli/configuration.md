@@ -438,7 +438,7 @@ Arguments passed directly when running the CLI can override other configurations
     - `auto_edit`: Automatically approve edit tools (replace, write_file) while prompting for others
     - `yolo`: Automatically approve all tool calls (equivalent to `--yolo`)
   - Cannot be used together with `--yolo`. Use `--approval-mode=yolo` instead of `--yolo` for the new unified approach.
-  - Example: `gemini --approval-mode auto_edit`
+  - Example: `qwen --approval-mode auto_edit`
 - **`--telemetry`**:
   - Enables [telemetry](../telemetry.md).
 - **`--telemetry-target`**:

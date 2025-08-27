@@ -58,7 +58,8 @@ const getMcpStatus = async (
   const blockedMcpServers = config.getBlockedMcpServers() || [];
 
   if (serverNames.length === 0 && blockedMcpServers.length === 0) {
-    const docsUrl = 'https://goo.gle/gemini-cli-docs-mcp';
+    const docsUrl =
+      'https://qwenlm.github.io/qwen-code-docs/en/tools/mcp-server/#how-to-set-up-your-mcp-server';
     return {
       type: 'message',
       messageType: 'info',

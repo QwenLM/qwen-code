@@ -218,7 +218,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('proxy', {
           type: 'string',
           description:
-            'Proxy for gemini client, like schema://user:password@host:port',
+            'Proxy for qwen client, like schema://user:password@host:port',
         })
         .option('include-directories', {
           type: 'array',
@@ -577,6 +577,7 @@ export async function loadCliConfig(
           'SYSTEM_TEMPLATE:{"name":"qwen3_coder","params":{"is_git_repository":{RUNTIME_VARS_IS_GIT_REPO},"sandbox":"{RUNTIME_VARS_SANDBOX}"}}',
       },
     ]) as ConfigParameters['systemPromptMappings'],
+    authType: settings.selectedAuthType,
     contentGenerator: settings.contentGenerator,
     cliVersion,
     tavilyApiKey:

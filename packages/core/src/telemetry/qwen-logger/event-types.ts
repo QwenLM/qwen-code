@@ -79,5 +79,6 @@ export interface RumPayload {
   session: RumSession;
   view: RumView;
   events: RumEvent[];
+  properties?: Record<string, unknown>;
   _v: string;
 }

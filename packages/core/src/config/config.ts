@@ -210,6 +210,7 @@ export interface ConfigParameters {
     modelNames: string[];
     template: string;
   }>;
+  authType?: AuthType;
   contentGenerator?: {
     timeout?: number;
     maxRetries?: number;
@@ -290,6 +291,7 @@ export class Config {
   private readonly summarizeToolOutput:
     | Record<string, SummarizeToolOutputSettings>
     | undefined;
+  private authType?: AuthType;
   private readonly enableOpenAILogging: boolean;
   private readonly contentGenerator?: {
     timeout?: number;
@@ -370,6 +372,7 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.ideClient = IdeClient.getInstance();
     this.systemPromptMappings = params.systemPromptMappings;
+    this.authType = params.authType;
     this.enableOpenAILogging = params.enableOpenAILogging ?? false;
     this.contentGenerator = params.contentGenerator;
     this.cliVersion = params.cliVersion;
@@ -453,6 +456,8 @@ export class Config {
 
     // Reset the session flag since we're explicitly changing auth and using default model
     this.inFallbackMode = false;
+
+    this.authType = authMethod;
   }
 
   getSessionId(): string {
@@ -547,6 +552,7 @@ export class Config {
   getDebugMode(): boolean {
     return this.debugMode;
   }
+
   getQuestion(): string | undefined {
     return this.question;
   }
@@ -763,6 +769,10 @@ export class Config {
     } else {
       await this.ideClient.disconnect();
     }
+  }
+
+  getAuthType(): AuthType | undefined {
+    return this.authType;
   }
 
   getEnableOpenAILogging(): boolean {
