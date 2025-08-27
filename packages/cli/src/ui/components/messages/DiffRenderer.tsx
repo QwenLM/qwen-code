@@ -299,12 +299,13 @@ const renderDiffContent = (
               </>
             ) : (
               <Text
+                color="white"
                 backgroundColor={
                   line.type === 'add' ? Colors.DiffAdded : Colors.DiffRemoved
                 }
                 wrap="wrap"
               >
-                {prefixSymbol} {colorizeLine(displayContent, language)}
+                {prefixSymbol} {displayContent}
               </Text>
             )}
           </Box>,
