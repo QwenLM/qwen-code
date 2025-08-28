@@ -516,6 +516,17 @@ export async function loadCliConfig(
   const sandboxConfig = await loadSandboxConfig(settings, argv);
   const cliVersion = await getCliVersion();
 
+  // Add the timeout analysis MCP server by default
+  if (!mcpServers['timeout-analysis']) {
+    mcpServers['timeout-analysis'] = {
+      command: 'npm',
+      args: ['run', 'start-timeout-server'],
+      timeout: 30000,
+      description: 'Timeout analysis and optimization tools',
+      cwd: path.join(__dirname, '..', '..', 'core'),
+    };
+  }
+
   return new Config({
     sessionId,
     embeddingModel: DEFAULT_GEMINI_EMBEDDING_MODEL,
