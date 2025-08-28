@@ -1,0 +1,38 @@
+{
+  "name": "@qwen-code/dream-architect",
+  "version": "1.0.0",
+  "description": "AI-Powered Dream Visualization & Code Generator using Qwen-Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "dream-architect": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "gui": "node dist/gui.js"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code-core": "file:../core",
+    "ink": "^6.0.1",
+    "ink-select-input": "^6.2.0",
+    "ink-text-input": "^5.0.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "electron": "^28.0.0",
+    "three": "^0.158.0",
+    "canvas": "^2.11.2",
+    "fabric": "^5.3.0",
+    "node-canvas": "^2.11.2",
+    "sharp": "^0.32.6",
+    "commander": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/three": "^0.158.0",
+    "typescript": "^5.3.3",
+    "tsx": "^4.6.2"
+  }
+}

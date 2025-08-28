@@ -1,0 +1,38 @@
+{
+  "name": "@qwen-code/neural-gardener",
+  "version": "1.0.0",
+  "description": "AI that Grows Digital Plants from Code Complexity using Qwen-Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "neural-gardener": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "grow": "node dist/grow.js",
+    "garden": "node dist/garden.js"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code-core": "file:../core",
+    "ink": "^6.0.1",
+    "ink-select-input": "^6.2.0",
+    "ink-text-input": "^5.0.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "commander": "^11.1.0",
+    "chalk": "^5.3.0",
+    "canvas": "^2.11.2",
+    "figlet": "^1.6.0",
+    "glob": "^10.4.1",
+    "complexity": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/figlet": "^1.5.8",
+    "typescript": "^5.3.3",
+    "tsx": "^4.6.2"
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@qwen-code/creative-ecosystem",
+  "version": "1.0.0",
+  "description": "Unified platform that orchestrates all 5 creative Qwen-Code tools into synergistic workflows",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "creative-ecosystem": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "orchestrate": "node dist/orchestrator.js",
+    "workflow": "node dist/workflow.js"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code-core": "file:../core",
+    "@qwen-code/dream-architect": "file:../dream-architect",
+    "@qwen-code/quantum-kitchen": "file:../quantum-kitchen",
+    "@qwen-code/time-weaver": "file:../time-weaver",
+    "@qwen-code/echo-chamber": "file:../echo-chamber",
+    "@qwen-code/neural-gardener": "file:../neural-gardener",
+    "ink": "^6.0.1",
+    "ink-select-input": "^6.2.0",
+    "ink-text-input": "^5.0.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "commander": "^11.1.0",
+    "chalk": "^5.3.0",
+    "figlet": "^1.6.0",
+    "glob": "^10.4.1",
+    "fs-extra": "^11.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/figlet": "^1.5.8",
+    "typescript": "^5.3.3",
+    "tsx": "^4.6.2"
+  }
+}
