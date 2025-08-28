@@ -169,11 +169,10 @@ describe('GitHub Actions - Test CI Workflow', () => {
       expectLike(/jobs:\s*\n\s*test:\s*\n(?:[\s\S]*?)runs-on:\s*['"]?ubuntu-latest['"]?/m.test(raw)).toBeTruthy();
     }
   });
-  });
 
   it('should include a pinned actions/checkout step with the expected commit SHA', () => {
     const pinnedSha = '08c6903cd8c0fde910a37f88322edcfb5dd907a8';
-    const pinnedPattern = new RegExp(`actions/checkout@${pinnedSha.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}`);
+    const pinnedPattern = new RegExp(`actions/checkout@${pinnedSha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
     expectLike(pinnedPattern.test(raw)).toBeTruthy();
 
     // Also ensure it's pinned (40-hex SHA), not a floating tag like v4
