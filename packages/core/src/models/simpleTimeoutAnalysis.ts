@@ -54,7 +54,7 @@ export function suggestTimeoutConfig(
   
   // Increase timeout based on request characteristics
   if (requestSize) {
-    // Add 1 second per 10 MB of data
+    // Add 100ms per 1MB of data
     suggestedTimeout += Math.min(requestSize * 100, 200000); // Cap at 200 seconds additional
   }
   
@@ -67,7 +67,7 @@ export function suggestTimeoutConfig(
   suggestedTimeout = Math.max(suggestedTimeout, 64000);
   
   // Cap at reasonable maximum
-  suggestedTimeout = Math.min(suggestedTimeout, 300000); // Cap at 5 minutes
+  suggestedTimeout = Math.min(suggestedTimeout, 300000); // Cap at 5 minutes (300000ms)
   
-  return suggestedTimeout;
+  return Math.ceil(suggestedTimeout);
 }
