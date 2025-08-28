@@ -74,6 +74,8 @@ export interface CliArgs {
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
+  openaiTimeout: number | undefined;
+  openaiMaxRetries: number | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   tavilyApiKey: string | undefined;
@@ -242,6 +244,14 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'OpenAI base URL (for custom endpoints)',
         })
+        .option('openai-timeout', {
+          type: 'number',
+          description: 'OpenAI API timeout in milliseconds (default: 120000)',
+        })
+        .option('openai-max-retries', {
+          type: 'number',
+          description: 'OpenAI API maximum retries (default: 3)',
+        })
         .option('tavily-api-key', {
           type: 'string',
           description: 'Tavily API key for web search functionality',
@@ -363,6 +373,16 @@ export async function loadCliConfig(
   // Handle OpenAI base URL from command line
   if (argv.openaiBaseUrl) {
     process.env.OPENAI_BASE_URL = argv.openaiBaseUrl;
+  }
+
+  // Handle OpenAI timeout from command line
+  if (argv.openaiTimeout) {
+    process.env.OPENAI_TIMEOUT = argv.openaiTimeout.toString();
+  }
+
+  // Handle OpenAI max retries from command line
+  if (argv.openaiMaxRetries) {
+    process.env.OPENAI_MAX_RETRIES = argv.openaiMaxRetries.toString();
   }
 
   // Handle Tavily API key from command line
