@@ -1,0 +1,31 @@
+{
+  "name": "@qwen-code/extensions",
+  "version": "0.0.1-alpha.1",
+  "description": "Creative Extensions for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc && cp -r src/web-assets dist/",
+    "dev": "npm run build && node dist/index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code-core": "file:../core",
+    "express": "^4.18.2",
+    "ws": "^8.18.0",
+    "three": "^0.170.0",
+    "tone": "^15.0.4",
+    "canvas": "^2.11.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.24",
+    "@types/three": "^0.170.0",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.3.3",
+    "vitest": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
