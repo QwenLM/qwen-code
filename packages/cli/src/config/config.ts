@@ -519,10 +519,11 @@ export async function loadCliConfig(
   // Add the timeout analysis MCP server by default
   if (!mcpServers['timeout-analysis']) {
     mcpServers['timeout-analysis'] = {
-      command: 'node',
-      args: [path.join(__dirname, '..', '..', 'core', 'dist', 'src', 'mcp', 'timeout-analysis-server.js')],
+      command: 'npm',
+      args: ['run', 'start-timeout-server'],
       timeout: 30000,
-      description: 'Timeout analysis and optimization tools'
+      description: 'Timeout analysis and optimization tools',
+      cwd: path.join(__dirname, '..', '..', 'core'),
     };
   }
 
