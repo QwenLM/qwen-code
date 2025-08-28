@@ -9,14 +9,14 @@
   They validate the GitHub Actions workflow named "Test CI Workflow" introduced/modified by the PR diff.
 */
 
-const fs = require('fs');
-const path = require('path');
+import fs from 'fs';
+import path from 'path';
 
 let expectFn = undefined;
 let assert;
 try {
   // Prefer Jest/Vitest style expect if available
-  expectFn = global.expect;
+  expectFn = globalThis.expect;
 } catch {}
 try {
   // Fallback to Node assert if expect is not defined
@@ -48,19 +48,30 @@ function expectLike(actual) {
     toBe: (v) => assert.strictEqual(actual, v),
     toEqual: (v) => assert.deepStrictEqual(actual, v),
     toContain: (v) => {
-      if (typeof actual === 'string') assert.ok(actual.includes(v), `Expected string to contain "${v}", got: ${actual}`);
-      else if (Array.isArray(actual)) assert.ok(actual.includes(v), `Expected array to contain "${v}", got: ${JSON.stringify(actual)}`);
+      if (typeof actual === 'string')
+        assert.ok(
+          actual.includes(v),
+          `Expected string to contain "${v}", got: ${actual}`,
+        );
+      else if (Array.isArray(actual))
+        assert.ok(
+          actual.includes(v),
+          `Expected array to contain "${v}", got: ${JSON.stringify(actual)}`,
+        );
       else throw new Error('toContain supports strings and arrays only');
     },
     toMatch: (re) => {
-      assert.ok(re.test(actual), `Expected value to match ${re}, got: ${actual}`);
+      assert.ok(
+        re.test(actual),
+        `Expected value to match ${re}, got: ${actual}`,
+      );
     },
     toBeDefined: () => {
       assert.notStrictEqual(typeof actual, 'undefined');
     },
     toBeTruthy: () => {
       assert.ok(!!actual);
-    }
+    },
   };
 }
 
@@ -72,7 +83,7 @@ function getWorkflowPath() {
   // Common locations fallback
   const candidates = [
     '.github/workflows/test-ci-workflow.yml',
-    '.github/workflows/test-ci-workflow.yaml'
+    '.github/workflows/test-ci-workflow.yaml',
   ];
   for (const p of candidates) {
     if (fs.existsSync(p)) return p;
@@ -101,7 +112,7 @@ function loadWorkflowDoc(raw) {
     const msg = [
       'No YAML parser (js-yaml or yaml) found. Please ensure one is present in devDependencies.',
       'This test suite prefers using existing dependencies and will not install new ones.',
-      'Raw content checks will still run.'
+      'Raw content checks will still run.',
     ].join('\n');
     // eslint-disable-next-line no-console
     console.warn(msg);
@@ -146,16 +157,27 @@ describe('GitHub Actions - Test CI Workflow', () => {
       expectLike(pushBranches).toContain('ci-test-branch');
 
       // on.pull_request.branches includes ci-test-branch
-      const prBranches = doc.on && doc.on.pull_request && doc.on.pull_request.branches;
+      const prBranches =
+        doc.on && doc.on.pull_request && doc.on.pull_request.branches;
       expectLike(Array.isArray(prBranches)).toBeTruthy();
       expectLike(prBranches).toContain('ci-test-branch');
 
       // workflow_dispatch exists (can be {} or null or true-like)
-      expectLike(Object.prototype.hasOwnProperty.call(doc.on || {}, 'workflow_dispatch')).toBeTruthy();
+      expectLike(
+        Object.prototype.hasOwnProperty.call(doc.on || {}, 'workflow_dispatch'),
+      ).toBeTruthy();
     } else {
       // Raw checks
-      expectLike(/on:\s*\n(?:[\s\S]*?)push:\s*\n(?:[\s\S]*?)branches:\s*\n(?:[\s\S]*?)-\s*['"]?ci-test-branch['"]?/m.test(raw)).toBeTruthy();
-      expectLike(/pull_request:\s*\n(?:[\s\S]*?)branches:\s*\n(?:[\s\S]*?)-\s*['"]?ci-test-branch['"]?/m.test(raw)).toBeTruthy();
+      expectLike(
+        /on:\s*\n(?:[\s\S]*?)push:\s*\n(?:[\s\S]*?)branches:\s*\n(?:[\s\S]*?)-\s*['"]?ci-test-branch['"]?/m.test(
+          raw,
+        ),
+      ).toBeTruthy();
+      expectLike(
+        /pull_request:\s*\n(?:[\s\S]*?)branches:\s*\n(?:[\s\S]*?)-\s*['"]?ci-test-branch['"]?/m.test(
+          raw,
+        ),
+      ).toBeTruthy();
       expectLike(/workflow_dispatch:/m.test(raw)).toBeTruthy();
     }
   });
@@ -166,13 +188,19 @@ describe('GitHub Actions - Test CI Workflow', () => {
       expectLike(doc.jobs.test).toBeDefined();
       expectLike(doc.jobs.test['runs-on']).toBe('ubuntu-latest');
     } else {
-      expectLike(/jobs:\s*\n\s*test:\s*\n(?:[\s\S]*?)runs-on:\s*['"]?ubuntu-latest['"]?/m.test(raw)).toBeTruthy();
+      expectLike(
+        /jobs:\s*\n\s*test:\s*\n(?:[\s\S]*?)runs-on:\s*['"]?ubuntu-latest['"]?/m.test(
+          raw,
+        ),
+      ).toBeTruthy();
     }
   });
 
   it('should include a pinned actions/checkout step with the expected commit SHA', () => {
     const pinnedSha = '08c6903cd8c0fde910a37f88322edcfb5dd907a8';
-    const pinnedPattern = new RegExp(`actions/checkout@${pinnedSha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+    const pinnedPattern = new RegExp(
+      `actions/checkout@${pinnedSha.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`,
+    );
     expectLike(pinnedPattern.test(raw)).toBeTruthy();
 
     // Also ensure it's pinned (40-hex SHA), not a floating tag like v4
@@ -191,21 +219,32 @@ describe('GitHub Actions - Test CI Workflow', () => {
   });
 
   it('should include a "Run a simple test" step that echoes key info', () => {
-    if (doc && doc.jobs && doc.jobs.test && Array.isArray(doc.jobs.test.steps)) {
+    if (
+      doc &&
+      doc.jobs &&
+      doc.jobs.test &&
+      Array.isArray(doc.jobs.test.steps)
+    ) {
       const steps = doc.jobs.test.steps;
-      const runStep = steps.find(s => s.name === 'Run a simple test');
+      const runStep = steps.find((s) => s.name === 'Run a simple test');
       expectLike(!!runStep).toBeTruthy();
       const content = (runStep && runStep.run) || '';
       expectLike(typeof content === 'string').toBeTruthy();
-      expectLike(content).toContain("CI is working!");
-      expectLike(content).toContain("${{ github.ref }}");
-      expectLike(content).toContain("${{ github.repository }}");
+      expectLike(content).toContain('CI is working!');
+      expectLike(content).toContain('${{ github.ref }}');
+      expectLike(content).toContain('${{ github.repository }}');
     } else {
       // Raw content fallback assertions
-      expectLike(/- name:\s*['"]?Run a simple test['"]?\s*\n\s*run:\s*\|/m.test(raw)).toBeTruthy();
+      expectLike(
+        /- name:\s*['"]?Run a simple test['"]?\s*\n\s*run:\s*\|/m.test(raw),
+      ).toBeTruthy();
       expectLike(/echo\s+['"]CI is working!['"]/.test(raw)).toBeTruthy();
-      expectLike(/echo\s+"Branch:\s*\${{\s*github\.ref\s*}}"/.test(raw)).toBeTruthy();
-      expectLike(/echo\s+"Repository:\s*\${{\s*github\.repository\s*}}"/.test(raw)).toBeTruthy();
+      expectLike(
+        /echo\s+"Branch:\s*\${{\s*github\.ref\s*}}"/.test(raw),
+      ).toBeTruthy();
+      expectLike(
+        /echo\s+"Repository:\s*\${{\s*github\.repository\s*}}"/.test(raw),
+      ).toBeTruthy();
     }
   });
 
@@ -216,7 +255,9 @@ describe('GitHub Actions - Test CI Workflow', () => {
       expectLike(steps.length >= 2).toBeTruthy();
     } else {
       // Approximate by raw matches
-      const stepsCount = (raw.match(/^\s*-\s+name:/gm) || []).length + (raw.match(/^\s*-\s+uses:/gm) || []).length;
+      const stepsCount =
+        (raw.match(/^\s*-\s+name:/gm) || []).length +
+        (raw.match(/^\s*-\s+uses:/gm) || []).length;
       expectLike(stepsCount >= 2).toBeTruthy();
     }
   });

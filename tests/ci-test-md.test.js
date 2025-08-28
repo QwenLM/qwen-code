@@ -17,24 +17,24 @@
  *  - Directories linked without a filename are accepted if they contain README.md or index.md.
  */
 
-const fs = require("fs");
-const path = require("path");
+import fs from 'fs';
+import path from 'path';
 
 // Directories to skip during traversal
 const IGNORED_DIRS = new Set([
-  "node_modules",
-  ".git",
-  "dist",
-  "build",
-  "coverage",
-  ".next",
-  ".cache",
-  "out",
-  "public",
-  "static",
-  ".turbo",
-  ".vercel",
-  ".expo",
+  'node_modules',
+  '.git',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.cache',
+  'out',
+  'public',
+  'static',
+  '.turbo',
+  '.vercel',
+  '.expo',
 ]);
 
 function isIgnoredDir(dirPath) {
@@ -65,7 +65,7 @@ function collectMarkdownFiles(rootDir) {
       }
       if (!entry.isFile()) continue;
       const ext = path.extname(entry.name).toLowerCase();
-      if (ext === ".md" || ext === ".mdx") {
+      if (ext === '.md' || ext === '.mdx') {
         result.push(full);
       }
     }
@@ -91,7 +91,10 @@ function computeCodeBlockMask(lines) {
     const isBacktick = /^```/.test(trimmed);
     const isTilde = /^~~~/.test(trimmed);
 
-    if ((isBacktick && fenceStyle === "```") || (isTilde && fenceStyle === "~~~")) {
+    if (
+      (isBacktick && fenceStyle === '```') ||
+      (isTilde && fenceStyle === '~~~')
+    ) {
       // Closing current fence
       mask[i] = true;
       inFence = false;
@@ -103,7 +106,7 @@ function computeCodeBlockMask(lines) {
       // Opening a fence
       mask[i] = true;
       inFence = true;
-      fenceStyle = isBacktick ? "```" : "~~~";
+      fenceStyle = isBacktick ? '```' : '~~~';
       continue;
     }
 
@@ -115,7 +118,7 @@ function computeCodeBlockMask(lines) {
 }
 
 function countFences(content, fence) {
-  const re = new RegExp(`^\\s*${fence}`, "gm");
+  const re = new RegExp(`^\\s*${fence}`, 'gm');
   const matches = content.match(re);
   return matches ? matches.length : 0;
 }
@@ -129,14 +132,16 @@ function linesOutsideCode(lines, codeMask) {
 }
 
 function isExternalLink(target) {
-  return /^(?:[a-z]+:)?\/\//i.test(target) ||
-         /^(mailto:|tel:|data:|javascript:|geo:|sms:)/i.test(target);
+  return (
+    /^(?:[a-z]+:)?\/\//i.test(target) ||
+    /^(mailto:|tel:|data:|javascript:|geo:|sms:)/i.test(target)
+  );
 }
 
 function normalizeTarget(raw) {
   // Strip angle brackets around autolinks and trim
   let t = raw.trim();
-  if (t.startsWith("<") && t.endsWith(">")) {
+  if (t.startsWith('<') && t.endsWith('>')) {
     t = t.slice(1, -1).trim();
   }
   // Remove query/hash when checking filesystem
@@ -144,7 +149,7 @@ function normalizeTarget(raw) {
 }
 
 function stripQueryHash(target) {
-  return target.split("#")[0].split("?")[0];
+  return target.split('#')[0].split('?')[0];
 }
 
 function parseLinks(content) {
@@ -181,8 +186,8 @@ function isDirectory(p) {
 
 function resolveRelativeLink(baseFile, target) {
   // target may start with "/" (repo-root relative) or be relative to base file
-  if (target.startsWith("/")) {
-    return path.join(process.cwd(), target.replace(/^\//, ""));
+  if (target.startsWith('/')) {
+    return path.join(process.cwd(), target.replace(/^\//, ''));
   }
   return path.resolve(path.dirname(baseFile), target);
 }
@@ -197,7 +202,10 @@ function resolvesToExistingFile(baseFile, target) {
 
   // If it's a directory, allow README.md or index.md
   if (fileOrDirExists(abs) && isDirectory(abs)) {
-    const candidates = [path.join(abs, "README.md"), path.join(abs, "index.md")];
+    const candidates = [
+      path.join(abs, 'README.md'),
+      path.join(abs, 'index.md'),
+    ];
     if (candidates.some(fileOrDirExists)) return true;
   }
 
@@ -213,31 +221,31 @@ function resolvesToExistingFile(baseFile, target) {
 const mdFiles = collectMarkdownFiles(process.cwd());
 
 if (mdFiles.length === 0) {
-  test("No Markdown files found - skipping Markdown quality checks", () => {
+  test('No Markdown files found - skipping Markdown quality checks', () => {
     expect(true).toBe(true);
   });
 } else {
-  describe("Markdown quality checks", () => {
-    test("Repository contains Markdown files", () => {
+  describe('Markdown quality checks', () => {
+    test('Repository contains Markdown files', () => {
       expect(mdFiles.length).toBeGreaterThan(0);
     });
 
-    describe.each(mdFiles)("File: %s", (file) => {
-      const content = fs.readFileSync(file, "utf8");
+    describe.each(mdFiles)('File: %s', (file) => {
+      const content = fs.readFileSync(file, 'utf8');
       const lines = getLines(content);
       const codeMask = computeCodeBlockMask(lines);
       const outside = linesOutsideCode(lines, codeMask);
       const ext = path.extname(file).toLowerCase();
 
-      test("has balanced code fences (``` and ~~~)", () => {
-        const backtickCount = countFences(content, "```");
-        const tildeCount = countFences(content, "~~~");
+      test('has balanced code fences (``` and ~~~)', () => {
+        const backtickCount = countFences(content, '```');
+        const tildeCount = countFences(content, '~~~');
         expect(backtickCount % 2).toBe(0);
         expect(tildeCount % 2).toBe(0);
       });
 
-      if (ext === ".md") {
-        test("contains at least one H1 heading (# ...) near the top", () => {
+      if (ext === '.md') {
+        test('contains at least one H1 heading (# ...) near the top', () => {
           const first20 = lines.slice(0, Math.min(20, lines.length));
           const hasH1Anywhere = lines.some((l) => /^#\s+/.test(l.trim()));
           const hasEarlyH1 = first20.some((l) => /^#\s+/.test(l.trim()));
@@ -246,26 +254,26 @@ if (mdFiles.length === 0) {
         });
       }
 
-      test("has no TODO/TBD/FIXME outside code blocks", () => {
+      test('has no TODO/TBD/FIXME outside code blocks', () => {
         const offenders = outside
           .filter(({ line }) => /\b(TODO|TBD|FIXME)\b/i.test(line))
           .map(({ i, line }) => `${i + 1}: ${line}`);
         expect(offenders).toEqual([]);
       });
 
-      test("has no trailing whitespace outside code blocks", () => {
+      test('has no trailing whitespace outside code blocks', () => {
         const offenders = outside
           .filter(({ line }) => /[ \t]+$/.test(line))
           .map(({ i, line }) => `${i + 1}: ${line}`);
         expect(offenders).toEqual([]);
       });
 
-      test("keeps line length reasonable (<= 200 chars) outside code blocks, excluding URLs and tables", () => {
+      test('keeps line length reasonable (<= 200 chars) outside code blocks, excluding URLs and tables', () => {
         const offenders = outside
           .filter(({ line }) => {
             const trimmed = line.trimRight();
             if (!trimmed) return false;
-            if (trimmed.includes("http")) return false; // allow long URLs
+            if (trimmed.includes('http')) return false; // allow long URLs
             if (/^\|.*\|$/.test(trimmed)) return false; // allow tables
             return trimmed.length > 200;
           })
@@ -273,16 +281,16 @@ if (mdFiles.length === 0) {
         expect(offenders).toEqual([]);
       });
 
-      test("all relative links and image sources resolve to existing files", () => {
+      test('all relative links and image sources resolve to existing files', () => {
         const links = parseLinks(content);
         const missing = [];
 
         for (const { isImage, target } of links) {
-          if (!target || isExternalLink(target) || target.startsWith("#")) {
+          if (!target || isExternalLink(target) || target.startsWith('#')) {
             continue; // external or pure anchor
           }
           if (!resolvesToExistingFile(file, target)) {
-            missing.push(`${isImage ? "image" : "link"} -> ${target}`);
+            missing.push(`${isImage ? 'image' : 'link'} -> ${target}`);
           }
         }
 
