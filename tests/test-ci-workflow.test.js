@@ -11,13 +11,7 @@
 
 import fs from 'fs';
 import path from 'path';
-
-let expectFn = undefined;
-let assert;
-try {
-  // Prefer Jest/Vitest style expect if available
-  expectFn = globalThis.expect;
-} catch {}
+import { describe, it, expect } from 'vitest';
 try {
   // Fallback to Node assert if expect is not defined
   assert = require('assert');

@@ -19,6 +19,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { describe, it, expect } from 'vitest';
 
 // Directories to skip during traversal
 const IGNORED_DIRS = new Set([
