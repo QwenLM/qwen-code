@@ -3,6 +3,7 @@ const cors = require('cors');
 const db = require('./db.json');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
 const app = express();
 const port = 3001;
@@ -105,6 +106,26 @@ app.post('/api/threads/:id/posts', (req, res) => {
 
     thread.posts.push(newPost);
     fs.writeFileSync(path.join(__dirname, 'db.json'), JSON.stringify(db, null, 2));
+
+    const postData = JSON.stringify({
+        achievementId: 'community-helper'
+    });
+
+    const options = {
+        hostname: 'localhost',
+        port: 3003,
+        path: `/api/users/${loggedInUser.username}/achievements`,
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+        }
+    };
+
+    const req = http.request(options);
+    req.on('error', () => {});
+    req.write(postData);
+    req.end();
 
     res.json(thread);
 });

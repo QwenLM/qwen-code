@@ -20,6 +20,13 @@ app.get('/api/users/:username', (req, res) => {
     }
 });
 
+app.get('/api/leaderboard', (req, res) => {
+    const users = Object.values(db.users);
+    const sortedUsers = users.sort((a, b) => b.points - a.points);
+    const top10 = sortedUsers.slice(0, 10);
+    res.json(top10);
+});
+
 app.post('/api/users/:username/achievements', (req, res) => {
     const username = req.params.username;
     const { achievementId } = req.body;

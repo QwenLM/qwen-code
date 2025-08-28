@@ -3,11 +3,11 @@ import open from 'open';
 import path from 'path';
 import { request } from 'gaxios';
 
-export const learnCommand: Command = {
-    name: 'learn',
-    description: 'Opens the interactive learning platform',
+export const dashboardCommand: Command = {
+    name: 'dashboard',
+    description: 'Opens the usage analytics dashboard',
     async execute() {
-        const filePath = path.join(process.cwd(), 'enhancements', 'learning-platform', 'index.html');
+        const filePath = path.join(process.cwd(), 'enhancements', 'analytics-dashboard', 'public', 'index.html');
         await open(filePath);
 
         try {
@@ -15,7 +15,7 @@ export const learnCommand: Command = {
                 url: 'http://localhost:3003/api/users/user123/achievements',
                 method: 'POST',
                 data: {
-                    achievementId: 'knowledge-seeker',
+                    achievementId: 'data-driven',
                 },
             });
         } catch (error) {
@@ -24,7 +24,7 @@ export const learnCommand: Command = {
 
         return {
             type: 'exit',
-            message: 'Opening the learning platform in your browser...',
+            message: 'Opening the usage analytics dashboard in your browser...',
         };
     },
 };

@@ -4,12 +4,14 @@ import { Chart as ChartJS, CategoryScale, LinearScale, PointElement, LineElement
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
+const usageData = window.USAGE_DATA || [];
+
 const tokenUsageData = {
-  labels: ['Day 1', 'Day 2', 'Day 3', 'Day 4', 'Day 5', 'Day 6', 'Day 7'],
+  labels: usageData.map(d => new Date(d.timestamp).toLocaleDateString()),
   datasets: [
     {
       label: 'Tokens Used',
-      data: [1200, 1900, 3000, 5000, 2300, 3100, 4000],
+      data: usageData.map(d => d.tokens),
       fill: false,
       backgroundColor: 'rgb(75, 192, 192)',
       borderColor: 'rgba(75, 192, 192, 0.2)',
@@ -17,12 +19,11 @@ const tokenUsageData = {
   ],
 };
 
-const commandHistory = [
-    { id: 1, command: 'Explain this codebase', tokens: 500 },
-    { id: 2, command: 'Refactor this function', tokens: 700 },
-    { id: 3, command: 'Generate unit tests', tokens: 1200 },
-    { id: 4, command: 'What are the key dependencies?', tokens: 600 },
-];
+const commandHistory = usageData.map((d, i) => ({
+    id: i + 1,
+    command: d.command,
+    tokens: d.tokens,
+}));
 
 function App() {
   return (

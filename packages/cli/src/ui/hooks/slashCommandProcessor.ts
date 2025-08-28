@@ -10,6 +10,7 @@ import open from 'open';
 import process from 'node:process';
 import { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { useStateAndRef } from './useStateAndRef.js';
+import { request } from 'gaxios';
 import {
   Config,
   GitService,
@@ -637,6 +638,13 @@ export const useSlashCommandProcessor = (
           (async () => {
             try {
               await open(bugReportUrl);
+              await request({
+                url: 'http://localhost:3003/api/users/user123/achievements',
+                method: 'POST',
+                data: {
+                    achievementId: 'bug-squasher',
+                },
+              });
             } catch (error) {
               const errorMessage =
                 error instanceof Error ? error.message : String(error);
