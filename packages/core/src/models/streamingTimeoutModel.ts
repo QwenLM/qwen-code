@@ -240,63 +240,6 @@ class ConfigRecommendationSystem {
   }
 }
 
-// Example usage and testing
-function runAnalysis() {
-  const model = new StreamingTimeoutModel();
-
-  // Example request that might cause timeout
-  const request: StreamingRequest = {
-    dataSize: 500, // 500 MB
-    complexity: 7, // Medium complexity
-    setupTime: 15, // 15 seconds setup
-    processingRate: 25, // 25 MB/s processing
-    networkLatency: 0.2, // 200ms latency per chunk
-    chunkSize: 50, // 50 MB chunks
-  };
-
-  // System metrics
-  const metrics: SystemMetrics = {
-    currentLoad: 0.6, // 60% system load
-    avgSetupTime: 10, // 10 seconds average setup
-    avgProcessingRate: 30, // 30 MB/s average processing
-    avgNetworkLatency: 0.1, // 100ms average latency
-  };
-
-  // Analyze the request
-  const analysis = model.analyzeTimeout(request, metrics);
-
-  console.log('=== Streaming Timeout Analysis ===');
-  console.log(`Expected time: ${analysis.expectedTime.toFixed(2)}s`);
-  console.log(`Timeout threshold: ${analysis.timeoutThreshold}s`);
-  console.log(`Will timeout: ${analysis.willTimeout ? 'YES' : 'NO'}`);
-  console.log(`Recommended solution: ${analysis.recommendedSolution}`);
-
-  // Calculate adaptive timeout
-  const adaptiveTimeout = model.calculateAdaptiveTimeout(request, metrics);
-  console.log(`Adaptive timeout: ${adaptiveTimeout.toFixed(2)}s`);
-
-  // Example configuration analysis
-  const sampleConfig = {
-    contentGenerator: {
-      timeout: 60000, // 60 seconds - might be too low
-      samplingParams: {
-        max_tokens: 4096,
-        temperature: 1.2,
-      },
-    },
-  };
-
-  console.log('\n=== Configuration Analysis ===');
-  const configRecommendations =
-    ConfigRecommendationSystem.analyzeConfig(sampleConfig);
-  configRecommendations.forEach((rec) => console.log(`- ${rec}`));
-
-  console.log('\n=== Recommended Configuration ===');
-  const recommendedConfig =
-    ConfigRecommendationSystem.generateRecommendedConfig(sampleConfig);
-  console.log(JSON.stringify(recommendedConfig, null, 2));
-}
-
 // Export for use in other modules
 export {
   StreamingTimeoutModel,
@@ -305,8 +248,3 @@ export {
   SystemMetrics,
   TimeoutAnalysis,
 };
-
-// Run analysis if this file is executed directly
-if (require.main === module) {
-  runAnalysis();
-}
