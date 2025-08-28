@@ -1,16 +1,19 @@
 # Streaming API Timeout Modeling and Solutions
 
-This document explains the mathematical modeling approach used to understand and solve the streaming API timeout issue described in GitHub issue #239.
+This document explains the mathematical modeling approach used to understand and solve
+the streaming API timeout issue described in GitHub issue #239.
 
 ## Problem Analysis
 
-The issue occurs when streaming API requests timeout after 64 seconds during setup. This is a systems-level problem that can be modeled mathematically to understand the contributing factors and design appropriate solutions.
+The issue occurs when streaming API requests timeout after 64 seconds during setup.
+This is a systems-level problem that can be modeled mathematically to understand
+the contributing factors and design appropriate solutions.
 
 ## Mathematical Model
 
 We model the total time for a streaming request as:
 
-```
+```javascript
 Total Time = Setup Time + Processing Time + Network Overhead
 
 Where:
@@ -34,7 +37,7 @@ Where:
 
 Instead of a fixed timeout, we calculate timeouts based on request characteristics:
 
-```
+```javascript
 Adaptive Timeout = Base Timeout +
                    (Data Size × 0.05) +
                    (Complexity × 0.1) +
@@ -43,7 +46,8 @@ Adaptive Timeout = Base Timeout +
 
 ### 2. Enhanced Error Messaging
 
-When timeouts occur, we provide more specific troubleshooting guidance based on the request characteristics.
+When timeouts occur, we provide more specific troubleshooting guidance based on the
+request characteristics.
 
 ### 3. CLI Configuration Options
 
@@ -54,7 +58,8 @@ New CLI options allow users to configure:
 
 ### 4. Configuration Recommendations
 
-The system now provides configuration recommendations based on analysis of current settings.
+The system now provides configuration recommendations based on analysis of current
+settings.
 
 ## Usage Examples
 
@@ -86,5 +91,7 @@ qwen --openai-max-retries 5 --prompt "Complex analysis task"
 ## Future Improvements
 
 1. **Machine Learning Approach**: Use historical data to predict optimal timeouts
-2. **Dynamic Adjustment**: Real-time adjustment of timeouts based on current performance
-3. **Progressive Enhancement**: Start with conservative timeouts and increase based on success patterns
+2. **Dynamic Adjustment**: Real-time adjustment of timeouts based on
+   current performance
+3. **Progressive Enhancement**: Start with conservative timeouts and increase
+   based on success patterns
