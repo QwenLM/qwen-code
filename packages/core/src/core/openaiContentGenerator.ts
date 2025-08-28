@@ -25,7 +25,9 @@ import {
   ContentGenerator,
   ContentGeneratorConfig,
 } from './contentGenerator.js';
-import { enhanceTimeoutErrorMessage, suggestTimeoutConfig } from '../models/simpleTimeoutAnalysis.js';
+import {
+  enhanceTimeoutErrorMessage
+} from '../models/simpleTimeoutAnalysis.js';
 import OpenAI from 'openai';
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
