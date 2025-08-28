@@ -6,7 +6,6 @@
 
 export { GoogleGenAI } from '@google/genai';
 export { Config } from './config/config.js';
-export { createServerConfig } from './config/server-config.js';
 export { loadServerHierarchicalMemory } from './utils/memoryImportProcessor.js';
 export { setGeminiMdFilename } from './tools/memoryTool.js';
 export { FileDiscoveryService } from './services/fileDiscoveryService.js';
