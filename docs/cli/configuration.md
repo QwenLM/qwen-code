@@ -272,6 +272,10 @@ In addition to a project settings file, a project's `.qwen` directory can contai
   - **Description:** API key for Tavily web search service. Required to enable the `web_search` tool functionality. If not configured, the web search tool will be disabled and skipped.
   - **Default:** `undefined` (web search disabled)
   - **Example:** `"tavilyApiKey": "tvly-your-api-key-here"`
+- **`readAfterEdit`** (boolean):
+  - **Description:** Automatically read file content after editing to provide context to the AI. When enabled, the content of a file is included in the LLM response after successful edit operations, enhancing the AI's awareness of the changes made.
+  - **Default:** `true`
+  - **Example:** `"readAfterEdit": false`
 - **`chatCompression`** (object):
   - **Description:** Controls the settings for chat history compression, both automatic and
     when manually invoked through the /compress command.

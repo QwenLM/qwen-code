@@ -81,6 +81,7 @@ describe('EditTool', () => {
       getGeminiMdFileCount: () => 0,
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
+      getReadAfterEdit: () => vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -844,6 +845,292 @@ describe('EditTool', () => {
 
       expect(params.old_string).toBe(initialContent);
       expect(params.new_string).toBe(modifiedContent);
+    });
+  });
+});
+
+describe('EditTool - readAfterEdit', () => {
+  let tool: EditTool;
+  let tempDir: string;
+  let rootDir: string;
+  let mockConfig: Config;
+  let geminiClient: any;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'edit-tool-readafteredit-test-'),
+    );
+    rootDir = path.join(tempDir, 'root');
+    fs.mkdirSync(rootDir);
+
+    geminiClient = {
+      generateJson: mockGenerateJson,
+    };
+
+    mockConfig = {
+      getGeminiClient: vi.fn().mockReturnValue(geminiClient),
+      getTargetDir: () => rootDir,
+      getApprovalMode: vi.fn(),
+      getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
+      getReadAfterEdit: vi.fn().mockReturnValue(true), // Default to true for these tests
+    } as unknown as Config;
+
+    (mockConfig.getApprovalMode as Mock).mockClear();
+    (mockConfig.getApprovalMode as Mock).mockReturnValue(ApprovalMode.DEFAULT);
+
+    mockEnsureCorrectEdit.mockReset();
+    mockEnsureCorrectEdit.mockImplementation(
+      async (_, currentContent, params) => {
+        let occurrences = 0;
+        if (params.old_string && currentContent) {
+          let index = currentContent.indexOf(params.old_string);
+          while (index !== -1) {
+            occurrences++;
+            index = currentContent.indexOf(params.old_string, index + 1);
+          }
+        } else if (params.old_string === '') {
+          occurrences = 0;
+        }
+        return Promise.resolve({ params, occurrences });
+      },
+    );
+
+    mockGenerateJson.mockReset();
+    mockGenerateJson.mockImplementation(async () => Promise.resolve({}));
+
+    tool = new EditTool(mockConfig);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  describe('readAfterEdit enabled', () => {
+    beforeEach(() => {
+      (mockConfig.getReadAfterEdit as Mock).mockReturnValue(true);
+    });
+
+    it('should include file content in llmContent after successful edit', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const initialContent = 'This is the original content.';
+      const newContent = 'This is the modified content.';
+
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'original',
+        new_string: 'modified',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/Successfully modified file/);
+      expect(result.llmContent).toContain(newContent);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+    });
+
+    it('should include file content in llmContent when creating a new file', async () => {
+      const newFileName = 'new_file.txt';
+      const newFilePath = path.join(rootDir, newFileName);
+      const fileContent = 'Content for the new file.';
+
+      const params: EditToolParams = {
+        file_path: newFilePath,
+        old_string: '',
+        new_string: fileContent,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/Created new file/);
+      expect(result.llmContent).toContain(fileContent);
+      expect(fs.existsSync(newFilePath)).toBe(true);
+      expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
+    });
+
+    it('should include file content in llmContent when replacing multiple occurrences', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const initialContent = 'old text old text old text';
+      const expectedContent = 'new text new text new text';
+
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+        expected_replacements: 3,
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/Successfully modified file/);
+      expect(result.llmContent).toContain(expectedContent);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(expectedContent);
+    });
+
+    it('should include file content even when user modified the new_string', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const initialContent = 'This is some old text.';
+      const newContent = 'This is some new text.';
+
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+        modified_by_user: true,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(
+        /User modified the `new_string` content/,
+      );
+      expect(result.llmContent).toContain(newContent);
+    });
+  });
+
+  describe('readAfterEdit disabled', () => {
+    beforeEach(() => {
+      (mockConfig.getReadAfterEdit as Mock).mockReturnValue(false);
+    });
+
+    it('should NOT include file content in llmContent after successful edit when disabled', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const initialContent = 'This is the original content.';
+      const newContent = 'This is the modified content.';
+
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'original',
+        new_string: 'modified',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/Successfully modified file/);
+      expect(result.llmContent).not.toContain(newContent);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+    });
+
+    it('should NOT include file content when creating a new file and feature is disabled', async () => {
+      const newFileName = 'new_file.txt';
+      const newFilePath = path.join(rootDir, newFileName);
+      const fileContent = 'Content for the new file.';
+
+      const params: EditToolParams = {
+        file_path: newFilePath,
+        old_string: '',
+        new_string: fileContent,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/Created new file/);
+      expect(result.llmContent).not.toContain(fileContent);
+      expect(fs.existsSync(newFilePath)).toBe(true);
+      expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
+    });
+
+    it('should NOT include file content when replacing multiple occurrences and feature is disabled', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const initialContent = 'old text old text old text';
+      const expectedContent = 'new text new text new text';
+
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+        expected_replacements: 3,
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/Successfully modified file/);
+      expect(result.llmContent).not.toContain(expectedContent);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(expectedContent);
+    });
+  });
+
+  describe('Error cases with readAfterEdit', () => {
+    beforeEach(() => {
+      (mockConfig.getReadAfterEdit as Mock).mockReturnValue(true);
+    });
+
+    it('should not include file content in llmContent when edit fails', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const initialContent = 'Some content.';
+
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'nonexistent',
+        new_string: 'replacement',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(
+        /0 occurrences found for old_string in/,
+      );
+      expect(result.llmContent).not.toContain(initialContent); // Should not include file content on error
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent); // File should be unchanged
+    });
+
+    it('should not include file content in llmContent when file already exists during creation', async () => {
+      const testFile = 'test.txt';
+      const filePath = path.join(rootDir, testFile);
+      const existingContent = 'Existing content';
+
+      fs.writeFileSync(filePath, existingContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: '',
+        new_string: 'new content',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toMatch(/File already exists, cannot create/);
+      expect(result.llmContent).not.toContain(existingContent); // Should not include file content on error
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(existingContent); // File should be unchanged
     });
   });
 });

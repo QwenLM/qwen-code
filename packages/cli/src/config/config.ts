@@ -585,6 +585,7 @@ export async function loadCliConfig(
     chatCompression: settings.chatCompression,
     folderTrustFeature,
     folderTrust,
+    readAfterEdit: settings.readAfterEdit ?? true,
     interactive,
     trustedFolder,
   });

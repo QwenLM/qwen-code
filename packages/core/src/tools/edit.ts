@@ -384,8 +384,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         );
       }
 
+      let llmContent = llmSuccessMessageParts.join(' ');
+      if (this.config.getReadAfterEdit()) {
+        llmContent += `\n${editData.newContent}`;
+      }
+
       return {
-        llmContent: llmSuccessMessageParts.join(' '),
+        llmContent,
         returnDisplay: displayResult,
       };
     } catch (error) {
