@@ -25,7 +25,7 @@ import {
   ContentGenerator,
   ContentGeneratorConfig,
 } from './contentGenerator.js';
-import { StreamingTimeoutModel, ConfigRecommendationSystem } from '../models/streamingTimeoutModel.js';
+import { enhanceTimeoutErrorMessage, suggestTimeoutConfig } from '../models/simpleTimeoutAnalysis.js';
 import OpenAI from 'openai';
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
@@ -143,15 +143,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries ?? 3,
       defaultHeaders,
     });
-    
-    // Initialize our streaming timeout model for enhanced timeout handling
-    this.streamingTimeoutModel = new StreamingTimeoutModel();
   }
-
-  /**
-   * Streaming timeout model for enhanced timeout prediction and handling
-   */
-  private streamingTimeoutModel: StreamingTimeoutModel;
 
   /**
    * Hook for subclasses to customize error handling behavior
@@ -542,20 +534,15 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
   /**
    * Generate an enhanced timeout error message with more specific troubleshooting
-   * using our mathematical streaming timeout model
    */
   private getEnhancedTimeoutMessage(
     baseMessage: string,
     durationMs: number,
     request: GenerateContentParameters,
   ): string {
-    // Estimate request complexity using our model
+    // Estimate request characteristics
     let dataSize = 0; // in MB
     let complexity = 1; // 1-10 scale
-    let setupTime = 10; // seconds
-    let processingRate = 25; // MB/s
-    let networkLatency = 0.1; // seconds per chunk
-    let chunkSize = 10; // MB per chunk
     
     // Estimate data size from content
     if (request.contents) {
@@ -578,81 +565,8 @@ export class OpenAIContentGenerator implements ContentGenerator {
       }
     }
     
-    // Create request and metrics objects for our model
-    const streamingRequest = {
-      dataSize,
-      complexity,
-      setupTime,
-      processingRate,
-      networkLatency,
-      chunkSize
-    };
-    
-    const systemMetrics = {
-      currentLoad: 0.5, // Assume medium system load
-      avgSetupTime: setupTime,
-      avgProcessingRate: processingRate,
-      avgNetworkLatency: networkLatency
-    };
-    
-    // Analyze the request using our model
-    const analysis = this.streamingTimeoutModel.analyzeTimeout(streamingRequest, systemMetrics);
-    const adaptiveTimeout = this.streamingTimeoutModel.calculateAdaptiveTimeout(streamingRequest, systemMetrics);
-    
-    // Generate enhanced error message with model-based analysis
-    let enhancedMessage = 
-      `${baseMessage}\n\nStreaming setup timeout analysis:\n` +
-      `- Expected time: ${analysis.expectedTime.toFixed(2)}s\n` +
-      `- Timeout threshold: ${analysis.timeoutThreshold}s\n` +
-      `- Will timeout: ${analysis.willTimeout ? 'YES' : 'NO'}\n` +
-      `- Adaptive timeout: ${adaptiveTimeout.toFixed(2)}s\n\n` +
-      `Streaming setup timeout troubleshooting:\n` +
-      `- Reduce input length or complexity\n` +
-      `- Increase timeout in config: contentGenerator.timeout\n` +
-      `- Check network connectivity and firewall settings\n` +
-      `- Consider using non-streaming mode for very long inputs`;
-    
-    // Add size-specific recommendations
-    if (dataSize > 50) {
-      enhancedMessage +=
-        `\n\nAdditional recommendations for large requests (${dataSize} MB):\n` +
-        `- Consider breaking your request into smaller chunks\n` +
-        `- Use progressive summarization for context\n` +
-        `- Enable checkpointing if available`;
-    } else if (complexity > 7) {
-      enhancedMessage +=
-        `\n\nAdditional recommendations for complex requests (complexity ${complexity}/10):\n` +
-        `- Simplify request structure if possible\n` +
-        `- Use more specific prompts\n` +
-        `- Consider using tool-based approaches for complex tasks`;
-    }
-    
-    // Add adaptive timeout suggestion
-    if (this.contentGeneratorConfig.timeout) {
-      const currentTimeout = this.contentGeneratorConfig.timeout;
-      const suggestedTimeout = Math.ceil(adaptiveTimeout * 1000); // Convert to milliseconds
-      
-      // Ensure suggested timeout is reasonable
-      const finalSuggestedTimeout = Math.min(Math.max(suggestedTimeout, currentTimeout * 1.5), 300000);
-      
-      if (finalSuggestedTimeout > currentTimeout) {
-        enhancedMessage += `\n\nSuggested timeout adjustment: Current ${currentTimeout}ms, Suggested ${finalSuggestedTimeout}ms`;
-      }
-    }
-    
-    // Add configuration recommendations
-    const configRecommendations = ConfigRecommendationSystem.analyzeConfig({
-      contentGenerator: this.contentGeneratorConfig
-    });
-    
-    if (configRecommendations.length > 0) {
-      enhancedMessage += `\n\nConfiguration recommendations:`;
-      configRecommendations.forEach(rec => {
-        enhancedMessage += `\n- ${rec}`;
-      });
-    }
-    
-    return enhancedMessage;
+    // Use our simple timeout analysis
+    return enhanceTimeoutErrorMessage(baseMessage, dataSize, complexity);
   }
 
   private async *streamGenerator(
