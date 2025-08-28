@@ -55,6 +55,9 @@ export enum Command {
   REVERSE_SEARCH = 'reverseSearch',
   SUBMIT_REVERSE_SEARCH = 'submitReverseSearch',
   ACCEPT_SUGGESTION_REVERSE_SEARCH = 'acceptSuggestionReverseSearch',
+
+  // Prompt enhancement
+  ENHANCE_PROMPT = 'enhancePrompt',
 }
 
 /**
@@ -180,4 +183,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.SUBMIT_REVERSE_SEARCH]: [{ key: 'return', ctrl: false }],
   // Original: key.name === 'tab'
   [Command.ACCEPT_SUGGESTION_REVERSE_SEARCH]: [{ key: 'tab' }],
+
+  // Prompt enhancement
+  // Ctrl+B for enhance prompt (B for Better/Boost)
+  [Command.ENHANCE_PROMPT]: [{ key: 'b', ctrl: true }],
 };
