@@ -1,0 +1,55 @@
+{
+    "meta": {
+        "source_prompt": "A hidden village in a deep forest",
+        "version": "0.1.0"
+    },
+    "systems": {
+        "mycomind": {
+            "system_name": "MycoMind",
+            "description": "Models the social and economic systems of the world.",
+            "prompt_received": "A hidden village in a deep forest",
+            "data": {
+                "agents": 100,
+                "initial_resource": "water"
+            }
+        },
+        "architectonic": {
+            "system_name": "Architectonic",
+            "description": "Generates the physical architecture and layout.",
+            "prompt_received": "A hidden village in a deep forest",
+            "data": {
+                "style": "naturalistic, integrated",
+                "primary_material": "living wood",
+                "secondary_material": "moss and river stone",
+                "key_feature": "structures are grown, not built"
+            }
+        },
+        "lexisynth": {
+            "system_name": "LexiSynth",
+            "description": "Defines the laws, traditions, and social contracts.",
+            "prompt_received": "A hidden village in a deep forest",
+            "data": {
+                "legal_system": "common_law",
+                "core_tenet": "harmony"
+            }
+        },
+        "gastronomicon": {
+            "system_name": "Gastronomicon",
+            "description": "Creates the cuisine based on the world's ecosystem.",
+            "prompt_received": "A hidden village in a deep forest",
+            "data": {
+                "staple_food": "native fungus",
+                "key_spice": "red salt"
+            }
+        },
+        "choreograph": {
+            "system_name": "Choreograph",
+            "description": "Designs the rituals, dances, and common movements.",
+            "prompt_received": "A hidden village in a deep forest",
+            "data": {
+                "primary_ritual": "sun-gazing",
+                "movement_style": "slow"
+            }
+        }
+    }
+}

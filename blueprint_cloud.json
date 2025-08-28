@@ -1,0 +1,55 @@
+{
+    "meta": {
+        "source_prompt": "A majestic city floating in the clouds",
+        "version": "0.1.0"
+    },
+    "systems": {
+        "mycomind": {
+            "system_name": "MycoMind",
+            "description": "Models the social and economic systems of the world.",
+            "prompt_received": "A majestic city floating in the clouds",
+            "data": {
+                "agents": 100,
+                "initial_resource": "water"
+            }
+        },
+        "architectonic": {
+            "system_name": "Architectonic",
+            "description": "Generates the physical architecture and layout.",
+            "prompt_received": "A majestic city floating in the clouds",
+            "data": {
+                "style": "ethereal, art nouveau",
+                "primary_material": "spun cloud-matter",
+                "secondary_material": "brass fittings",
+                "key_feature": "translucent, light-filtering walkways"
+            }
+        },
+        "lexisynth": {
+            "system_name": "LexiSynth",
+            "description": "Defines the laws, traditions, and social contracts.",
+            "prompt_received": "A majestic city floating in the clouds",
+            "data": {
+                "legal_system": "common_law",
+                "core_tenet": "harmony"
+            }
+        },
+        "gastronomicon": {
+            "system_name": "Gastronomicon",
+            "description": "Creates the cuisine based on the world's ecosystem.",
+            "prompt_received": "A majestic city floating in the clouds",
+            "data": {
+                "staple_food": "native fungus",
+                "key_spice": "red salt"
+            }
+        },
+        "choreograph": {
+            "system_name": "Choreograph",
+            "description": "Designs the rituals, dances, and common movements.",
+            "prompt_received": "A majestic city floating in the clouds",
+            "data": {
+                "primary_ritual": "sun-gazing",
+                "movement_style": "slow"
+            }
+        }
+    }
+}

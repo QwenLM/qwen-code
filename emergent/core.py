@@ -2,6 +2,43 @@
 The core generation engine for Emergent Worlds.
 """
 
+def _mock_generative_ai_call(system_prompt: str, user_prompt: str) -> dict:
+    """
+    A mock function to simulate a call to a generative AI model.
+    It returns a pre-defined dictionary based on keywords in the user_prompt.
+    """
+    # This function is a stand-in for a real call to a model like qwen-code.
+    # The system_prompt is included for future compatibility.
+    user_prompt = user_prompt.lower()
+    if "cloud" in user_prompt or "sky" in user_prompt:
+        return {
+            "style": "ethereal, art nouveau",
+            "primary_material": "spun cloud-matter",
+            "secondary_material": "brass fittings",
+            "key_feature": "translucent, light-filtering walkways"
+        }
+    elif "forest" in user_prompt or "tree" in user_prompt:
+        return {
+            "style": "naturalistic, integrated",
+            "primary_material": "living wood",
+            "secondary_material": "moss and river stone",
+            "key_feature": "structures are grown, not built"
+        }
+    elif "underwater" in user_prompt or "ocean" in user_prompt:
+        return {
+            "style": "bioluminescent, organic",
+            "primary_material": "biocrete from coral",
+            "secondary_material": "hardened kelp",
+            "key_feature": "buildings pulse with soft, internal light"
+        }
+    else:
+        return {
+            "style": "generic modern",
+            "primary_material": "concrete",
+            "secondary_material": "steel and glass",
+            "key_feature": "functional but uninspired design"
+        }
+
 def generate_mycomind(prompt: str) -> dict:
     """Placeholder for the MycoMind systems modeler."""
     return {
@@ -12,12 +49,20 @@ def generate_mycomind(prompt: str) -> dict:
     }
 
 def generate_architectonic(prompt: str) -> dict:
-    """Placeholder for the Architectonic architectural designer."""
+    """Generates architectural data by calling the mock AI."""
+    system_prompt = (
+        "You are an imaginative architectural designer. "
+        "Based on the user's prompt, describe a unique architectural style. "
+        "Provide a style, a primary material, a secondary material, and a key feature."
+    )
+
+    ai_generated_data = _mock_generative_ai_call(system_prompt, prompt)
+
     return {
         "system_name": "Architectonic",
         "description": "Generates the physical architecture and layout.",
         "prompt_received": prompt,
-        "data": { "style": "brutalist", "primary_material": "stone" }
+        "data": ai_generated_data
     }
 
 def generate_lexisynth(prompt: str) -> dict:
