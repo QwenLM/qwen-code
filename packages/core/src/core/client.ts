@@ -48,6 +48,7 @@ import { ideContext } from '../ide/ideContext.js';
 import { logNextSpeakerCheck } from '../telemetry/loggers.js';
 import { NextSpeakerCheckEvent } from '../telemetry/types.js';
 import { IdeContext, File } from '../ide/ideContext.js';
+import { FileWatcherService } from '../services/FileWatcherService.js';
 
 function isThinkingSupported(model: string) {
   if (model.startsWith('gemini-2.5')) return true;
@@ -112,6 +113,7 @@ export class GeminiClient {
   private lastPromptId: string;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private fileWatcherService: FileWatcherService;
 
   constructor(private config: Config) {
     if (config.getProxy()) {
@@ -121,6 +123,7 @@ export class GeminiClient {
     this.embeddingModel = config.getEmbeddingModel();
     this.loopDetector = new LoopDetectionService(config);
     this.lastPromptId = this.config.getSessionId();
+    this.fileWatcherService = new FileWatcherService();
   }
 
   async initialize(contentGeneratorConfig: ContentGeneratorConfig) {
@@ -130,6 +133,10 @@ export class GeminiClient {
       this.config.getSessionId(),
     );
     this.chat = await this.startChat();
+    
+    // Initialize and start the file watcher service
+    await this.fileWatcherService.initialize();
+    this.fileWatcherService.watchDirectory(this.config.getProjectRoot());
   }
 
   getContentGenerator(): ContentGenerator {
@@ -968,5 +975,12 @@ export class GeminiClient {
 
     // For other errors, don't handle them specially
     return null;
+  }
+
+  /**
+   * Closes the file watcher service and cleans up resources
+   */
+  async close(): Promise<void> {
+    this.fileWatcherService.close();
   }
 }

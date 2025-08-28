@@ -101,3 +101,6 @@ export { sessionId } from './utils/session.js';
 export * from './utils/browser.js';
 // OpenAI Logging Utilities
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
+
+// Export RAG components
+export * from './rag/index.js';
