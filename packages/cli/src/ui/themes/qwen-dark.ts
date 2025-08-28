@@ -18,8 +18,8 @@ const qwenDarkColors: ColorsTheme = {
   AccentGreen: '#AAD94C',
   AccentYellow: '#FFD700',
   AccentRed: '#F26D78',
-  DiffAdded: '#AAD94C',
-  DiffRemoved: '#F26D78',
+  DiffAdded: '#008000',
+  DiffRemoved: '#800000',
   Comment: '#646A71',
   Gray: '#3D4149',
   GradientColors: ['#FFD700', '#da7959'],
@@ -72,9 +72,6 @@ export const QwenDark: Theme = new Theme(
     'hljs-bullet': {
       color: qwenDarkColors.AccentYellow,
     },
-    'hljs-addition': {
-      color: qwenDarkColors.AccentGreen,
-    },
     'hljs-variable': {
       color: qwenDarkColors.Foreground,
     },
@@ -93,7 +90,16 @@ export const QwenDark: Theme = new Theme(
       fontStyle: 'italic',
     },
     'hljs-deletion': {
-      color: qwenDarkColors.AccentRed,
+      backgroundColor: qwenDarkColors.DiffRemoved,
+      color: 'white',
+      display: 'inline-block',
+      width: '100%',
+    },
+    'hljs-addition': {
+      backgroundColor: qwenDarkColors.DiffAdded,
+      color: 'white',
+      display: 'inline-block',
+      width: '100%',
     },
     'hljs-meta': {
       color: qwenDarkColors.AccentYellow,
