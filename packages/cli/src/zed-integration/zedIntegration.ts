@@ -770,7 +770,28 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
         type: 'content',
         content: { type: 'text', text: toolResult.returnDisplay },
       };
-    } else {
+    } else if (
+      'type' in toolResult.returnDisplay &&
+      toolResult.returnDisplay.type === 'todo_list'
+    ) {
+      // Handle TodoResultDisplay - convert to text representation
+      const todoText = toolResult.returnDisplay.todos
+        .map((todo) => {
+          const statusIcon = {
+            pending: '○',
+            in_progress: '◐',
+            completed: '●',
+          }[todo.status];
+          return `${statusIcon} ${todo.content}`;
+        })
+        .join('\n');
+
+      return {
+        type: 'content',
+        content: { type: 'text', text: todoText },
+      };
+    } else if ('fileDiff' in toolResult.returnDisplay) {
+      // Handle FileDiff
       return {
         type: 'diff',
         path: toolResult.returnDisplay.fileName,
@@ -778,9 +799,8 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
         newText: toolResult.returnDisplay.newContent,
       };
     }
-  } else {
-    return null;
   }
+  return null;
 }
 
 const basicPermissionOptions = [

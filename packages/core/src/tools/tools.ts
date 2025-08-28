@@ -491,7 +491,7 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export type ToolResultDisplay = string | FileDiff;
+export type ToolResultDisplay = string | FileDiff | TodoResultDisplay;
 
 export interface FileDiff {
   fileDiff: string;
@@ -506,6 +506,15 @@ export interface DiffStat {
   ai_added_lines: number;
   user_added_lines: number;
   user_removed_lines: number;
+}
+
+export interface TodoResultDisplay {
+  type: 'todo_list';
+  todos: Array<{
+    id: string;
+    content: string;
+    status: 'pending' | 'in_progress' | 'completed';
+  }>;
 }
 
 export interface ToolEditConfirmationDetails {
