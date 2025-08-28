@@ -2,11 +2,15 @@
 
 ## Problem Summary
 
-The streaming API setup was timing out after 64 seconds, causing user frustration and limiting the tool's effectiveness for large requests. The error message provided generic troubleshooting tips but didn't offer specific solutions based on the request characteristics.
+The streaming API setup was timing out after 64 seconds, causing user frustration and
+limiting the tool's effectiveness for large requests. The error message provided
+generic troubleshooting tips but didn't offer specific solutions based on the request
+characteristics.
 
 ## Solution Approach
 
-We've implemented a comprehensive mathematical modeling approach to understand and solve this timeout issue:
+We've implemented a comprehensive mathematical modeling approach to understand and solve
+this timeout issue:
 
 ### 1. Mathematical Modeling
 
@@ -21,9 +25,10 @@ This allows us to predict when timeouts will occur and recommend appropriate sol
 
 ### 2. Adaptive Timeout Calculation
 
-Instead of fixed timeouts, we now calculate adaptive timeouts based on request characteristics:
+Instead of fixed timeouts, we now calculate adaptive timeouts based on request
+characteristics:
 
-```
+```javascript
 Adaptive Timeout = Base Timeout +
                    (Data Size × 0.05) +
                    (Complexity × 0.1) +
@@ -32,7 +37,8 @@ Adaptive Timeout = Base Timeout +
 
 ### 3. Enhanced Error Messaging
 
-When timeouts occur, we now provide more specific troubleshooting guidance based on the request characteristics:
+When timeouts occur, we now provide more specific troubleshooting guidance based on the
+request characteristics:
 
 - For large requests: Suggestions to break into smaller chunks
 - For complex requests: Recommendations for progressive summarization
@@ -47,7 +53,8 @@ New CLI options allow users to configure:
 
 ### 5. Configuration Recommendations
 
-The system now provides configuration recommendations based on analysis of current settings, including:
+The system now provides configuration recommendations based on analysis of current
+settings, including:
 
 - Optimal timeout values
 - Sampling parameter adjustments
@@ -57,10 +64,13 @@ The system now provides configuration recommendations based on analysis of curre
 
 ### Core Changes
 
-1. **Created StreamingTimeoutModel** - A mathematical model for predicting and preventing timeouts
-2. **Enhanced OpenAIContentGenerator** - Added adaptive timeout handling and improved error messages
+1. **Created StreamingTimeoutModel** - A mathematical model for predicting and
+   preventing timeouts
+2. **Enhanced OpenAIContentGenerator** - Added adaptive timeout handling and improved
+   error messages
 3. **Updated CLI Configuration** - Added new timeout and retry options
-4. **Improved ContentGeneratorConfig** - Better handling of timeout configuration from environment variables
+4. **Improved ContentGeneratorConfig** - Better handling of timeout configuration from
+   environment variables
 
 ### Files Modified
 
@@ -108,7 +118,11 @@ All tests pass, including new tests for the streaming timeout model:
 ## Future Improvements
 
 1. **Machine Learning Approach**: Use historical data to predict optimal timeouts
-2. **Dynamic Adjustment**: Real-time adjustment of timeouts based on current performance
-3. **Progressive Enhancement**: Start with conservative timeouts and increase based on success patterns
+2. **Dynamic Adjustment**: Real-time adjustment of timeouts based on
+   current performance
+3. **Progressive Enhancement**: Start with conservative timeouts and increase
+   based on success patterns
 
-This solution transforms a frustrating timeout issue into an opportunity for intelligent, adaptive system behavior that improves the user experience for large and complex requests.
+This solution transforms a frustrating timeout issue into an opportunity for
+intelligent, adaptive system behavior that improves the user experience for
+large and complex requests.
