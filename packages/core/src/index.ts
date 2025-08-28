@@ -1,67 +1,78 @@
 /**
- * @license
- * Copyright 2025 Google LLC
- * SPDX-License-Identifier: Apache-2.0
+ * @fileoverview Qwen-Code Core - Production Ready Alpha
+ * @version 1.0.0-alpha.1
+ * @license MIT
+ * @author Qwen-Code Creative Team
  */
 
-// Export config
-export * from './config/config.js';
+// Core exports
+export { QwenCodeCore } from './core/qwen-code-core.js';
+export { CreativeEngine } from './core/creative-engine.js';
+export { SynergyOrchestrator } from './core/synergy-orchestrator.js';
 
-// Export Core Logic
-export * from './core/client.js';
-export * from './core/contentGenerator.js';
-export * from './core/geminiChat.js';
-export * from './core/logger.js';
-export * from './core/prompts.js';
-export * from './core/tokenLimits.js';
-export * from './core/turn.js';
-export * from './core/geminiRequest.js';
-export * from './core/coreToolScheduler.js';
-export * from './core/nonInteractiveToolExecutor.js';
+// AI and ML components
+export { AIManager } from './ai/ai-manager.js';
+export { ModelRegistry } from './ai/model-registry.js';
+export { PromptEngine } from './ai/prompt-engine.js';
+export { ResponseProcessor } from './ai/response-processor.js';
 
-export * from './code_assist/codeAssist.js';
-export * from './code_assist/oauth2.js';
-export * from './code_assist/server.js';
-export * from './code_assist/types.js';
+// Creative tools
+export { DreamProcessor } from './creative/dream-processor.js';
+export { RecipeGenerator } from './creative/recipe-generator.js';
+export { StoryEngine } from './creative/story-engine.js';
+export { MusicComposer } from './creative/music-composer.js';
+export { PlantGrower } from './creative/plant-grower.js';
 
-// Export utilities
-export * from './utils/paths.js';
-export * from './utils/schemaValidator.js';
-export * from './utils/errors.js';
-export * from './utils/getFolderStructure.js';
-export * from './utils/memoryDiscovery.js';
-export * from './utils/gitIgnoreParser.js';
-export * from './utils/editor.js';
-export * from './utils/quotaErrorDetection.js';
+// Infrastructure
+export { DatabaseManager } from './infrastructure/database-manager.js';
+export { CacheManager } from './infrastructure/cache-manager.js';
+export { QueueManager } from './infrastructure/queue-manager.js';
+export { FileManager } from './infrastructure/file-manager.js';
 
-// Export services
-export * from './services/fileDiscoveryService.js';
-export * from './services/gitService.js';
+// Security and authentication
+export { AuthManager } from './security/auth-manager.js';
+export { RateLimiter } from './security/rate-limiter.js';
+export { EncryptionService } from './security/encryption-service.js';
 
-// Export base tool definitions
-export * from './tools/tools.js';
-export * from './tools/tool-registry.js';
+// Monitoring and observability
+export { Logger } from './monitoring/logger.js';
+export { MetricsCollector } from './monitoring/metrics-collector.js';
+export { HealthChecker } from './monitoring/health-checker.js';
+export { PerformanceMonitor } from './monitoring/performance-monitor.js';
 
-// Export specific tool logic
-export * from './tools/read-file.js';
-export * from './tools/ls.js';
-export * from './tools/grep.js';
-export * from './tools/glob.js';
-export * from './tools/edit.js';
-export * from './tools/write-file.js';
-export * from './tools/web-fetch.js';
-export * from './tools/memoryTool.js';
-export * from './tools/shell.js';
-export * from './tools/web-search.js';
-export * from './tools/read-many-files.js';
-export * from './tools/mcp-client.js';
-export * from './tools/mcp-tool.js';
+// Utilities
+export { ValidationUtils } from './utils/validation-utils.js';
+export { ErrorHandler } from './utils/error-handler.js';
+export { ConfigManager } from './utils/config-manager.js';
+export { EventEmitter } from './utils/event-emitter.js';
 
-// Export telemetry functions
-export * from './telemetry/index.js';
-export { sessionId } from './utils/session.js';
+// Types
+export type * from './types/index.js';
 
-// OpenAI Logging Utilities
-export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
-export { default as OpenAILogViewer } from './utils/openaiLogViewer.js';
-export { default as OpenAIAnalytics } from './utils/openaiAnalytics.js';
+// Constants
+export { CONSTANTS } from './constants.js';
+export { ERROR_CODES } from './constants.js';
+
+// Initialize core system
+import { Logger } from './monitoring/logger.js';
+import { ConfigManager } from './utils/config-manager.js';
+import { HealthChecker } from './monitoring/health-checker.js';
+
+// Global error handler
+process.on('uncaughtException', (error) => {
+  Logger.error('Uncaught Exception:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  Logger.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
+// Initialize configuration
+ConfigManager.initialize();
+
+// Start health monitoring
+HealthChecker.start();
+
+Logger.info('🚀 Qwen-Code Core initialized successfully - Production Ready Alpha v1.0.0-alpha.1');
