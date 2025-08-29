@@ -87,18 +87,32 @@ export function createContentGeneratorConfig(
   // openai auth
   const openaiApiKey = process.env.OPENAI_API_KEY;
   const openaiBaseUrl = process.env.OPENAI_BASE_URL || undefined;
+  const openaiTimeout = process.env.OPENAI_TIMEOUT
+    ? parseInt(process.env.OPENAI_TIMEOUT, 10)
+    : undefined;
+  const openaiMaxRetries = process.env.OPENAI_MAX_RETRIES
+    ? parseInt(process.env.OPENAI_MAX_RETRIES, 10)
+    : undefined;
   const openaiModel = process.env.OPENAI_MODEL || undefined;
 
   // Use runtime model from config if available; otherwise, fall back to parameter or default
   const effectiveModel = config.getModel() || DEFAULT_GEMINI_MODEL;
+
+  // Get timeout from config or environment, with a default of 120000ms
+  const timeout =
+    config.getContentGeneratorTimeout() ?? openaiTimeout ?? 120000;
+
+  // Get max retries from config or environment, with a default of 3
+  const maxRetries =
+    config.getContentGeneratorMaxRetries() ?? openaiMaxRetries ?? 3;
 
   const contentGeneratorConfig: ContentGeneratorConfig = {
     model: effectiveModel,
     authType,
     proxy: config?.getProxy(),
     enableOpenAILogging: config.getEnableOpenAILogging(),
-    timeout: config.getContentGeneratorTimeout(),
-    maxRetries: config.getContentGeneratorMaxRetries(),
+    timeout,
+    maxRetries,
     samplingParams: config.getContentGeneratorSamplingParams(),
   };
 

@@ -25,6 +25,9 @@ import {
   ContentGenerator,
   ContentGeneratorConfig,
 } from './contentGenerator.js';
+import {
+  enhanceTimeoutErrorMessage
+} from '../models/simpleTimeoutAnalysis.js';
 import OpenAI from 'openai';
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
@@ -518,17 +521,54 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
       // Provide helpful timeout-specific error message for streaming setup
       if (isTimeoutError) {
-        throw new Error(
-          `${errorMessage}\n\nStreaming setup timeout troubleshooting:\n` +
-            `- Reduce input length or complexity\n` +
-            `- Increase timeout in config: contentGenerator.timeout\n` +
-            `- Check network connectivity and firewall settings\n` +
-            `- Consider using non-streaming mode for very long inputs`,
+        // Use our enhanced timeout handling
+        const enhancedErrorMessage = this.getEnhancedTimeoutMessage(
+          errorMessage,
+          durationMs,
+          request,
         );
+        throw new Error(enhancedErrorMessage);
       }
 
       throw error;
     }
+  }
+
+  /**
+   * Generate an enhanced timeout error message with more specific troubleshooting
+   */
+  private getEnhancedTimeoutMessage(
+    baseMessage: string,
+    durationMs: number,
+    request: GenerateContentParameters,
+  ): string {
+    // Estimate request characteristics
+    let dataSize = 0; // in MB
+    let complexity = 1; // 1-10 scale
+    
+    // Estimate data size from content
+    if (request.contents) {
+      const contentString = JSON.stringify(request.contents);
+      // Rough approximation: 1 MB ≈ 1,000,000 characters
+      dataSize = Math.ceil(contentString.length / 1000000);
+      
+      // Estimate complexity based on structure
+      const hasComplexStructure = contentString.includes('function') || 
+                                  contentString.includes('tool') ||
+                                  contentString.includes('json') ||
+                                  contentString.includes('array');
+      complexity = hasComplexStructure ? 7 : 3;
+      
+      // Very large requests are more complex
+      if (dataSize > 100) {
+        complexity = Math.min(complexity + 3, 10);
+      } else if (dataSize > 10) {
+        complexity = Math.min(complexity + 1, 10);
+      }
+    }
+    
+    // Use our simple timeout analysis
+    return enhanceTimeoutErrorMessage(baseMessage, dataSize, complexity);
   }
 
   private async *streamGenerator(

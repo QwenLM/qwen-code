@@ -21,7 +21,7 @@ esbuild
     outfile: 'bundle/gemini.js',
     platform: 'node',
     format: 'esm',
-    external: [],
+    external: ['@modelcontextprotocol/sdk'],
     alias: {
       'is-in-ci': path.resolve(
         __dirname,
