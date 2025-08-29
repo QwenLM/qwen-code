@@ -213,6 +213,7 @@ export class GeminiClient {
     });
   }
 
+
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     const envParts = await getEnvironmentContext(this.config);
