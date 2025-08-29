@@ -24,7 +24,6 @@ export const clearCommand: SlashCommand = {
     }
 
     uiTelemetryService.resetLastPromptTokenCount();
-    context.session.resetSession();
     context.ui.clear();
   },
 };

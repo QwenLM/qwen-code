@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BaseTool, Kind, ToolResult } from './tools.js';
-import { SchemaValidator } from '../utils/schemaValidator.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
+
 import { getErrorMessage } from '../utils/errors.js';
 import { Config } from '../config/config.js';
 
@@ -40,71 +46,24 @@ export interface WebSearchToolResult extends ToolResult {
   sources?: Array<{ title: string; url: string }>;
 }
 
-/**
- * A tool to perform web searches using Tavily API.
- */
-export class WebSearchTool extends BaseTool<
+class WebSearchToolInvocation extends BaseToolInvocation<
   WebSearchToolParams,
   WebSearchToolResult
 > {
-  static readonly Name: string = 'web_search';
-
-  constructor(private readonly config: Config) {
-    super(
-      WebSearchTool.Name,
-      'TavilySearch',
-      'Performs a web search using the Tavily API and returns a concise answer with sources. Requires the TAVILY_API_KEY environment variable.',
-      Kind.Search,
-      {
-        type: 'object',
-        properties: {
-          query: {
-            type: 'string',
-            description: 'The search query to find information on the web.',
-          },
-        },
-        required: ['query'],
-      },
-    );
-  }
-
-  /**
-   * Validates the parameters for the WebSearchTool.
-   * @param params The parameters to validate
-   * @returns An error message string if validation fails, null if valid
-   */
-  validateParams(params: WebSearchToolParams): string | null {
-    const errors = SchemaValidator.validate(
-      this.schema.parametersJsonSchema,
-      params,
-    );
-    if (errors) {
-      return errors;
-    }
-
-    if (!params.query || params.query.trim() === '') {
-      return "The 'query' parameter cannot be empty.";
-    }
-    return null;
-  }
-
-  override getDescription(params: WebSearchToolParams): string {
-    return `Searching the web for: "${params.query}"`;
-  }
-
-  async execute(
+  constructor(
+    private readonly config: Config,
     params: WebSearchToolParams,
-    _signal: AbortSignal,
-  ): Promise<WebSearchToolResult> {
-    const validationError = this.validateToolParams(params);
-    if (validationError) {
-      return {
-        llmContent: `Error: Invalid parameters provided. Reason: ${validationError}`,
-        returnDisplay: validationError,
-      };
-    }
+  ) {
+    super(params);
+  }
 
-    const apiKey = this.config.getTavilyApiKey() || process.env.TAVILY_API_KEY;
+  override getDescription(): string {
+    return `Searching the web for: "${this.params.query}"`;
+  }
+
+  async execute(signal: AbortSignal): Promise<WebSearchToolResult> {
+    const apiKey =
+      this.config.getTavilyApiKey() || process.env['TAVILY_API_KEY'];
     if (!apiKey) {
       return {
         llmContent:
@@ -115,8 +74,6 @@ export class WebSearchTool extends BaseTool<
     }
 
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000);
       const response = await fetch('https://api.tavily.com/search', {
         method: 'POST',
         headers: {
@@ -124,14 +81,13 @@ export class WebSearchTool extends BaseTool<
         },
         body: JSON.stringify({
           api_key: apiKey,
-          query: params.query,
+          query: this.params.query,
           search_depth: 'advanced',
           max_results: 5,
           include_answer: true,
         }),
-        signal: controller.signal,
+        signal,
       });
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const text = await response.text().catch(() => '');
@@ -166,18 +122,18 @@ export class WebSearchTool extends BaseTool<
 
       if (!content.trim()) {
         return {
-          llmContent: `No search results or information found for query: "${params.query}"`,
+          llmContent: `No search results or information found for query: "${this.params.query}"`,
           returnDisplay: 'No information found.',
         };
       }
 
       return {
-        llmContent: `Web search results for "${params.query}":\n\n${content}`,
-        returnDisplay: `Search results for "${params.query}" returned.`,
+        llmContent: `Web search results for "${this.params.query}":\n\n${content}`,
+        returnDisplay: `Search results for "${this.params.query}" returned.`,
         sources,
       };
     } catch (error: unknown) {
-      const errorMessage = `Error during web search for query "${params.query}": ${getErrorMessage(
+      const errorMessage = `Error during web search for query "${this.params.query}": ${getErrorMessage(
         error,
       )}`;
       console.error(errorMessage, error);
@@ -186,5 +142,54 @@ export class WebSearchTool extends BaseTool<
         returnDisplay: `Error performing web search.`,
       };
     }
+  }
+}
+
+/**
+ * A tool to perform web searches using Google Search via the Gemini API.
+ */
+export class WebSearchTool extends BaseDeclarativeTool<
+  WebSearchToolParams,
+  WebSearchToolResult
+> {
+  static readonly Name: string = 'google_web_search';
+
+  constructor(private readonly config: Config) {
+    super(
+      WebSearchTool.Name,
+      'TavilySearch',
+      'Performs a web search using the Tavily API and returns a concise answer with sources. Requires the TAVILY_API_KEY environment variable.',
+      Kind.Search,
+      {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The search query to find information on the web.',
+          },
+        },
+        required: ['query'],
+      },
+    );
+  }
+
+  /**
+   * Validates the parameters for the WebSearchTool.
+   * @param params The parameters to validate
+   * @returns An error message string if validation fails, null if valid
+   */
+  protected override validateToolParamValues(
+    params: WebSearchToolParams,
+  ): string | null {
+    if (!params.query || params.query.trim() === '') {
+      return "The 'query' parameter cannot be empty.";
+    }
+    return null;
+  }
+
+  protected createInvocation(
+    params: WebSearchToolParams,
+  ): ToolInvocation<WebSearchToolParams, WebSearchToolResult> {
+    return new WebSearchToolInvocation(this.config, params);
   }
 }

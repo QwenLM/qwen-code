@@ -59,13 +59,13 @@ export function AuthDialog({
       }
 
       const defaultAuthType = parseDefaultAuthType(
-        process.env.GEMINI_DEFAULT_AUTH_TYPE,
+        process.env['GEMINI_DEFAULT_AUTH_TYPE'],
       );
       if (defaultAuthType) {
         return item.value === defaultAuthType;
       }
 
-      if (process.env.GEMINI_API_KEY) {
+      if (process.env['GEMINI_API_KEY']) {
         return item.value === AuthType.USE_GEMINI;
       }
 
@@ -76,7 +76,10 @@ export function AuthDialog({
   const handleAuthSelect = (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);
     if (error) {
-      if (authMethod === AuthType.USE_OPENAI && !process.env.OPENAI_API_KEY) {
+      if (
+        authMethod === AuthType.USE_OPENAI &&
+        !process.env['OPENAI_API_KEY']
+      ) {
         setShowOpenAIKeyPrompt(true);
         setErrorMessage(null);
       } else {
@@ -156,7 +159,6 @@ export function AuthDialog({
           items={items}
           initialIndex={initialAuthIndex}
           onSelect={handleAuthSelect}
-          isFocused={true}
         />
       </Box>
       {errorMessage && (

@@ -7,6 +7,7 @@
 import { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Config } from '../config/config.js';
 import { CompletedToolCall } from '../core/coreToolScheduler.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import { FileDiff } from '../tools/tools.js';
 import { AuthType } from '../core/contentGenerator.js';
 import {
@@ -14,7 +15,7 @@ import {
   ToolCallDecision,
 } from './tool-call-decision.js';
 
-interface BaseTelemetryEvent {
+export interface BaseTelemetryEvent {
   'event.name': string;
   /** Current timestamp in ISO 8601 format */
   'event.timestamp': string;
@@ -114,6 +115,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   error?: string;
   error_type?: string;
   prompt_id: string;
+  tool_type: 'native' | 'mcp';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
 
@@ -130,6 +132,10 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
+    this.tool_type =
+      typeof call.tool !== 'undefined' && call.tool instanceof DiscoveredMCPTool
+        ? 'mcp'
+        : 'native';
 
     if (
       call.status === 'success' &&
@@ -298,7 +304,7 @@ export class NextSpeakerCheckEvent implements BaseTelemetryEvent {
 
 export interface SlashCommandEvent extends BaseTelemetryEvent {
   'event.name': 'slash_command';
-  'event.timestamp': string; // ISO 8106
+  'event.timestamp': string;
   command: string;
   subcommand?: string;
   status?: SlashCommandStatus;
@@ -321,6 +327,25 @@ export function makeSlashCommandEvent({
 export enum SlashCommandStatus {
   SUCCESS = 'success',
   ERROR = 'error',
+}
+
+export interface ChatCompressionEvent extends BaseTelemetryEvent {
+  'event.name': 'chat_compression';
+  'event.timestamp': string;
+  tokens_before: number;
+  tokens_after: number;
+}
+
+export function makeChatCompressionEvent({
+  tokens_before,
+  tokens_after,
+}: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
+  return {
+    'event.name': 'chat_compression',
+    'event.timestamp': new Date().toISOString(),
+    tokens_before,
+    tokens_after,
+  };
 }
 
 export class MalformedJsonResponseEvent implements BaseTelemetryEvent {
@@ -366,6 +391,59 @@ export class KittySequenceOverflowEvent {
   }
 }
 
+// Add these new event interfaces
+export class InvalidChunkEvent implements BaseTelemetryEvent {
+  'event.name': 'invalid_chunk';
+  'event.timestamp': string;
+  error_message?: string; // Optional: validation error details
+
+  constructor(error_message?: string) {
+    this['event.name'] = 'invalid_chunk';
+    this['event.timestamp'] = new Date().toISOString();
+    this.error_message = error_message;
+  }
+}
+
+export class ContentRetryEvent implements BaseTelemetryEvent {
+  'event.name': 'content_retry';
+  'event.timestamp': string;
+  attempt_number: number;
+  error_type: string; // e.g., 'EmptyStreamError'
+  retry_delay_ms: number;
+
+  constructor(
+    attempt_number: number,
+    error_type: string,
+    retry_delay_ms: number,
+  ) {
+    this['event.name'] = 'content_retry';
+    this['event.timestamp'] = new Date().toISOString();
+    this.attempt_number = attempt_number;
+    this.error_type = error_type;
+    this.retry_delay_ms = retry_delay_ms;
+  }
+}
+
+export class ContentRetryFailureEvent implements BaseTelemetryEvent {
+  'event.name': 'content_retry_failure';
+  'event.timestamp': string;
+  total_attempts: number;
+  final_error_type: string;
+  total_duration_ms?: number; // Optional: total time spent retrying
+
+  constructor(
+    total_attempts: number,
+    final_error_type: string,
+    total_duration_ms?: number,
+  ) {
+    this['event.name'] = 'content_retry_failure';
+    this['event.timestamp'] = new Date().toISOString();
+    this.total_attempts = total_attempts;
+    this.final_error_type = final_error_type;
+    this.total_duration_ms = total_duration_ms;
+  }
+}
+
 export type TelemetryEvent =
   | StartSessionEvent
   | EndSessionEvent
@@ -380,4 +458,7 @@ export type TelemetryEvent =
   | KittySequenceOverflowEvent
   | MalformedJsonResponseEvent
   | IdeConnectionEvent
-  | SlashCommandEvent;
+  | SlashCommandEvent
+  | InvalidChunkEvent
+  | ContentRetryEvent
+  | ContentRetryFailureEvent;

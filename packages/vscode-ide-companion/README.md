@@ -1,6 +1,6 @@
 # Qwen Code Companion
 
-The Qwen Code Companion extension seamlessly integrates [Qwen Code](https://github.com/QwenLM/qwen-code) into your IDE.
+The Qwen Code Companion extension seamlessly integrates [Qwen Code](https://github.com/QwenLM/qwen-code). This extension is compatible with both VS Code and VS Code forks.
 
 # Features
 

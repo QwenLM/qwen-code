@@ -248,7 +248,8 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
 const TODO_SUBDIR = 'todos';
 
 function getTodoFilePath(sessionId?: string): string {
-  const homeDir = process.env.HOME || process.env.USERPROFILE || process.cwd();
+  const homeDir =
+    process.env['HOME'] || process.env['USERPROFILE'] || process.cwd();
   const todoDir = path.join(homeDir, QWEN_DIR, TODO_SUBDIR);
 
   // Use sessionId if provided, otherwise fall back to 'default'
@@ -383,7 +384,7 @@ export async function readTodosForSession(
 export async function listTodoSessions(): Promise<string[]> {
   try {
     const homeDir =
-      process.env.HOME || process.env.USERPROFILE || process.cwd();
+      process.env['HOME'] || process.env['USERPROFILE'] || process.cwd();
     const todoDir = path.join(homeDir, QWEN_DIR, TODO_SUBDIR);
     const files = await fs.readdir(todoDir);
     return files

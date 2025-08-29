@@ -66,7 +66,6 @@ export interface CommandContext {
   // Session-specific data
   session: {
     stats: SessionStatsState;
-    resetSession: () => void;
     /** A transient list of shell commands the user has approved for this session. */
     sessionShellAllowlist: Set<string>;
   };

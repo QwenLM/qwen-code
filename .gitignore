@@ -37,9 +37,12 @@ packages/*/coverage/
 
 # Generated files
 packages/cli/src/generated/
+packages/core/src/generated/
 .integration-tests/
 packages/vscode-ide-companion/*.vsix
 
 # Qwen Code Configs
 .qwen/
 logs/
+# GHA credentials
+gha-creds-*.json

@@ -19,7 +19,6 @@ import {
   ToolConfirmationOutcome,
   Kind,
 } from './tools.js';
-import { SchemaValidator } from '../utils/schemaValidator.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { summarizeToolOutput } from '../utils/summarizer.js';
 import {
@@ -102,6 +101,8 @@ class ShellToolInvocation extends BaseToolInvocation<
   async execute(
     signal: AbortSignal,
     updateOutput?: (output: string) => void,
+    terminalColumns?: number,
+    terminalRows?: number,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -145,13 +146,11 @@ class ShellToolInvocation extends BaseToolInvocation<
         this.params.directory || '',
       );
 
-      let cumulativeStdout = '';
-      let cumulativeStderr = '';
-
+      let cumulativeOutput = '';
       let lastUpdateTime = Date.now();
       let isBinaryStream = false;
 
-      const { result: resultPromise } = ShellExecutionService.execute(
+      const { result: resultPromise } = await ShellExecutionService.execute(
         commandToExecute,
         cwd,
         (event: ShellOutputEvent) => {
@@ -164,15 +163,9 @@ class ShellToolInvocation extends BaseToolInvocation<
 
           switch (event.type) {
             case 'data':
-              if (isBinaryStream) break; // Don't process text if we are in binary mode
-              if (event.stream === 'stdout') {
-                cumulativeStdout += event.chunk;
-              } else {
-                cumulativeStderr += event.chunk;
-              }
-              currentDisplayOutput =
-                cumulativeStdout +
-                (cumulativeStderr ? `\n${cumulativeStderr}` : '');
+              if (isBinaryStream) break;
+              cumulativeOutput = event.chunk;
+              currentDisplayOutput = cumulativeOutput;
               if (Date.now() - lastUpdateTime > OUTPUT_UPDATE_INTERVAL_MS) {
                 shouldUpdate = true;
               }
@@ -203,6 +196,9 @@ class ShellToolInvocation extends BaseToolInvocation<
           }
         },
         signal,
+        this.config.getShouldUseNodePtyShell(),
+        terminalColumns,
+        terminalRows,
       );
 
       const result = await resultPromise;
@@ -234,7 +230,7 @@ class ShellToolInvocation extends BaseToolInvocation<
       if (result.aborted) {
         llmContent = 'Command was cancelled by user before it could complete.';
         if (result.output.trim()) {
-          llmContent += ` Below is the output (on stdout and stderr) before it was cancelled:\n${result.output}`;
+          llmContent += ` Below is the output before it was cancelled:\n${result.output}`;
         } else {
           llmContent += ' There was no output before it was cancelled.';
         }
@@ -248,8 +244,7 @@ class ShellToolInvocation extends BaseToolInvocation<
         llmContent = [
           `Command: ${this.params.command}`,
           `Directory: ${this.params.directory || '(root)'}`,
-          `Stdout: ${result.stdout || '(empty)'}`,
-          `Stderr: ${result.stderr || '(empty)'}`,
+          `Output: ${result.output || '(empty)'}`,
           `Error: ${finalError}`, // Use the cleaned error string.
           `Exit Code: ${result.exitCode ?? '(none)'}`,
           `Signal: ${result.signal ?? '(none)'}`,
@@ -345,18 +340,10 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
   }
 }
 
-export class ShellTool extends BaseDeclarativeTool<
-  ShellToolParams,
-  ToolResult
-> {
-  static Name: string = 'run_shell_command';
-  private allowlist: Set<string> = new Set();
-
-  constructor(private readonly config: Config) {
-    super(
-      ShellTool.Name,
-      'Shell',
-      `This tool executes a given shell command as \`bash -c <command>\`. 
+function getShellToolDescription(): string {
+  const platform = os.platform();
+  const toolDescription = `
+    ${platform === 'win32' ? 'This tool executes a given shell command as `cmd.exe /c <command>`.' : 'This tool executes a given shell command as `bash -c <command>`. '}
 
       **Background vs Foreground Execution:**
       You should decide whether commands should run in background or foreground based on their nature:
@@ -375,7 +362,7 @@ export class ShellTool extends BaseDeclarativeTool<
       - Git operations: \`git commit\`, \`git push\`
       - Test runs: \`npm test\`, \`pytest\`
       
-      Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.
+      ${platform === 'win32' ? '' : 'Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.'}
 
       The following information is returned:
 
@@ -387,14 +374,38 @@ export class ShellTool extends BaseDeclarativeTool<
       Exit Code: Exit code or \`(none)\` if terminated by signal.
       Signal: Signal number or \`(none)\` if no signal was received.
       Background PIDs: List of background processes started or \`(none)\`.
-      Process Group PGID: Process group started or \`(none)\``,
+      Process Group PGID: Process group started or \`(none)\``;
+
+  return toolDescription;
+}
+
+function getCommandDescription(): string {
+  if (os.platform() === 'win32') {
+    return 'Exact command to execute as `cmd.exe /c <command>`';
+  } else {
+    return 'Exact bash command to execute as `bash -c <command>`';
+  }
+}
+
+export class ShellTool extends BaseDeclarativeTool<
+  ShellToolParams,
+  ToolResult
+> {
+  static Name: string = 'run_shell_command';
+  private allowlist: Set<string> = new Set();
+
+  constructor(private readonly config: Config) {
+    super(
+      ShellTool.Name,
+      'Shell',
+      getShellToolDescription(),
       Kind.Execute,
       {
         type: 'object',
         properties: {
           command: {
             type: 'string',
-            description: 'Exact bash command to execute as `bash -c <command>`',
+            description: getCommandDescription(),
           },
           is_background: {
             type: 'boolean',
@@ -419,7 +430,9 @@ export class ShellTool extends BaseDeclarativeTool<
     );
   }
 
-  override validateToolParams(params: ShellToolParams): string | null {
+  protected override validateToolParamValues(
+    params: ShellToolParams,
+  ): string | null {
     const commandCheck = isCommandAllowed(params.command, this.config);
     if (!commandCheck.allowed) {
       if (!commandCheck.reason) {
@@ -429,13 +442,6 @@ export class ShellTool extends BaseDeclarativeTool<
         return `Command is not allowed: ${params.command}`;
       }
       return commandCheck.reason;
-    }
-    const errors = SchemaValidator.validate(
-      this.schema.parametersJsonSchema,
-      params,
-    );
-    if (errors) {
-      return errors;
     }
     if (!params.command.trim()) {
       return 'Command cannot be empty.';

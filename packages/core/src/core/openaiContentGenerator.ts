@@ -538,7 +538,18 @@ export class OpenAIContentGenerator implements ContentGenerator {
     this.streamingToolCalls.clear();
 
     for await (const chunk of stream) {
-      yield this.convertStreamChunkToGeminiFormat(chunk);
+      const response = this.convertStreamChunkToGeminiFormat(chunk);
+
+      // Ignore empty responses, which would cause problems with downstream code
+      // that expects a valid response.
+      if (
+        response.candidates?.[0]?.content?.parts?.length === 0 &&
+        !response.usageMetadata
+      ) {
+        continue;
+      }
+
+      yield response;
     }
   }
 

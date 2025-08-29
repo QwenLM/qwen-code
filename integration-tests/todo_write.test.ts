@@ -60,7 +60,7 @@ Please create a todo list for these tasks.`;
     }
 
     // Log success info if verbose
-    if (process.env.VERBOSE === 'true') {
+    if (process.env['VERBOSE'] === 'true') {
       console.log('Todo list created successfully');
     }
   });
@@ -125,7 +125,7 @@ Please create a todo list for these tasks.`;
     }
 
     // Log success info if verbose
-    if (process.env.VERBOSE === 'true') {
+    if (process.env['VERBOSE'] === 'true') {
       console.log('Todo list updated successfully');
     }
   });
