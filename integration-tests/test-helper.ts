@@ -100,7 +100,7 @@ export function validateModelOutput(
         'The tool was called successfully, which is the main requirement.',
       );
       return false;
-    } else if (process.env.VERBOSE === 'true') {
+    } else if (process.env['VERBOSE'] === 'true') {
       console.log(`${testName}: Model output validated successfully.`);
     }
     return true;
@@ -221,8 +221,8 @@ export class TestRig {
     // Handle stdin if provided
     if (execOptions.input) {
       child.stdin!.write(execOptions.input);
-      child.stdin!.end();
     }
+    child.stdin!.end();
 
     child.stdout!.on('data', (data: Buffer) => {
       stdout += data;

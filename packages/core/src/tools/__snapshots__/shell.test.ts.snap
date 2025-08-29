@@ -1,0 +1,73 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ShellTool > getDescription > should return the non-windows description when not on windows 1`] = `
+"
+    This tool executes a given shell command as \`bash -c <command>\`. 
+
+      **Background vs Foreground Execution:**
+      You should decide whether commands should run in background or foreground based on their nature:
+      
+      **Use background execution (is_background: true) for:**
+      - Long-running development servers: \`npm run start\`, \`npm run dev\`, \`yarn dev\`, \`bun run start\`
+      - Build watchers: \`npm run watch\`, \`webpack --watch\`
+      - Database servers: \`mongod\`, \`mysql\`, \`redis-server\`
+      - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
+      - Any command expected to run indefinitely until manually stopped
+      
+      **Use foreground execution (is_background: false) for:**
+      - One-time commands: \`ls\`, \`cat\`, \`grep\`
+      - Build commands: \`npm run build\`, \`make\`
+      - Installation commands: \`npm install\`, \`pip install\`
+      - Git operations: \`git commit\`, \`git push\`
+      - Test runs: \`npm test\`, \`pytest\`
+      
+      Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.
+
+      The following information is returned:
+
+      Command: Executed command.
+      Directory: Directory (relative to project root) where command was executed, or \`(root)\`.
+      Stdout: Output on stdout stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
+      Stderr: Output on stderr stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
+      Error: Error or \`(none)\` if no error was reported for the subprocess.
+      Exit Code: Exit code or \`(none)\` if terminated by signal.
+      Signal: Signal number or \`(none)\` if no signal was received.
+      Background PIDs: List of background processes started or \`(none)\`.
+      Process Group PGID: Process group started or \`(none)\`"
+`;
+
+exports[`ShellTool > getDescription > should return the windows description when on windows 1`] = `
+"
+    This tool executes a given shell command as \`cmd.exe /c <command>\`.
+
+      **Background vs Foreground Execution:**
+      You should decide whether commands should run in background or foreground based on their nature:
+      
+      **Use background execution (is_background: true) for:**
+      - Long-running development servers: \`npm run start\`, \`npm run dev\`, \`yarn dev\`, \`bun run start\`
+      - Build watchers: \`npm run watch\`, \`webpack --watch\`
+      - Database servers: \`mongod\`, \`mysql\`, \`redis-server\`
+      - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
+      - Any command expected to run indefinitely until manually stopped
+      
+      **Use foreground execution (is_background: false) for:**
+      - One-time commands: \`ls\`, \`cat\`, \`grep\`
+      - Build commands: \`npm run build\`, \`make\`
+      - Installation commands: \`npm install\`, \`pip install\`
+      - Git operations: \`git commit\`, \`git push\`
+      - Test runs: \`npm test\`, \`pytest\`
+      
+      
+
+      The following information is returned:
+
+      Command: Executed command.
+      Directory: Directory (relative to project root) where command was executed, or \`(root)\`.
+      Stdout: Output on stdout stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
+      Stderr: Output on stderr stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
+      Error: Error or \`(none)\` if no error was reported for the subprocess.
+      Exit Code: Exit code or \`(none)\` if terminated by signal.
+      Signal: Signal number or \`(none)\` if no signal was received.
+      Background PIDs: List of background processes started or \`(none)\`.
+      Process Group PGID: Process group started or \`(none)\`"
+`;

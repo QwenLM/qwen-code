@@ -129,7 +129,7 @@ class ThemeManager {
    * @returns The active theme.
    */
   getActiveTheme(): Theme {
-    if (process.env.NO_COLOR) {
+    if (process.env['NO_COLOR']) {
       return NoColorTheme;
     }
     // Ensure the active theme is always valid (fall back to default if not)

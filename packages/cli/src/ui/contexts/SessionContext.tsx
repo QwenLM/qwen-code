@@ -17,6 +17,7 @@ import {
   uiTelemetryService,
   SessionMetrics,
   ModelMetrics,
+  sessionId,
 } from '@qwen-code/qwen-code-core';
 
 // --- Interface Definitions ---
@@ -24,6 +25,7 @@ import {
 export type { SessionMetrics, ModelMetrics };
 
 export interface SessionStatsState {
+  sessionId: string;
   sessionStartTime: Date;
   metrics: SessionMetrics;
   lastPromptTokenCount: number;
@@ -42,6 +44,8 @@ export interface ComputedSessionStats {
   agreementRate: number;
   totalCachedTokens: number;
   totalPromptTokens: number;
+  totalLinesAdded: number;
+  totalLinesRemoved: number;
 }
 
 // Defines the final "value" of our context, including the state
@@ -50,7 +54,6 @@ interface SessionStatsContextValue {
   stats: SessionStatsState;
   startNewPrompt: () => void;
   getPromptCount: () => number;
-  resetSession: () => void;
 }
 
 // --- Context Definition ---
@@ -65,6 +68,7 @@ export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
   children,
 }) => {
   const [stats, setStats] = useState<SessionStatsState>({
+    sessionId,
     sessionStartTime: new Date(),
     metrics: uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,
@@ -110,23 +114,13 @@ export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
     [stats.promptCount],
   );
 
-  const resetSession = useCallback(() => {
-    setStats({
-      sessionStartTime: new Date(),
-      metrics: uiTelemetryService.getMetrics(),
-      lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
-      promptCount: 0,
-    });
-  }, []);
-
   const value = useMemo(
     () => ({
       stats,
       startNewPrompt,
       getPromptCount,
-      resetSession,
     }),
-    [stats, startNewPrompt, getPromptCount, resetSession],
+    [stats, startNewPrompt, getPromptCount],
   );
 
   return (

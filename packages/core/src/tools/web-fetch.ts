@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SchemaValidator } from '../utils/schemaValidator.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -211,16 +210,9 @@ export class WebFetchTool extends BaseDeclarativeTool<
     }
   }
 
-  protected override validateToolParams(
+  protected override validateToolParamValues(
     params: WebFetchToolParams,
   ): string | null {
-    const errors = SchemaValidator.validate(
-      this.schema.parametersJsonSchema,
-      params,
-    );
-    if (errors) {
-      return errors;
-    }
     if (!params.url || params.url.trim() === '') {
       return "The 'url' parameter cannot be empty.";
     }

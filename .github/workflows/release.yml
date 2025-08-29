@@ -181,21 +181,15 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-        run: |
-          # Build the gh release create command with appropriate options
-          RELEASE_CMD="gh release create ${{ steps.version.outputs.RELEASE_TAG }} bundle/gemini.js --target \"$RELEASE_BRANCH\" --title \"Release ${{ steps.version.outputs.RELEASE_TAG }}\""
-
-          # Add previous tag for release notes if available
-          if [[ -n "${{ steps.version.outputs.PREVIOUS_TAG }}" ]]; then
-            echo "Generating release notes from previous tag: ${{ steps.version.outputs.PREVIOUS_TAG }}"
-            RELEASE_CMD="$RELEASE_CMD --generate-notes --notes-start-tag ${{ steps.version.outputs.PREVIOUS_TAG }}"
-          else
-            echo "No previous tag found, generating release notes from repository history"
-            RELEASE_CMD="$RELEASE_CMD --generate-notes"
-          fi
-
-          # Execute the release command
-          eval "$RELEASE_CMD"
+          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+          PREVIOUS_TAG: '${{ steps.version.outputs.PREVIOUS_TAG }}'
+        run: |-
+          gh release create "${RELEASE_TAG}" \
+            bundle/gemini.js \
+            --target "$RELEASE_BRANCH" \
+            --title "Release ${RELEASE_TAG}" \
+            --notes-start-tag "$PREVIOUS_TAG" \
+            --generate-notes
 
       - name: 'Create Issue on Failure'
         if: |-

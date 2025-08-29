@@ -7,7 +7,6 @@
 import { LogAttributes, LogRecord, logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import { Config } from '../config/config.js';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   EVENT_API_ERROR,
   EVENT_API_REQUEST,
@@ -20,15 +19,11 @@ import {
   EVENT_TOOL_CALL,
   EVENT_USER_PROMPT,
   SERVICE_NAME,
+  EVENT_CHAT_COMPRESSION,
+  EVENT_INVALID_CHUNK,
+  EVENT_CONTENT_RETRY,
+  EVENT_CONTENT_RETRY_FAILURE,
 } from './constants.js';
-import {
-  recordApiErrorMetrics,
-  recordApiResponseMetrics,
-  recordTokenUsageMetrics,
-  recordToolCallMetrics,
-} from './metrics.js';
-import { QwenLogger } from './qwen-logger/qwen-logger.js';
-import { isTelemetrySdkInitialized } from './sdk.js';
 import {
   ApiErrorEvent,
   ApiRequestEvent,
@@ -42,8 +37,25 @@ import {
   StartSessionEvent,
   ToolCallEvent,
   UserPromptEvent,
+  ChatCompressionEvent,
+  InvalidChunkEvent,
+  ContentRetryEvent,
+  ContentRetryFailureEvent,
 } from './types.js';
-import { UiEvent, uiTelemetryService } from './uiTelemetry.js';
+import {
+  recordApiErrorMetrics,
+  recordTokenUsageMetrics,
+  recordApiResponseMetrics,
+  recordToolCallMetrics,
+  recordChatCompressionMetrics,
+  recordInvalidChunk,
+  recordContentRetry,
+  recordContentRetryFailure,
+} from './metrics.js';
+import { QwenLogger } from './qwen-logger/qwen-logger.js';
+import { isTelemetrySdkInitialized } from './sdk.js';
+import { uiTelemetryService, UiEvent } from './uiTelemetry.js';
+import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
@@ -98,7 +110,7 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
   };
 
   if (shouldLogUserPrompts(config)) {
-    attributes.prompt = event.prompt;
+    attributes['prompt'] = event.prompt;
   }
 
   const logger = logs.getLogger(SERVICE_NAME);
@@ -145,6 +157,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     event.duration_ms,
     event.success,
     event.decision,
+    event.tool_type,
   );
 }
 
@@ -247,7 +260,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.timestamp': new Date().toISOString(),
   };
   if (event.response_text) {
-    attributes.response_text = event.response_text;
+    attributes['response_text'] = event.response_text;
   }
   if (event.error) {
     attributes['error.message'] = event.error;
@@ -380,6 +393,31 @@ export function logIdeConnection(
   logger.emit(logRecord);
 }
 
+export function logChatCompression(
+  config: Config,
+  event: ChatCompressionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logChatCompressionEvent(event);
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CHAT_COMPRESSION,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Chat compression (Saved ${event.tokens_before - event.tokens_after} tokens)`,
+    attributes,
+  };
+  logger.emit(logRecord);
+
+  recordChatCompressionMetrics(config, {
+    tokens_before: event.tokens_before,
+    tokens_after: event.tokens_after,
+  });
+}
+
 export function logKittySequenceOverflow(
   config: Config,
   event: KittySequenceOverflowEvent,
@@ -396,4 +434,73 @@ export function logKittySequenceOverflow(
     attributes,
   };
   logger.emit(logRecord);
+}
+export function logInvalidChunk(
+  config: Config,
+  event: InvalidChunkEvent,
+): void {
+  QwenLogger.getInstance(config)?.logInvalidChunkEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_INVALID_CHUNK,
+    'event.timestamp': event['event.timestamp'],
+  };
+
+  if (event.error_message) {
+    attributes['error.message'] = event.error_message;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Invalid chunk received from stream.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordInvalidChunk(config);
+}
+
+export function logContentRetry(
+  config: Config,
+  event: ContentRetryEvent,
+): void {
+  QwenLogger.getInstance(config)?.logContentRetryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CONTENT_RETRY,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Content retry attempt ${event.attempt_number} due to ${event.error_type}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordContentRetry(config);
+}
+
+export function logContentRetryFailure(
+  config: Config,
+  event: ContentRetryFailureEvent,
+): void {
+  QwenLogger.getInstance(config)?.logContentRetryFailureEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CONTENT_RETRY_FAILURE,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `All content retries failed after ${event.total_attempts} attempts.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordContentRetryFailure(config);
 }

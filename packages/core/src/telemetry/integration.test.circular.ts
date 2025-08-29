@@ -72,7 +72,8 @@ describe('Circular Reference Integration Test', () => {
     const logger = QwenLogger.getInstance(mockConfig);
 
     expect(() => {
-      logger?.enqueueLogEvent(problematicEvent);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      logger?.enqueueLogEvent(problematicEvent as any);
     }).not.toThrow();
   });
 

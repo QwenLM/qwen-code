@@ -23,6 +23,10 @@ import {
   MalformedJsonResponseEvent,
   IdeConnectionEvent,
   KittySequenceOverflowEvent,
+  ChatCompressionEvent,
+  InvalidChunkEvent,
+  ContentRetryEvent,
+  ContentRetryFailureEvent,
 } from '../types.js';
 import {
   RumEvent,
@@ -205,7 +209,7 @@ export class QwenLogger {
     return {
       app: {
         id: RUN_APP_ID,
-        env: process.env.DEBUG ? 'dev' : 'prod',
+        env: process.env['DEBUG'] ? 'dev' : 'prod',
         version: version || 'unknown',
         type: 'cli',
       },
@@ -225,7 +229,9 @@ export class QwenLogger {
         auth_type: authType,
         model: this.config?.getModel(),
         base_url:
-          authType === AuthType.USE_OPENAI ? process.env.OPENAI_BASE_URL : '',
+          authType === AuthType.USE_OPENAI
+            ? process.env['OPENAI_BASE_URL']
+            : '',
       },
       _v: `qwen-code@${version}`,
     };
@@ -560,6 +566,60 @@ export class QwenLogger {
         snapshots: JSON.stringify({
           sequence_length: event.sequence_length,
           truncated_sequence: event.truncated_sequence,
+        }),
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logChatCompressionEvent(event: ChatCompressionEvent): void {
+    const rumEvent = this.createActionEvent('compression', 'chat_compression', {
+      snapshots: JSON.stringify({
+        tokens_before: event.tokens_before,
+        tokens_after: event.tokens_after,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logInvalidChunkEvent(event: InvalidChunkEvent): void {
+    const rumEvent = this.createExceptionEvent('error', 'invalid_chunk', {
+      subtype: 'invalid_chunk',
+      message: event.error_message,
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logContentRetryEvent(event: ContentRetryEvent): void {
+    const rumEvent = this.createActionEvent('retry', 'content_retry', {
+      snapshots: JSON.stringify({
+        attempt_number: event.attempt_number,
+        error_type: event.error_type,
+        retry_delay_ms: event.retry_delay_ms,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logContentRetryFailureEvent(event: ContentRetryFailureEvent): void {
+    const rumEvent = this.createExceptionEvent(
+      'error',
+      'content_retry_failure',
+      {
+        subtype: 'content_retry_failure',
+        message: `Content retry failed after ${event.total_attempts} attempts`,
+        snapshots: JSON.stringify({
+          total_attempts: event.total_attempts,
+          final_error_type: event.final_error_type,
+          total_duration_ms: event.total_duration_ms,
         }),
       },
     );

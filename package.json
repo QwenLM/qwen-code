@@ -35,7 +35,7 @@
     "test:e2e": "cross-env VERBOSE=true KEEP_OUTPUT=true npm run test:integration:sandbox:none",
     "test:integration:all": "npm run test:integration:sandbox:none && npm run test:integration:sandbox:docker && npm run test:integration:sandbox:podman",
     "test:integration:sandbox:none": "GEMINI_SANDBOX=false vitest run --root ./integration-tests",
-    "test:integration:sandbox:docker": "npm run build:sandbox && GEMINI_SANDBOX=docker vitest run --root ./integration-tests",
+    "test:integration:sandbox:docker": "GEMINI_SANDBOX=docker npm run build:sandbox && GEMINI_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "GEMINI_SANDBOX=podman vitest run --root ./integration-tests",
     "lint": "eslint . --ext .ts,.tsx && eslint integration-tests",
     "lint:fix": "eslint . --fix && eslint integration-tests --fix",
@@ -92,6 +92,16 @@
     "yargs": "^17.7.2"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "strip-ansi": "^7.1.0"
+  },
+  "optionalDependencies": {
+    "@lydell/node-pty": "1.1.0",
+    "@lydell/node-pty-darwin-arm64": "1.1.0",
+    "@lydell/node-pty-darwin-x64": "1.1.0",
+    "@lydell/node-pty-linux-x64": "1.1.0",
+    "@lydell/node-pty-win32-arm64": "1.1.0",
+    "@lydell/node-pty-win32-x64": "1.1.0",
+    "node-pty": "^1.0.0"
   }
 }

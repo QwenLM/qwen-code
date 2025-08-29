@@ -157,7 +157,7 @@ describe('PKCE Code Generation', () => {
 describe('Type Guards', () => {
   describe('isDeviceAuthorizationSuccess', () => {
     it('should return true for successful authorization response', () => {
-      const expectedBaseUrl = process.env.DEBUG
+      const expectedBaseUrl = process.env['DEBUG']
         ? 'https://pre4-chat.qwen.ai'
         : 'https://chat.qwen.ai';
 

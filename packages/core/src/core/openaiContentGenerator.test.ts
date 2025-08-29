@@ -578,7 +578,7 @@ describe('OpenAIContentGenerator', () => {
         responses.push(response);
       }
 
-      // Tool calls should only appear in the final response
+      // First response should contain the complete tool call (accumulated from streaming)
       if (
         responses[0]?.candidates &&
         responses[0].candidates.length > 0 &&
@@ -586,7 +586,15 @@ describe('OpenAIContentGenerator', () => {
       ) {
         const firstCandidate = responses[0].candidates[0];
         if (firstCandidate.content) {
-          expect(firstCandidate.content.parts).toEqual([]);
+          expect(firstCandidate.content.parts).toEqual([
+            {
+              functionCall: {
+                id: 'call_123',
+                name: 'get_weather',
+                args: { location: 'NYC' },
+              },
+            },
+          ]);
         }
       }
       if (
