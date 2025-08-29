@@ -203,7 +203,7 @@ describe('activate with multiple folders', () => {
       expect(
         context.environmentVariableCollection.replace,
       ).toHaveBeenCalledWith(
-        'GEMINI_CLI_IDE_WORKSPACE_PATH',
+        'QWEN_CODE_IDE_WORKSPACE_PATH',
         'c:/foo/bar;d:/baz/qux',
       );
     },
