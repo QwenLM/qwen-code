@@ -18,26 +18,26 @@ On startup, Qwen Code will automatically discover and load any `.js` or `.ts` fi
 
 Each tool file must export a default object that defines the tool's structure and behavior. This object must conform to the following interface:
 
--   `name` (string, required): The name of the tool that the agent will use to call it (e.g., `my_custom_tool`).
--   `description` (string, required): A detailed description of what the tool does. This is crucial for the agent to understand when and how to use the tool.
--   `parameterSchema` (object, optional): A JSON Schema object defining the parameters the tool accepts.
--   `build` (function, required): A function that receives the parameters and returns an `Invocation` object.
--   `displayName` (string, optional): A user-friendly name for the tool. Defaults to `name`.
--   `kind` (string, optional): The kind of tool, used for categorization. Defaults to `'other'`.
+- `name` (string, required): The name of the tool that the agent will use to call it (e.g., `my_custom_tool`).
+- `description` (string, required): A detailed description of what the tool does. This is crucial for the agent to understand when and how to use the tool.
+- `parameterSchema` (object, optional): A JSON Schema object defining the parameters the tool accepts.
+- `build` (function, required): A function that receives the parameters and returns an `Invocation` object.
+- `displayName` (string, optional): A user-friendly name for the tool. Defaults to `name`.
+- `kind` (string, optional): The kind of tool, used for categorization. Defaults to `'other'`.
 
 ### The Invocation Object
 
 The `build` function must return an object (or a class instance) that has an `execute` method.
 
--   `execute()`: This method contains the core logic of your tool. It should return a `Promise` that resolves to a `ToolResult` object.
+- `execute()`: This method contains the core logic of your tool. It should return a `Promise` that resolves to a `ToolResult` object.
 
 ### The ToolResult Object
 
 The `ToolResult` object that your `execute` method returns should have the following properties:
 
--   `llmContent` (string): The factual output of the tool. This is what the agent will see and use in its next reasoning step.
--   `returnDisplay` (string): A user-friendly string to display in the UI after the tool is executed.
--   `summary` (string, optional): A short, one-line summary of the tool's action (e.g., "Echoed a message.").
+- `llmContent` (string): The factual output of the tool. This is what the agent will see and use in its next reasoning step.
+- `returnDisplay` (string): A user-friendly string to display in the UI after the tool is executed.
+- `summary` (string, optional): A short, one-line summary of the tool's action (e.g., "Echoed a message.").
 
 ## Example: An Echo Tool
 
@@ -56,7 +56,7 @@ class EchoInvocation {
     const result = {
       llmContent: `The tool echoed: ${this.params.message}`,
       returnDisplay: `Echo: ${this.params.message}`,
-      summary: `Echoed a message.`
+      summary: `Echoed a message.`,
     };
     return Promise.resolve(result);
   }
@@ -74,14 +74,14 @@ export default {
     properties: {
       message: {
         type: 'string',
-        description: 'The message to echo back.'
-      }
+        description: 'The message to echo back.',
+      },
     },
-    required: ['message']
+    required: ['message'],
   },
   build: (params) => {
     return new EchoInvocation(params);
-  }
+  },
 };
 ```
 
