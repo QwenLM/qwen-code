@@ -20,6 +20,7 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import { FunctionDeclaration, CallableTool, mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
 import { MockTool } from '../test-utils/tools.js';
 
 vi.mock('node:fs');
@@ -119,6 +120,8 @@ describe('ToolRegistry', () => {
     vi.mocked(fs.statSync).mockReturnValue({
       isDirectory: () => true,
     } as fs.Stats);
+    vi.mocked(fsPromises.access).mockRejectedValue(new Error('ENOENT'));
+    vi.mocked(fsPromises.readdir).mockResolvedValue([]);
     config = new Config(baseConfigParams);
     toolRegistry = new ToolRegistry(config);
     vi.spyOn(console, 'warn').mockImplementation(() => {});

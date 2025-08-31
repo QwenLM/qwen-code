@@ -5,13 +5,28 @@
  */
 
 import { FunctionDeclaration } from '@google/genai';
-import { AnyDeclarativeTool, Kind, ToolResult, BaseTool } from './tools.js';
+import {
+  AnyDeclarativeTool,
+  Kind,
+  ToolResult,
+  BaseTool,
+  DeclarativeTool,
+  ToolInvocation,
+} from './tools.js';
 import { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { discoverMcpTools } from './mcp-client.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
+import { promises as fs } from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+
+// Extracted for testability
+export async function importCustomTool(toolPath: string) {
+  return await import(toolPath);
+}
 
 type ToolParams = Record<string, unknown>;
 
@@ -124,6 +139,47 @@ Signal: Signal number or \`(none)\` if no signal was received.
   }
 }
 
+/**
+ * A wrapper for custom tools loaded from the file system.
+ * It validates the structure of the loaded tool object and adapts it
+ * to the `DeclarativeTool` interface.
+ */
+export class CustomTool extends DeclarativeTool<object, ToolResult> {
+  private customToolObject: {
+    build: (params: object) => ToolInvocation<object, ToolResult>;
+  };
+
+  constructor(customToolObject: Record<string, unknown>) {
+    // Basic validation for the structure of the loaded tool object.
+    if (
+      !customToolObject.name ||
+      !customToolObject.description ||
+      typeof customToolObject.build !== 'function'
+    ) {
+      throw new Error(
+        'Custom tool object is missing required fields (name, description, build).',
+      );
+    }
+
+    super(
+      customToolObject.name as string,
+      (customToolObject.displayName ?? customToolObject.name) as string,
+      customToolObject.description as string,
+      (customToolObject.kind ?? Kind.Other) as Kind,
+      customToolObject.parameterSchema ?? { type: 'object', properties: {} },
+      (customToolObject.isOutputMarkdown ?? false) as boolean,
+      (customToolObject.canUpdateOutput ?? false) as boolean,
+    );
+    this.customToolObject =
+      customToolObject as unknown as typeof this.customToolObject;
+  }
+
+  build(params: object): ToolInvocation<object, ToolResult> {
+    // The loaded object's build function is responsible for returning a valid invocation.
+    return this.customToolObject.build(params);
+  }
+}
+
 export class ToolRegistry {
   private tools: Map<string, AnyDeclarativeTool> = new Map();
   private config: Config;
@@ -182,6 +238,7 @@ export class ToolRegistry {
     this.config.getPromptRegistry().clear();
 
     await this.discoverAndRegisterToolsFromCommand();
+    await this.discoverAndRegisterToolsFromFileSystem();
 
     // discover tools using MCP servers, if configured
     await discoverMcpTools(
@@ -192,6 +249,41 @@ export class ToolRegistry {
       this.config.getDebugMode(),
       this.config.getWorkspaceContext(),
     );
+  }
+
+  private async discoverAndRegisterToolsFromFileSystem(): Promise<void> {
+    const toolsDir = path.join(os.homedir(), '.qwen', 'tools');
+    try {
+      await fs.access(toolsDir);
+    } catch (_e) {
+      // Directory doesn't exist, so no custom tools to load.
+      return;
+    }
+
+    const files = await fs.readdir(toolsDir);
+    for (const file of files) {
+      if (file.endsWith('.js') || file.endsWith('.ts')) {
+        const toolPath = path.join(toolsDir, file);
+        try {
+          const toolModule = await importCustomTool(toolPath);
+          if (toolModule.default && typeof toolModule.default === 'object') {
+            try {
+              const customTool = new CustomTool(
+                toolModule.default as Record<string, unknown>,
+              );
+              this.registerTool(customTool);
+            } catch (e) {
+              console.error(
+                `Error validating custom tool from ${toolPath}:`,
+                e,
+              );
+            }
+          }
+        } catch (e) {
+          console.error(`Failed to load custom tool from ${toolPath}:`, e);
+        }
+      }
+    }
   }
 
   /**
