@@ -1,0 +1,39 @@
+{
+  "name": "@qwen-code/test-generator",
+  "version": "1.0.0",
+  "description": "AI-powered test generator using Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "qwen-test": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code-core": "file:../../packages/core",
+    "chalk": "^5.3.0",
+    "commander": "^12.0.0",
+    "inquirer": "^9.2.15",
+    "fs-extra": "^11.2.0",
+    "glob": "^10.4.5",
+    "jest": "^29.7.0",
+    "vitest": "^3.1.1",
+    "mocha": "^10.3.0",
+    "react": "^19.1.0",
+    "ink": "^6.0.1",
+    "ink-select-input": "^6.2.0",
+    "ink-text-input": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "@types/fs-extra": "^11.0.4",
+    "@types/jest": "^29.5.12",
+    "@types/mocha": "^10.0.6",
+    "typescript": "^5.3.3",
+    "tsx": "^4.19.2"
+  }
+}

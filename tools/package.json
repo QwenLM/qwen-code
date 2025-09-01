@@ -1,0 +1,51 @@
+{
+  "name": "@qwen-code/tools-suite",
+  "version": "1.0.0",
+  "description": "Complete suite of AI-powered development tools built on Qwen Code",
+  "type": "module",
+  "workspaces": [
+    "code-review-assistant",
+    "doc-generator",
+    "test-generator",
+    "migration-assistant",
+    "performance-analyzer"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "install:all": "npm install --workspaces",
+    "test": "npm run test --workspaces",
+    "clean": "npm run clean --workspaces",
+    "setup": "npm run install:all && npm run build"
+  },
+  "bin": {
+    "qwen-tools": "./bin/qwen-tools.js"
+  },
+  "keywords": [
+    "qwen-code",
+    "ai",
+    "development",
+    "tools",
+    "code-review",
+    "documentation",
+    "testing",
+    "migration",
+    "performance",
+    "workflow"
+  ],
+  "author": "Qwen Code Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QwenLM/qwen-code.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@qwen-code/qwen-code-core": "file:../packages/core"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "tsx": "^4.19.2"
+  }
+}
