@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen Code - Usage Analytics Dashboard</title>
+</head>
+<body>
+    <div id="root"></div>
+    <script>
+        window.USAGE_DATA = [
+          {
+            "timestamp": 1678886400000,
+            "command": "/learn",
+            "tokens": 100
+          },
+          {
+            "timestamp": 1678972800000,
+            "command": "/community",
+            "tokens": 50
+          },
+          {
+            "timestamp": 1679059200000,
+            "command": "/share \"My test snippet\"",
+            "tokens": 200
+          }
+        ];
+    </script>
+</body>
+</html>

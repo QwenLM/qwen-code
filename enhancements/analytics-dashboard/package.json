@@ -1,0 +1,13 @@
+{
+  "name": "analytics-dashboard",
+  "version": "1.0.0",
+  "description": "A usage analytics dashboard for Qwen Code.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.17.1",
+    "cors": "^2.8.5"
+  }
+}

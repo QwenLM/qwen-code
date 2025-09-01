@@ -1,0 +1,36 @@
+{
+  "users": [
+    {
+      "username": "user123",
+      "password": "password123"
+    }
+  ],
+  "threads": [
+    {
+      "id": 1,
+      "title": "How do I use Qwen Code with a private git repository?",
+      "author": "user123",
+      "posts": [
+        {
+          "author": "user123",
+          "content": "I'm trying to use Qwen Code with a private git repository, but I'm having trouble authenticating. Can anyone help?"
+        },
+        {
+          "author": "dev456",
+          "content": "You need to make sure that your SSH key is properly configured."
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Showcase: A script to automate release notes generation",
+      "author": "coder_jane",
+      "posts": [
+        {
+          "author": "coder_jane",
+          "content": "I created a script that uses Qwen Code to automatically generate release notes from git commits. Check it out!"
+        }
+      ]
+    }
+  ]
+}

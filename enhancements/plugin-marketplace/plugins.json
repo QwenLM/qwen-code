@@ -1,0 +1,22 @@
+{
+  "plugins": [
+    {
+      "id": "stats-for-nerds",
+      "name": "Stats for Nerds",
+      "description": "Displays advanced statistics about your Qwen Code usage.",
+      "author": "dev456"
+    },
+    {
+      "id": "code-visualizer",
+      "name": "Code Visualizer",
+      "description": "Generates visualizations of your codebase.",
+      "author": "artist_coder"
+    },
+    {
+        "id": "github-pr-summary",
+        "name": "GitHub PR Summary",
+        "description": "Summarizes GitHub pull requests.",
+        "author": "user123"
+    }
+  ]
+}
