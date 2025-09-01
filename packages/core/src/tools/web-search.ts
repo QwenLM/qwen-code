@@ -152,7 +152,7 @@ export class WebSearchTool extends BaseDeclarativeTool<
   WebSearchToolParams,
   WebSearchToolResult
 > {
-  static readonly Name: string = 'google_web_search';
+  static readonly Name: string = 'web_search';
 
   constructor(private readonly config: Config) {
     super(

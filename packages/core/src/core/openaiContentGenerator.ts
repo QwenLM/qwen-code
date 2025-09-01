@@ -935,7 +935,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
 
             messages.push({
               role: 'assistant' as const,
-              content: textParts.join('\n') || null,
+              content: textParts.join('') || null,
               tool_calls: toolCalls,
             });
           }
@@ -945,7 +945,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
               content.role === 'model'
                 ? ('assistant' as const)
                 : ('user' as const);
-            const text = textParts.join('\n');
+            const text = textParts.join('');
             if (text) {
               messages.push({ role, content: text });
             }
