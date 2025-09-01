@@ -17,7 +17,6 @@ import * as path from 'path';
 import * as process from 'process';
 
 import { QWEN_DIR } from '../utils/paths.js';
-import { SchemaValidator } from '../utils/schemaValidator.js';
 import { Config } from '../config/config.js';
 
 export interface TodoItem {
@@ -416,14 +415,6 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   }
 
   override validateToolParams(params: TodoWriteParams): string | null {
-    const errors = SchemaValidator.validate(
-      this.schema.parametersJsonSchema,
-      params,
-    );
-    if (errors) {
-      return errors;
-    }
-
     // Validate todos array
     if (!Array.isArray(params.todos)) {
       return 'Parameter "todos" must be an array.';

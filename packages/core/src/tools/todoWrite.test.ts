@@ -87,7 +87,7 @@ describe('TodoWriteTool', () => {
       };
 
       const result = tool.validateToolParams(params);
-      expect(result).toContain('non-empty "id"');
+      expect(result).toContain('non-empty "id" string');
     });
 
     it('should reject todos with invalid status', () => {
