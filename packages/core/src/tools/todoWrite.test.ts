@@ -75,7 +75,9 @@ describe('TodoWriteTool', () => {
       };
 
       const result = tool.validateToolParams(params);
-      expect(result).toContain('must NOT have fewer than 1 characters');
+      expect(result).toContain(
+        'Each todo must have a non-empty "content" string',
+      );
     });
 
     it('should reject todos with empty id', () => {
@@ -103,7 +105,9 @@ describe('TodoWriteTool', () => {
       };
 
       const result = tool.validateToolParams(params);
-      expect(result).toContain('must be equal to one of the allowed values');
+      expect(result).toContain(
+        'Each todo must have a valid "status" (pending, in_progress, completed)',
+      );
     });
 
     it('should reject todos with duplicate IDs', () => {
