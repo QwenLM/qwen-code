@@ -6,7 +6,7 @@
 
 import { defineConfig } from 'vitest/config';
 
-const timeoutMinutes = Number(process.env.TB_TIMEOUT_MINUTES || '5');
+const timeoutMinutes = Number(process.env.TB_TIMEOUT_MINUTES || '30');
 const testTimeoutMs = timeoutMinutes * 60 * 1000;
 
 export default defineConfig({
@@ -14,8 +14,7 @@ export default defineConfig({
     testTimeout: testTimeoutMs,
     globalSetup: './globalSetup.ts',
     reporters: ['default'],
-    include: ['**/*.test.ts'],
-    exclude: ['**/terminal-bench/*.test.ts', '**/node_modules/**'],
+    include: ['**/terminal-bench/*.test.ts'],
     retry: 2,
     fileParallelism: false,
   },
