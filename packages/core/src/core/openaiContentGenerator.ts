@@ -90,6 +90,11 @@ interface OpenAIResponseFormat {
   usage?: OpenAIUsage;
 }
 
+/**
+ * @deprecated refactored to ./openaiContentGenerator
+ * use `createOpenAIContentGenerator` instead
+ * or extend `OpenAIContentGenerator` to add customized behavior
+ */
 export class OpenAIContentGenerator implements ContentGenerator {
   protected client: OpenAI;
   private model: string;
