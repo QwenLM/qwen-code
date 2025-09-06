@@ -18,6 +18,7 @@ import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { MemoryTool, GEMINI_CONFIG_DIR } from '../tools/memoryTool.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
+import { GenerateContentConfig } from '@google/genai';
 
 export interface ModelTemplateMapping {
   baseUrls?: string[];
@@ -42,6 +43,48 @@ function normalizeUrl(url: string): string {
 function urlMatches(urlArray: string[], targetUrl: string): boolean {
   const normalizedTarget = normalizeUrl(targetUrl);
   return urlArray.some((url) => normalizeUrl(url) === normalizedTarget);
+}
+
+/**
+ * Processes a custom system instruction by appending user memory if available.
+ * This function should only be used when there is actually a custom instruction.
+ *
+ * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
+ * @param userMemory - User memory to append
+ * @returns Processed custom system instruction with user memory appended
+ */
+export function getCustomSystemPrompt(
+  customInstruction: GenerateContentConfig['systemInstruction'],
+  userMemory?: string,
+): string {
+  // Extract text from custom instruction
+  let instructionText = '';
+
+  if (typeof customInstruction === 'string') {
+    instructionText = customInstruction;
+  } else if (Array.isArray(customInstruction)) {
+    // PartUnion[]
+    instructionText = customInstruction
+      .map((part) => (typeof part === 'string' ? part : part.text || ''))
+      .join('');
+  } else if (customInstruction && 'parts' in customInstruction) {
+    // Content
+    instructionText =
+      customInstruction.parts
+        ?.map((part) => (typeof part === 'string' ? part : part.text || ''))
+        .join('') || '';
+  } else if (customInstruction && 'text' in customInstruction) {
+    // PartUnion (single part)
+    instructionText = customInstruction.text || '';
+  }
+
+  // Append user memory using the same pattern as getCoreSystemPrompt
+  const memorySuffix =
+    userMemory && userMemory.trim().length > 0
+      ? `\n\n---\n\n${userMemory.trim()}`
+      : '';
+
+  return `${instructionText}${memorySuffix}`;
 }
 
 export function getCoreSystemPrompt(

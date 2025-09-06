@@ -157,7 +157,7 @@ export class WebSearchTool extends BaseDeclarativeTool<
   constructor(private readonly config: Config) {
     super(
       WebSearchTool.Name,
-      'TavilySearch',
+      'WebSearch',
       'Performs a web search using the Tavily API and returns a concise answer with sources. Requires the TAVILY_API_KEY environment variable.',
       Kind.Search,
       {

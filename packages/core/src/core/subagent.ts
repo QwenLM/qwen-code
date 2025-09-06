@@ -118,15 +118,15 @@ export interface ModelConfig {
    *
    * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */
-  model: string;
+  model?: string;
   /**
    * The temperature for the model's sampling process.
    */
-  temp: number;
+  temp?: number;
   /**
    * The top-p value for nucleus sampling.
    */
-  top_p: number;
+  top_p?: number;
 }
 
 /**
@@ -138,7 +138,7 @@ export interface ModelConfig {
  */
 export interface RunConfig {
   /** The maximum execution time for the subagent in minutes. */
-  max_time_minutes: number;
+  max_time_minutes?: number;
   /**
    * The maximum number of conversational turns (a user message + model response)
    * before the execution is terminated. Helps prevent infinite loops.
@@ -387,7 +387,10 @@ export class SubAgentScope {
           break;
         }
         let durationMin = (Date.now() - startTime) / (1000 * 60);
-        if (durationMin >= this.runConfig.max_time_minutes) {
+        if (
+          this.runConfig.max_time_minutes &&
+          durationMin >= this.runConfig.max_time_minutes
+        ) {
           this.output.terminate_reason = SubagentTerminateMode.TIMEOUT;
           break;
         }
@@ -413,7 +416,10 @@ export class SubAgentScope {
         }
 
         durationMin = (Date.now() - startTime) / (1000 * 60);
-        if (durationMin >= this.runConfig.max_time_minutes) {
+        if (
+          this.runConfig.max_time_minutes &&
+          durationMin >= this.runConfig.max_time_minutes
+        ) {
           this.output.terminate_reason = SubagentTerminateMode.TIMEOUT;
           break;
         }
@@ -588,7 +594,9 @@ export class SubAgentScope {
         this.runtimeContext.getSessionId(),
       );
 
-      this.runtimeContext.setModel(this.modelConfig.model);
+      if (this.modelConfig.model) {
+        this.runtimeContext.setModel(this.modelConfig.model);
+      }
 
       return new GeminiChat(
         this.runtimeContext,

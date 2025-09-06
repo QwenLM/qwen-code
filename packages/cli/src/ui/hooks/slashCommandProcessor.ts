@@ -51,6 +51,8 @@ export const useSlashCommandProcessor = (
   setQuittingMessages: (message: HistoryItem[]) => void,
   openPrivacyNotice: () => void,
   openSettingsDialog: () => void,
+  openSubagentCreateDialog: () => void,
+  openAgentsManagerDialog: () => void,
   toggleVimEnabled: () => Promise<boolean>,
   setIsProcessing: (isProcessing: boolean) => void,
   setGeminiMdFileCount: (count: number) => void,
@@ -351,16 +353,19 @@ export const useSlashCommandProcessor = (
                     toolArgs: result.toolArgs,
                   };
                 case 'message':
-                  addItem(
-                    {
-                      type:
-                        result.messageType === 'error'
-                          ? MessageType.ERROR
-                          : MessageType.INFO,
-                      text: result.content,
-                    },
-                    Date.now(),
-                  );
+                  if (result.messageType === 'info') {
+                    addMessage({
+                      type: MessageType.INFO,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
+                  } else {
+                    addMessage({
+                      type: MessageType.ERROR,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
+                  }
                   return { type: 'handled' };
                 case 'dialog':
                   switch (result.dialog) {
@@ -378,6 +383,12 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'settings':
                       openSettingsDialog();
+                      return { type: 'handled' };
+                    case 'subagent_create':
+                      openSubagentCreateDialog();
+                      return { type: 'handled' };
+                    case 'subagent_list':
+                      openAgentsManagerDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
@@ -553,6 +564,8 @@ export const useSlashCommandProcessor = (
       openEditorDialog,
       setQuittingMessages,
       openSettingsDialog,
+      openSubagentCreateDialog,
+      openAgentsManagerDialog,
       setShellConfirmationRequest,
       setSessionShellAllowlist,
       setIsProcessing,

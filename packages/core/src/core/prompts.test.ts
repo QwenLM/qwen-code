@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getCoreSystemPrompt } from './prompts.js';
+import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -361,5 +361,47 @@ describe('URL matching with trailing slash compatibility', () => {
 
     // Restore original environment variables
     process.env = originalEnv;
+  });
+});
+
+describe('getCustomSystemPrompt', () => {
+  it('should handle string custom instruction without user memory', () => {
+    const customInstruction =
+      'You are a helpful assistant specialized in code review.';
+    const result = getCustomSystemPrompt(customInstruction);
+
+    expect(result).toBe(
+      'You are a helpful assistant specialized in code review.',
+    );
+    expect(result).not.toContain('---');
+  });
+
+  it('should handle string custom instruction with user memory', () => {
+    const customInstruction =
+      'You are a helpful assistant specialized in code review.';
+    const userMemory =
+      'Remember to be extra thorough.\nFocus on security issues.';
+    const result = getCustomSystemPrompt(customInstruction, userMemory);
+
+    expect(result).toBe(
+      'You are a helpful assistant specialized in code review.\n\n---\n\nRemember to be extra thorough.\nFocus on security issues.',
+    );
+    expect(result).toContain('---');
+  });
+
+  it('should handle Content object with parts array and user memory', () => {
+    const customInstruction = {
+      parts: [
+        { text: 'You are a code assistant. ' },
+        { text: 'Always provide examples.' },
+      ],
+    };
+    const userMemory = 'User prefers TypeScript examples.';
+    const result = getCustomSystemPrompt(customInstruction, userMemory);
+
+    expect(result).toBe(
+      'You are a code assistant. Always provide examples.\n\n---\n\nUser prefers TypeScript examples.',
+    );
+    expect(result).toContain('---');
   });
 });

@@ -144,8 +144,11 @@ describe('useSlashCommandProcessor', () => {
         mockSetQuittingMessages,
         vi.fn(), // openPrivacyNotice
         vi.fn(), // openSettingsDialog
+        vi.fn(), // openSubagentCreateDialog
+        vi.fn(), // openAgentsManagerDialog
         vi.fn(), // toggleVimEnabled
         setIsProcessing,
+        vi.fn(), // setGeminiMdFileCount
       ),
     );
 
@@ -894,11 +897,12 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // toggleCorgiMode
           mockSetQuittingMessages,
           vi.fn(), // openPrivacyNotice
-
           vi.fn(), // openSettingsDialog
+          vi.fn(), // openSubagentCreateDialog
+          vi.fn(), // openAgentsManagerDialog
           vi.fn(), // toggleVimEnabled
-          vi.fn().mockResolvedValue(false), // toggleVimEnabled
           vi.fn(), // setIsProcessing
+          vi.fn(), // setGeminiMdFileCount
         ),
       );
 

@@ -407,7 +407,7 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   constructor(private readonly config: Config) {
     super(
       TodoWriteTool.Name,
-      'Todo Write',
+      'TodoWrite',
       todoWriteToolDescription,
       Kind.Think,
       todoWriteToolSchemaData.parametersJsonSchema as Record<string, unknown>,

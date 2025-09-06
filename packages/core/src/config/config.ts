@@ -54,6 +54,7 @@ import {
 } from '../services/fileSystemService.js';
 import { logCliConfiguration, logIdeConnection } from '../telemetry/loggers.js';
 import { IdeConnectionEvent, IdeConnectionType } from '../telemetry/types.js';
+import { SubagentManager } from '../subagents/subagent-manager.js';
 
 // Re-export OAuth config type
 export type { MCPOAuthConfig };
@@ -316,6 +317,7 @@ export class Config {
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private initialized: boolean = false;
+  private subagentManager: SubagentManager | null = null;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -863,6 +865,13 @@ export class Config {
       await this.gitService.initialize();
     }
     return this.gitService;
+  }
+
+  getSubagentManager(): SubagentManager {
+    if (!this.subagentManager) {
+      this.subagentManager = new SubagentManager(this.targetDir);
+    }
+    return this.subagentManager;
   }
 
   async createToolRegistry(): Promise<ToolRegistry> {
