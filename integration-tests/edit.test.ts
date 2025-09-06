@@ -7,34 +7,34 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
 
-describe('replace', () => {
-  it('should be able to replace content in a file', async () => {
+describe('edit', () => {
+  it('should be able to edit content in a file', async () => {
     const rig = new TestRig();
-    await rig.setup('should be able to replace content in a file');
+    await rig.setup('should be able to edit content in a file');
 
-    const fileName = 'file_to_replace.txt';
+    const fileName = 'file_to_edit.txt';
     const originalContent = 'original content';
-    const expectedContent = 'replaced content';
+    const expectedContent = 'edited content';
 
     rig.createFile(fileName, originalContent);
-    const prompt = `Can you replace 'original' with 'replaced' in the file 'file_to_replace.txt'`;
+    const prompt = `Can you edit the file 'file_to_edit.txt' to change 'original' to 'edited'`;
 
     const result = await rig.run(prompt);
 
-    const foundToolCall = await rig.waitForToolCall('replace');
+    const foundToolCall = await rig.waitForToolCall('edit');
 
     // Add debugging information
     if (!foundToolCall) {
       printDebugInfo(rig, result);
     }
 
-    expect(foundToolCall, 'Expected to find a replace tool call').toBeTruthy();
+    expect(foundToolCall, 'Expected to find an edit tool call').toBeTruthy();
 
     // Validate model output - will throw if no output, warn if missing expected content
     validateModelOutput(
       result,
-      ['replaced', 'file_to_replace.txt'],
-      'Replace content test',
+      ['edited', 'file_to_edit.txt'],
+      'Edit content test',
     );
 
     const newFileContent = rig.readFile(fileName);
@@ -58,7 +58,7 @@ describe('replace', () => {
     // Log success info if verbose
     vi.stubEnv('VERBOSE', 'true');
     if (process.env['VERBOSE'] === 'true') {
-      console.log('File replaced successfully. New content:', newFileContent);
+      console.log('File edited successfully. New content:', newFileContent);
     }
   });
 });

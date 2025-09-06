@@ -47,7 +47,6 @@ describe('file-system', () => {
     const foundToolCall = await rig.waitForAnyToolCall([
       'write_file',
       'edit',
-      'replace',
     ]);
 
     // Add debugging information
@@ -57,7 +56,7 @@ describe('file-system', () => {
 
     expect(
       foundToolCall,
-      'Expected to find a write_file, edit, or replace tool call',
+      'Expected to find a write_file or edit tool call',
     ).toBeTruthy();
 
     // Validate model output - will throw if no output

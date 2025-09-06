@@ -453,7 +453,7 @@ Arguments passed directly when running the CLI can override other configurations
 - **`--approval-mode <mode>`**:
   - Sets the approval mode for tool calls. Available modes:
     - `default`: Prompt for approval on each tool call (default behavior)
-    - `auto_edit`: Automatically approve edit tools (replace, write_file) while prompting for others
+    - `auto_edit`: Automatically approve edit tools (edit, write_file) while prompting for others
     - `yolo`: Automatically approve all tool calls (equivalent to `--yolo`)
   - Cannot be used together with `--yolo`. Use `--approval-mode=yolo` instead of `--yolo` for the new unified approach.
   - Example: `qwen --approval-mode auto_edit`

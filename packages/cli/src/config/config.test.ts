@@ -1665,7 +1665,7 @@ describe('loadCliConfig tool exclusions', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
     expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
+    expect(config.getExcludeTools()).not.toContain('edit');
     expect(config.getExcludeTools()).not.toContain('write_file');
   });
 
@@ -1675,7 +1675,7 @@ describe('loadCliConfig tool exclusions', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
     expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
+    expect(config.getExcludeTools()).not.toContain('edit');
     expect(config.getExcludeTools()).not.toContain('write_file');
   });
 
@@ -1685,7 +1685,7 @@ describe('loadCliConfig tool exclusions', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
     expect(config.getExcludeTools()).toContain('run_shell_command');
-    expect(config.getExcludeTools()).toContain('replace');
+    expect(config.getExcludeTools()).toContain('edit');
     expect(config.getExcludeTools()).toContain('write_file');
   });
 
@@ -1695,7 +1695,7 @@ describe('loadCliConfig tool exclusions', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
     expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('replace');
+    expect(config.getExcludeTools()).not.toContain('edit');
     expect(config.getExcludeTools()).not.toContain('write_file');
   });
 });

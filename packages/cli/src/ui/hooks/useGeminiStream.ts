@@ -913,7 +913,7 @@ export const useGeminiStream = (
       }
       const restorableToolCalls = toolCalls.filter(
         (toolCall) =>
-          (toolCall.request.name === 'replace' ||
+          (toolCall.request.name === 'edit' ||
             toolCall.request.name === 'write_file') &&
           toolCall.status === 'awaiting_approval',
       );
