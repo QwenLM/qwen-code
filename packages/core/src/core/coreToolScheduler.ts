@@ -24,6 +24,7 @@ import {
 } from '../index.js';
 import { Part, PartListUnion } from '@google/genai';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
+import { partToString } from '../utils/partUtils.js';
 import {
   isModifiableDeclarativeTool,
   ModifyContext,
@@ -161,12 +162,11 @@ export function convertToFunctionResponse(
   }
 
   if (Array.isArray(contentToProcess)) {
-    const functionResponse = createFunctionResponsePart(
+    return createFunctionResponsePart(
       callId,
       toolName,
-      'Tool execution succeeded.',
+      partToString(contentToProcess)
     );
-    return [functionResponse, ...contentToProcess];
   }
 
   // After this point, contentToProcess is a single Part object.
