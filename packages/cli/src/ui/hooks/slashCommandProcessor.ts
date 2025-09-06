@@ -51,6 +51,7 @@ export const useSlashCommandProcessor = (
   setQuittingMessages: (message: HistoryItem[]) => void,
   openPrivacyNotice: () => void,
   openSettingsDialog: () => void,
+  openModelSelectionDialog: () => void,
   toggleVimEnabled: () => Promise<boolean>,
   setIsProcessing: (isProcessing: boolean) => void,
   setGeminiMdFileCount: (count: number) => void,
@@ -379,6 +380,9 @@ export const useSlashCommandProcessor = (
                     case 'settings':
                       openSettingsDialog();
                       return { type: 'handled' };
+                    case 'model':
+                      openModelSelectionDialog();
+                      return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
                     default: {
@@ -557,6 +561,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      openModelSelectionDialog,
     ],
   );
 

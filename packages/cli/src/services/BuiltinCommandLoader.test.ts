@@ -53,6 +53,13 @@ vi.mock('../ui/commands/mcpCommand.js', () => ({
     kind: 'BUILT_IN',
   },
 }));
+vi.mock('../ui/commands/modelCommand.js', () => ({
+  modelCommand: {
+    name: 'model',
+    description: 'Model command',
+    kind: 'BUILT_IN',
+  },
+}));
 
 describe('BuiltinCommandLoader', () => {
   let mockConfig: Config;
@@ -123,5 +130,8 @@ describe('BuiltinCommandLoader', () => {
 
     const mcpCmd = commands.find((c) => c.name === 'mcp');
     expect(mcpCmd).toBeDefined();
+
+    const modelCmd = commands.find((c) => c.name === 'model');
+    expect(modelCmd).toBeDefined();
   });
 });
