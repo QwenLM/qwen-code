@@ -44,10 +44,7 @@ describe('file-system', () => {
     const result = await rig.run(`edit test.txt to have a hello world message`);
 
     // Accept multiple valid tools for editing files
-    const foundToolCall = await rig.waitForAnyToolCall([
-      'write_file',
-      'edit',
-    ]);
+    const foundToolCall = await rig.waitForAnyToolCall(['write_file', 'edit']);
 
     // Add debugging information
     if (!foundToolCall) {

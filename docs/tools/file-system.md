@@ -151,6 +151,7 @@ search_file_content(pattern="function", include="*.js", maxResults=10)
 
   - `new_string` (string, required): The exact literal text to replace `old_string` with.
   - `expected_replacements` (number, optional): The number of occurrences to replace. Defaults to `1`.
+
 - **Behavior:**
   - If `old_string` is empty and `file_path` does not exist, creates a new file with `new_string` as content.
   - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence of `old_string`.
