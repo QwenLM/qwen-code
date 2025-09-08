@@ -138,36 +138,35 @@ search_file_content(pattern="function", include="*.js", maxResults=10)
 
 ## 6. `edit` (Edit)
 
-The `edit` tool replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when `expected_replacements` is specified. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
+`edit` replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when `expected_replacements` is specified. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
 
-**Key Features:**
 - **Tool name:** `edit`
-- **Purpose:** Modify existing files by replacing text content
-- **Precision:** Requires exact context matching for reliable operation
+- **Display name:** Edit
+- **File:** `edit.ts`
+- **Parameters:**
+  - `file_path` (string, required): The absolute path to the file to modify.
+  - `old_string` (string, required): The exact literal text to replace.
 
-**Parameters:**
-- `file_path` (string, required): The absolute path to the file to modify.
-- `old_string` (string, required): The exact literal text to replace.
-- `new_string` (string, required): The exact literal text to replace `old_string` with.
-- `expected_replacements` (number, optional): The number of occurrences to replace. Defaults to `1`.
+    **CRITICAL:** This string must uniquely identify the single instance to change. It should include at least 3 lines of context _before_ and _after_ the target text, matching whitespace and indentation precisely. If `old_string` is empty, the tool attempts to create a new file at `file_path` with `new_string` as content.
 
-**How it works:**
-- Searches for the exact `old_string` in the file content.
-- If one occurrence is found, it replaces it with `new_string`.
-- If multiple occurrences are found, it can replace all or a specified number.
-- This self-correction process attempts to identify the unique segment the model intended to modify, making the `edit` operation more robust even with slightly imperfect initial context.
-
-**Example:**
-```typescript
-{
-  "file_path": "/path/to/file.txt",
-  "old_string": "old text",
-  "new_string": "new text",
-  "expected_replacements": 1
-}
-```
-
-**Response:**
-- On success: `Successfully modified file: /path/to/file.txt (1 replacements).` or `Created new file: /path/to/new_file.txt with provided content.`
+  - `new_string` (string, required): The exact literal text to replace `old_string` with.
+  - `expected_replacements` (number, optional): The number of occurrences to replace. Defaults to `1`.
+- **Behavior:**
+  - If `old_string` is empty and `file_path` does not exist, creates a new file with `new_string` as content.
+  - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence of `old_string`.
+  - If one occurrence is found, it replaces it with `new_string`.
+  - **Enhanced Reliability (Multi-Stage Edit Correction):** To significantly improve the success rate of edits, especially when the model-provided `old_string` might not be perfectly precise, the tool incorporates a multi-stage edit correction mechanism.
+    - If the initial `old_string` isn't found or matches multiple locations, the tool can leverage the Gemini model to iteratively refine `old_string` (and potentially `new_string`).
+    - This self-correction process attempts to identify the unique segment the model intended to modify, making the `edit` operation more robust even with slightly imperfect initial context.
+- **Failure conditions:** Despite the correction mechanism, the tool will fail if:
+  - `file_path` is not absolute or is outside the root directory.
+  - `old_string` is not empty, but the `file_path` does not exist.
+  - `old_string` is empty, but the `file_path` already exists.
+  - `old_string` is not found in the file after attempts to correct it.
+  - `old_string` is found multiple times, and the self-correction mechanism cannot resolve it to a single, unambiguous match.
+- **Output (`llmContent`):**
+  - On success: `Successfully modified file: /path/to/file.txt (1 replacements).` or `Created new file: /path/to/new_file.txt with provided content.`
+  - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit, expected 1 occurrences but found 2...`).
+- **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
 
 These file system tools provide a foundation for Qwen Code to understand and interact with your local project context.
