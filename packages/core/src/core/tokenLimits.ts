@@ -7,7 +7,39 @@
 type Model = string;
 type TokenCount = number;
 
-export const DEFAULT_TOKEN_LIMIT = 1_048_576;
+function parseTokenLimit(value: string | undefined): TokenCount {
+  if (!value) {
+    return 1_048_576; // Default if env var is not set
+  }
+
+  const normalizedValue = value.toLowerCase().trim();
+  const multiplierMatch = normalizedValue.match(/^(\d+)([km])$/);
+  let numericValue;
+  let multiplier = 1;
+
+  if (multiplierMatch) {
+    numericValue = parseInt(multiplierMatch[1], 10);
+    const suffix = multiplierMatch[2];
+    if (suffix === 'k') {
+      multiplier = 1024;
+    } else if (suffix === 'm') {
+      multiplier = 1024 * 1024;
+    }
+  } else {
+    numericValue = parseInt(normalizedValue, 10);
+  }
+
+  if (isNaN(numericValue)) {
+    // Fallback to default if parsing fails
+    return 1_048_576;
+  }
+
+  return numericValue * multiplier;
+}
+
+export const DEFAULT_TOKEN_LIMIT: TokenCount = parseTokenLimit(
+  process.env['DEFAULT_TOKEN_LIMIT'],
+);
 
 export function tokenLimit(model: Model): TokenCount {
   // Add other models as they become relevant or if specified by config
