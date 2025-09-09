@@ -1664,9 +1664,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('edit');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getExcludeTools()).not.toContain(ShellTool.Name);
+    expect(config.getExcludeTools()).not.toContain(EditTool.Name);
+    expect(config.getExcludeTools()).not.toContain(WriteFileTool.Name);
   });
 
   it('should not exclude interactive tools in interactive mode with YOLO', async () => {
@@ -1674,9 +1674,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '--yolo'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('edit');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getExcludeTools()).not.toContain(ShellTool.Name);
+    expect(config.getExcludeTools()).not.toContain(EditTool.Name);
+    expect(config.getExcludeTools()).not.toContain(WriteFileTool.Name);
   });
 
   it('should exclude interactive tools in non-interactive mode without YOLO', async () => {
@@ -1684,9 +1684,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
-    expect(config.getExcludeTools()).toContain('run_shell_command');
-    expect(config.getExcludeTools()).toContain('edit');
-    expect(config.getExcludeTools()).toContain('write_file');
+    expect(config.getExcludeTools()).toContain(ShellTool.Name);
+    expect(config.getExcludeTools()).toContain(EditTool.Name);
+    expect(config.getExcludeTools()).toContain(WriteFileTool.Name);
   });
 
   it('should not exclude interactive tools in non-interactive mode with YOLO', async () => {
@@ -1694,9 +1694,9 @@ describe('loadCliConfig tool exclusions', () => {
     process.argv = ['node', 'script.js', '-p', 'test', '--yolo'];
     const argv = await parseArguments();
     const config = await loadCliConfig({}, [], 'test-session', argv);
-    expect(config.getExcludeTools()).not.toContain('run_shell_command');
-    expect(config.getExcludeTools()).not.toContain('edit');
-    expect(config.getExcludeTools()).not.toContain('write_file');
+    expect(config.getExcludeTools()).not.toContain(ShellTool.Name);
+    expect(config.getExcludeTools()).not.toContain(EditTool.Name);
+    expect(config.getExcludeTools()).not.toContain(WriteFileTool.Name);
   });
 });
 
