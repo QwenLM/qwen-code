@@ -104,6 +104,7 @@ describe('useSlashCommandProcessor', () => {
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
   const mockOpenAuthDialog = vi.fn();
+  const mockOpenModelSelectionDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
 
   const mockConfig = makeFakeConfig({});
@@ -116,6 +117,7 @@ describe('useSlashCommandProcessor', () => {
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
+    mockOpenModelSelectionDialog.mockClear();
   });
 
   const setupProcessorHook = (
@@ -144,8 +146,10 @@ describe('useSlashCommandProcessor', () => {
         mockSetQuittingMessages,
         vi.fn(), // openPrivacyNotice
         vi.fn(), // openSettingsDialog
+        mockOpenModelSelectionDialog,
         vi.fn(), // toggleVimEnabled
         setIsProcessing,
+        vi.fn(), // setGeminiMdFileCount
       ),
     );
 
@@ -384,6 +388,21 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockOpenThemeDialog).toHaveBeenCalled();
+    });
+
+    it('should handle "dialog: model" action', async () => {
+      const command = createTestCommand({
+        name: 'modelcmd',
+        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/modelcmd');
+      });
+
+      expect(mockOpenModelSelectionDialog).toHaveBeenCalled();
     });
 
     it('should handle "load_history" action', async () => {
@@ -896,9 +915,10 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // openPrivacyNotice
 
           vi.fn(), // openSettingsDialog
+          vi.fn(), // openModelSelectionDialog
           vi.fn(), // toggleVimEnabled
-          vi.fn().mockResolvedValue(false), // toggleVimEnabled
           vi.fn(), // setIsProcessing
+          vi.fn(), // setGeminiMdFileCount
         ),
       );
 

@@ -47,6 +47,7 @@ import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { useKeypress } from './useKeypress.js';
 import { useLogger } from './useLogger.js';
+import { useVisionAutoSwitch } from './useVisionAutoSwitch.js';
 import {
   mapToDisplay as mapTrackedToolCallsToDisplay,
   TrackedCancelledToolCall,
@@ -95,6 +96,11 @@ export const useGeminiStream = (
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
   onEditorClose: () => void,
   onCancelSubmit: () => void,
+  onVisionSwitchRequired?: (query: PartListUnion) => Promise<{
+    modelOverride?: string;
+    persistSessionModel?: string;
+    showGuidance?: boolean;
+  }>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -159,6 +165,12 @@ export const useGeminiStream = (
     onDebugMessage,
     config,
     geminiClient,
+  );
+
+  const { handleVisionSwitch, restoreOriginalModel } = useVisionAutoSwitch(
+    config,
+    addItem,
+    onVisionSwitchRequired,
   );
 
   const streamingState = useMemo(() => {
@@ -695,6 +707,20 @@ export const useGeminiStream = (
         return;
       }
 
+      // Handle vision switch requirement
+      const visionSwitchResult = await handleVisionSwitch(
+        queryToSend,
+        userMessageTimestamp,
+        options?.isContinuation || false,
+      );
+
+      if (!visionSwitchResult.shouldProceed) {
+        isSubmittingQueryRef.current = false;
+        return;
+      }
+
+      const finalQueryToSend = queryToSend;
+
       if (!options?.isContinuation) {
         startNewPrompt();
         setThought(null); // Reset thought when starting a new prompt
@@ -705,7 +731,7 @@ export const useGeminiStream = (
 
       try {
         const stream = geminiClient.sendMessageStream(
-          queryToSend,
+          finalQueryToSend,
           abortSignal,
           prompt_id!,
         );
@@ -716,6 +742,8 @@ export const useGeminiStream = (
         );
 
         if (processingStatus === StreamProcessingStatus.UserCancelled) {
+          // Restore original model if it was temporarily overridden
+          restoreOriginalModel();
           isSubmittingQueryRef.current = false;
           return;
         }
@@ -728,7 +756,13 @@ export const useGeminiStream = (
           loopDetectedRef.current = false;
           handleLoopDetectedEvent();
         }
+
+        // Restore original model if it was temporarily overridden
+        restoreOriginalModel();
       } catch (error: unknown) {
+        // Restore original model if it was temporarily overridden
+        restoreOriginalModel();
+
         if (error instanceof UnauthorizedError) {
           onAuthError();
         } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -766,6 +800,8 @@ export const useGeminiStream = (
       startNewPrompt,
       getPromptCount,
       handleLoopDetectedEvent,
+      handleVisionSwitch,
+      restoreOriginalModel,
     ],
   );
 

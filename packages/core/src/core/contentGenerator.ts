@@ -208,19 +208,15 @@ export async function createContentGenerator(
     }
 
     // Import OpenAIContentGenerator dynamically to avoid circular dependencies
-    const { OpenAIContentGenerator } = await import(
-      './openaiContentGenerator.js'
+    const { createOpenAIContentGenerator } = await import(
+      './openaiContentGenerator/index.js'
     );
 
     // Always use OpenAIContentGenerator, logging is controlled by enableOpenAILogging flag
-    return new OpenAIContentGenerator(config, gcConfig);
+    return createOpenAIContentGenerator(config, gcConfig);
   }
 
   if (config.authType === AuthType.QWEN_OAUTH) {
-    if (config.apiKey !== 'QWEN_OAUTH_DYNAMIC_TOKEN') {
-      throw new Error('Invalid Qwen OAuth configuration');
-    }
-
     // Import required classes dynamically
     const { getQwenOAuthClient: getQwenOauthClient } = await import(
       '../qwen/qwenOAuth2.js'
