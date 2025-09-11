@@ -116,8 +116,8 @@ describe('useSlashCompletion', () => {
 
       expect(result.current.suggestions).toEqual([
         {
-          label: 'stats',
-          value: 'stats',
+          label: 'usage',
+          value: 'usage',
           description: 'check session stats. Usage: /stats [model|tools]',
         },
       ]);
