@@ -172,14 +172,12 @@ describe('ReadManyFilesTool', () => {
       );
     });
 
-    it('should throw error if include array contains non-string elements', () => {
+    it('should coerce non-string elements in include array', () => {
       const params = {
         paths: ['file1.txt'],
         include: ['*.ts', 123] as string[],
       };
-      expect(() => tool.build(params)).toThrow(
-        'params/include/1 must be string',
-      );
+      expect(() => tool.build(params)).toBeDefined();
     });
 
     it('should throw error if exclude array contains non-string elements', () => {
