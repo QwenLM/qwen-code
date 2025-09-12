@@ -204,9 +204,16 @@ export class WebFetchTool extends BaseDeclarativeTool<
         type: 'object',
       },
     );
+    
+    // Use the configured proxy if available
     const proxy = config.getProxy();
     if (proxy) {
       setGlobalDispatcher(new ProxyAgent(proxy as string));
+    } 
+    // If no configured proxy, check if sandbox proxy is set via GEMINI_SANDBOX_PROXY_COMMAND
+    else if (process.env['GEMINI_SANDBOX_PROXY_COMMAND']) {
+      // When GEMINI_SANDBOX_PROXY_COMMAND is set, the proxy listens on localhost:8877
+      setGlobalDispatcher(new ProxyAgent('http://localhost:8877'));
     }
   }
 
