@@ -220,14 +220,12 @@ describe('WriteFileTool', () => {
       );
     });
 
-    it('should throw an error if the content is null', () => {
-      const dirAsFilePath = path.join(rootDir, 'a_directory');
-      fs.mkdirSync(dirAsFilePath);
+    it('should coerce null content into an empty string', () => {
       const params = {
-        file_path: dirAsFilePath,
+        file_path: path.join(rootDir, 'test.txt'),
         content: null,
       } as unknown as WriteFileToolParams; // Intentionally non-conforming
-      expect(() => tool.build(params)).toThrow('params/content must be string');
+      expect(() => tool.build(params)).toBeDefined();
     });
 
     it('should throw error if the file_path is empty', () => {

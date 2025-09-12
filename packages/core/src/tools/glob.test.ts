@@ -54,6 +54,9 @@ describe('GlobTool', () => {
     // Ensure a noticeable difference in modification time
     await new Promise((resolve) => setTimeout(resolve, 50));
     await fs.writeFile(path.join(tempRootDir, 'newer.sortme'), 'newer_content');
+
+    // For type coercion testing
+    await fs.mkdir(path.join(tempRootDir, '123'));
   });
 
   afterEach(async () => {
@@ -248,26 +251,20 @@ describe('GlobTool', () => {
       );
     });
 
-    it('should return error if path is provided but is not a string (schema validation)', () => {
+    it('should pass if path is provided but is not a string (type coercion)', () => {
       const params = {
         pattern: '*.ts',
         path: 123,
-      };
-      // @ts-expect-error - We're intentionally creating invalid params for testing
-      expect(globTool.validateToolParams(params)).toBe(
-        'params/path must be string',
-      );
+      } as unknown as GlobToolParams; // Force incorrect type
+      expect(globTool.validateToolParams(params)).toBeNull();
     });
 
-    it('should return error if case_sensitive is provided but is not a boolean (schema validation)', () => {
+    it('should pass if case_sensitive is provided but is not a boolean (type coercion)', () => {
       const params = {
         pattern: '*.ts',
         case_sensitive: 'true',
-      };
-      // @ts-expect-error - We're intentionally creating invalid params for testing
-      expect(globTool.validateToolParams(params)).toBe(
-        'params/case_sensitive must be boolean',
-      );
+      } as unknown as GlobToolParams; // Force incorrect type
+      expect(globTool.validateToolParams(params)).toBeNull();
     });
 
     it("should return error if search path resolves outside the tool's root directory", () => {
