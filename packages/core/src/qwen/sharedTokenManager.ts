@@ -26,17 +26,20 @@ const QWEN_LOCK_FILENAME = 'oauth_creds.lock';
 // Token and Cache Configuration
 const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // 30 seconds
 const LOCK_TIMEOUT_MS = 10000; // 10 seconds lock timeout
-const CACHE_CHECK_INTERVAL_MS = 1000; // 1 second cache check interval
+const CACHE_CHECK_INTERVAL_MS = 5000; // 5 seconds cache check interval (increased from 1 second)
 
 // Lock acquisition configuration (can be overridden for testing)
 interface LockConfig {
   maxAttempts: number;
   attemptInterval: number;
+  // Add exponential backoff parameters
+  maxInterval: number;
 }
 
 const DEFAULT_LOCK_CONFIG: LockConfig = {
-  maxAttempts: 50,
-  attemptInterval: 200,
+  maxAttempts: 20, // Reduced from 50 to prevent excessive waiting
+  attemptInterval: 100, // Reduced from 200ms to check more frequently
+  maxInterval: 2000, // Maximum interval for exponential backoff
 };
 
 /**
@@ -300,7 +303,25 @@ export class SharedTokenManager {
 
     try {
       const filePath = this.getCredentialFilePath();
-      const stats = await fs.stat(filePath);
+      // Add timeout to file stat operation
+      const withTimeout = async <T>(
+        promise: Promise<T>,
+        timeoutMs: number,
+      ): Promise<T> =>
+        Promise.race([
+          promise,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(`File operation timed out after ${timeoutMs}ms`),
+                ),
+              timeoutMs,
+            ),
+          ),
+        ]);
+
+      const stats = await withTimeout(fs.stat(filePath), 3000);
       const fileModTime = stats.mtimeMs;
 
       // Reload credentials if file has been modified since last cache
@@ -423,6 +444,7 @@ export class SharedTokenManager {
     qwenClient: IQwenOAuth2Client,
     forceRefresh = false,
   ): Promise<QwenCredentials> {
+    const startTime = Date.now();
     const lockPath = this.getLockFilePath();
 
     try {
@@ -438,6 +460,15 @@ export class SharedTokenManager {
 
       // Acquire distributed file lock
       await this.acquireLock(lockPath);
+
+      // Check if the operation is taking too long
+      const lockAcquisitionTime = Date.now() - startTime;
+      if (lockAcquisitionTime > 5000) {
+        // 5 seconds warning threshold
+        console.warn(
+          `Token refresh lock acquisition took ${lockAcquisitionTime}ms`,
+        );
+      }
 
       // Double-check if another process already refreshed the token (unless force refresh is requested)
       // Skip the time-based throttling since we're already in a locked refresh operation
@@ -455,6 +486,13 @@ export class SharedTokenManager {
 
       // Perform the actual token refresh
       const response = await qwenClient.refreshAccessToken();
+
+      // Check if the token refresh is taking too long
+      const totalOperationTime = Date.now() - startTime;
+      if (totalOperationTime > 10000) {
+        // 10 seconds warning threshold
+        console.warn(`Token refresh operation took ${totalOperationTime}ms`);
+      }
 
       if (!response || isErrorResponse(response)) {
         const errorData = response as ErrorData;
@@ -551,9 +589,27 @@ export class SharedTokenManager {
     const dirPath = path.dirname(filePath);
     const tempPath = `${filePath}.tmp.${randomUUID()}`;
 
+    // Add timeout wrapper for file operations
+    const withTimeout = async <T>(
+      promise: Promise<T>,
+      timeoutMs: number,
+    ): Promise<T> =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Operation timed out after ${timeoutMs}ms`)),
+            timeoutMs,
+          ),
+        ),
+      ]);
+
     // Create directory with restricted permissions
     try {
-      await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+      await withTimeout(
+        fs.mkdir(dirPath, { recursive: true, mode: 0o700 }),
+        5000,
+      );
     } catch (error) {
       throw new TokenManagerError(
         TokenError.FILE_ACCESS_ERROR,
@@ -566,18 +622,21 @@ export class SharedTokenManager {
 
     try {
       // Write to temporary file first with restricted permissions
-      await fs.writeFile(tempPath, credString, { mode: 0o600 });
+      await withTimeout(
+        fs.writeFile(tempPath, credString, { mode: 0o600 }),
+        5000,
+      );
 
       // Atomic move to final location
-      await fs.rename(tempPath, filePath);
+      await withTimeout(fs.rename(tempPath, filePath), 5000);
 
       // Update cached file modification time atomically after successful write
-      const stats = await fs.stat(filePath);
+      const stats = await withTimeout(fs.stat(filePath), 5000);
       this.memoryCache.fileModTime = stats.mtimeMs;
     } catch (error) {
       // Clean up temp file if it exists
       try {
-        await fs.unlink(tempPath);
+        await withTimeout(fs.unlink(tempPath), 1000);
       } catch (_cleanupError) {
         // Ignore cleanup errors - temp file might not exist
       }
@@ -628,8 +687,10 @@ export class SharedTokenManager {
    * @throws TokenManagerError if lock cannot be acquired within timeout period
    */
   private async acquireLock(lockPath: string): Promise<void> {
-    const { maxAttempts, attemptInterval } = this.lockConfig;
+    const { maxAttempts, attemptInterval, maxInterval } = this.lockConfig;
     const lockId = randomUUID(); // Use random UUID instead of PID for security
+
+    let currentInterval = attemptInterval;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
@@ -671,8 +732,10 @@ export class SharedTokenManager {
             );
           }
 
-          // Wait before retrying
-          await new Promise((resolve) => setTimeout(resolve, attemptInterval));
+          // Wait before retrying with exponential backoff
+          await new Promise((resolve) => setTimeout(resolve, currentInterval));
+          // Increase interval for next attempt (exponential backoff), but cap at maxInterval
+          currentInterval = Math.min(currentInterval * 1.5, maxInterval);
         } else {
           throw new TokenManagerError(
             TokenError.FILE_ACCESS_ERROR,
