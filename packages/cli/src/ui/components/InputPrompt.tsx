@@ -81,6 +81,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [cursorPosition, setCursorPosition] = useState<[number, number]>([
     0, 0,
   ]);
+
+  // Paste detection state
+  const [pasteDetectionActive, setPasteDetectionActive] = useState(false);
+  const pasteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastInputTimeRef = useRef(Date.now());
   const shellHistory = useShellHistory(config.getProjectRoot());
   const historyData = shellHistory.history;
 
@@ -234,6 +239,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleInput = useCallback(
     (key: Key) => {
+      const now = Date.now();
+      const timeSinceLastInput = now - lastInputTimeRef.current;
+      lastInputTimeRef.current = now;
+
       /// We want to handle paste even when not focused to support drag and drop.
       if (!focus && !key.paste) {
         return;
@@ -242,6 +251,48 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (key.paste) {
         // Ensure we never accidentally interpret paste as regular input.
         buffer.handleInput(key);
+        return;
+      }
+
+      // More precise paste detection system
+      const isVeryRapidInput = timeSinceLastInput < 5; // Extremely fast input (< 5ms)
+      const hasNewlines = key.sequence && /[\n\r]/.test(key.sequence);
+      const isLargeInput = key.sequence && key.sequence.length > 10; // Increased threshold
+      const isNormalKey = !key.ctrl && !key.meta && !key.shift;
+      const isMultiCharWithNewlines = key.sequence && key.sequence.length > 1 && hasNewlines;
+
+      // Detect start of paste operation - more conservative criteria
+      if (isNormalKey && (isLargeInput || isMultiCharWithNewlines || (isVeryRapidInput && hasNewlines))) {
+        setPasteDetectionActive(true);
+
+        // Clear any existing timeout
+        if (pasteTimeoutRef.current) {
+          clearTimeout(pasteTimeoutRef.current);
+        }
+
+        // Set timeout to end paste detection
+        pasteTimeoutRef.current = setTimeout(() => {
+          setPasteDetectionActive(false);
+        }, 50); // Reduced to 50ms window
+
+        // Treat as paste operation
+        const pasteKey = { ...key, paste: true };
+        buffer.handleInput(pasteKey);
+        return;
+      }
+
+      // If we're in paste detection mode, treat all input as paste
+      if (pasteDetectionActive && isNormalKey && (isVeryRapidInput || hasNewlines)) {
+        // Only extend if it's very rapid or has newlines
+        if (pasteTimeoutRef.current) {
+          clearTimeout(pasteTimeoutRef.current);
+        }
+        pasteTimeoutRef.current = setTimeout(() => {
+          setPasteDetectionActive(false);
+        }, 50);
+
+        const pasteKey = { ...key, paste: true };
+        buffer.handleInput(pasteKey);
         return;
       }
 
@@ -444,6 +495,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.SUBMIT](key)) {
+        // Only block submission if we're actively detecting paste operations
+        if (key.paste || pasteDetectionActive) {
+          buffer.newline();
+          return;
+        }
+
+        // More conservative timing-based protection - only block if VERY recent
+        const timeSinceLastInput = now - lastInputTimeRef.current;
+        if (timeSinceLastInput < 20 && key.sequence && key.sequence.length > 1) {
+          // Only block if it's very recent AND looks like multi-character input
+          buffer.newline();
+          return;
+        }
+
         if (buffer.text.trim()) {
           const [row, col] = buffer.cursor;
           const line = buffer.lines[row];
@@ -528,12 +593,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       reverseSearchActive,
       textBeforeReverseSearch,
       cursorPosition,
+      pasteDetectionActive, // Add this
     ],
   );
 
   useKeypress(handleInput, {
     isActive: true,
   });
+
+  // Cleanup paste detection timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (pasteTimeoutRef.current) {
+        clearTimeout(pasteTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const linesToRender = buffer.viewportVisualLines;
   const [cursorVisualRowAbsolute, cursorVisualColAbsolute] =

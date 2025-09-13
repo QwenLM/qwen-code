@@ -1558,7 +1558,7 @@ export function useTextBuffer({
 
   const insert = useCallback(
     (ch: string, { paste = false }: { paste?: boolean } = {}): void => {
-      if (/[\n\r]/.test(ch)) {
+      if (/[\n\r]/.test(ch) && !paste) {
         dispatch({ type: 'insert', payload: ch });
         return;
       }
