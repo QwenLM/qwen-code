@@ -596,7 +596,6 @@ describe('SettingsDialog', () => {
       // Restart prompt should be cleared when switching scopes
       unmount();
     });
-
   });
 
   describe('Settings Display Values', () => {
