@@ -823,7 +823,8 @@ export class GeminiClient {
     // Don't compress if not forced and we are under the limit.
     if (!force) {
       const threshold =
-        contextPercentageThreshold ?? COMPRESSION_TOKEN_THRESHOLD;
+        this.config.getChatCompression()?.contextPercentageThreshold ??
+        COMPRESSION_TOKEN_THRESHOLD;
       if (originalTokenCount < threshold * tokenLimit(model)) {
         return null;
       }
