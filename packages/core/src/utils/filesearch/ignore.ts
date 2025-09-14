@@ -11,13 +11,35 @@ import picomatch from 'picomatch';
 
 const hasFileExtension = picomatch('**/*[*.]*');
 
+/**
+ * Defines the options for loading ignore rules.
+ */
 export interface LoadIgnoreRulesOptions {
+  /**
+   * The root directory of the project.
+   */
   projectRoot: string;
+  /**
+   * Whether to load rules from `.gitignore` files.
+   */
   useGitignore: boolean;
+  /**
+   * Whether to load rules from `.geminiignore` files.
+   */
   useGeminiignore: boolean;
+  /**
+   * An array of additional directory names to ignore.
+   */
   ignoreDirs: string[];
 }
 
+/**
+ * Loads ignore rules from `.gitignore` and `.geminiignore` files, and combines them
+ * with a default set of ignored directories.
+ *
+ * @param options The options for loading ignore rules.
+ * @returns An `Ignore` instance containing all the loaded rules.
+ */
 export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
   const ignorer = new Ignore();
   if (options.useGitignore) {

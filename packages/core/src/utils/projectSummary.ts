@@ -7,22 +7,62 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
+/**
+ * Represents the structured information extracted from a `PROJECT_SUMMARY.md` file.
+ */
 export interface ProjectSummaryInfo {
+  /**
+   * Indicates whether a project summary file was found.
+   */
   hasHistory: boolean;
+  /**
+   * The full content of the project summary file.
+   */
   content?: string;
+  /**
+   * The timestamp of the last update to the summary file.
+   */
   timestamp?: string;
+  /**
+   * A human-readable string representing the time since the last update (e.g., "2 hours ago").
+   */
   timeAgo?: string;
+  /**
+   * The content of the "Overall Goal" section.
+   */
   goalContent?: string;
+  /**
+   * The content of the "Current Plan" section.
+   */
   planContent?: string;
+  /**
+   * The total number of tasks in the plan.
+   */
   totalTasks?: number;
+  /**
+   * The number of tasks marked as "[DONE]".
+   */
   doneCount?: number;
+  /**
+   * The number of tasks marked as "[IN PROGRESS]".
+   */
   inProgressCount?: number;
+  /**
+   * The number of tasks marked as "[TODO]".
+   */
   todoCount?: number;
+  /**
+   * An array of the first few pending tasks (TODO or IN PROGRESS).
+   */
   pendingTasks?: string[];
 }
 
 /**
- * Reads and parses the project summary file to extract structured information
+ * Reads and parses the `PROJECT_SUMMARY.md` file from the `.qwen` directory
+ * to extract structured information about the project's status, goal, and plan.
+ *
+ * @returns A promise that resolves to a `ProjectSummaryInfo` object.
+ *          If the summary file is not found, `hasHistory` will be `false`.
  */
 export async function getProjectSummaryInfo(): Promise<ProjectSummaryInfo> {
   const summaryPath = path.join(process.cwd(), '.qwen', 'PROJECT_SUMMARY.md');

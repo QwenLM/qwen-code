@@ -12,19 +12,53 @@ import {
   isQwenThrottlingError,
 } from './quotaErrorDetection.js';
 
+/**
+ * An interface for an HTTP error, which includes an optional status code.
+ */
 export interface HttpError extends Error {
+  /**
+   * The HTTP status code of the error response.
+   */
   status?: number;
 }
 
+/**
+ * Defines the options for the `retryWithBackoff` function.
+ */
 export interface RetryOptions {
+  /**
+   * The maximum number of retry attempts.
+   */
   maxAttempts: number;
+  /**
+   * The initial delay in milliseconds before the first retry.
+   */
   initialDelayMs: number;
+  /**
+   * The maximum delay in milliseconds between retries.
+   */
   maxDelayMs: number;
+  /**
+   * A function that determines whether a retry should be attempted based on the error.
+   * @param error The error that occurred.
+   * @returns `true` if the operation should be retried, `false` otherwise.
+   */
   shouldRetry: (error: Error) => boolean;
+  /**
+   * An optional callback function to handle persistent 429 (Too Many Requests) errors.
+   * This can be used to implement custom logic, such as switching to a fallback model.
+   * @param authType The authentication type being used.
+   * @param error The error that occurred.
+   * @returns A promise that resolves to a string (e.g., the name of a fallback model),
+   *          `true` if the operation should be retried, or `false` or `null` to stop retrying.
+   */
   onPersistent429?: (
     authType?: string,
     error?: unknown,
   ) => Promise<string | boolean | null>;
+  /**
+   * The authentication type being used, which can affect the retry logic.
+   */
   authType?: string;
 }
 
@@ -36,10 +70,11 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
 };
 
 /**
- * Default predicate function to determine if a retry should be attempted.
- * Retries on 429 (Too Many Requests) and 5xx server errors.
+ * The default predicate function to determine if a retry should be attempted.
+ * It retries on 429 (Too Many Requests) and 5xx server errors.
+ *
  * @param error The error object.
- * @returns True if the error is a transient error, false otherwise.
+ * @returns `true` if the error is a transient error that should be retried, `false` otherwise.
  */
 function defaultShouldRetry(error: Error | unknown): boolean {
   // Check for common transient error status codes either in message or a status property
@@ -66,11 +101,13 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Retries a function with exponential backoff and jitter.
+ * Retries an asynchronous function with exponential backoff and jitter if it fails.
+ * This is useful for handling transient errors, such as network issues or temporary server unavailability.
+ *
  * @param fn The asynchronous function to retry.
- * @param options Optional retry configuration.
- * @returns A promise that resolves with the result of the function if successful.
- * @throws The last error encountered if all attempts fail.
+ * @param options Optional configuration for the retry logic.
+ * @returns A promise that resolves with the result of the function if it succeeds.
+ * @throws The last error encountered if all retry attempts fail.
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
@@ -232,9 +269,9 @@ export async function retryWithBackoff<T>(
 }
 
 /**
- * Extracts the HTTP status code from an error object.
+ * Extracts the HTTP status code from a variety of possible error object structures.
  * @param error The error object.
- * @returns The HTTP status code, or undefined if not found.
+ * @returns The HTTP status code, or `undefined` if it cannot be found.
  */
 export function getErrorStatus(error: unknown): number | undefined {
   if (typeof error === 'object' && error !== null) {

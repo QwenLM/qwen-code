@@ -57,6 +57,15 @@ const getRateLimitErrorMessageDefault = (
 ) =>
   `\nPossible quota limitations in place or slow response times detected. Switching to the ${fallbackModel} model for the rest of this session.`;
 
+/**
+ * Generates a user-facing error message for rate limiting, tailored to the user's authentication type and tier.
+ * @param authType The user's authentication method.
+ * @param error The error object, used to determine the specific type of quota error.
+ * @param userTier The user's service tier (e.g., free, legacy, standard).
+ * @param currentModel The model that was in use when the error occurred.
+ * @param fallbackModel The model that the user will be switched to.
+ * @returns A formatted string containing the rate limit error message.
+ */
 function getRateLimitMessage(
   authType?: AuthType,
   error?: unknown,
@@ -101,6 +110,18 @@ function getRateLimitMessage(
   }
 }
 
+/**
+ * Parses a generic error from the API and formats it into a user-friendly string.
+ * It specifically handles different types of quota errors, providing tailored messages
+ * based on the user's authentication type and service tier.
+ *
+ * @param error The error object to parse.
+ * @param authType The user's authentication method.
+ * @param userTier The user's service tier.
+ * @param currentModel The model in use when the error occurred.
+ * @param fallbackModel The model to switch to if applicable.
+ * @returns A formatted string containing the parsed error message.
+ */
 export function parseAndFormatApiError(
   error: unknown,
   authType?: AuthType,

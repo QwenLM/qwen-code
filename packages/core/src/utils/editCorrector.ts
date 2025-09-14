@@ -37,27 +37,44 @@ const editCorrectionCache = new LruCache<string, CorrectedEditResult>(
 const fileContentCorrectionCache = new LruCache<string, string>(MAX_CACHE_SIZE);
 
 /**
- * Defines the structure of the parameters within CorrectedEditResult
+ * Defines the structure of the parameters within CorrectedEditResult.
+ * These parameters are the result of a correction process and are ready to be used in an edit operation.
  */
 interface CorrectedEditParams {
+  /**
+   * The path to the file to be edited.
+   */
   file_path: string;
+  /**
+   * The string to be replaced. This string has been verified to exist in the file.
+   */
   old_string: string;
+  /**
+   * The new string to replace the old string. This string has been adjusted to align with the corrected old_string.
+   */
   new_string: string;
 }
 
 /**
- * Defines the result structure for ensureCorrectEdit.
+ * Defines the result structure for the `ensureCorrectEdit` function.
+ * It contains the corrected parameters for an edit operation and the number of occurrences of the `old_string` in the file.
  */
 export interface CorrectedEditResult {
+  /**
+   * The corrected parameters for the edit operation.
+   */
   params: CorrectedEditParams;
+  /**
+   * The number of occurrences of the `old_string` in the file after correction.
+   */
   occurrences: number;
 }
 
 /**
- * Extracts the timestamp from the .id value, which is in format
- * <tool.name>-<timestamp>-<uuid>
- * @param fcnId the ID value of a functionCall or functionResponse object
- * @returns -1 if the timestamp could not be extracted, else the timestamp (as a number)
+ * Extracts the timestamp from a function call or function response ID.
+ * The ID is expected to be in the format `<tool.name>-<timestamp>-<uuid>`.
+ * @param fcnId The ID of a functionCall or functionResponse object.
+ * @returns The timestamp as a number, or -1 if the timestamp could not be extracted.
  */
 function getTimestampFromFunctionId(fcnId: string): number {
   const idParts = fcnId.split('-');
@@ -71,11 +88,11 @@ function getTimestampFromFunctionId(fcnId: string): number {
 }
 
 /**
- * Will look through the gemini client history and determine when the most recent
- * edit to a target file occurred. If no edit happened, it will return -1
- * @param filePath the path to the file
- * @param client the geminiClient, so that we can get the history
- * @returns a DateTime (as a number) of when the last edit occurred, or -1 if no edit was found.
+ * Finds the timestamp of the most recent edit to a file by searching through the Gemini client's history.
+ * If no edit to the specified file is found, it returns -1.
+ * @param filePath The path to the file to check for edits.
+ * @param client The GeminiClient instance, used to access the conversation history.
+ * @returns A promise that resolves to the timestamp (as a number) of the last edit, or -1 if no edit was found.
  */
 async function findLastEditTimestamp(
   filePath: string,
@@ -144,15 +161,24 @@ async function findLastEditTimestamp(
 }
 
 /**
- * Attempts to correct edit parameters if the original old_string is not found.
- * It tries unescaping, and then LLM-based correction.
- * Results are cached to avoid redundant processing.
+ * Attempts to correct edit parameters if the original `old_string` is not found in the file content.
+ * This function is crucial for handling cases where the LLM's proposed edit is based on a slightly
+ * outdated or incorrectly escaped version of the file content. It employs a series of strategies:
+ * 1.  Checks for the exact `old_string`.
+ * 2.  If not found, it tries unescaping the `old_string` (to fix common LLM escaping errors).
+ * 3.  If still not found, it uses another LLM call to find the most likely intended match for the `old_string` in the current content.
+ * 4.  It also corrects the `new_string` to align with any corrections made to the `old_string`.
+ * 5.  It performs a check to see if the file has been modified by an external process since the last edit.
  *
+ * Results are cached to avoid redundant processing for the same content and parameters.
+ *
+ * @param filePath The path to the file being edited.
  * @param currentContent The current content of the file.
- * @param originalParams The original EditToolParams
- * @param client The GeminiClient for LLM calls.
- * @returns A promise resolving to an object containing the (potentially corrected)
- *          EditToolParams (as CorrectedEditParams) and the final occurrences count.
+ * @param originalParams The original parameters for the edit operation, as proposed by the LLM.
+ * @param client The GeminiClient instance, used for making corrective LLM calls.
+ * @param abortSignal An AbortSignal to cancel any ongoing LLM calls.
+ * @returns A promise that resolves to a `CorrectedEditResult` object, containing the (potentially corrected)
+ *          edit parameters and the final count of occurrences for the `old_string`.
  */
 export async function ensureCorrectEdit(
   filePath: string,
@@ -332,6 +358,16 @@ export async function ensureCorrectEdit(
   return result;
 }
 
+/**
+ * Ensures that the content of a file is correctly escaped before being written to disk.
+ * This is particularly useful for content generated by an LLM, which may contain incorrect
+ * escape sequences.
+ *
+ * @param content The content to be checked and corrected.
+ * @param client The GeminiClient instance, used for making corrective LLM calls.
+ * @param abortSignal An AbortSignal to cancel any ongoing LLM calls.
+ * @returns A promise that resolves to the corrected content string.
+ */
 export async function ensureCorrectFileContent(
   content: string,
   client: GeminiClient,
@@ -371,6 +407,18 @@ const OLD_STRING_CORRECTION_SCHEMA: Record<string, unknown> = {
   required: ['corrected_target_snippet'],
 };
 
+/**
+ * Uses an LLM to correct a mismatched `old_string` snippet.
+ * This function is called when a direct match and an unescaped match for the `old_string` both fail.
+ * It asks the LLM to find the most probable match for the `problematicSnippet` within the `fileContent`.
+ *
+ * @param geminiClient The GeminiClient instance for the LLM call.
+ * @param fileContent The full content of the file.
+ * @param problematicSnippet The `old_string` that failed to match.
+ * @param abortSignal An AbortSignal to cancel the LLM call.
+ * @returns A promise that resolves to the LLM's suggested correction for the snippet.
+ *          If the LLM fails or returns an empty string, the original `problematicSnippet` is returned.
+ */
 export async function correctOldStringMismatch(
   geminiClient: GeminiClient,
   fileContent: string,
@@ -446,7 +494,17 @@ const NEW_STRING_CORRECTION_SCHEMA: Record<string, unknown> = {
 };
 
 /**
- * Adjusts the new_string to align with a corrected old_string, maintaining the original intent.
+ * Adjusts the `new_string` to align with a corrected `old_string`, maintaining the original intent of the change.
+ * This is necessary when `correctOldStringMismatch` has altered the `old_string`. This function asks the LLM
+ * to infer the intended change from the original `old_string` and `new_string` and apply a similar
+ * transformation to the `correctedOldString`.
+ *
+ * @param geminiClient The GeminiClient instance for the LLM call.
+ * @param originalOldString The `old_string` as it was initially provided.
+ * @param correctedOldString The `old_string` after correction by `correctOldStringMismatch`.
+ * @param originalNewString The `new_string` as it was initially provided.
+ * @param abortSignal An AbortSignal to cancel the LLM call.
+ * @returns A promise that resolves to the adjusted `new_string`.
  */
 export async function correctNewString(
   geminiClient: GeminiClient,
@@ -528,6 +586,17 @@ const CORRECT_NEW_STRING_ESCAPING_SCHEMA: Record<string, unknown> = {
   required: ['corrected_new_string_escaping'],
 };
 
+/**
+ * Corrects the escaping of a `new_string` that is suspected to be improperly escaped.
+ * This is a targeted correction for the `new_string` in an edit operation, asking an LLM to fix
+ * common escaping issues like `\\n` instead of `\n`.
+ *
+ * @param geminiClient The GeminiClient instance for the LLM call.
+ * @param oldString The `old_string` that is being replaced.
+ * @param potentiallyProblematicNewString The `new_string` that may have escaping issues.
+ * @param abortSignal An AbortSignal to cancel the LLM call.
+ * @returns A promise that resolves to the `new_string` with corrected escaping.
+ */
 export async function correctNewStringEscaping(
   geminiClient: GeminiClient,
   oldString: string,
@@ -600,6 +669,15 @@ const CORRECT_STRING_ESCAPING_SCHEMA: Record<string, unknown> = {
   required: ['corrected_string_escaping'],
 };
 
+/**
+ * A general-purpose function to correct the escaping of any given string.
+ * It uses an LLM to identify and fix common escaping errors.
+ *
+ * @param potentiallyProblematicString The string that may have escaping issues.
+ * @param client The GeminiClient instance for the LLM call.
+ * @param abortSignal An AbortSignal to cancel the LLM call.
+ * @returns A promise that resolves to the string with corrected escaping.
+ */
 export async function correctStringEscaping(
   potentiallyProblematicString: string,
   client: GeminiClient,
@@ -654,6 +732,18 @@ Return ONLY the corrected string in the specified JSON format with the key 'corr
   }
 }
 
+/**
+ * Trims whitespace from both the target and its corresponding replacement string,
+ * but only if the trimmed target string still results in the same number of occurrences
+ * in the original content. This is to avoid accidentally creating a more ambiguous
+ * target string.
+ *
+ * @param target The string to be searched for and potentially trimmed.
+ * @param trimIfTargetTrims The string to be trimmed if the target is trimmed.
+ * @param currentContent The full content of the file.
+ * @param expectedReplacements The number of occurrences expected for the target.
+ * @returns An object containing the potentially trimmed targetString and its corresponding pair.
+ */
 function trimPairIfPossible(
   target: string,
   trimIfTargetTrims: string,
@@ -684,6 +774,12 @@ function trimPairIfPossible(
 
 /**
  * Unescapes a string that might have been overly escaped by an LLM.
+ * This function handles common incorrect escape sequences like `\\n`, `\\t`, `\\"`, `\\'` etc.,
+ * converting them to their correct single-character representations (`\n`, `\t`, `"`, `'`).
+ * It is a workaround for a common issue where LLMs generate strings with excessive backslashes.
+ *
+ * @param inputString The string to unescape.
+ * @returns The unescaped string.
  */
 export function unescapeStringForGeminiBug(inputString: string): string {
   // Regex explanation:
@@ -729,7 +825,11 @@ export function unescapeStringForGeminiBug(inputString: string): string {
 }
 
 /**
- * Counts occurrences of a substring in a string
+ * Counts the number of non-overlapping occurrences of a substring within a string.
+ *
+ * @param str The string to search within.
+ * @param substr The substring to search for.
+ * @returns The number of occurrences of the substring.
  */
 export function countOccurrences(str: string, substr: string): number {
   if (substr === '') {
@@ -744,6 +844,10 @@ export function countOccurrences(str: string, substr: string): number {
   return count;
 }
 
+/**
+ * Resets the caches used by the edit corrector.
+ * This function is intended for use in tests only.
+ */
 export function resetEditCorrectorCaches_TEST_ONLY() {
   editCorrectionCache.clear();
   fileContentCorrectionCache.clear();

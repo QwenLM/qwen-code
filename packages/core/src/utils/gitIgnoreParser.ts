@@ -9,20 +9,43 @@ import * as path from 'path';
 import ignore, { type Ignore } from 'ignore';
 import { isGitRepository } from './gitUtils.js';
 
+/**
+ * An interface for a filter that uses .gitignore-style patterns.
+ */
 export interface GitIgnoreFilter {
+  /**
+   * Checks if a given file path is ignored by the filter.
+   * @param filePath The path to check.
+   * @returns `true` if the file is ignored, `false` otherwise.
+   */
   isIgnored(filePath: string): boolean;
+  /**
+   * Gets the raw patterns that the filter is using.
+   * @returns An array of pattern strings.
+   */
   getPatterns(): string[];
 }
 
+/**
+ * A parser for .gitignore files that can be used to filter file paths.
+ */
 export class GitIgnoreParser implements GitIgnoreFilter {
   private projectRoot: string;
   private ig: Ignore = ignore();
   private patterns: string[] = [];
 
+  /**
+   * Creates a new GitIgnoreParser.
+   * @param projectRoot The root directory of the project.
+   */
   constructor(projectRoot: string) {
     this.projectRoot = path.resolve(projectRoot);
   }
 
+  /**
+   * Loads the ignore patterns from the `.gitignore` and `.git/info/exclude` files
+   * in the project's Git repository.
+   */
   loadGitRepoPatterns(): void {
     if (!isGitRepository(this.projectRoot)) return;
 
@@ -35,6 +58,10 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     }
   }
 
+  /**
+   * Loads ignore patterns from a specified file.
+   * @param patternsFileName The name of the file containing the patterns (e.g., '.gitignore').
+   */
   loadPatterns(patternsFileName: string): void {
     const patternsFilePath = path.join(this.projectRoot, patternsFileName);
     let content: string;
@@ -56,6 +83,11 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     this.patterns.push(...patterns);
   }
 
+  /**
+   * Checks if a given file path is ignored by the loaded patterns.
+   * @param filePath The path to check.
+   * @returns `true` if the file is ignored, `false` otherwise.
+   */
   isIgnored(filePath: string): boolean {
     const resolved = path.resolve(this.projectRoot, filePath);
     const relativePath = path.relative(this.projectRoot, resolved);
@@ -69,6 +101,10 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     return this.ig.ignores(normalizedPath);
   }
 
+  /**
+   * Gets the raw patterns that have been loaded.
+   * @returns An array of pattern strings.
+   */
   getPatterns(): string[] {
     return this.patterns;
   }

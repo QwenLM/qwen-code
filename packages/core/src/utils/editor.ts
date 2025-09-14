@@ -6,6 +6,9 @@
 
 import { execSync, spawn } from 'child_process';
 
+/**
+ * A type representing the supported editors.
+ */
 export type EditorType =
   | 'vscode'
   | 'vscodium'
@@ -16,6 +19,11 @@ export type EditorType =
   | 'zed'
   | 'emacs';
 
+/**
+ * Checks if a given string is a valid `EditorType`.
+ * @param editor The string to check.
+ * @returns `true` if the string is a valid `EditorType`, `false` otherwise.
+ */
 function isValidEditorType(editor: string): editor is EditorType {
   return [
     'vscode',
@@ -29,11 +37,25 @@ function isValidEditorType(editor: string): editor is EditorType {
   ].includes(editor);
 }
 
+/**
+ * Represents the command and arguments needed to launch an editor for a diff operation.
+ */
 interface DiffCommand {
+  /**
+   * The command to execute.
+   */
   command: string;
+  /**
+   * The arguments to pass to the command.
+   */
   args: string[];
 }
 
+/**
+ * Checks if a command exists on the system.
+ * @param cmd The command to check.
+ * @returns `true` if the command exists, `false` otherwise.
+ */
 function commandExists(cmd: string): boolean {
   try {
     execSync(
@@ -64,6 +86,11 @@ const editorCommands: Record<
   emacs: { win32: ['emacs.exe'], default: ['emacs'] },
 };
 
+/**
+ * Checks if a specific editor is installed on the system.
+ * @param editor The editor to check for.
+ * @returns `true` if the editor is found, `false` otherwise.
+ */
 export function checkHasEditorType(editor: EditorType): boolean {
   const commandConfig = editorCommands[editor];
   const commands =
@@ -71,6 +98,11 @@ export function checkHasEditorType(editor: EditorType): boolean {
   return commands.some((cmd) => commandExists(cmd));
 }
 
+/**
+ * Determines if a specific editor is allowed to be used within the sandbox environment.
+ * @param editor The editor to check.
+ * @returns `true` if the editor is allowed, `false` otherwise.
+ */
 export function allowEditorTypeInSandbox(editor: EditorType): boolean {
   const notUsingSandbox = !process.env['SANDBOX'];
   if (['vscode', 'vscodium', 'windsurf', 'cursor', 'zed'].includes(editor)) {
@@ -81,8 +113,9 @@ export function allowEditorTypeInSandbox(editor: EditorType): boolean {
 }
 
 /**
- * Check if the editor is valid and can be used.
- * Returns false if preferred editor is not set / invalid / not available / not allowed in sandbox.
+ * Checks if a preferred editor is set, valid, available, and allowed in the current environment.
+ * @param editor The editor to check.
+ * @returns `true` if the editor is available for use, `false` otherwise.
  */
 export function isEditorAvailable(editor: string | undefined): boolean {
   if (editor && isValidEditorType(editor)) {
@@ -92,7 +125,11 @@ export function isEditorAvailable(editor: string | undefined): boolean {
 }
 
 /**
- * Get the diff command for a specific editor.
+ * Gets the appropriate command and arguments to launch a diff view in a specific editor.
+ * @param oldPath The path to the "before" file in the diff.
+ * @param newPath The path to the "after" file in the diff.
+ * @param editor The editor to get the diff command for.
+ * @returns A `DiffCommand` object if the editor is supported, otherwise `null`.
  */
 export function getDiffCommand(
   oldPath: string,
@@ -157,8 +194,13 @@ export function getDiffCommand(
 
 /**
  * Opens a diff tool to compare two files.
- * Terminal-based editors by default blocks parent process until the editor exits.
- * GUI-based editors require args such as "--wait" to block parent process.
+ * This function handles the specifics of launching different editors, including whether
+ * to block the parent process (for terminal-based editors) or not (for GUI-based editors).
+ *
+ * @param oldPath The path to the "before" file in the diff.
+ * @param newPath The path to the "after" file in the diff.
+ * @param editor The editor to use for the diff.
+ * @param onEditorClose A callback function to be executed after the editor is closed.
  */
 export async function openDiff(
   oldPath: string,

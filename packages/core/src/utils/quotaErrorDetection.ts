@@ -6,6 +6,9 @@
 
 import { StructuredError } from '../core/turn.js';
 
+/**
+ * Represents the structure of a standard API error response.
+ */
 export interface ApiError {
   error: {
     code: number;
@@ -15,6 +18,11 @@ export interface ApiError {
   };
 }
 
+/**
+ * Type guard to check if an error object conforms to the `ApiError` interface.
+ * @param error The error object to check.
+ * @returns `true` if the object is an `ApiError`, `false` otherwise.
+ */
 export function isApiError(error: unknown): error is ApiError {
   return (
     typeof error === 'object' &&
@@ -25,6 +33,11 @@ export function isApiError(error: unknown): error is ApiError {
   );
 }
 
+/**
+ * Type guard to check if an error object is a `StructuredError`.
+ * @param error The error object to check.
+ * @returns `true` if the object is a `StructuredError`, `false` otherwise.
+ */
 export function isStructuredError(error: unknown): error is StructuredError {
   return (
     typeof error === 'object' &&
@@ -34,6 +47,13 @@ export function isStructuredError(error: unknown): error is StructuredError {
   );
 }
 
+/**
+ * Checks if an error is a "Gemini Pro Quota Exceeded" error.
+ * This is a specific type of quota error that indicates the user has exhausted their quota for the Gemini Pro model.
+ *
+ * @param error The error object to check.
+ * @returns `true` if the error is a Pro quota exceeded error, `false` otherwise.
+ */
 export function isProQuotaExceededError(error: unknown): boolean {
   // Check for Pro quota exceeded errors by looking for the specific pattern
   // This will match patterns like:
@@ -83,6 +103,13 @@ export function isProQuotaExceededError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Checks if an error is a generic "Quota Exceeded" error.
+ * This is a more general check for any error message that includes the phrase "Quota exceeded for quota metric".
+ *
+ * @param error The error object to check.
+ * @returns `true` if the error is a generic quota exceeded error, `false` otherwise.
+ */
 export function isGenericQuotaExceededError(error: unknown): boolean {
   if (typeof error === 'string') {
     return error.includes('Quota exceeded for quota metric');
@@ -99,6 +126,13 @@ export function isGenericQuotaExceededError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Checks if an error is a Qwen "Insufficient Quota" error.
+ * These errors indicate that the user's quota has been exhausted and the request should not be retried.
+ *
+ * @param error The error object to check.
+ * @returns `true` if the error is a Qwen insufficient quota error, `false` otherwise.
+ */
 export function isQwenQuotaExceededError(error: unknown): boolean {
   // Check for Qwen insufficient quota errors (should not retry)
   const checkMessage = (message: string): boolean => {
@@ -125,6 +159,13 @@ export function isQwenQuotaExceededError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Checks if an error is a Qwen "Throttling" error.
+ * These errors indicate that the user is sending requests too frequently and the request should be retried after a delay.
+ *
+ * @param error The error object to check.
+ * @returns `true` if the error is a Qwen throttling error, `false` otherwise.
+ */
 export function isQwenThrottlingError(error: unknown): boolean {
   // Check for Qwen throttling errors (should retry)
   const checkMessage = (message: string): boolean => {

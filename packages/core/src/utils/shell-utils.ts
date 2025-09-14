@@ -28,12 +28,10 @@ export interface ShellConfiguration {
 }
 
 /**
- * Determines the appropriate shell configuration for the current platform.
+ * Determines the appropriate shell configuration for the current operating system.
+ * This ensures that commands can be executed predictably and securely across platforms.
  *
- * This ensures we can execute command strings predictably and securely across platforms
- * using the `spawn(executable, [...argsPrefix, commandString], { shell: false })` pattern.
- *
- * @returns The ShellConfiguration for the current environment.
+ * @returns The `ShellConfiguration` for the current environment.
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
@@ -71,16 +69,17 @@ export function getShellConfiguration(): ShellConfiguration {
 }
 
 /**
- * Export the platform detection constant for use in process management (e.g., killing processes).
+ * Checks if the current operating system is Windows.
+ * @returns `true` if the platform is 'win32', `false` otherwise.
  */
 export const isWindows = () => os.platform() === 'win32';
 
 /**
- * Escapes a string so that it can be safely used as a single argument
- * in a shell command, preventing command injection.
+ * Escapes a string so that it can be safely used as a single argument in a shell command,
+ * preventing command injection vulnerabilities.
  *
  * @param arg The argument string to escape.
- * @param shell The type of shell the argument is for.
+ * @param shell The type of shell the argument is intended for.
  * @returns The shell-escaped string.
  */
 export function escapeShellArg(arg: string, shell: ShellType): string {
@@ -103,10 +102,11 @@ export function escapeShellArg(arg: string, shell: ShellType): string {
 }
 
 /**
- * Splits a shell command into a list of individual commands, respecting quotes.
- * This is used to separate chained commands (e.g., using &&, ||, ;).
- * @param command The shell command string to parse
- * @returns An array of individual command strings
+ * Splits a shell command string into an array of individual commands, respecting quotes
+ * and command separators (e.g., `&&`, `||`, `;`).
+ *
+ * @param command The shell command string to parse.
+ * @returns An array of individual command strings.
  */
 export function splitCommands(command: string): string[] {
   const commands: string[] = [];
@@ -159,12 +159,11 @@ export function splitCommands(command: string): string[] {
 }
 
 /**
- * Extracts the root command from a given shell command string.
+ * Extracts the root command from a given shell command string (e.g., "ls" from "ls -la").
  * This is used to identify the base command for permission checks.
- * @param command The shell command string to parse
- * @returns The root command name, or undefined if it cannot be determined
- * @example getCommandRoot("ls -la /tmp") returns "ls"
- * @example getCommandRoot("git status && npm test") returns "git"
+ *
+ * @param command The shell command string to parse.
+ * @returns The root command name, or `undefined` if it cannot be determined.
  */
 export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();

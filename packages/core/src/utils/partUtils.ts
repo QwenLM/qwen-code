@@ -7,8 +7,15 @@
 import { GenerateContentResponse, PartListUnion, Part } from '@google/genai';
 
 /**
- * Converts a PartListUnion into a string.
- * If verbose is true, includes summary representations of non-text parts.
+ * Converts a `PartListUnion` (which can be a string, an array of `Part` objects, or a single `Part`)
+ * into a single string.
+ *
+ * If `verbose` is true, it provides summary representations for non-text parts
+ * (e.g., `[Function Call: myFunction]`). Otherwise, it only includes the text content.
+ *
+ * @param value The `PartListUnion` to convert.
+ * @param options An optional object with a `verbose` flag.
+ * @returns The string representation of the `PartListUnion`.
  */
 export function partToString(
   value: PartListUnion,
@@ -64,6 +71,13 @@ export function partToString(
   return part.text ?? '';
 }
 
+/**
+ * Extracts the text content from a `GenerateContentResponse`.
+ * It concatenates the text from all parts of the first candidate's content.
+ *
+ * @param response The `GenerateContentResponse` from the API.
+ * @returns The combined text content, or `null` if no text is found.
+ */
 export function getResponseText(
   response: GenerateContentResponse,
 ): string | null {

@@ -17,7 +17,15 @@ const PRIVATE_IP_RANGES = [
   /^fe80:/,
 ];
 
+/**
+ * Custom error class for fetch-related errors.
+ */
 export class FetchError extends Error {
+  /**
+   * Creates a new FetchError.
+   * @param message The error message.
+   * @param code An optional error code (e.g., 'ETIMEDOUT').
+   */
   constructor(
     message: string,
     public code?: string,
@@ -27,6 +35,11 @@ export class FetchError extends Error {
   }
 }
 
+/**
+ * Checks if a given URL resolves to a private IP address.
+ * @param url The URL to check.
+ * @returns `true` if the URL resolves to a private IP, `false` otherwise.
+ */
 export function isPrivateIp(url: string): boolean {
   try {
     const hostname = new URL(url).hostname;
@@ -36,6 +49,13 @@ export function isPrivateIp(url: string): boolean {
   }
 }
 
+/**
+ * Fetches a URL with a specified timeout.
+ * @param url The URL to fetch.
+ * @param timeout The timeout in milliseconds.
+ * @returns A promise that resolves to the `Response` object.
+ * @throws {FetchError} If the request times out or another fetch-related error occurs.
+ */
 export async function fetchWithTimeout(
   url: string,
   timeout: number,

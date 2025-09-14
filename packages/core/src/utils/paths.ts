@@ -21,9 +21,9 @@ const COMMANDS_DIR_NAME = 'commands';
 export const SHELL_SPECIAL_CHARS = /[ \t()[\]{};|*?$`'"#&<>!~]/;
 
 /**
- * Replaces the home directory with a tilde.
- * @param path - The path to tildeify.
- * @returns The tildeified path.
+ * Replaces the user's home directory with a tilde (`~`) in a given path.
+ * @param path The path to "tilde-ify".
+ * @returns The path with the home directory replaced by a tilde, or the original path if it's not in the home directory.
  */
 export function tildeifyPath(path: string): string {
   const homeDir = os.homedir();
@@ -34,8 +34,12 @@ export function tildeifyPath(path: string): string {
 }
 
 /**
- * Shortens a path string if it exceeds maxLen, prioritizing the start and end segments.
- * Example: /path/to/a/very/long/file.txt -> /path/.../long/file.txt
+ * Shortens a file path to a maximum length, preserving the beginning and end of the path.
+ * For example, `/a/very/long/path/to/a/file.txt` might become `/a/.../to/a/file.txt`.
+ *
+ * @param filePath The file path to shorten.
+ * @param maxLen The maximum length of the shortened path. Defaults to 35.
+ * @returns The shortened path, or the original path if it's already shorter than `maxLen`.
  */
 export function shortenPath(filePath: string, maxLen: number = 35): string {
   if (filePath.length <= maxLen) {
@@ -105,12 +109,12 @@ export function shortenPath(filePath: string, maxLen: number = 35): string {
 
 /**
  * Calculates the relative path from a root directory to a target path.
- * Ensures both paths are resolved before calculating.
- * Returns '.' if the target path is the same as the root directory.
+ * It ensures both paths are resolved before calculating the relative path.
+ * If the target path is the same as the root directory, it returns `.`.
  *
  * @param targetPath The absolute or relative path to make relative.
  * @param rootDirectory The absolute path of the directory to make the target path relative to.
- * @returns The relative path from rootDirectory to targetPath.
+ * @returns The relative path from `rootDirectory` to `targetPath`.
  */
 export function makeRelative(
   targetPath: string,
@@ -126,9 +130,11 @@ export function makeRelative(
 }
 
 /**
- * Escapes special characters in a file path like macOS terminal does.
- * Escapes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
- * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.
+ * Escapes special shell characters in a file path to make it safe for use in shell commands.
+ * It adds a backslash (`\`) before characters that have special meaning in the shell.
+ *
+ * @param filePath The file path to escape.
+ * @returns The escaped file path.
  */
 export function escapePath(filePath: string): string {
   let result = '';
@@ -155,8 +161,11 @@ export function escapePath(filePath: string): string {
 }
 
 /**
- * Unescapes special characters in a file path.
- * Removes backslash escaping from shell metacharacters.
+ * Unescapes special shell characters in a file path.
+ * It removes the backslash (`\`) from characters that were escaped for shell compatibility.
+ *
+ * @param filePath The file path to unescape.
+ * @returns The unescaped file path.
  */
 export function unescapePath(filePath: string): string {
   return filePath.replace(
@@ -166,7 +175,9 @@ export function unescapePath(filePath: string): string {
 }
 
 /**
- * Generates a unique hash for a project based on its root path.
+ * Generates a unique SHA256 hash for a project based on its root path.
+ * This is used to create unique temporary directories for each project.
+ *
  * @param projectRoot The absolute path to the project's root directory.
  * @returns A SHA256 hash of the project root path.
  */
@@ -175,9 +186,9 @@ export function getProjectHash(projectRoot: string): string {
 }
 
 /**
- * Generates a unique temporary directory path for a project.
+ * Generates a unique temporary directory path for a project, based on a hash of the project's root path.
  * @param projectRoot The absolute path to the project's root directory.
- * @returns The path to the project's temporary directory.
+ * @returns The path to the project's temporary directory within the user's Qwen directory.
  */
 export function getProjectTempDir(projectRoot: string): string {
   const hash = getProjectHash(projectRoot);
@@ -185,7 +196,7 @@ export function getProjectTempDir(projectRoot: string): string {
 }
 
 /**
- * Returns the absolute path to the user-level commands directory.
+ * Gets the absolute path to the user-level commands directory within the user's Qwen directory.
  * @returns The path to the user's commands directory.
  */
 export function getUserCommandsDir(): string {
@@ -193,7 +204,7 @@ export function getUserCommandsDir(): string {
 }
 
 /**
- * Returns the absolute path to the project-level commands directory.
+ * Gets the absolute path to the project-level commands directory within the project's Qwen directory.
  * @param projectRoot The absolute path to the project's root directory.
  * @returns The path to the project's commands directory.
  */
@@ -202,10 +213,12 @@ export function getProjectCommandsDir(projectRoot: string): string {
 }
 
 /**
- * Checks if a path is a subpath of another path.
- * @param parentPath The parent path.
- * @param childPath The child path.
- * @returns True if childPath is a subpath of parentPath, false otherwise.
+ * Checks if a given path is a subpath of another path.
+ * This function correctly handles both Windows and POSIX-style paths.
+ *
+ * @param parentPath The potential parent path.
+ * @param childPath The potential child path.
+ * @returns `true` if `childPath` is a subpath of `parentPath`, `false` otherwise.
  */
 export function isSubpath(parentPath: string, childPath: string): boolean {
   const isWindows = os.platform() === 'win32';

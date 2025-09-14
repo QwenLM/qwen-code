@@ -196,30 +196,78 @@ export async function detectFileType(
   return 'text';
 }
 
+/**
+ * An enumeration of possible file processing error types.
+ */
 export enum FileErrorType {
+  /**
+   * The file was not found at the specified path.
+   */
   FILE_NOT_FOUND = 'FILE_NOT_FOUND',
+  /**
+   * The specified path points to a directory, not a file.
+   */
   IS_DIRECTORY = 'IS_DIRECTORY',
+  /**
+   * The file is too large to be processed.
+   */
   FILE_TOO_LARGE = 'FILE_TOO_LARGE',
+  /**
+   * An error occurred while reading the file.
+   */
   READ_ERROR = 'READ_ERROR',
 }
 
+/**
+ * Represents the result of processing a single file read operation.
+ * This interface standardizes the output for different file types (text, image, etc.)
+ * and includes metadata about the operation, such as whether the content was truncated.
+ */
 export interface ProcessedFileReadResult {
+  /**
+   * The content to be sent to the LLM. This can be a string for text files
+   * or a `Part` object for binary files like images and PDFs.
+   */
   llmContent: PartUnion; // string for text, Part for image/pdf/unreadable binary
+  /**
+   * A user-facing string to display in the tool's return message, summarizing the result of the read operation.
+   */
   returnDisplay: string;
+  /**
+   * An optional error message for the LLM if file processing failed.
+   */
   error?: string; // Optional error message for the LLM if file processing failed
+  /**
+   * A structured error type, providing a more specific reason for a failure.
+   */
   errorType?: FileErrorType; // Structured error type using enum
+  /**
+   * For text files, indicates if the content was truncated (either by line limit or line length).
+   */
   isTruncated?: boolean; // For text files, indicates if content was truncated
+  /**
+   * For text files, the total number of lines in the original file.
+   */
   originalLineCount?: number; // For text files
+  /**
+   * For text files, the range of lines that were read, formatted as `[startLine, endLine]` (1-based).
+   */
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
 }
 
 /**
- * Reads and processes a single file, handling text, images, and PDFs.
- * @param filePath Absolute path to the file.
- * @param rootDirectory Absolute path to the project root for relative path display.
- * @param offset Optional offset for text files (0-based line number).
- * @param limit Optional limit for text files (number of lines to read).
- * @returns ProcessedFileReadResult object.
+ * Reads and processes a single file, handling text, images, and other file types.
+ * It determines the file type, reads the content, and formats it into a `ProcessedFileReadResult` object.
+ * For text files, it supports reading a specific range of lines and handles truncation.
+ * For binary files like images and PDFs, it reads the file as a base64-encoded string.
+ * It also handles errors such as file not found, path is a directory, and file size limits.
+ *
+ * @param filePath The absolute path to the file to be processed.
+ * @param rootDirectory The absolute path to the project's root directory, used for creating relative display paths.
+ * @param fileSystemService An instance of `FileSystemService` to handle file reading operations.
+ * @param offset An optional 0-based line number to start reading from for text files.
+ * @param limit An optional maximum number of lines to read from text files.
+ * @returns A promise that resolves to a `ProcessedFileReadResult` object containing the processed file content and metadata.
  */
 export async function processSingleFileContent(
   filePath: string,

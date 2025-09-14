@@ -9,18 +9,34 @@ import os from 'node:os';
 import path from 'node:path';
 import { Content } from '@google/genai';
 
+/**
+ * Defines the structure for the data that is written to an error report file.
+ */
 interface ErrorReportData {
+  /**
+   * The error object, containing the message and optionally the stack trace.
+   */
   error: { message: string; stack?: string } | { message: string };
+  /**
+   * The context in which the error occurred (e.g., chat history, request contents).
+   */
   context?: unknown;
+  /**
+   * Any additional information that might be useful for debugging.
+   */
   additionalInfo?: Record<string, unknown>;
 }
 
 /**
- * Generates an error report, writes it to a temporary file, and logs information to console.error.
- * @param error The error object.
- * @param context The relevant context (e.g., chat history, request contents).
- * @param type A string to identify the type of error (e.g., 'startChat', 'generateJson-api').
- * @param baseMessage The initial message to log to console.error before the report path.
+ * Generates a detailed error report, writes it to a temporary file, and logs a summary to the console.
+ * This function is designed to capture the state of the application when an unexpected error occurs,
+ * making it easier to debug. The full report is saved as a JSON file in the system's temporary directory.
+ *
+ * @param error The error object that was thrown.
+ * @param baseMessage A concise message to log to the console, providing immediate context about the error.
+ * @param context The relevant data or state at the time of the error (e.g., chat history, request objects).
+ * @param type A string to categorize the error, used in the report's filename (e.g., 'startChat', 'api-call').
+ * @param reportingDir The directory where the error report file will be saved. Defaults to the system's temp directory.
  */
 export async function reportError(
   error: Error | unknown,

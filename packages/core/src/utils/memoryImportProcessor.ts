@@ -22,28 +22,52 @@ const logger = {
 };
 
 /**
- * Interface for tracking import processing state to prevent circular imports
+ * An interface for tracking the state of an import process, used to prevent circular imports.
  */
 interface ImportState {
+  /**
+   * A set of file paths that have already been processed in the current import chain.
+   */
   processedFiles: Set<string>;
+  /**
+   * The maximum depth of imports to allow.
+   */
   maxDepth: number;
+  /**
+   * The current depth of the import chain.
+   */
   currentDepth: number;
+  /**
+   * The path of the file currently being processed.
+   */
   currentFile?: string; // Track the current file being processed
 }
 
 /**
- * Interface representing a file in the import tree
+ * An interface representing a file in the import tree.
  */
 export interface MemoryFile {
+  /**
+   * The path to the file.
+   */
   path: string;
+  /**
+   * An array of `MemoryFile` objects representing the files imported by this file.
+   */
   imports?: MemoryFile[]; // Direct imports, in the order they were imported
 }
 
 /**
- * Result of processing imports
+ * Represents the result of processing imports in a file.
  */
 export interface ProcessImportsResult {
+  /**
+   * The content of the file with all import statements resolved and replaced by the imported content.
+   */
   content: string;
+  /**
+   * A tree structure representing the import hierarchy.
+   */
   importTree: MemoryFile;
 }
 
@@ -192,15 +216,25 @@ function findCodeRegions(content: string): Array<[number, number]> {
 }
 
 /**
- * Processes import statements in QWEN.md content
- * Supports @path/to/file syntax for importing content from other files
- * @param content - The content to process for imports
- * @param basePath - The directory path where the current file is located
- * @param debugMode - Whether to enable debug logging
- * @param importState - State tracking for circular import prevention
- * @param projectRoot - The project root directory for allowed directories
- * @param importFormat - The format of the import tree
- * @returns Processed content with imports resolved and import tree
+ * Processes `@import` statements in a file's content, recursively replacing them
+ * with the content of the imported files. It supports two formats: `tree` and `flat`.
+ *
+ * In `tree` format, imports are nested, and the content is wrapped in comments
+ * indicating the start and end of the imported file.
+ *
+ * In `flat` format, all imported files are concatenated into a single string,
+ * with each file's content wrapped in a header and footer.
+ *
+ * This function also handles circular import detection and path validation to prevent
+ * accessing files outside of the project root.
+ *
+ * @param content The content to process for imports.
+ * @param basePath The directory path where the current file is located.
+ * @param debugMode Whether to enable debug logging.
+ * @param importState An object for tracking the state of the import process.
+ * @param projectRoot The root directory of the project.
+ * @param importFormat The format to use for processing imports (`tree` or `flat`).
+ * @returns A promise that resolves to a `ProcessImportsResult` object.
  */
 export async function processImports(
   content: string,
@@ -400,6 +434,15 @@ export async function processImports(
   };
 }
 
+/**
+ * Validates an import path to ensure it is a subpath of one of the allowed directories.
+ * This is a security measure to prevent path traversal attacks.
+ *
+ * @param importPath The import path to validate.
+ * @param basePath The base path from which the import is being made.
+ * @param allowedDirectories An array of directories that the import path must be within.
+ * @returns `true` if the path is valid, `false` otherwise.
+ */
 export function validateImportPath(
   importPath: string,
   basePath: string,

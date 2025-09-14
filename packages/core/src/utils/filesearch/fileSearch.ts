@@ -11,17 +11,48 @@ import { ResultCache } from './result-cache.js';
 import { crawl } from './crawler.js';
 import { AsyncFzf, FzfResultItem } from 'fzf';
 
+/**
+ * Defines the options for creating a `FileSearch` instance.
+ */
 export interface FileSearchOptions {
+  /**
+   * The root directory of the project to be searched.
+   */
   projectRoot: string;
+  /**
+   * An array of directory names to be ignored during the search.
+   */
   ignoreDirs: string[];
+  /**
+   * Whether to respect the rules in `.gitignore` files.
+   */
   useGitignore: boolean;
+  /**
+   * Whether to respect the rules in `.geminiignore` files.
+   */
   useGeminiignore: boolean;
+  /**
+   * Whether to cache the results of the file crawl.
+   */
   cache: boolean;
+  /**
+   * The time-to-live for cache entries, in seconds.
+   */
   cacheTtl: number;
+  /**
+   * Whether to enable recursive file search. If `false`, the search will only
+   * be performed in the directory specified in the search pattern.
+   */
   enableRecursiveFileSearch: boolean;
+  /**
+   * The maximum depth to crawl when searching for files.
+   */
   maxDepth?: number;
 }
 
+/**
+ * A custom error class to indicate that a search operation was aborted.
+ */
 export class AbortError extends Error {
   constructor(message = 'Search aborted') {
     super(message);
@@ -30,10 +61,12 @@ export class AbortError extends Error {
 }
 
 /**
- * Filters a list of paths based on a given pattern.
+ * Filters a list of paths based on a picomatch pattern and sorts the results.
+ * Directories are sorted before files.
+ *
  * @param allPaths The list of all paths to filter.
  * @param pattern The picomatch pattern to filter by.
- * @param signal An AbortSignal to cancel the operation.
+ * @param signal An `AbortSignal` to cancel the operation.
  * @returns A promise that resolves to the filtered and sorted list of paths.
  */
 export async function filter(
@@ -77,13 +110,35 @@ export async function filter(
   return results;
 }
 
+/**
+ * Defines the options for a search operation.
+ */
 export interface SearchOptions {
+  /**
+   * An `AbortSignal` to cancel the search operation.
+   */
   signal?: AbortSignal;
+  /**
+   * The maximum number of results to return.
+   */
   maxResults?: number;
 }
 
+/**
+ * An interface for a file search engine.
+ */
 export interface FileSearch {
+  /**
+   * Initializes the search engine, which may involve crawling the file system
+   * and building caches.
+   */
   initialize(): Promise<void>;
+  /**
+   * Searches for files matching a given pattern.
+   * @param pattern The search pattern.
+   * @param options The options for the search operation.
+   * @returns A promise that resolves to an array of matching file paths.
+   */
   search(pattern: string, options?: SearchOptions): Promise<string[]>;
 }
 
@@ -227,7 +282,15 @@ class DirectoryFileSearch implements FileSearch {
   }
 }
 
+/**
+ * A factory class for creating `FileSearch` instances.
+ */
 export class FileSearchFactory {
+  /**
+   * Creates a new `FileSearch` instance based on the provided options.
+   * @param options The options for the file search.
+   * @returns A new `FileSearch` instance.
+   */
   static create(options: FileSearchOptions): FileSearch {
     if (options.enableRecursiveFileSearch) {
       return new RecursiveFileSearch(options);

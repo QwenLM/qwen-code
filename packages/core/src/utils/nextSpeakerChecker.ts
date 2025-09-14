@@ -34,11 +34,33 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
   required: ['reasoning', 'next_speaker'],
 };
 
+/**
+ * Represents the response from the `checkNextSpeaker` function.
+ */
 export interface NextSpeakerResponse {
+  /**
+   * The reasoning behind the decision of who should speak next.
+   */
   reasoning: string;
+  /**
+   * The next speaker, either 'user' or 'model'.
+   */
   next_speaker: 'user' | 'model';
 }
 
+/**
+ * Determines who should speak next in a conversation, the user or the model.
+ * This function analyzes the last turn in the conversation history and uses a set of rules
+ * to decide if the model should continue, if it's waiting for a user response, or if it
+ * has asked a direct question to the user.
+ *
+ * It uses an LLM call to make the final determination based on a specific prompt and response schema.
+ *
+ * @param chat The `GeminiChat` instance representing the conversation.
+ * @param geminiClient The `GeminiClient` instance to use for the LLM call.
+ * @param abortSignal An `AbortSignal` to cancel the operation.
+ * @returns A promise that resolves to a `NextSpeakerResponse` object, or `null` if the next speaker cannot be determined.
+ */
 export async function checkNextSpeaker(
   chat: GeminiChat,
   geminiClient: GeminiClient,

@@ -18,20 +18,35 @@ const DEFAULT_IGNORED_FOLDERS = new Set(['node_modules', '.git', 'dist']);
 
 // --- Interfaces ---
 
-/** Options for customizing folder structure retrieval. */
+/**
+ * Options for customizing folder structure retrieval.
+ */
 interface FolderStructureOptions {
-  /** Maximum number of files and folders combined to display. Defaults to 20. */
+  /**
+   * Maximum number of files and folders combined to display. Defaults to 20.
+   */
   maxItems?: number;
-  /** Set of folder names to ignore completely. Case-sensitive. */
+  /**
+   * Set of folder names to ignore completely. Case-sensitive.
+   */
   ignoredFolders?: Set<string>;
-  /** Optional regex to filter included files by name. */
+  /**
+   * Optional regex to filter included files by name.
+   */
   fileIncludePattern?: RegExp;
-  /** For filtering files. */
+  /**
+   * For filtering files.
+   */
   fileService?: FileDiscoveryService;
-  /** File filtering ignore options. */
+  /**
+   * File filtering ignore options.
+   */
   fileFilteringOptions?: FileFilteringOptions;
 }
-// Define a type for the merged options where fileIncludePattern remains optional
+
+/**
+ * Represents the merged options for folder structure retrieval, with default values applied.
+ */
 type MergedFolderStructureOptions = Required<
   Omit<FolderStructureOptions, 'fileIncludePattern' | 'fileService'>
 > & {
@@ -40,16 +55,45 @@ type MergedFolderStructureOptions = Required<
   fileFilteringOptions?: FileFilteringOptions;
 };
 
-/** Represents the full, unfiltered information about a folder and its contents. */
+/**
+ * Represents the full, unfiltered information about a folder and its contents.
+ */
 interface FullFolderInfo {
+  /**
+   * The name of the folder.
+   */
   name: string;
+  /**
+   * The absolute path to the folder.
+   */
   path: string;
+  /**
+   * An array of file names within the folder.
+   */
   files: string[];
+  /**
+   * An array of `FullFolderInfo` objects for subfolders.
+   */
   subFolders: FullFolderInfo[];
+  /**
+   * The total number of files and subfolders included from this folder during the BFS scan.
+   */
   totalChildren: number; // Number of files and subfolders included from this folder during BFS scan
+  /**
+   * The number of files included from this folder during the BFS scan.
+   */
   totalFiles: number; // Number of files included from this folder during BFS scan
+  /**
+   * A flag to indicate if the folder was ignored.
+   */
   isIgnored?: boolean; // Flag to easily identify ignored folders later
+  /**
+   * Indicates if there are more files in this folder that were not included due to the `maxItems` limit.
+   */
   hasMoreFiles?: boolean; // Indicates if files were truncated for this specific folder
+  /**
+   * Indicates if there are more subfolders in this folder that were not included due to the `maxItems` limit.
+   */
   hasMoreSubfolders?: boolean; // Indicates if subfolders were truncated for this specific folder
 }
 
@@ -286,13 +330,13 @@ function formatStructure(
 // --- Main Exported Function ---
 
 /**
- * Generates a string representation of a directory's structure,
- * limiting the number of items displayed. Ignored folders are shown
- * followed by '...' instead of their contents.
+ * Generates a string representation of a directory's structure, formatted as a tree.
+ * The output is limited by the number of items displayed. Ignored folders are shown
+ * with a truncation indicator instead of their contents.
  *
  * @param directory The absolute or relative path to the directory.
- * @param options Optional configuration settings.
- * @returns A promise resolving to the formatted folder structure string.
+ * @param options Optional configuration settings to customize the output.
+ * @returns A promise that resolves to the formatted folder structure string.
  */
 export async function getFolderStructure(
   directory: string,

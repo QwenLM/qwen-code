@@ -6,6 +6,11 @@
 
 import { GenerateContentResponse, Part, FunctionCall } from '@google/genai';
 
+/**
+ * Extracts the text content from a `GenerateContentResponse`.
+ * @param response The response from the generate content request.
+ * @returns The combined text from all parts, or `undefined` if no text parts are found.
+ */
 export function getResponseText(
   response: GenerateContentResponse,
 ): string | undefined {
@@ -23,6 +28,11 @@ export function getResponseText(
   return textSegments.join('');
 }
 
+/**
+ * Extracts the text content from an array of `Part` objects.
+ * @param parts An array of `Part` objects.
+ * @returns The combined text from all parts, or `undefined` if no text parts are found.
+ */
 export function getResponseTextFromParts(parts: Part[]): string | undefined {
   if (!parts) {
     return undefined;
@@ -37,6 +47,11 @@ export function getResponseTextFromParts(parts: Part[]): string | undefined {
   return textSegments.join('');
 }
 
+/**
+ * Extracts all function calls from a `GenerateContentResponse`.
+ * @param response The response from the generate content request.
+ * @returns An array of `FunctionCall` objects, or `undefined` if no function calls are found.
+ */
 export function getFunctionCalls(
   response: GenerateContentResponse,
 ): FunctionCall[] | undefined {
@@ -50,6 +65,11 @@ export function getFunctionCalls(
   return functionCallParts.length > 0 ? functionCallParts : undefined;
 }
 
+/**
+ * Extracts all function calls from an array of `Part` objects.
+ * @param parts An array of `Part` objects.
+ * @returns An array of `FunctionCall` objects, or `undefined` if no function calls are found.
+ */
 export function getFunctionCallsFromParts(
   parts: Part[],
 ): FunctionCall[] | undefined {
@@ -62,6 +82,11 @@ export function getFunctionCallsFromParts(
   return functionCallParts.length > 0 ? functionCallParts : undefined;
 }
 
+/**
+ * Extracts all function calls from a `GenerateContentResponse` and returns them as a JSON string.
+ * @param response The response from the generate content request.
+ * @returns A JSON string representing the function calls, or `undefined` if no function calls are found.
+ */
 export function getFunctionCallsAsJson(
   response: GenerateContentResponse,
 ): string | undefined {
@@ -72,6 +97,11 @@ export function getFunctionCallsAsJson(
   return JSON.stringify(functionCalls, null, 2);
 }
 
+/**
+ * Extracts all function calls from an array of `Part` objects and returns them as a JSON string.
+ * @param parts An array of `Part` objects.
+ * @returns A JSON string representing the function calls, or `undefined` if no function calls are found.
+ */
 export function getFunctionCallsFromPartsAsJson(
   parts: Part[],
 ): string | undefined {
@@ -82,6 +112,12 @@ export function getFunctionCallsFromPartsAsJson(
   return JSON.stringify(functionCalls, null, 2);
 }
 
+/**
+ * Gets a structured response from a `GenerateContentResponse`, combining text and function calls.
+ * @param response The response from the generate content request.
+ * @returns A string containing the text content and/or a JSON representation of the function calls.
+ *          Returns `undefined` if the response contains neither.
+ */
 export function getStructuredResponse(
   response: GenerateContentResponse,
 ): string | undefined {
@@ -100,6 +136,12 @@ export function getStructuredResponse(
   return undefined;
 }
 
+/**
+ * Gets a structured response from an array of `Part` objects, combining text and function calls.
+ * @param parts An array of `Part` objects.
+ * @returns A string containing the text content and/or a JSON representation of the function calls.
+ *          Returns `undefined` if the response contains neither.
+ */
 export function getStructuredResponseFromParts(
   parts: Part[],
 ): string | undefined {

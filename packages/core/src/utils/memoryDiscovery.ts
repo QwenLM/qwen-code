@@ -33,11 +33,25 @@ const logger = {
     console.error('[ERROR] [MemoryDiscovery]', ...args),
 };
 
+/**
+ * Represents the content of a Gemini file, including its path and content.
+ */
 interface GeminiFileContent {
+  /**
+   * The path to the file.
+   */
   filePath: string;
+  /**
+   * The content of the file, or `null` if the file could not be read.
+   */
   content: string | null;
 }
 
+/**
+ * Finds the root of a Git repository by searching upwards from a starting directory.
+ * @param startDir The directory to start the search from.
+ * @returns A promise that resolves to the path of the repository root, or `null` if not found.
+ */
 async function findProjectRoot(startDir: string): Promise<string | null> {
   let currentDir = path.resolve(startDir);
   while (true) {
@@ -82,6 +96,19 @@ async function findProjectRoot(startDir: string): Promise<string | null> {
   }
 }
 
+/**
+ * Finds all `QWEN.md` and other `.gemini.md` files in the hierarchy,
+ * including global, home, and project-specific files.
+ * @param currentWorkingDirectory The current working directory.
+ * @param includeDirectoriesToReadGemini An array of additional directories to search.
+ * @param userHomePath The path to the user's home directory.
+ * @param debugMode Whether to enable debug logging.
+ * @param fileService An instance of `FileDiscoveryService` for filtering files.
+ * @param extensionContextFilePaths An array of file paths from the extension context.
+ * @param fileFilteringOptions Options for filtering files.
+ * @param maxDirs The maximum number of directories to scan.
+ * @returns A promise that resolves to an array of unique file paths.
+ */
 async function getGeminiMdFilePathsInternal(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[],
@@ -112,6 +139,17 @@ async function getGeminiMdFilePathsInternal(
   return Array.from(new Set<string>(paths));
 }
 
+/**
+ * Finds all `QWEN.md` and other `.gemini.md` files for a single directory.
+ * @param dir The directory to search.
+ * @param userHomePath The path to the user's home directory.
+ * @param debugMode Whether to enable debug logging.
+ * @param fileService An instance of `FileDiscoveryService` for filtering files.
+ * @param extensionContextFilePaths An array of file paths from the extension context.
+ * @param fileFilteringOptions Options for filtering files.
+ * @param maxDirs The maximum number of directories to scan.
+ * @returns A promise that resolves to an array of unique file paths.
+ */
 async function getGeminiMdFilePathsInternalForEachDir(
   dir: string,
   userHomePath: string,
@@ -240,6 +278,13 @@ async function getGeminiMdFilePathsInternalForEachDir(
   return finalPaths;
 }
 
+/**
+ * Reads the content of multiple Gemini files.
+ * @param filePaths An array of file paths to read.
+ * @param debugMode Whether to enable debug logging.
+ * @param importFormat The format to use for processing imports ('flat' or 'tree').
+ * @returns A promise that resolves to an array of `GeminiFileContent` objects.
+ */
 async function readGeminiMdFiles(
   filePaths: string[],
   debugMode: boolean,
@@ -281,6 +326,13 @@ async function readGeminiMdFiles(
   return results;
 }
 
+/**
+ * Concatenates the content of multiple Gemini files into a single string,
+ * with each file's content wrapped in a context block.
+ * @param instructionContents An array of `GeminiFileContent` objects.
+ * @param currentWorkingDirectoryForDisplay The current working directory, used for creating relative display paths.
+ * @returns A single string containing the concatenated content.
+ */
 function concatenateInstructions(
   instructionContents: GeminiFileContent[],
   // CWD is needed to resolve relative paths for display markers
@@ -303,8 +355,18 @@ function concatenateInstructions(
 }
 
 /**
- * Loads hierarchical QWEN.md files and concatenates their content.
- * This function is intended for use by the server.
+ * Loads hierarchical memory files (like `QWEN.md`) and concatenates their content.
+ * This function is intended for use on the server to provide context to the LLM.
+ *
+ * @param currentWorkingDirectory The current working directory of the user's project.
+ * @param includeDirectoriesToReadGemini An array of additional directories to search for memory files.
+ * @param debugMode Whether to enable debug logging.
+ * @param fileService An instance of `FileDiscoveryService` for filtering files.
+ * @param extensionContextFilePaths An array of file paths provided by the extension context.
+ * @param importFormat The format to use for processing imports ('flat' or 'tree').
+ * @param fileFilteringOptions Options for filtering files.
+ * @param maxDirs The maximum number of directories to scan during the search.
+ * @returns A promise that resolves to an object containing the combined memory content and the number of files read.
  */
 export async function loadServerHierarchicalMemory(
   currentWorkingDirectory: string,

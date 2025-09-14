@@ -15,12 +15,33 @@ const logger = {
   debug: (...args: any[]) => console.debug('[DEBUG] [BfsFileSearch]', ...args),
 };
 
+/**
+ * Options for the bfsFileSearch function.
+ */
 interface BfsFileSearchOptions {
+  /**
+   * The name of the file to search for.
+   */
   fileName: string;
+  /**
+   * An array of directory names to ignore.
+   */
   ignoreDirs?: string[];
+  /**
+   * The maximum number of directories to scan.
+   */
   maxDirs?: number;
+  /**
+   * Whether to enable debug logging.
+   */
   debug?: boolean;
+  /**
+   * An instance of FileDiscoveryService to use for filtering files.
+   */
   fileService?: FileDiscoveryService;
+  /**
+   * Options for filtering files.
+   */
   fileFilteringOptions?: FileFilteringOptions;
 }
 
