@@ -22,6 +22,7 @@ import { ShellTool } from '../tools/shell.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
+import { GitSearchTool } from '../tools/git-search.js';
 import {
   MemoryTool,
   setGeminiMdFilename,
@@ -919,6 +920,7 @@ export class Config {
     registerCoreTool(WebFetchTool, this);
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
+    registerCoreTool(GitSearchTool, this);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
     // Conditionally register web search tool only if Tavily API key is set
