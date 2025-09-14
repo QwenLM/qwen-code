@@ -502,9 +502,23 @@ export const SETTINGS_SCHEMA = {
     label: 'Chat Compression',
     category: 'General',
     requiresRestart: false,
-    default: undefined as ChatCompressionSettings | undefined,
+    default: {} as ChatCompressionSettings,
     description: 'Chat compression settings.',
-    showInDialog: false,
+    showInDialog: true,
+    properties: {
+      contextPercentageThreshold: {
+        type: 'number',
+        label: 'Auto-compression threshold',
+        category: 'General',
+        requiresRestart: false,
+        default: 0.7,
+        description:
+          'The percentage of the token limit that will trigger auto-compression of the chat history (0-1).',
+        parentKey: 'chatCompression',
+        childKey: 'contextPercentageThreshold',
+        showInDialog: true,
+      },
+    },
   },
   showLineNumbers: {
     type: 'boolean',
