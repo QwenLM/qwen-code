@@ -116,30 +116,75 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
         .join('\n');
     }
 
-    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. 
+    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 
-Available agent types and the tools they have access to:
+## Available Agents
 ${subagentDescriptions}
 
-When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+## When to Use the Task Tool
 
-When NOT to use the Agent tool:
-- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly
-- Other tasks that are not related to the agent descriptions above
+Use the Task tool when you need to delegate complex, multi-step work that requires specialized knowledge or capabilities. The tool is particularly effective for:
 
-Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
-4. The agent's outputs should generally be trusted
-5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+- Research tasks that require exploring multiple files or codebases
+- Code analysis and refactoring projects
+- Multi-file editing or creation tasks
+- Complex problem-solving that benefits from a structured approach
 
-Example usage:
+## When NOT to Use the Task Tool
+
+Avoid using the Task tool for:
+- Simple file operations - use Read, Write, or Glob tools directly
+- Quick searches - use Grep or Glob tools for immediate results
+- Single-step tasks - handle them directly without delegation
+- Tasks requiring user interaction - these should be handled by the primary agent
+
+## Task Delegation Guidelines
+
+### Selecting the Right Agent
+- Review the available agents and their descriptions above
+- Match the agent's strengths to your task requirements
+- When in doubt, the general-purpose agent is a good default choice
+
+### Crafting Effective Task Prompts
+When delegating tasks, ensure your prompt includes:
+- Clear, specific objectives
+- Expected outcomes and deliverables
+- Any constraints or limitations
+- Relevant context about the codebase or project
+
+### Optimizing for Performance
+- Launch multiple agents concurrently when possible to maximize performance
+- Use a single message with multiple tool uses for related tasks
+- Provide sufficient context upfront to minimize back-and-forth
+
+## Agent Communication Guidelines
+
+### Before Delegation
+- Clearly define what you expect the agent to accomplish
+- Specify the format and detail level of the expected response
+- Include any relevant constraints or requirements
+
+### During Execution
+- Each agent invocation is stateless with no ability to communicate further
+- The agent will return a single message with its final result
+- You must explicitly request any specific information you need in the result
+
+### After Completion
+- The result returned by the agent is not visible to the user
+- You should send a text message back to the user with a concise summary
+- Include relevant details, code snippets, or findings as appropriate
+
+## Quality Standards
+
+- **Clarity**: Provide unambiguous task descriptions
+- **Completeness**: Include all necessary context and requirements
+- **Specificity**: Clearly define expected outcomes
+- **Efficiency**: Match the task complexity to the right agent
+
+## Example Usage Patterns
+
 <example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a signficant piece of code
+"code-reviewer": use this agent after you are done writing a significant piece of code
 "greeting-responder": use this agent when to respond to user greetings with a friendly joke
 </example_agent_description>
 
@@ -158,10 +203,10 @@ function isPrime(n) {
 }
 </code>
 <commentary>
-Since a signficant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+Since a significant piece of code was written and the task was completed, now use the general-purpose agent to review the code
 </commentary>
-assistant: Now let me use the code-reviewer agent to review the code
-assistant: Uses the Task tool to launch the with the code-reviewer agent 
+assistant: Now let me use the general-purpose agent to review the code
+assistant: Uses the Task tool to launch the general-purpose agent
 </example>
 
 <example>
@@ -169,7 +214,7 @@ user: "Hello"
 <commentary>
 Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
 </commentary>
-assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+assistant: "I'm going to use the Task tool to launch the greeting-responder agent"
 </example>
 `;
 
