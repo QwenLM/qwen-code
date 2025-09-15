@@ -6,6 +6,7 @@
 
 import { SlashCommand } from '../ui/commands/types.js';
 import { ICommandLoader } from './types.js';
+import { Settings } from '../config/settings.js';
 
 /**
  * Orchestrates the discovery and loading of all slash commands for the CLI.
@@ -42,11 +43,13 @@ export class CommandService {
    * @param loaders An array of objects that conform to the `ICommandLoader`
    *   interface. Built-in commands should come first, followed by FileCommandLoader.
    * @param signal An AbortSignal to cancel the loading process.
+   * @param settings Optional settings to control which commands to load.
    * @returns A promise that resolves to a new, fully initialized `CommandService` instance.
    */
   static async create(
     loaders: ICommandLoader[],
     signal: AbortSignal,
+    settings?: Settings,
   ): Promise<CommandService> {
     const results = await Promise.allSettled(
       loaders.map((loader) => loader.loadCommands(signal)),
@@ -61,8 +64,26 @@ export class CommandService {
       }
     }
 
+    // Filter commands based on coreCommands and excludeCommands settings
+    let filteredCommands = allCommands;
+    
+    // Create sets for efficient lookup
+    const coreCommandSet = new Set(settings?.coreCommands || []);
+    const excludeCommandSet = new Set(settings?.excludeCommands || []);
+    
+    // If coreCommands is specified, only include those commands
+    if (coreCommandSet.size > 0) {
+      filteredCommands = filteredCommands.filter(cmd => 
+        coreCommandSet.has(cmd.name) && !excludeCommandSet.has(cmd.name)
+      );
+    } else if (excludeCommandSet.size > 0) {
+      filteredCommands = filteredCommands.filter(cmd => 
+        !excludeCommandSet.has(cmd.name)
+      );
+    }
+
     const commandMap = new Map<string, SlashCommand>();
-    for (const cmd of allCommands) {
+    for (const cmd of filteredCommands) {
       let finalName = cmd.name;
 
       // Extension commands get renamed if they conflict with existing commands

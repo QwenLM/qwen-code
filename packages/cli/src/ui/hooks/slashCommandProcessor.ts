@@ -252,6 +252,7 @@ export const useSlashCommandProcessor = (
       const commandService = await CommandService.create(
         loaders,
         controller.signal,
+        settings.merged,
       );
       setCommands(commandService.getCommands());
     };
@@ -261,7 +262,7 @@ export const useSlashCommandProcessor = (
     return () => {
       controller.abort();
     };
-  }, [config, reloadTrigger]);
+  }, [config, settings, reloadTrigger]);
 
   const handleSlashCommand = useCallback(
     async (
