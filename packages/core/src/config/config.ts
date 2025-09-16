@@ -18,6 +18,7 @@ import { ReadFileTool } from '../tools/read-file.js';
 import { GrepTool } from '../tools/grep.js';
 import { GlobTool } from '../tools/glob.js';
 import { EditTool } from '../tools/edit.js';
+import { SmartEditTool } from '../tools/smart-edit.js';
 import { ShellTool } from '../tools/shell.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
@@ -233,6 +234,7 @@ export interface ConfigParameters {
   trustedFolder?: boolean;
   shouldUseNodePtyShell?: boolean;
   skipNextSpeakerCheck?: boolean;
+  useSmartEdit?: boolean;
 }
 
 export class Config {
@@ -318,6 +320,7 @@ export class Config {
   private readonly trustedFolder: boolean | undefined;
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
+  private readonly useSmartEdit: boolean;
   private initialized: boolean = false;
 
   constructor(params: ConfigParameters) {
@@ -399,6 +402,7 @@ export class Config {
     this.trustedFolder = params.trustedFolder;
     this.shouldUseNodePtyShell = params.shouldUseNodePtyShell ?? false;
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? false;
+    this.useSmartEdit = params.useSmartEdit ?? true;
 
     // Web search
     this.tavilyApiKey = params.tavilyApiKey;
@@ -861,6 +865,10 @@ export class Config {
     return this.skipNextSpeakerCheck;
   }
 
+  getUseSmartEdit(): boolean {
+    return this.useSmartEdit;
+  }
+
   async getGitService(): Promise<GitService> {
     if (!this.gitService) {
       this.gitService = new GitService(this.targetDir);
@@ -914,7 +922,11 @@ export class Config {
     registerCoreTool(ReadFileTool, this);
     registerCoreTool(GrepTool, this);
     registerCoreTool(GlobTool, this);
-    registerCoreTool(EditTool, this);
+    if (this.getUseSmartEdit()) {
+      registerCoreTool(SmartEditTool, this);
+    } else {
+      registerCoreTool(EditTool, this);
+    }
     registerCoreTool(WriteFileTool, this);
     registerCoreTool(WebFetchTool, this);
     registerCoreTool(ReadManyFilesTool, this);
