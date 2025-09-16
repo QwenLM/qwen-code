@@ -118,7 +118,7 @@ export const codeReviewCommand: SlashCommand = {
     } catch (error) {
       // Clear pending item on error
       ui.setPendingItem(null);
-      
+
       ui.addItem(
         {
           type: MessageType.ERROR,
@@ -280,7 +280,7 @@ ${previousContent}
     const reviewText =
       response.candidates?.[0]?.content?.parts?.[0]?.text ||
       'No review feedback received.';
-    
+
     // Format the review results as a proper report
     return `# Code Review Report
 
