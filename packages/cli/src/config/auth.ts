@@ -66,3 +66,7 @@ export const setOpenAIBaseUrl = (baseUrl: string): void => {
 export const setOpenAIModel = (model: string): void => {
   process.env['OPENAI_MODEL'] = model;
 };
+
+export const setOpenAIContextWindow = (contextWindow: number): void => {
+  process.env['OPENAI_CONTEXT_WINDOW'] = contextWindow.toString();
+};

@@ -161,6 +161,7 @@ Use API keys for OpenAI or other compatible providers:
    export OPENAI_API_KEY="your_api_key_here"
    export OPENAI_BASE_URL="your_api_endpoint"
    export OPENAI_MODEL="your_model_choice"
+   export OPENAI_CONTEXT_WINDOW="context_window_size"  # Optional, context window size in tokens
    ```
 
 2. **Project `.env` File**
@@ -169,6 +170,7 @@ Use API keys for OpenAI or other compatible providers:
    OPENAI_API_KEY=your_api_key_here
    OPENAI_BASE_URL=your_api_endpoint
    OPENAI_MODEL=your_model_choice
+   OPENAI_CONTEXT_WINDOW=context_window_size  # Optional, context window size in tokens
    ```
 
 **API Provider Options**
@@ -187,6 +189,7 @@ Use API keys for OpenAI or other compatible providers:
 export OPENAI_API_KEY="your_api_key_here"
 export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
 export OPENAI_MODEL="qwen3-coder-plus"
+export OPENAI_CONTEXT_WINDOW=32768  # Optional, context window size in tokens
 ```
 
 **Option 2: ModelScope (Free Tier)** ([Apply for API Key](https://modelscope.cn/docs/model-service/API-Inference/intro))
@@ -198,6 +201,7 @@ export OPENAI_MODEL="qwen3-coder-plus"
 export OPENAI_API_KEY="your_api_key_here"
 export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
 export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+export OPENAI_CONTEXT_WINDOW=32768  # Optional, context window size in tokens
 ```
 
 </details>
@@ -211,6 +215,7 @@ export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
 export OPENAI_API_KEY="your_api_key_here"
 export OPENAI_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 export OPENAI_MODEL="qwen3-coder-plus"
+export OPENAI_CONTEXT_WINDOW=32768  # Optional, context window size in tokens
 ```
 
 **Option 2: OpenRouter (Free Tier Available)** ([Apply for API Key](https://openrouter.ai/))
@@ -219,6 +224,7 @@ export OPENAI_MODEL="qwen3-coder-plus"
 export OPENAI_API_KEY="your_api_key_here"
 export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
 export OPENAI_MODEL="qwen/qwen3-coder:free"
+export OPENAI_CONTEXT_WINDOW=8192  # Optional, context window size in tokens
 ```
 
 </details>

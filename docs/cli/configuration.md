@@ -380,6 +380,10 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
   - Specifies the default OPENAI model to use.
   - Overrides the hardcoded default
   - Example: `export OPENAI_MODEL="qwen3-coder-plus"`
+- **`OPENAI_CONTEXT_WINDOW`**:
+  - Specifies the context window size (max tokens) for OpenAI-compatible models.
+  - Can help manage token usage with models that have different context window limits.
+  - Example: `export OPENAI_CONTEXT_WINDOW=8192`
 - **`GEMINI_SANDBOX`**:
   - Alternative to the `sandbox` setting in `settings.json`.
   - Accepts `true`, `false`, `docker`, `podman`, or a custom command string.
@@ -469,6 +473,9 @@ Arguments passed directly when running the CLI can override other configurations
   - Displays the version of the CLI.
 - **`--openai-logging`**:
   - Enables logging of OpenAI API calls for debugging and analysis. This flag overrides the `enableOpenAILogging` setting in `settings.json`.
+- **`--openai-context-window <number>`**:
+  - Sets the context window size (max tokens) for OpenAI-compatible models. This can help manage token usage with models that have different context window limits.
+  - Example: `qwen --openai-context-window 8192`
 - **`--tavily-api-key <api_key>`**:
   - Sets the Tavily API key for web search functionality for this session.
   - Example: `qwen --tavily-api-key tvly-your-api-key-here`
