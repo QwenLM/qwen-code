@@ -336,7 +336,13 @@ export async function main() {
     config,
   );
 
-  await runNonInteractive(nonInteractiveConfig, input, prompt_id);
+    await runNonInteractive(
+    nonInteractiveConfig, 
+    input, 
+    prompt_id, 
+    argv.verbose || false, 
+    argv.verboseToStdout || false
+  );
   process.exit(0);
 }
 

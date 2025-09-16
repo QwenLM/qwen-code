@@ -26,6 +26,8 @@ export async function runNonInteractive(
   config: Config,
   input: string,
   prompt_id: string,
+  verbose: boolean = false,
+  verboseToStdout: boolean = false,
 ): Promise<void> {
   const consolePatcher = new ConsolePatcher({
     stderr: true,
@@ -103,6 +105,13 @@ export async function runNonInteractive(
             id: toolCallRequest.callId,
           };
           functionCalls.push(fc);
+
+          // In verbose mode, show the function call
+          if (verbose) {
+            const output = verboseToStdout ? process.stdout : process.stderr;
+            output.write(`\n[FUNCTION CALL] ${fc.name}\n`);
+            output.write(`[ARGS] ${JSON.stringify(fc.args, null, 2)}\n`);
+          }
         }
       }
 
@@ -129,6 +138,18 @@ export async function runNonInteractive(
             console.error(
               `Error executing tool ${fc.name}: ${toolResponse.resultDisplay || toolResponse.error.message}`,
             );
+          }
+
+          // In verbose mode, show the function response
+          if (verbose) {
+            const output = verboseToStdout ? process.stdout : process.stderr;
+            output.write(`\n[FUNCTION RESPONSE] ${fc.name}\n`);
+            if (toolResponse.resultDisplay) {
+              output.write(`[RESULT] ${toolResponse.resultDisplay}\n`);
+            }
+            if (toolResponse.responseParts) {
+              output.write(`[RESPONSE PARTS] ${JSON.stringify(toolResponse.responseParts, null, 2)}\n`);
+            }
           }
 
           if (toolResponse.responseParts) {

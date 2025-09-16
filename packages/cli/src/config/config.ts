@@ -80,6 +80,8 @@ export interface CliArgs {
   includeDirectories: string[] | undefined;
   tavilyApiKey: string | undefined;
   session: string | undefined;
+  verbose: boolean | undefined;
+  verboseToStdout: boolean | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -259,6 +261,16 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Session ID for maintaining conversation context across multiple interactions',
         })
+        .option('verbose', {
+          type: 'boolean',
+          description: 'Show detailed output including function calls and responses in non-interactive mode',
+          default: false,
+        })
+        .option('verbose-to-stdout', {
+          type: 'boolean',
+          description: 'Output verbose information to stdout instead of stderr (requires --verbose)',
+          default: false,
+        })
 
         .check((argv) => {
           if (argv.prompt && argv['promptInteractive']) {
@@ -269,6 +281,12 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv.yolo && argv['approvalMode']) {
             throw new Error(
               'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
+            );
+          }
+
+          if (argv['verboseToStdout'] && !argv.verbose) {
+            throw new Error(
+              'Cannot use --verbose-to-stdout without --verbose flag.',
             );
           }
           return true;
