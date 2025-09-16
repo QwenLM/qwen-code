@@ -11,6 +11,7 @@ import yargs from 'yargs/yargs';
 import { hideBin } from 'yargs/helpers';
 import process from 'node:process';
 import { mcpCommand } from '../commands/mcp.js';
+import { sessionCommand } from '../commands/sessionCommand.js';
 import {
   Config,
   loadServerHierarchicalMemory,
@@ -78,6 +79,7 @@ export interface CliArgs {
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   tavilyApiKey: string | undefined;
+  session: string | undefined;
 }
 
 export async function parseArguments(): Promise<CliArgs> {
@@ -253,6 +255,10 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Tavily API key for web search functionality',
         })
+        .option('session', {
+          type: 'string',
+          description: 'Session ID for maintaining conversation context across multiple interactions',
+        })
 
         .check((argv) => {
           if (argv.prompt && argv['promptInteractive']) {
@@ -270,6 +276,8 @@ export async function parseArguments(): Promise<CliArgs> {
     )
     // Register MCP subcommands
     .command(mcpCommand)
+    // Register session management subcommands
+    .command(sessionCommand)
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
     .alias('v', 'version')
     .help()
@@ -280,10 +288,10 @@ export async function parseArguments(): Promise<CliArgs> {
   yargsInstance.wrap(yargsInstance.terminalWidth());
   const result = await yargsInstance.parse();
 
-  // Handle case where MCP subcommands are executed - they should exit the process
+  // Handle case where MCP or session subcommands are executed - they should exit the process
   // and not return to main CLI logic
-  if (result._.length > 0 && result._[0] === 'mcp') {
-    // MCP commands handle their own execution and process exit
+  if (result._.length > 0 && (result._[0] === 'mcp' || result._[0] === 'session'))  {
+    // MCP and session commands handle their own execution and process exit
     process.exit(0);
   }
 

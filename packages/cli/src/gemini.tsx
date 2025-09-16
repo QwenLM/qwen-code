@@ -152,10 +152,14 @@ export async function main() {
 
   const argv = await parseArguments();
   const extensions = loadExtensions(workspaceRoot);
+
+  // Use session ID from command line argument or generate a new one.
+  const actualSessionId = argv.session || sessionId;
+
   const config = await loadCliConfig(
     settings.merged,
     extensions,
-    sessionId,
+    actualSessionId,
     argv,
   );
 

@@ -16,6 +16,11 @@ import {
 import { Content, Part, FunctionCall } from '@google/genai';
 
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
+import {
+  saveSession,
+  loadSession,
+  createNewSessionData,
+} from './utils/sessionManager.js';
 
 export async function runNonInteractive(
   config: Config,
@@ -38,6 +43,25 @@ export async function runNonInteractive(
     });
 
     const geminiClient = config.getGeminiClient();
+    const sessionId = config.getSessionId();
+    const projectRoot = config.getProjectRoot();
+
+    // Load existing session or create new one
+    let sessionData = await loadSession(sessionId);
+    if (!sessionData) {
+      sessionData = createNewSessionData(sessionId, projectRoot);
+      if (config.getDebugMode()) {
+        console.error(`Created new session: ${sessionId}`);
+      }
+    } else {
+      if (config.getDebugMode()) {
+        console.error(`Loaded existing session: ${sessionId} with ${sessionData.history.length} messages`);
+      }
+      // Restore conversation history to gemini client
+      if (sessionData.history.length > 0) {
+        geminiClient.setHistory(sessionData.history);
+      }
+    }
 
     const abortController = new AbortController();
     let currentMessages: Content[] = [
@@ -123,6 +147,21 @@ export async function runNonInteractive(
         currentMessages = [{ role: 'user', parts: toolResponseParts }];
       } else {
         process.stdout.write('\n'); // Ensure a final newline
+        
+        // Save session data before returning
+        try {
+          // Update session history with the current conversation
+          sessionData.history = geminiClient.getHistory();
+          await saveSession(sessionData);
+          if (config.getDebugMode()) {
+            console.error(`Session saved: ${sessionId}`);
+          }
+        } catch (error) {
+          if (config.getDebugMode()) {
+            console.error(`Failed to save session: ${error}`);
+          }
+        }
+        
         return;
       }
     }
@@ -133,6 +172,19 @@ export async function runNonInteractive(
         config.getContentGeneratorConfig()?.authType,
       ),
     );
+    
+    // Try to save session even if there was an error
+    try {
+      const sessionId = config.getSessionId();
+      let sessionData = await loadSession(sessionId);
+      if (sessionData) {
+        sessionData.history = config.getGeminiClient().getHistory();
+        await saveSession(sessionData);
+      }
+    } catch (saveError) {
+      // Ignore save errors in error path
+    }
+    
     process.exit(1);
   } finally {
     consolePatcher.cleanup();
