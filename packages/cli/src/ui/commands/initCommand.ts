@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,6 +13,8 @@ import {
   CommandKind,
 } from './types.js';
 import { getCurrentGeminiMdFilename } from '@qwen-code/qwen-code-core';
+import { Text } from 'ink';
+import React from 'react';
 
 export const initCommand: SlashCommand = {
   name: 'init',
@@ -35,15 +37,27 @@ export const initCommand: SlashCommand = {
 
     try {
       if (fs.existsSync(contextFilePath)) {
-        // If file exists but is empty (or whitespace), continue to initialize; otherwise, bail out
+        // If file exists but is empty (or whitespace), continue to initialize
         try {
           const existing = fs.readFileSync(contextFilePath, 'utf8');
           if (existing && existing.trim().length > 0) {
-            return {
-              type: 'message',
-              messageType: 'info',
-              content: `A ${contextFileName} file already exists in this directory. No changes were made.`,
-            };
+            // File exists and has content - ask for confirmation to overwrite
+            if (!context.overwriteConfirmed) {
+              return {
+                type: 'confirm_action',
+                // TODO: Move to .tsx file to use JSX syntax instead of React.createElement
+                // For now, using React.createElement to maintain .ts compatibility for PR review
+                prompt: React.createElement(
+                  Text,
+                  null,
+                  `A ${contextFileName} file already exists in this directory. Do you want to regenerate it?`,
+                ),
+                originalInvocation: {
+                  raw: context.invocation?.raw || '/init',
+                },
+              };
+            }
+            // User confirmed overwrite, continue with regeneration
           }
         } catch {
           // If we fail to read, conservatively proceed to (re)create the file

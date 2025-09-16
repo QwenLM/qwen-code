@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useKeypress, Key } from './useKeypress.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { useStdin } from 'ink';
@@ -54,8 +54,8 @@ vi.mock('readline', () => {
 class MockStdin extends EventEmitter {
   isTTY = true;
   setRawMode = vi.fn();
-  on = this.addListener;
-  removeListener = this.removeListener;
+  override on = this.addListener;
+  override removeListener = super.removeListener;
   write = vi.fn();
   resume = vi.fn();
 
@@ -105,12 +105,33 @@ describe('useKeypress', () => {
   let originalNodeVersion: string;
 
   const wrapper = ({ children }: { children: React.ReactNode }) =>
-    React.createElement(KeypressProvider, null, children);
+    React.createElement(
+      KeypressProvider,
+      {
+        kittyProtocolEnabled: false,
+        pasteWoraround: false,
+      },
+      children,
+    );
+
+  const wrapperWithWindowsWorkaround = ({
+    children,
+  }: {
+    children: React.ReactNode;
+  }) =>
+    React.createElement(
+      KeypressProvider,
+      {
+        kittyProtocolEnabled: false,
+        pasteWoraround: true,
+      },
+      children,
+    );
 
   beforeEach(() => {
     vi.clearAllMocks();
     stdin = new MockStdin();
-    (useStdin as vi.Mock).mockReturnValue({
+    (useStdin as ReturnType<typeof vi.fn>).mockReturnValue({
       stdin,
       setRawMode: mockSetRawMode,
     });
@@ -187,34 +208,33 @@ describe('useKeypress', () => {
       description: 'Modern Node (>= v20)',
       setup: () => setNodeVersion('20.0.0'),
       isLegacy: false,
+      pasteWoraround: false,
     },
     {
-      description: 'Legacy Node (< v20)',
-      setup: () => setNodeVersion('18.0.0'),
-      isLegacy: true,
-    },
-    {
-      description: 'Workaround Env Var',
+      description: 'PasteWorkaround Environment Variable',
       setup: () => {
         setNodeVersion('20.0.0');
-        vi.stubEnv('PASTE_WORKAROUND', 'true');
       },
-      isLegacy: true,
+      isLegacy: false,
+      pasteWoraround: true,
     },
-  ])('in $description', ({ setup, isLegacy }) => {
+  ])('in $description', ({ setup, isLegacy, pasteWoraround }) => {
     beforeEach(() => {
       setup();
       stdin.setLegacy(isLegacy);
     });
 
-    it('should process a paste as a single event', () => {
+    it('should process a paste as a single event', async () => {
       renderHook(() => useKeypress(onKeypress, { isActive: true }), {
-        wrapper,
+        wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
       });
       const pasteText = 'hello world';
       act(() => stdin.paste(pasteText));
 
-      expect(onKeypress).toHaveBeenCalledTimes(1);
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledTimes(1);
+      });
+
       expect(onKeypress).toHaveBeenCalledWith({
         name: '',
         ctrl: false,
@@ -225,47 +245,59 @@ describe('useKeypress', () => {
       });
     });
 
-    it('should handle keypress interspersed with pastes', () => {
+    it('should handle keypress interspersed with pastes', async () => {
       renderHook(() => useKeypress(onKeypress, { isActive: true }), {
-        wrapper,
+        wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
       });
 
       const keyA = { name: 'a', sequence: 'a' };
       act(() => stdin.pressKey(keyA));
-      expect(onKeypress).toHaveBeenCalledWith(
-        expect.objectContaining({ ...keyA, paste: false }),
-      );
+
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledWith(
+          expect.objectContaining({ ...keyA, paste: false }),
+        );
+      });
 
       const pasteText = 'pasted';
       act(() => stdin.paste(pasteText));
-      expect(onKeypress).toHaveBeenCalledWith(
-        expect.objectContaining({ paste: true, sequence: pasteText }),
-      );
+
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledWith(
+          expect.objectContaining({ paste: true, sequence: pasteText }),
+        );
+      });
 
       const keyB = { name: 'b', sequence: 'b' };
       act(() => stdin.pressKey(keyB));
-      expect(onKeypress).toHaveBeenCalledWith(
-        expect.objectContaining({ ...keyB, paste: false }),
-      );
+
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledWith(
+          expect.objectContaining({ ...keyB, paste: false }),
+        );
+      });
 
       expect(onKeypress).toHaveBeenCalledTimes(3);
     });
 
-    it('should emit partial paste content if unmounted mid-paste', () => {
+    it('should emit partial paste content if unmounted mid-paste', async () => {
       const { unmount } = renderHook(
         () => useKeypress(onKeypress, { isActive: true }),
-        { wrapper },
+        {
+          wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+        },
       );
       const pasteText = 'incomplete paste';
 
       act(() => stdin.startPaste(pasteText));
 
-      // No event should be fired yet.
+      // No event should be fired yet for incomplete paste
       expect(onKeypress).not.toHaveBeenCalled();
 
-      // Unmounting should trigger the flush.
+      // Unmounting should trigger the flush
       unmount();
 
+      // Both legacy and modern modes now flush partial paste content on unmount
       expect(onKeypress).toHaveBeenCalledTimes(1);
       expect(onKeypress).toHaveBeenCalledWith({
         name: '',

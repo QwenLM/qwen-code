@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.0.11
+
+- Added subagents feature with file-based configuration system for specialized AI assistants.
+- Added Welcome Back Dialog with project summary and enhanced quit options.
+- Fixed performance issues with SharedTokenManager causing 20-minute delays.
+- Fixed tool calls UI issues and improved user experience.
+- Fixed credential clearing when switching authentication types.
+- Enhanced subagent capabilities to use tools requiring user confirmation.
+- Improved ReadManyFiles tool with shared line limits across files.
+- Re-implemented tokenLimits class for better compatibility with Qwen and other model types.
+- Fixed chunk validation to avoid unnecessary retries.
+- Resolved EditTool naming inconsistency causing agent confusion loops.
+- Fixed unexpected re-authentication when auth-token is expired.
+- Added Terminal Bench integration tests.
+- Updated multilingual documentation links in README.
+- Fixed various Windows compatibility issues.
+- Miscellaneous improvements and bug fixes.
+
 ## 0.0.10
 
 - Synced upstream `gemini-cli` to v0.2.1.

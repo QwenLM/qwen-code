@@ -503,7 +503,7 @@ export const useSlashCommandProcessor = (
                   setTimeout(async () => {
                     await runExitCleanup();
                     process.exit(0);
-                  }, 1000);
+                  }, 100);
                   return { type: 'handled' };
 
                 case 'submit_prompt':

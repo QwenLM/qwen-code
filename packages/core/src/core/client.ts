@@ -551,17 +551,21 @@ export class GeminiClient {
 
     const turn = new Turn(this.getChat(), prompt_id);
 
-    const loopDetected = await this.loopDetector.turnStarted(signal);
-    if (loopDetected) {
-      yield { type: GeminiEventType.LoopDetected };
-      return turn;
+    if (!this.config.getSkipLoopDetection()) {
+      const loopDetected = await this.loopDetector.turnStarted(signal);
+      if (loopDetected) {
+        yield { type: GeminiEventType.LoopDetected };
+        return turn;
+      }
     }
 
     const resultStream = turn.run(request, signal);
     for await (const event of resultStream) {
-      if (this.loopDetector.addAndCheck(event)) {
-        yield { type: GeminiEventType.LoopDetected };
-        return turn;
+      if (!this.config.getSkipLoopDetection()) {
+        if (this.loopDetector.addAndCheck(event)) {
+          yield { type: GeminiEventType.LoopDetected };
+          return turn;
+        }
       }
       yield event;
       if (event.type === GeminiEventType.Error) {

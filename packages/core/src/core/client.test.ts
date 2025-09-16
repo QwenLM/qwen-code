@@ -233,6 +233,7 @@ describe('Gemini Client (client.ts)', () => {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
+      getSkipLoopDetection: vi.fn().mockReturnValue(false),
     };
     const MockedConfig = vi.mocked(Config, true);
     MockedConfig.mockImplementation(
@@ -1986,6 +1987,100 @@ ${JSON.stringify(
 
       // Assert
       expect(mockCheckNextSpeaker).not.toHaveBeenCalled();
+    });
+
+    it('does not run loop checks when skipLoopDetection is true', async () => {
+      // Arrange
+      // Ensure config returns true for skipLoopDetection
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(true);
+
+      // Replace loop detector with spies
+      const ldMock = {
+        turnStarted: vi.fn().mockResolvedValue(false),
+        addAndCheck: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      };
+      // @ts-expect-error override private for testing
+      client['loopDetector'] = ldMock;
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+        yield { type: 'content', value: 'World' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const mockGenerator: Partial<ContentGenerator> = {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
+        generateContent: mockGenerateContentFn,
+      };
+      client['contentGenerator'] = mockGenerator as ContentGenerator;
+
+      // Act
+      const stream = client.sendMessageStream(
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+        'prompt-id-loop-skip',
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      // Assert: methods not called due to skip
+      const ld = client['loopDetector'] as unknown as {
+        turnStarted: ReturnType<typeof vi.fn>;
+        addAndCheck: ReturnType<typeof vi.fn>;
+      };
+      expect(ld.turnStarted).not.toHaveBeenCalled();
+      expect(ld.addAndCheck).not.toHaveBeenCalled();
+    });
+
+    it('runs loop checks when skipLoopDetection is false', async () => {
+      // Arrange
+      vi.spyOn(client['config'], 'getSkipLoopDetection').mockReturnValue(false);
+
+      const turnStarted = vi.fn().mockResolvedValue(false);
+      const addAndCheck = vi.fn().mockReturnValue(false);
+      const reset = vi.fn();
+      // @ts-expect-error override private for testing
+      client['loopDetector'] = { turnStarted, addAndCheck, reset };
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+        yield { type: 'content', value: 'World' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const mockGenerator: Partial<ContentGenerator> = {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
+        generateContent: mockGenerateContentFn,
+      };
+      client['contentGenerator'] = mockGenerator as ContentGenerator;
+
+      // Act
+      const stream = client.sendMessageStream(
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+        'prompt-id-loop-run',
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      // Assert
+      expect(turnStarted).toHaveBeenCalledTimes(1);
+      expect(addAndCheck).toHaveBeenCalled();
     });
   });
 

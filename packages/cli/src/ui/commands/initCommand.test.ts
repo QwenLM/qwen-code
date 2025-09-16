@@ -53,7 +53,7 @@ describe('initCommand', () => {
     vi.clearAllMocks();
   });
 
-  it(`should inform the user if ${DEFAULT_CONTEXT_FILENAME} already exists and is non-empty`, async () => {
+  it(`should ask for confirmation if ${DEFAULT_CONTEXT_FILENAME} already exists and is non-empty`, async () => {
     // Arrange: Simulate that the file exists
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.spyOn(fs, 'readFileSync').mockReturnValue('# Existing content');
@@ -61,13 +61,15 @@ describe('initCommand', () => {
     // Act: Run the command's action
     const result = await initCommand.action!(mockContext, '');
 
-    // Assert: Check for the correct informational message
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content: `A ${DEFAULT_CONTEXT_FILENAME} file already exists in this directory. No changes were made.`,
-    });
-    // Assert: Ensure no file was written
+    // Assert: Check for the correct confirmation request
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'confirm_action',
+        prompt: expect.anything(), // React element, not a string
+        originalInvocation: expect.anything(),
+      }),
+    );
+    // Assert: Ensure no file was written yet
     expect(fs.writeFileSync).not.toHaveBeenCalled();
   });
 
@@ -91,9 +93,13 @@ describe('initCommand', () => {
     );
 
     // Assert: Check that the correct prompt is submitted
-    expect(result.type).toBe('submit_prompt');
-    expect(result.content).toContain(
-      'You are Qwen Code, an interactive CLI agent',
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'submit_prompt',
+        content: expect.stringContaining(
+          'You are Qwen Code, an interactive CLI agent',
+        ),
+      }),
     );
   });
 
@@ -104,7 +110,43 @@ describe('initCommand', () => {
     const result = await initCommand.action!(mockContext, '');
 
     expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
-    expect(result.type).toBe('submit_prompt');
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'submit_prompt',
+      }),
+    );
+  });
+
+  it(`should regenerate ${DEFAULT_CONTEXT_FILENAME} when overwrite is confirmed`, async () => {
+    // Arrange: Simulate that the file exists and overwrite is confirmed
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('# Existing content');
+    mockContext.overwriteConfirmed = true;
+
+    // Act: Run the command's action
+    const result = await initCommand.action!(mockContext, '');
+
+    // Assert: Check that writeFileSync was called correctly
+    expect(fs.writeFileSync).toHaveBeenCalledWith(geminiMdPath, '', 'utf8');
+
+    // Assert: Check that an informational message was added to the UI
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: `Empty ${DEFAULT_CONTEXT_FILENAME} created. Now analyzing the project to populate it.`,
+      },
+      expect.any(Number),
+    );
+
+    // Assert: Check that the correct prompt is submitted
+    expect(result).toEqual(
+      expect.objectContaining({
+        type: 'submit_prompt',
+        content: expect.stringContaining(
+          'You are Qwen Code, an interactive CLI agent',
+        ),
+      }),
+    );
   });
 
   it('should return an error if config is not available', async () => {

@@ -604,6 +604,15 @@ export const SETTINGS_SCHEMA = {
     description: 'Skip the next speaker check.',
     showInDialog: true,
   },
+  skipLoopDetection: {
+    type: 'boolean',
+    label: 'Skip Loop Detection',
+    category: 'General',
+    requiresRestart: false,
+    default: false,
+    description: 'Disable all loop detection checks (streaming and LLM).',
+    showInDialog: true,
+  },
   enableWelcomeBack: {
     type: 'boolean',
     label: 'Enable Welcome Back',

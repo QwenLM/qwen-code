@@ -311,6 +311,22 @@ In addition to a project settings file, a project's `.qwen` directory can contai
     "showLineNumbers": false
     ```
 
+- **`skipNextSpeakerCheck`** (boolean):
+  - **Description:** Skips the next speaker check after text responses. When enabled, the system bypasses analyzing whether the AI should continue speaking.
+  - **Default:** `false`
+  - **Example:**
+    ```json
+    "skipNextSpeakerCheck": true
+    ```
+
+- **`skipLoopDetection`** (boolean):
+  - **Description:** Disables all loop detection checks (streaming and LLM-based). Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.
+  - **Default:** `false`
+  - **Example:**
+    ```json
+    "skipLoopDetection": true
+    ```
+
 ### Example `settings.json`:
 
 ```json
@@ -338,6 +354,8 @@ In addition to a project settings file, a project's `.qwen` directory can contai
   "usageStatisticsEnabled": true,
   "hideTips": false,
   "hideBanner": false,
+  "skipNextSpeakerCheck": false,
+  "skipLoopDetection": false,
   "maxSessionTurns": 10,
   "summarizeToolOutput": {
     "run_shell_command": {

@@ -69,10 +69,12 @@ export function useKeypressContext() {
 export function KeypressProvider({
   children,
   kittyProtocolEnabled,
+  pasteWorkaround = false,
   config,
 }: {
-  children: React.ReactNode;
+  children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
+  pasteWorkaround?: boolean;
   config?: Config;
 }) {
   const { stdin, setRawMode } = useStdin();
@@ -97,12 +99,8 @@ export function KeypressProvider({
 
     const keypressStream = new PassThrough();
     let usePassthrough = false;
-    const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
-    if (
-      nodeMajorVersion < 20 ||
-      process.env['PASTE_WORKAROUND'] === '1' ||
-      process.env['PASTE_WORKAROUND'] === 'true'
-    ) {
+    // Use passthrough mode when pasteWorkaround is enabled,
+    if (pasteWorkaround) {
       usePassthrough = true;
     }
 
@@ -111,6 +109,8 @@ export function KeypressProvider({
     let kittySequenceBuffer = '';
     let backslashTimeout: NodeJS.Timeout | null = null;
     let waitingForEnterAfterBackslash = false;
+    let rawDataBuffer = Buffer.alloc(0);
+    let rawFlushTimeout: NodeJS.Timeout | null = null;
 
     const parseKittySequence = (sequence: string): Key | null => {
       const kittyPattern = new RegExp(`^${ESC}\\[(\\d+)(;(\\d+))?([u~])$`);
@@ -333,54 +333,111 @@ export function KeypressProvider({
       broadcast({ ...key, paste: isPaste });
     };
 
-    const handleRawKeypress = (data: Buffer) => {
+    const clearRawFlushTimeout = () => {
+      if (rawFlushTimeout) {
+        clearTimeout(rawFlushTimeout);
+        rawFlushTimeout = null;
+      }
+    };
+
+    const createPasteKeyEvent = (
+      name: 'paste-start' | 'paste-end' | '' = '',
+      sequence: string = '',
+    ): Key => ({
+      name,
+      ctrl: false,
+      meta: false,
+      shift: false,
+      paste: false,
+      sequence,
+    });
+
+    const flushRawBuffer = () => {
+      if (!rawDataBuffer.length) {
+        return;
+      }
+
       const pasteModePrefixBuffer = Buffer.from(PASTE_MODE_PREFIX);
       const pasteModeSuffixBuffer = Buffer.from(PASTE_MODE_SUFFIX);
+      const data = rawDataBuffer;
+      let cursor = 0;
 
-      let pos = 0;
-      while (pos < data.length) {
-        const prefixPos = data.indexOf(pasteModePrefixBuffer, pos);
-        const suffixPos = data.indexOf(pasteModeSuffixBuffer, pos);
-        const isPrefixNext =
-          prefixPos !== -1 && (suffixPos === -1 || prefixPos < suffixPos);
-        const isSuffixNext =
-          suffixPos !== -1 && (prefixPos === -1 || suffixPos < prefixPos);
+      while (cursor < data.length) {
+        const prefixPos = data.indexOf(pasteModePrefixBuffer, cursor);
+        const suffixPos = data.indexOf(pasteModeSuffixBuffer, cursor);
+        const hasPrefix =
+          prefixPos !== -1 &&
+          prefixPos + pasteModePrefixBuffer.length <= data.length;
+        const hasSuffix =
+          suffixPos !== -1 &&
+          suffixPos + pasteModeSuffixBuffer.length <= data.length;
 
-        let nextMarkerPos = -1;
+        let markerPos = -1;
         let markerLength = 0;
+        let markerType: 'prefix' | 'suffix' | null = null;
 
-        if (isPrefixNext) {
-          nextMarkerPos = prefixPos;
-        } else if (isSuffixNext) {
-          nextMarkerPos = suffixPos;
+        if (hasPrefix && (!hasSuffix || prefixPos < suffixPos)) {
+          markerPos = prefixPos;
+          markerLength = pasteModePrefixBuffer.length;
+          markerType = 'prefix';
+        } else if (hasSuffix) {
+          markerPos = suffixPos;
+          markerLength = pasteModeSuffixBuffer.length;
+          markerType = 'suffix';
         }
-        markerLength = pasteModeSuffixBuffer.length;
 
-        if (nextMarkerPos === -1) {
-          keypressStream.write(data.slice(pos));
-          return;
+        if (markerPos === -1) {
+          break;
         }
 
-        const nextData = data.slice(pos, nextMarkerPos);
+        const nextData = data.slice(cursor, markerPos);
         if (nextData.length > 0) {
           keypressStream.write(nextData);
         }
-        const createPasteKeyEvent = (
-          name: 'paste-start' | 'paste-end',
-        ): Key => ({
-          name,
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: false,
-          sequence: '',
-        });
-        if (isPrefixNext) {
+        if (markerType === 'prefix') {
           handleKeypress(undefined, createPasteKeyEvent('paste-start'));
-        } else if (isSuffixNext) {
+        } else if (markerType === 'suffix') {
           handleKeypress(undefined, createPasteKeyEvent('paste-end'));
         }
-        pos = nextMarkerPos + markerLength;
+        cursor = markerPos + markerLength;
+      }
+
+      rawDataBuffer = data.slice(cursor);
+
+      if (rawDataBuffer.length === 0) {
+        return;
+      }
+
+      if (rawDataBuffer.length <= 2 || isPaste) {
+        keypressStream.write(rawDataBuffer);
+      } else {
+        // Flush raw data buffer as a paste event
+        handleKeypress(undefined, createPasteKeyEvent('paste-start'));
+        keypressStream.write(rawDataBuffer);
+        handleKeypress(undefined, createPasteKeyEvent('paste-end'));
+      }
+
+      rawDataBuffer = Buffer.alloc(0);
+      clearRawFlushTimeout();
+    };
+
+    const handleRawKeypress = (_data: Buffer) => {
+      const data = Buffer.isBuffer(_data) ? _data : Buffer.from(_data, 'utf8');
+
+      // Buffer the incoming data
+      rawDataBuffer = Buffer.concat([rawDataBuffer, data]);
+
+      clearRawFlushTimeout();
+
+      // On some Windows terminals, during a paste, the terminal might send a
+      // single return character chunk. In this case, we need to wait a time period
+      // to know if it is part of a paste or just a return character.
+      const isReturnChar =
+        rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d);
+      if (isReturnChar) {
+        rawFlushTimeout = setTimeout(flushRawBuffer, 100);
+      } else {
+        flushRawBuffer();
       }
     };
 
@@ -417,6 +474,11 @@ export function KeypressProvider({
         backslashTimeout = null;
       }
 
+      if (rawFlushTimeout) {
+        clearTimeout(rawFlushTimeout);
+        rawFlushTimeout = null;
+      }
+
       // Flush any pending paste data to avoid data loss on exit.
       if (isPaste) {
         broadcast({
@@ -430,7 +492,14 @@ export function KeypressProvider({
         pasteBuffer = Buffer.alloc(0);
       }
     };
-  }, [stdin, setRawMode, kittyProtocolEnabled, config, subscribers]);
+  }, [
+    stdin,
+    setRawMode,
+    kittyProtocolEnabled,
+    pasteWorkaround,
+    config,
+    subscribers,
+  ]);
 
   return (
     <KeypressContext.Provider value={{ subscribe, unsubscribe }}>
