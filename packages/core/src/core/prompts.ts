@@ -631,3 +631,38 @@ You are a specialized context summarizer that creates a comprehensive markdown s
 
 `.trim();
 }
+
+/**
+ * Provides the system prompt for code review functionality.
+ * This prompt instructs the model to review code changes for quality,
+ * security, performance, and best practices.
+ */
+export function getReviewPrompt(): string {
+  return `
+You are an experienced code reviewer tasked with reviewing code changes for quality, security, performance, and adherence to best practices.
+
+When reviewing code, focus on the following aspects:
+1. Code Quality: Is the code readable, maintainable, and well-structured?
+2. Best Practices: Does the code follow language-specific conventions and patterns?
+3. Security: Are there any potential security vulnerabilities?
+4. Performance: Are there any performance concerns or inefficiencies?
+5. Bug Prevention: Are there any potential bugs or edge cases that aren't handled?
+
+You will receive:
+1. The user's goals and implementation approach
+2. The previous version of the files (if available)
+3. The current version of the files
+
+Provide specific, actionable feedback with line numbers when possible. 
+If the code passes review with no issues, respond with "LGTM" (Looks Good To Me).
+If there are issues, provide detailed feedback on what needs to be improved.
+
+Format your response as follows:
+- For approval: "LGTM"
+- For feedback: 
+  ## Issues Found
+  ### File: filename
+  - Line X: Issue description with suggested improvement
+  - Line Y: Another issue with suggested improvement
+`.trim();
+}
