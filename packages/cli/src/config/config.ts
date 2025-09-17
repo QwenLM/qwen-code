@@ -78,6 +78,7 @@ export interface CliArgs {
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
+  openaiContextWindow: number | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   tavilyApiKey: string | undefined;
@@ -240,6 +241,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'string',
           description: 'OpenAI base URL (for custom endpoints)',
         })
+        .option('openai-context-window', {
+          type: 'number',
+          description:
+            'Context window size (max tokens) for OpenAI-compatible models',
+        })
         .option('tavily-api-key', {
           type: 'string',
           description: 'Tavily API key for web search functionality',
@@ -377,6 +383,11 @@ export async function loadCliConfig(
   // Handle OpenAI base URL from command line
   if (argv.openaiBaseUrl) {
     process.env['OPENAI_BASE_URL'] = argv.openaiBaseUrl;
+  }
+
+  // Handle OpenAI context window from command line
+  if (argv.openaiContextWindow) {
+    process.env['OPENAI_CONTEXT_WINDOW'] = argv.openaiContextWindow.toString();
   }
 
   // Handle Tavily API key from command line
@@ -611,8 +622,12 @@ export async function loadCliConfig(
           'SYSTEM_TEMPLATE:{"name":"qwen3_coder","params":{"is_git_repository":{RUNTIME_VARS_IS_GIT_REPO},"sandbox":"{RUNTIME_VARS_SANDBOX}"}}',
       },
     ]) as ConfigParameters['systemPromptMappings'],
-    authType: settings.security?.auth?.selectedType,
-    contentGenerator: settings.contentGenerator,
+    authType: settings.selectedAuthType,
+    contentGenerator: {
+      ...settings.contentGenerator,
+      contextWindow:
+        argv.openaiContextWindow || settings.contentGenerator?.contextWindow,
+    },
     cliVersion,
     tavilyApiKey:
       argv.tavilyApiKey ||

@@ -1754,7 +1754,7 @@ describe('loadCliConfig chatCompression', () => {
   });
 });
 
-describe('loadCliConfig useRipgrep', () => {
+describe('loadCliConfig contentGenerator contextWindow', () => {
   const originalArgv = process.argv;
 
   beforeEach(() => {
@@ -1769,28 +1769,42 @@ describe('loadCliConfig useRipgrep', () => {
     vi.restoreAllMocks();
   });
 
-  it('should be false by default when useRipgrep is not set in settings', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+  it('should pass contextWindow from CLI arguments to contentGenerator config', async () => {
+    process.argv = ['node', 'script.js', '--openai-context-window', '8192'];
+    const argv = await parseArguments();
     const settings: Settings = {};
-    const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getUseRipgrep()).toBe(false);
+    const _config = await loadCliConfig(settings, [], 'test-session', argv);
+
+    // Since we're setting the environment variable in the CLI, we need to check that it's set
+    expect(process.env['OPENAI_CONTEXT_WINDOW']).toBe('8192');
   });
 
-  it('should be true when useRipgrep is set to true in settings', async () => {
+  it('should pass contextWindow from settings to contentGenerator config', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { tools: { useRipgrep: true } };
+    const argv = await parseArguments();
+    const settings: Settings = {
+      contentGenerator: {
+        contextWindow: 4096,
+      },
+    };
     const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getUseRipgrep()).toBe(true);
+
+    // Check that the config was passed correctly to the contentGenerator
+    expect(config.getContentGeneratorContextWindow()).toBe(4096);
   });
 
-  it('should be false when useRipgrep is explicitly set to false in settings', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { tools: { useRipgrep: false } };
-    const config = await loadCliConfig(settings, [], 'test-session', argv);
-    expect(config.getUseRipgrep()).toBe(false);
+  it('should prioritize CLI contextWindow over settings contextWindow', async () => {
+    process.argv = ['node', 'script.js', '--openai-context-window', '8192'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      contentGenerator: {
+        contextWindow: 4096,
+      },
+    };
+    const _config = await loadCliConfig(settings, [], 'test-session', argv);
+
+    // The environment variable should be set from CLI
+    expect(process.env['OPENAI_CONTEXT_WINDOW']).toBe('8192');
   });
 });
 

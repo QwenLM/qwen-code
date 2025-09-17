@@ -329,6 +329,11 @@ export class ContentGenerationPipeline {
       // Max tokens (special case: different property names)
       ...addParameterIfDefined('max_tokens', 'max_tokens', 'maxOutputTokens'),
 
+      // Context window (max tokens for input): config only
+      ...(this.contentGeneratorConfig.contextWindow !== undefined
+        ? { max_tokens: this.contentGeneratorConfig.contextWindow }
+        : {}),
+
       // Config-only parameters (no request fallback)
       ...addParameterIfDefined('top_k', 'top_k'),
       ...addParameterIfDefined('repetition_penalty', 'repetition_penalty'),

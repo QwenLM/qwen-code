@@ -123,6 +123,7 @@ describe('createContentGeneratorConfig', () => {
     getContentGeneratorMaxRetries: vi.fn().mockReturnValue(undefined),
     getContentGeneratorDisableCacheControl: vi.fn().mockReturnValue(undefined),
     getContentGeneratorSamplingParams: vi.fn().mockReturnValue(undefined),
+    getContentGeneratorContextWindow: vi.fn().mockReturnValue(undefined),
     getCliVersion: vi.fn().mockReturnValue('1.0.0'),
   } as unknown as Config;
 
@@ -187,5 +188,79 @@ describe('createContentGeneratorConfig', () => {
     );
     expect(config.apiKey).toBeUndefined();
     expect(config.vertexai).toBeUndefined();
+  });
+
+  describe('contextWindow configuration', () => {
+    it('should set contextWindow from OPENAI_CONTEXT_WINDOW environment variable for OpenAI provider', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+      vi.stubEnv('OPENAI_CONTEXT_WINDOW', '8192');
+      const config = await createContentGeneratorConfig(
+        mockConfig,
+        AuthType.USE_OPENAI,
+      );
+      expect(config.contextWindow).toBe(8192);
+    });
+
+    it('should not set contextWindow from invalid OPENAI_CONTEXT_WINDOW environment variable', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+      vi.stubEnv('OPENAI_CONTEXT_WINDOW', 'invalid');
+      const config = await createContentGeneratorConfig(
+        mockConfig,
+        AuthType.USE_OPENAI,
+      );
+      expect(config.contextWindow).toBeUndefined();
+    });
+
+    it('should not set contextWindow from negative OPENAI_CONTEXT_WINDOW environment variable', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+      vi.stubEnv('OPENAI_CONTEXT_WINDOW', '-100');
+      const config = await createContentGeneratorConfig(
+        mockConfig,
+        AuthType.USE_OPENAI,
+      );
+      expect(config.contextWindow).toBeUndefined();
+    });
+
+    it('should set contextWindow from config when OPENAI_CONTEXT_WINDOW is not set', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+      vi.stubEnv('OPENAI_CONTEXT_WINDOW', '');
+      const configWithWindow = {
+        ...mockConfig,
+        getContentGeneratorContextWindow: vi.fn().mockReturnValue(4096),
+      } as unknown as Config;
+      const config = await createContentGeneratorConfig(
+        configWithWindow,
+        AuthType.USE_OPENAI,
+      );
+      expect(config.contextWindow).toBe(4096);
+    });
+
+    it('should prioritize OPENAI_CONTEXT_WINDOW over config when both are set', async () => {
+      vi.stubEnv('OPENAI_API_KEY', 'test-openai-key');
+      vi.stubEnv('OPENAI_CONTEXT_WINDOW', '8192');
+      const configWithWindow = {
+        ...mockConfig,
+        getContentGeneratorContextWindow: vi.fn().mockReturnValue(4096),
+      } as unknown as Config;
+      const config = await createContentGeneratorConfig(
+        configWithWindow,
+        AuthType.USE_OPENAI,
+      );
+      expect(config.contextWindow).toBe(8192);
+    });
+
+    it('should not set contextWindow for non-OpenAI providers', async () => {
+      vi.stubEnv('GEMINI_API_KEY', 'test-gemini-key');
+      vi.stubEnv('OPENAI_CONTEXT_WINDOW', '8192');
+      const configWithWindow = {
+        ...mockConfig,
+        getContentGeneratorContextWindow: vi.fn().mockReturnValue(4096),
+      } as unknown as Config;
+      const config = await createContentGeneratorConfig(
+        configWithWindow,
+        AuthType.USE_GEMINI,
+      );
+      expect(config.contextWindow).toBeUndefined();
+    });
   });
 });

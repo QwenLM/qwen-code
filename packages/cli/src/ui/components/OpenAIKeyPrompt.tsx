@@ -10,7 +10,12 @@ import { Box, Text, useInput } from 'ink';
 import { Colors } from '../colors.js';
 
 interface OpenAIKeyPromptProps {
-  onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
+  onSubmit: (
+    apiKey: string,
+    baseUrl: string,
+    model: string,
+    contextWindow?: number,
+  ) => void;
   onCancel: () => void;
 }
 
@@ -21,8 +26,9 @@ export function OpenAIKeyPrompt({
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('');
+  const [contextWindow, setContextWindow] = useState('');
   const [currentField, setCurrentField] = useState<
-    'apiKey' | 'baseUrl' | 'model'
+    'apiKey' | 'baseUrl' | 'model' | 'contextWindow'
   >('apiKey');
 
   useInput((input, key) => {
@@ -50,6 +56,11 @@ export function OpenAIKeyPrompt({
         setBaseUrl((prev) => prev + cleanInput);
       } else if (currentField === 'model') {
         setModel((prev) => prev + cleanInput);
+      } else if (currentField === 'contextWindow') {
+        // Only allow digits for context window
+        if (/^\d*$/.test(cleanInput)) {
+          setContextWindow((prev) => prev + cleanInput);
+        }
       }
       return;
     }
@@ -64,9 +75,20 @@ export function OpenAIKeyPrompt({
         setCurrentField('model');
         return;
       } else if (currentField === 'model') {
+        setCurrentField('contextWindow');
+        return;
+      } else if (currentField === 'contextWindow') {
         // 只有在提交时才检查 API key 是否为空
         if (apiKey.trim()) {
-          onSubmit(apiKey.trim(), baseUrl.trim(), model.trim());
+          const contextWindowValue = contextWindow.trim()
+            ? parseInt(contextWindow.trim(), 10)
+            : undefined;
+          onSubmit(
+            apiKey.trim(),
+            baseUrl.trim(),
+            model.trim(),
+            contextWindowValue,
+          );
         } else {
           // 如果 API key 为空，回到 API key 字段
           setCurrentField('apiKey');
@@ -87,6 +109,8 @@ export function OpenAIKeyPrompt({
       } else if (currentField === 'baseUrl') {
         setCurrentField('model');
       } else if (currentField === 'model') {
+        setCurrentField('contextWindow');
+      } else if (currentField === 'contextWindow') {
         setCurrentField('apiKey');
       }
       return;
@@ -98,6 +122,8 @@ export function OpenAIKeyPrompt({
         setCurrentField('apiKey');
       } else if (currentField === 'model') {
         setCurrentField('baseUrl');
+      } else if (currentField === 'contextWindow') {
+        setCurrentField('model');
       }
       return;
     }
@@ -107,6 +133,10 @@ export function OpenAIKeyPrompt({
         setCurrentField('baseUrl');
       } else if (currentField === 'baseUrl') {
         setCurrentField('model');
+      } else if (currentField === 'model') {
+        setCurrentField('contextWindow');
+      } else if (currentField === 'contextWindow') {
+        setCurrentField('apiKey');
       }
       return;
     }
@@ -119,6 +149,8 @@ export function OpenAIKeyPrompt({
         setBaseUrl((prev) => prev.slice(0, -1));
       } else if (currentField === 'model') {
         setModel((prev) => prev.slice(0, -1));
+      } else if (currentField === 'contextWindow') {
+        setContextWindow((prev) => prev.slice(0, -1));
       }
       return;
     }
@@ -185,6 +217,23 @@ export function OpenAIKeyPrompt({
           <Text>
             {currentField === 'model' ? '> ' : '  '}
             {model}
+          </Text>
+        </Box>
+      </Box>
+      <Box marginTop={1} flexDirection="row">
+        <Box width={12}>
+          <Text
+            color={
+              currentField === 'contextWindow' ? Colors.AccentBlue : Colors.Gray
+            }
+          >
+            Context Window:
+          </Text>
+        </Box>
+        <Box flexGrow={1}>
+          <Text>
+            {currentField === 'contextWindow' ? '> ' : '  '}
+            {contextWindow}
           </Text>
         </Box>
       </Box>
