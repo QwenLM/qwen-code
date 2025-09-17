@@ -117,7 +117,11 @@ const packageVersion = JSON.parse(
 ).version;
 
 chmodSync(
-  join(cliPackageDir, 'dist', `successmove000-better-cli-${packageVersion}.tgz`),
+  join(
+    cliPackageDir,
+    'dist',
+    `successmove000-better-cli-${packageVersion}.tgz`,
+  ),
   0o755,
 );
 chmodSync(
