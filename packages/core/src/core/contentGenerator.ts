@@ -64,6 +64,8 @@ export type ContentGeneratorConfig = {
   maxRetries?: number;
   // Disable cache control for DashScope providers
   disableCacheControl?: boolean;
+  // Context window size (max tokens) for the model
+  contextWindow?: number;
   samplingParams?: {
     top_p?: number;
     top_k?: number;
@@ -134,6 +136,19 @@ export function createContentGeneratorConfig(
     contentGeneratorConfig.apiKey = openaiApiKey;
     contentGeneratorConfig.baseUrl = openaiBaseUrl;
     contentGeneratorConfig.model = openaiModel || DEFAULT_QWEN_MODEL;
+
+    // Read context window from environment variable
+    const openaiContextWindow = process.env['OPENAI_CONTEXT_WINDOW'];
+    if (openaiContextWindow) {
+      const contextWindow = parseInt(openaiContextWindow, 10);
+      if (!isNaN(contextWindow) && contextWindow > 0) {
+        contentGeneratorConfig.contextWindow = contextWindow;
+      }
+    } else if (config.getContentGeneratorContextWindow()) {
+      // Read context window from settings if not set in environment
+      contentGeneratorConfig.contextWindow =
+        config.getContentGeneratorContextWindow();
+    }
 
     return contentGeneratorConfig;
   }
