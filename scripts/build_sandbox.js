@@ -90,24 +90,26 @@ if (!argv.s) {
   execSync('npm run build --workspaces', { stdio: 'inherit' });
 }
 
-console.log('packing @qwen-code/qwen-code ...');
+console.log('packing @successmove000/better-cli ...');
 const cliPackageDir = join('packages', 'cli');
 rmSync(join(cliPackageDir, 'dist', 'qwen-code-*.tgz'), { force: true });
 execSync(
-  `npm pack -w @qwen-code/qwen-code --pack-destination ./packages/cli/dist`,
+  `npm pack -w @successmove000/better-cli --pack-destination ./packages/cli/dist`,
   {
     stdio: 'ignore',
   },
 );
 
-console.log('packing @qwen-code/qwen-code-core ...');
+console.log('packing @successmove000/better-cli-core ...');
 const corePackageDir = join('packages', 'core');
 rmSync(join(corePackageDir, 'dist', 'qwen-code-core-*.tgz'), {
   force: true,
 });
 execSync(
-  `npm pack -w @qwen-code/qwen-code-core --pack-destination ./packages/core/dist`,
-  { stdio: 'ignore' },
+  `npm pack -w @successmove000/better-cli-core --pack-destination ./packages/core/dist`,
+  {
+    stdio: 'ignore',
+  },
 );
 
 const packageVersion = JSON.parse(
@@ -115,14 +117,14 @@ const packageVersion = JSON.parse(
 ).version;
 
 chmodSync(
-  join(cliPackageDir, 'dist', `qwen-code-qwen-code-${packageVersion}.tgz`),
+  join(cliPackageDir, 'dist', `successmove000-better-cli-${packageVersion}.tgz`),
   0o755,
 );
 chmodSync(
   join(
     corePackageDir,
     'dist',
-    `qwen-code-qwen-code-core-${packageVersion}.tgz`,
+    `successmove000-better-cli-core-${packageVersion}.tgz`,
   ),
   0o755,
 );
