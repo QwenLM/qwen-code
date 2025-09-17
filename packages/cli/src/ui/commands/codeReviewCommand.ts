@@ -5,14 +5,13 @@
  */
 
 import { execSync } from 'child_process';
-import { CommandKind, SlashCommand } from './types.js';
-import { MessageType, HistoryItemInfo } from '../types.js';
+import { CommandKind } from './types.js';
+import type { SlashCommand } from './types.js';
+import { MessageType } from '../types.js';
+import type { HistoryItemInfo } from '../types.js';
 import * as fs from 'fs';
-import {
-  getReviewPrompt,
-  isGitRepository,
-  Config,
-} from '@qwen-code/qwen-code-core';
+import { getReviewPrompt, isGitRepository } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 interface ModifiedFile {
   path: string;
