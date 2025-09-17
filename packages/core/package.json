@@ -1,6 +1,6 @@
 {
-  "name": "@qwen-code/qwen-code-core",
-  "version": "0.0.11",
+  "name": "@successmove000/better-cli-core",
+  "version": "0.0.13",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
