@@ -11,7 +11,7 @@ import * as os from 'os';
 
 import open from 'open';
 import { EventEmitter } from 'events';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
 import {
   SharedTokenManager,

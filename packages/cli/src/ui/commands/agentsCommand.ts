@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CommandKind, SlashCommand, OpenDialogActionReturn } from './types.js';
+import {
+  CommandKind,
+  type SlashCommand,
+  type OpenDialogActionReturn,
+} from './types.js';
 
 export const agentsCommand: SlashCommand = {
   name: 'agents',

@@ -6,13 +6,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useQwenAuth, DeviceAuthorizationInfo } from './useQwenAuth.js';
+import type { DeviceAuthorizationInfo } from './useQwenAuth.js';
+import { useQwenAuth } from './useQwenAuth.js';
 import {
   AuthType,
   qwenOAuth2Events,
   QwenOAuth2Event,
 } from '@qwen-code/qwen-code-core';
-import { LoadedSettings } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 // Mock the qwenOAuth2Events
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -45,7 +46,11 @@ describe('useQwenAuth', () => {
   const createMockSettings = (authType: AuthType): LoadedSettings =>
     ({
       merged: {
-        selectedAuthType: authType,
+        security: {
+          auth: {
+            selectedType: authType,
+          },
+        },
       },
     }) as LoadedSettings;
 

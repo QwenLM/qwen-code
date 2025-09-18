@@ -19,7 +19,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import { MemoryTool, GEMINI_CONFIG_DIR } from '../tools/memoryTool.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { TaskTool } from '../tools/task.js';
-import { GenerateContentConfig } from '@google/genai';
+import type { GenerateContentConfig } from '@google/genai';
 
 export interface ModelTemplateMapping {
   baseUrls?: string[];

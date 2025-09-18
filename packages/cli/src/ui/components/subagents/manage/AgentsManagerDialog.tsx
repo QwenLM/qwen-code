@@ -5,7 +5,7 @@
  */
 
 import { useState, useCallback, useMemo, useEffect } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import { AgentSelectionStep } from './AgentSelectionStep.js';
 import { ActionSelectionStep } from './ActionSelectionStep.js';
 import { AgentViewerStep } from './AgentViewerStep.js';
@@ -17,7 +17,8 @@ import { MANAGEMENT_STEPS } from '../types.js';
 import { Colors } from '../../../colors.js';
 import { theme } from '../../../semantic-colors.js';
 import { getColorForDisplay, shouldShowColor } from '../utils.js';
-import { Config, SubagentConfig } from '@qwen-code/qwen-code-core';
+import type { SubagentConfig, Config } from '@qwen-code/qwen-code-core';
+import { useKeypress } from '../../../hooks/useKeypress.js';
 
 interface AgentsManagerDialogProps {
   onClose: () => void;
@@ -52,18 +53,7 @@ export function AgentsManagerDialog({
     const manager = config.getSubagentManager();
 
     // Load agents from all levels separately to show all agents including conflicts
-    const [projectAgents, userAgents, builtinAgents] = await Promise.all([
-      manager.listSubagents({ level: 'project' }),
-      manager.listSubagents({ level: 'user' }),
-      manager.listSubagents({ level: 'builtin' }),
-    ]);
-
-    // Combine all agents (project, user, and builtin level)
-    const allAgents = [
-      ...(projectAgents || []),
-      ...(userAgents || []),
-      ...(builtinAgents || []),
-    ];
+    const allAgents = await manager.listSubagents();
 
     setAvailableAgents(allAgents);
   }, [config]);
@@ -122,8 +112,12 @@ export function AgentsManagerDialog({
   );
 
   // Centralized ESC key handling for the entire dialog
-  useInput((input, key) => {
-    if (key.escape) {
+  useKeypress(
+    (key) => {
+      if (key.name !== 'escape') {
+        return;
+      }
+
       const currentStep = getCurrentStep();
       if (currentStep === MANAGEMENT_STEPS.AGENT_SELECTION) {
         // On first step, ESC cancels the entire dialog
@@ -132,8 +126,9 @@ export function AgentsManagerDialog({
         // On other steps, ESC goes back to previous step in navigation stack
         handleNavigateBack();
       }
-    }
-  });
+    },
+    { isActive: true },
+  );
 
   // Props for child components - now using direct state and callbacks
   const commonProps = useMemo(

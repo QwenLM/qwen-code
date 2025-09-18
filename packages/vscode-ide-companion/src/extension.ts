@@ -5,13 +5,11 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { IDEServer } from './ide-server.js';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
 import { createLogger } from './utils/logger.js';
 
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
-const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 export const DIFF_SCHEME = 'qwen-diff';
 
 let ideServer: IDEServer;
@@ -19,30 +17,10 @@ let logger: vscode.OutputChannel;
 
 let log: (message: string) => void = () => {};
 
-function updateWorkspacePath(context: vscode.ExtensionContext) {
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (workspaceFolders && workspaceFolders.length > 0) {
-    const workspacePaths = workspaceFolders
-      .map((folder) => folder.uri.fsPath)
-      .join(path.delimiter);
-    context.environmentVariableCollection.replace(
-      IDE_WORKSPACE_PATH_ENV_VAR,
-      workspacePaths,
-    );
-  } else {
-    context.environmentVariableCollection.replace(
-      IDE_WORKSPACE_PATH_ENV_VAR,
-      '',
-    );
-  }
-}
-
 export async function activate(context: vscode.ExtensionContext) {
   logger = vscode.window.createOutputChannel('Qwen Code Companion');
   log = createLogger(context, logger);
   log('Extension activated');
-
-  updateWorkspacePath(context);
 
   const diffContentProvider = new DiffContentProvider();
   const diffManager = new DiffManager(log, diffContentProvider);
@@ -88,7 +66,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
-      updateWorkspacePath(context);
+      ideServer.updateWorkspacePath();
     }),
     vscode.commands.registerCommand('qwen-code.runQwenCode', async () => {
       const workspaceFolders = vscode.workspace.workspaceFolders;

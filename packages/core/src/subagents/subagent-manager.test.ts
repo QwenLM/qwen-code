@@ -9,9 +9,9 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { SubagentManager } from './subagent-manager.js';
-import { SubagentConfig, SubagentError } from './types.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
-import { Config } from '../config/config.js';
+import { type SubagentConfig, SubagentError } from './types.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 
 // Mock file system operations
@@ -185,6 +185,7 @@ You are a helpful assistant.
       const config = manager.parseSubagentContent(
         validMarkdown,
         validConfig.filePath,
+        'project',
       );
 
       expect(config.name).toBe('test-agent');
@@ -209,6 +210,7 @@ You are a helpful assistant.
       const config = manager.parseSubagentContent(
         markdownWithTools,
         validConfig.filePath,
+        'project',
       );
 
       expect(config.tools).toEqual(['read_file', 'write_file']);
@@ -229,6 +231,7 @@ You are a helpful assistant.
       const config = manager.parseSubagentContent(
         markdownWithModel,
         validConfig.filePath,
+        'project',
       );
 
       expect(config.modelConfig).toEqual({ model: 'custom-model', temp: 0.5 });
@@ -249,6 +252,7 @@ You are a helpful assistant.
       const config = manager.parseSubagentContent(
         markdownWithRun,
         validConfig.filePath,
+        'project',
       );
 
       expect(config.runConfig).toEqual({ max_time_minutes: 5, max_turns: 10 });
@@ -266,6 +270,7 @@ You are a helpful assistant.
       const config = manager.parseSubagentContent(
         markdownWithNumeric,
         validConfig.filePath,
+        'project',
       );
 
       expect(config.name).toBe('11');
@@ -286,6 +291,7 @@ You are a helpful assistant.
       const config = manager.parseSubagentContent(
         markdownWithBoolean,
         validConfig.filePath,
+        'project',
       );
 
       expect(config.name).toBe('true');
@@ -301,8 +307,13 @@ You are a helpful assistant.
       const projectConfig = manager.parseSubagentContent(
         validMarkdown,
         projectPath,
+        'project',
       );
-      const userConfig = manager.parseSubagentContent(validMarkdown, userPath);
+      const userConfig = manager.parseSubagentContent(
+        validMarkdown,
+        userPath,
+        'user',
+      );
 
       expect(projectConfig.level).toBe('project');
       expect(userConfig.level).toBe('user');
@@ -313,7 +324,11 @@ You are a helpful assistant.
 Just content`;
 
       expect(() =>
-        manager.parseSubagentContent(invalidMarkdown, validConfig.filePath),
+        manager.parseSubagentContent(
+          invalidMarkdown,
+          validConfig.filePath,
+          'project',
+        ),
       ).toThrow(SubagentError);
     });
 
@@ -326,7 +341,11 @@ You are a helpful assistant.
 `;
 
       expect(() =>
-        manager.parseSubagentContent(markdownWithoutName, validConfig.filePath),
+        manager.parseSubagentContent(
+          markdownWithoutName,
+          validConfig.filePath,
+          'project',
+        ),
       ).toThrow(SubagentError);
     });
 
@@ -342,39 +361,20 @@ You are a helpful assistant.
         manager.parseSubagentContent(
           markdownWithoutDescription,
           validConfig.filePath,
+          'project',
         ),
       ).toThrow(SubagentError);
-    });
-
-    it('should warn when filename does not match subagent name', () => {
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const mismatchedPath = '/test/project/.qwen/agents/wrong-filename.md';
-
-      const config = manager.parseSubagentContent(
-        validMarkdown,
-        mismatchedPath,
-      );
-
-      expect(config.name).toBe('test-agent');
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Warning: Subagent file "wrong-filename.md" contains name "test-agent"',
-        ),
-      );
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Consider renaming the file to "test-agent.md"',
-        ),
-      );
-
-      consoleSpy.mockRestore();
     });
 
     it('should not warn when filename matches subagent name', () => {
       const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       const matchingPath = '/test/project/.qwen/agents/test-agent.md';
 
-      const config = manager.parseSubagentContent(validMarkdown, matchingPath);
+      const config = manager.parseSubagentContent(
+        validMarkdown,
+        matchingPath,
+        'project',
+      );
 
       expect(config.name).toBe('test-agent');
       expect(consoleSpy).not.toHaveBeenCalled();

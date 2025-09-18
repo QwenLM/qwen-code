@@ -4,14 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  metrics,
-  Attributes,
-  ValueType,
-  Meter,
-  Counter,
-  Histogram,
-} from '@opentelemetry/api';
+import type { Attributes, Meter, Counter, Histogram } from '@opentelemetry/api';
+import { metrics, ValueType } from '@opentelemetry/api';
 import {
   SERVICE_NAME,
   METRIC_TOOL_CALL_COUNT,
@@ -27,8 +21,8 @@ import {
   METRIC_CONTENT_RETRY_FAILURE_COUNT,
   METRIC_SUBAGENT_EXECUTION_COUNT,
 } from './constants.js';
-import { Config } from '../config/config.js';
-import { DiffStat } from '../tools/tools.js';
+import type { Config } from '../config/config.js';
+import type { DiffStat } from '../tools/tools.js';
 
 export enum FileOperation {
   CREATE = 'create',
@@ -244,6 +238,7 @@ export function recordFileOperationMetric(
   mimetype?: string,
   extension?: string,
   diffStat?: DiffStat,
+  programming_language?: string,
 ): void {
   if (!fileOperationCounter || !isMetricsInitialized) return;
   const attributes: Attributes = {
@@ -258,6 +253,9 @@ export function recordFileOperationMetric(
     attributes['ai_removed_lines'] = diffStat.ai_removed_lines;
     attributes['user_added_lines'] = diffStat.user_added_lines;
     attributes['user_removed_lines'] = diffStat.user_removed_lines;
+  }
+  if (programming_language !== undefined) {
+    attributes['programming_language'] = programming_language;
   }
   fileOperationCounter.add(1, attributes);
 }

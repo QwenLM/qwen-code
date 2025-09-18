@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { SubagentValidator } from './validation.js';
-import { SubagentConfig, SubagentError } from './types.js';
+import { type SubagentConfig, SubagentError } from './types.js';
 
 describe('SubagentValidator', () => {
   let validator: SubagentValidator;

@@ -6,14 +6,12 @@
 
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
-import React from 'react';
+import type React from 'react';
 import { Colors } from '../colors.js';
-import { useKeypress } from '../hooks/useKeypress.js';
 import { RenderInline } from '../utils/InlineMarkdownRenderer.js';
-import {
-  RadioButtonSelect,
-  RadioSelectItem,
-} from './shared/RadioButtonSelect.js';
+import type { RadioSelectItem } from './shared/RadioButtonSelect.js';
+import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
+import { useKeypress } from '../hooks/useKeypress.js';
 
 export interface ShellConfirmationRequest {
   commands: string[];

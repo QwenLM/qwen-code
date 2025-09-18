@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Content, FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
 
 /**
  * Represents the storage level for a subagent configuration.
@@ -116,6 +116,9 @@ export interface ListSubagentsOptions {
 
   /** Sort direction */
   sortOrder?: 'asc' | 'desc';
+
+  /** Force refresh from disk, bypassing cache. Defaults to false. */
+  force?: boolean;
 }
 
 /**

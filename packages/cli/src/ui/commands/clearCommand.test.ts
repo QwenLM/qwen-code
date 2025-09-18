@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, Mock } from 'vitest';
+import type { Mock } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { clearCommand } from './clearCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
@@ -20,7 +21,8 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   };
 });
 
-import { GeminiClient, uiTelemetryService } from '@qwen-code/qwen-code-core';
+import type { GeminiClient } from '@qwen-code/qwen-code-core';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 describe('clearCommand', () => {
   let mockContext: CommandContext;

@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GenerateContentParameters } from '@google/genai';
-import { RequestContext } from './telemetryService.js';
+import type { GenerateContentParameters } from '@google/genai';
+import type { RequestContext } from './telemetryService.js';
 
 export interface ErrorHandler {
   handle(

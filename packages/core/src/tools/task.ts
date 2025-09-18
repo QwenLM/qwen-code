@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import type {
   ToolResult,
   ToolResultDisplay,
   TaskResultDisplay,
@@ -17,16 +15,21 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
 } from './tools.js';
-import { Config } from '../config/config.js';
-import { SubagentManager } from '../subagents/subagent-manager.js';
-import { SubagentConfig, SubagentTerminateMode } from '../subagents/types.js';
+import type { Config } from '../config/config.js';
+import type { SubagentManager } from '../subagents/subagent-manager.js';
+import {
+  type SubagentConfig,
+  SubagentTerminateMode,
+} from '../subagents/types.js';
 import { ContextState } from '../subagents/subagent.js';
 import {
   SubAgentEventEmitter,
+  SubAgentEventType,
+} from '../subagents/subagent-events.js';
+import type {
   SubAgentToolCallEvent,
   SubAgentToolResultEvent,
   SubAgentFinishEvent,
-  SubAgentEventType,
   SubAgentErrorEvent,
   SubAgentApprovalRequestEvent,
 } from '../subagents/subagent-events.js';

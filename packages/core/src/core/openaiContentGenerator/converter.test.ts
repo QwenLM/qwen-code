@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
-import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import type { StreamingToolCallParser } from './streamingToolCallParser.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: OpenAIContentConverter;

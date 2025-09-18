@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
-import EventEmitter from 'events';
-import { Readable } from 'stream';
 import { type ChildProcess } from 'child_process';
+import EventEmitter from 'events';
+import type { Readable } from 'stream';
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   ShellExecutionService,
-  ShellOutputEvent,
+  type ShellOutputEvent,
 } from './shellExecutionService.js';
 
 // Hoisted Mocks
@@ -292,7 +292,7 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/c', 'dir "foo bar"'],
+        '/c dir "foo bar"',
         expect.any(Object),
       );
     });

@@ -14,7 +14,7 @@ import {
   afterAll,
 } from 'vitest';
 import { QwenLogger, TEST_ONLY } from './qwen-logger.js';
-import { Config } from '../../config/config.js';
+import type { Config } from '../../config/config.js';
 import {
   StartSessionEvent,
   EndSessionEvent,
@@ -22,7 +22,7 @@ import {
   KittySequenceOverflowEvent,
   IdeConnectionType,
 } from '../types.js';
-import { RumEvent } from './event-types.js';
+import type { RumEvent } from './event-types.js';
 
 // Mock dependencies
 vi.mock('../../utils/user_id.js', () => ({

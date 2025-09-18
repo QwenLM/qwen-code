@@ -15,8 +15,9 @@ import {
   DiscoveredMCPTool,
 } from '@qwen-code/qwen-code-core';
 
-import { MessageActionReturn } from './types.js';
-import { Type, CallableTool } from '@google/genai';
+import type { MessageActionReturn } from './types.js';
+import type { CallableTool } from '@google/genai';
+import { Type } from '@google/genai';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =

@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  GenerateContentResponse,
+import type {
   GenerateContentParameters,
-  FinishReason,
   Part,
   Content,
   Tool,
@@ -20,7 +18,8 @@ import {
   PartUnion,
   Candidate,
 } from '@google/genai';
-import OpenAI from 'openai';
+import { GenerateContentResponse, FinishReason } from '@google/genai';
+import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 

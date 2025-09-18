@@ -7,12 +7,12 @@
 import * as fsPromises from 'fs/promises';
 import path from 'path';
 import {
-  SlashCommand,
+  type SlashCommand,
   CommandKind,
-  SlashCommandActionReturn,
+  type SlashCommandActionReturn,
 } from './types.js';
 import { getProjectSummaryPrompt } from '@qwen-code/qwen-code-core';
-import { HistoryItemSummary } from '../types.js';
+import type { HistoryItemSummary } from '../types.js';
 
 export const summaryCommand: SlashCommand = {
   name: 'summary',

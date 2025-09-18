@@ -4,25 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, Mock } from 'vitest';
+import { Compute, OAuth2Client } from 'google-auth-library';
+import crypto from 'node:crypto';
+import * as fs from 'node:fs';
+import http from 'node:http';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import readline from 'node:readline';
+import open from 'open';
 import {
-  getOauthClient,
-  resetOauthClientForTesting,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type Mock,
+  vi,
+} from 'vitest';
+import type { Config } from '../config/config.js';
+import { AuthType } from '../core/contentGenerator.js';
+import { QWEN_DIR } from '../utils/paths.js';
+import { UserAccountManager } from '../utils/userAccountManager.js';
+import {
   clearCachedCredentialFile,
   clearOauthClientCache,
+  getOauthClient,
+  resetOauthClientForTesting,
 } from './oauth2.js';
-import { getCachedGoogleAccount } from '../utils/user_account.js';
-import { OAuth2Client, Compute } from 'google-auth-library';
-import * as fs from 'fs';
-import * as path from 'path';
-import http from 'http';
-import open from 'open';
-import crypto from 'crypto';
-import * as os from 'os';
-import { AuthType } from '../core/contentGenerator.js';
-import { Config } from '../config/config.js';
-import readline from 'node:readline';
-import { QWEN_DIR } from '../utils/paths.js';
 
 vi.mock('os', async (importOriginal) => {
   const os = await importOriginal<typeof import('os')>();
@@ -181,7 +189,10 @@ describe('oauth2', () => {
     });
 
     // Verify the getCachedGoogleAccount function works
-    expect(getCachedGoogleAccount()).toBe('test-google-account@gmail.com');
+    const userAccountManager = new UserAccountManager();
+    expect(userAccountManager.getCachedGoogleAccount()).toBe(
+      'test-google-account@gmail.com',
+    );
   });
 
   it('should perform login with user code', async () => {
@@ -516,6 +527,7 @@ describe('oauth2', () => {
       expect(mockSetCredentials).toHaveBeenCalledWith(cachedCreds);
     });
   });
+
   describe('clearCachedCredentialFile', () => {
     it('should clear cached credentials and Google account', async () => {
       const cachedCreds = { refresh_token: 'test-token' };
@@ -533,14 +545,17 @@ describe('oauth2', () => {
         googleAccountPath,
         JSON.stringify(accountData),
       );
+      const userAccountManager = new UserAccountManager();
 
       expect(fs.existsSync(credsPath)).toBe(true);
       expect(fs.existsSync(googleAccountPath)).toBe(true);
-      expect(getCachedGoogleAccount()).toBe('test@example.com');
+      expect(userAccountManager.getCachedGoogleAccount()).toBe(
+        'test@example.com',
+      );
 
       await clearCachedCredentialFile();
       expect(fs.existsSync(credsPath)).toBe(false);
-      expect(getCachedGoogleAccount()).toBeNull();
+      expect(userAccountManager.getCachedGoogleAccount()).toBeNull();
       const updatedAccountData = JSON.parse(
         fs.readFileSync(googleAccountPath, 'utf-8'),
       );

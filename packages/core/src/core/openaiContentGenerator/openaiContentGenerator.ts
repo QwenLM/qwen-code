@@ -1,7 +1,7 @@
-import { ContentGenerator } from '../contentGenerator.js';
-import { Config } from '../../config/config.js';
+import type { ContentGenerator } from '../contentGenerator.js';
+import type { Config } from '../../config/config.js';
 import { type OpenAICompatibleProvider } from './provider/index.js';
-import {
+import type {
   CountTokensParameters,
   CountTokensResponse,
   EmbedContentParameters,
@@ -9,10 +9,11 @@ import {
   GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import { ContentGenerationPipeline, PipelineConfig } from './pipeline.js';
+import type { PipelineConfig } from './pipeline.js';
+import { ContentGenerationPipeline } from './pipeline.js';
 import { DefaultTelemetryService } from './telemetryService.js';
 import { EnhancedErrorHandler } from './errorHandler.js';
-import { ContentGeneratorConfig } from '../contentGenerator.js';
+import type { ContentGeneratorConfig } from '../contentGenerator.js';
 
 export class OpenAIContentGenerator implements ContentGenerator {
   protected pipeline: ContentGenerationPipeline;

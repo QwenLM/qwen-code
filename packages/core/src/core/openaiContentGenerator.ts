@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
   CountTokensResponse,
-  GenerateContentResponse,
   GenerateContentParameters,
   CountTokensParameters,
   EmbedContentResponse,
   EmbedContentParameters,
-  FinishReason,
   Part,
   Content,
   Tool,
@@ -20,15 +18,16 @@ import {
   FunctionCall,
   FunctionResponse,
 } from '@google/genai';
-import {
-  AuthType,
+import { GenerateContentResponse, FinishReason } from '@google/genai';
+import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from './contentGenerator.js';
+import { AuthType } from './contentGenerator.js';
 import OpenAI from 'openai';
 import { logApiError, logApiResponse } from '../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { openaiLogger } from '../utils/openaiLogger.js';
 import { safeJsonParse } from '../utils/safeJsonParse.js';
 

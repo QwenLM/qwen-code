@@ -6,10 +6,10 @@
 
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
-import { ProjectSummaryInfo } from '@qwen-code/qwen-code-core';
+import { type ProjectSummaryInfo } from '@qwen-code/qwen-code-core';
 import {
   RadioButtonSelect,
-  RadioSelectItem,
+  type RadioSelectItem,
 } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 

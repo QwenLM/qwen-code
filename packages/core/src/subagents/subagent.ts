@@ -5,12 +5,12 @@
  */
 
 import { reportError } from '../utils/errorReporting.js';
-import { Config } from '../config/config.js';
-import { ToolCallRequestInfo } from '../core/turn.js';
+import type { Config } from '../config/config.js';
+import { type ToolCallRequestInfo } from '../core/turn.js';
 import {
   CoreToolScheduler,
-  ToolCall,
-  WaitingToolCall,
+  type ToolCall,
+  type WaitingToolCall,
 } from '../core/coreToolScheduler.js';
 import type {
   ToolConfirmationOutcome,
@@ -18,7 +18,7 @@ import type {
 } from '../tools/tools.js';
 import { createContentGenerator } from '../core/contentGenerator.js';
 import { getEnvironmentContext } from '../utils/environmentContext.js';
-import {
+import type {
   Content,
   Part,
   FunctionCall,
@@ -27,16 +27,14 @@ import {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../core/geminiChat.js';
-import {
-  SubagentTerminateMode,
+import type {
   PromptConfig,
   ModelConfig,
   RunConfig,
   ToolConfig,
 } from './types.js';
-import {
-  SubAgentEventEmitter,
-  SubAgentEventType,
+import { SubagentTerminateMode } from './types.js';
+import type {
   SubAgentFinishEvent,
   SubAgentRoundEvent,
   SubAgentStartEvent,
@@ -46,10 +44,14 @@ import {
   SubAgentErrorEvent,
 } from './subagent-events.js';
 import {
+  type SubAgentEventEmitter,
+  SubAgentEventType,
+} from './subagent-events.js';
+import {
   SubagentStatistics,
-  SubagentStatsSummary,
+  type SubagentStatsSummary,
 } from './subagent-statistics.js';
-import { SubagentHooks } from './subagent-hooks.js';
+import type { SubagentHooks } from './subagent-hooks.js';
 import { logSubagentExecution } from '../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../telemetry/types.js';
 import { TaskTool } from '../tools/task.js';
@@ -379,26 +381,36 @@ export class SubAgentScope {
         let roundText = '';
         let lastUsage: GenerateContentResponseUsageMetadata | undefined =
           undefined;
-        for await (const resp of responseStream) {
+        for await (const streamEvent of responseStream) {
           if (abortController.signal.aborted) {
             this.terminateMode = SubagentTerminateMode.CANCELLED;
             return;
           }
-          if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
-          const content = resp.candidates?.[0]?.content;
-          const parts = content?.parts || [];
-          for (const p of parts) {
-            const txt = (p as Part & { text?: string }).text;
-            if (txt) roundText += txt;
-            if (txt)
-              this.eventEmitter?.emit(SubAgentEventType.STREAM_TEXT, {
-                subagentId: this.subagentId,
-                round: turnCounter,
-                text: txt,
-                timestamp: Date.now(),
-              } as SubAgentStreamTextEvent);
+
+          // Handle retry events
+          if (streamEvent.type === 'retry') {
+            continue;
           }
-          if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+
+          // Handle chunk events
+          if (streamEvent.type === 'chunk') {
+            const resp = streamEvent.value;
+            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+            const content = resp.candidates?.[0]?.content;
+            const parts = content?.parts || [];
+            for (const p of parts) {
+              const txt = (p as Part & { text?: string }).text;
+              if (txt) roundText += txt;
+              if (txt)
+                this.eventEmitter?.emit(SubAgentEventType.STREAM_TEXT, {
+                  subagentId: this.subagentId,
+                  round: turnCounter,
+                  text: txt,
+                  timestamp: Date.now(),
+                } as SubAgentStreamTextEvent);
+            }
+            if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+          }
         }
         this.executionStats.rounds = turnCounter;
         this.stats.setRounds(turnCounter);
@@ -546,7 +558,6 @@ export class SubAgentScope {
     const responded = new Set<string>();
     let resolveBatch: (() => void) | null = null;
     const scheduler = new CoreToolScheduler({
-      toolRegistry: this.runtimeContext.getToolRegistry(),
       outputUpdateHandler: undefined,
       onAllToolCallsComplete: async (completedCalls) => {
         for (const call of completedCalls) {

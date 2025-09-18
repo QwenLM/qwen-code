@@ -5,7 +5,7 @@
  */
 
 import { useReducer, useCallback, useMemo } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import { wizardReducer, initialWizardState } from '../reducers.js';
 import { LocationSelector } from './LocationSelector.js';
 import { GenerationMethodSelector } from './GenerationMethodSelector.js';
@@ -13,13 +13,14 @@ import { DescriptionInput } from './DescriptionInput.js';
 import { ToolSelector } from './ToolSelector.js';
 import { ColorSelector } from './ColorSelector.js';
 import { CreationSummary } from './CreationSummary.js';
-import { WizardStepProps } from '../types.js';
+import { type WizardStepProps } from '../types.js';
 import { WIZARD_STEPS } from '../constants.js';
 import { getStepKind } from '../utils.js';
-import { Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { Colors } from '../../../colors.js';
 import { theme } from '../../../semantic-colors.js';
 import { TextEntryStep } from './TextEntryStep.js';
+import { useKeypress } from '../../../hooks/useKeypress.js';
 
 interface AgentCreationWizardProps {
   onClose: () => void;
@@ -49,8 +50,12 @@ export function AgentCreationWizard({
   }, [onClose]);
 
   // Centralized ESC key handling for the entire wizard
-  useInput((input, key) => {
-    if (key.escape) {
+  useKeypress(
+    (key) => {
+      if (key.name !== 'escape') {
+        return;
+      }
+
       // LLM DescriptionInput handles its own ESC logic when generating
       const kind = getStepKind(state.generationMethod, state.currentStep);
       if (kind === 'LLM_DESC' && state.isGenerating) {
@@ -64,8 +69,9 @@ export function AgentCreationWizard({
         // On other steps, ESC goes back to previous step
         handlePrevious();
       }
-    }
-  });
+    },
+    { isActive: true },
+  );
 
   const stepProps: WizardStepProps = useMemo(
     () => ({

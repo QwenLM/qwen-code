@@ -7,11 +7,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import {
-  MCPOAuthTokenStorage,
-  MCPOAuthToken,
-  MCPOAuthCredentials,
-} from './oauth-token-storage.js';
+import { MCPOAuthTokenStorage } from './oauth-token-storage.js';
+import type { OAuthToken, OAuthCredentials } from './token-storage/types.js';
 
 // Mock file system operations
 vi.mock('node:fs', () => ({
@@ -21,6 +18,7 @@ vi.mock('node:fs', () => ({
     mkdir: vi.fn(),
     unlink: vi.fn(),
   },
+  mkdirSync: vi.fn(),
 }));
 
 vi.mock('node:os', () => ({
@@ -28,7 +26,7 @@ vi.mock('node:os', () => ({
 }));
 
 describe('MCPOAuthTokenStorage', () => {
-  const mockToken: MCPOAuthToken = {
+  const mockToken: OAuthToken = {
     accessToken: 'access_token_123',
     refreshToken: 'refresh_token_456',
     tokenType: 'Bearer',
@@ -36,7 +34,7 @@ describe('MCPOAuthTokenStorage', () => {
     expiresAt: Date.now() + 3600000, // 1 hour from now
   };
 
-  const mockCredentials: MCPOAuthCredentials = {
+  const mockCredentials: OAuthCredentials = {
     serverName: 'test-server',
     token: mockToken,
     clientId: 'test-client-id',
@@ -72,7 +70,7 @@ describe('MCPOAuthTokenStorage', () => {
       expect(tokens.size).toBe(1);
       expect(tokens.get('test-server')).toEqual(mockCredentials);
       expect(fs.readFile).toHaveBeenCalledWith(
-        path.join('/mock/home', '.gemini', 'mcp-oauth-tokens.json'),
+        path.join('/mock/home', '.qwen', 'mcp-oauth-tokens.json'),
         'utf-8',
       );
     });
@@ -114,12 +112,11 @@ describe('MCPOAuthTokenStorage', () => {
         'https://token.url',
       );
 
-      expect(fs.mkdir).toHaveBeenCalledWith(
-        path.join('/mock/home', '.gemini'),
-        { recursive: true },
-      );
+      expect(fs.mkdir).toHaveBeenCalledWith(path.join('/mock/home', '.qwen'), {
+        recursive: true,
+      });
       expect(fs.writeFile).toHaveBeenCalledWith(
-        path.join('/mock/home', '.gemini', 'mcp-oauth-tokens.json'),
+        path.join('/mock/home', '.qwen', 'mcp-oauth-tokens.json'),
         expect.stringContaining('test-server'),
         { mode: 0o600 },
       );
@@ -219,7 +216,7 @@ describe('MCPOAuthTokenStorage', () => {
       await MCPOAuthTokenStorage.removeToken('test-server');
 
       expect(fs.unlink).toHaveBeenCalledWith(
-        path.join('/mock/home', '.gemini', 'mcp-oauth-tokens.json'),
+        path.join('/mock/home', '.qwen', 'mcp-oauth-tokens.json'),
       );
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
@@ -300,7 +297,7 @@ describe('MCPOAuthTokenStorage', () => {
       await MCPOAuthTokenStorage.clearAllTokens();
 
       expect(fs.unlink).toHaveBeenCalledWith(
-        path.join('/mock/home', '.gemini', 'mcp-oauth-tokens.json'),
+        path.join('/mock/home', '.qwen', 'mcp-oauth-tokens.json'),
       );
     });
 

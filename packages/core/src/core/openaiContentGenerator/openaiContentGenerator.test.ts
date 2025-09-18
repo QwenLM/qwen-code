@@ -6,14 +6,14 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
-import { Config } from '../../config/config.js';
+import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
 import type {
   GenerateContentParameters,
   CountTokensParameters,
 } from '@google/genai';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 
 // Mock tiktoken
 vi.mock('tiktoken', () => ({

@@ -8,12 +8,12 @@ import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
-  ToolInvocation,
-  ToolResult,
+  type ToolInvocation,
+  type ToolResult,
 } from './tools.js';
 
+import type { Config } from '../config/config.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { Config } from '../config/config.js';
 
 interface TavilyResultItem {
   title: string;

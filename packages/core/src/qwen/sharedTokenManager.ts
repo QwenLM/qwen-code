@@ -9,8 +9,8 @@ import { promises as fs, unlinkSync } from 'node:fs';
 import * as os from 'os';
 import { randomUUID } from 'node:crypto';
 
+import type { IQwenOAuth2Client } from './qwenOAuth2.js';
 import {
-  IQwenOAuth2Client,
   type QwenCredentials,
   type TokenRefreshData,
   type ErrorData,

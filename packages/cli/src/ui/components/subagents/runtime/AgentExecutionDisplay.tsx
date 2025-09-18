@@ -7,9 +7,10 @@
 import React, { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../../../colors.js';
-import {
+import type {
   TaskResultDisplay,
   SubagentStatsSummary,
+  Config,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
@@ -17,12 +18,13 @@ import { COLOR_OPTIONS } from '../constants.js';
 import { fmtDuration } from '../utils.js';
 import { ToolConfirmationMessage } from '../../messages/ToolConfirmationMessage.js';
 
-export type DisplayMode = 'default' | 'verbose';
+export type DisplayMode = 'compact' | 'default' | 'verbose';
 
 export interface AgentExecutionDisplayProps {
   data: TaskResultDisplay;
   availableHeight?: number;
-  childWidth?: number;
+  childWidth: number;
+  config: Config;
 }
 
 const getStatusColor = (
@@ -76,8 +78,9 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   data,
   availableHeight,
   childWidth,
+  config,
 }) => {
-  const [displayMode, setDisplayMode] = React.useState<DisplayMode>('default');
+  const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
 
   const agentColor = useMemo(() => {
     const colorOption = COLOR_OPTIONS.find(
@@ -90,8 +93,6 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     // This component only listens to keyboard shortcut events when the subagent is running
     if (data.status !== 'running') return '';
 
-    if (displayMode === 'verbose') return 'Press ctrl+r to show less.';
-
     if (displayMode === 'default') {
       const hasMoreLines =
         data.taskPrompt.split('\n').length > MAX_TASK_PROMPT_LINES;
@@ -99,17 +100,28 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         data.toolCalls && data.toolCalls.length > MAX_TOOL_CALLS;
 
       if (hasMoreToolCalls || hasMoreLines) {
-        return 'Press ctrl+r to show more.';
+        return 'Press ctrl+r to show less, ctrl+e to show more.';
       }
-      return '';
+      return 'Press ctrl+r to show less.';
     }
-    return '';
-  }, [displayMode, data.toolCalls, data.taskPrompt, data.status]);
 
-  // Handle ctrl+r keypresses to control display mode
+    if (displayMode === 'verbose') {
+      return 'Press ctrl+e to show less.';
+    }
+
+    return '';
+  }, [displayMode, data]);
+
+  // Handle keyboard shortcuts to control display mode
   useKeypress(
     (key) => {
       if (key.ctrl && key.name === 'r') {
+        // ctrl+r toggles between compact and default
+        setDisplayMode((current) =>
+          current === 'compact' ? 'default' : 'compact',
+        );
+      } else if (key.ctrl && key.name === 'e') {
+        // ctrl+e toggles between default and verbose
         setDisplayMode((current) =>
           current === 'default' ? 'verbose' : 'default',
         );
@@ -118,6 +130,82 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     { isActive: true },
   );
 
+  if (displayMode === 'compact') {
+    return (
+      <Box flexDirection="column">
+        {/* Header: Agent name and status */}
+        {!data.pendingConfirmation && (
+          <Box flexDirection="row">
+            <Text bold color={agentColor}>
+              {data.subagentName}
+            </Text>
+            <StatusDot status={data.status} />
+            <StatusIndicator status={data.status} />
+          </Box>
+        )}
+
+        {/* Running state: Show current tool call and progress */}
+        {data.status === 'running' && (
+          <>
+            {/* Current tool call */}
+            {data.toolCalls && data.toolCalls.length > 0 && (
+              <Box flexDirection="column">
+                <ToolCallItem
+                  toolCall={data.toolCalls[data.toolCalls.length - 1]}
+                  compact={true}
+                />
+                {/* Show count of additional tool calls if there are more than 1 */}
+                {data.toolCalls.length > 1 && !data.pendingConfirmation && (
+                  <Box flexDirection="row" paddingLeft={4}>
+                    <Text color={Colors.Gray}>
+                      +{data.toolCalls.length - 1} more tool calls (ctrl+r to
+                      expand)
+                    </Text>
+                  </Box>
+                )}
+              </Box>
+            )}
+
+            {/* Inline approval prompt when awaiting confirmation */}
+            {data.pendingConfirmation && (
+              <Box flexDirection="column" marginTop={1} paddingLeft={1}>
+                <ToolConfirmationMessage
+                  confirmationDetails={data.pendingConfirmation}
+                  isFocused={true}
+                  availableTerminalHeight={availableHeight}
+                  terminalWidth={childWidth}
+                  compactMode={true}
+                  config={config}
+                />
+              </Box>
+            )}
+          </>
+        )}
+
+        {/* Completed state: Show summary line */}
+        {data.status === 'completed' && data.executionSummary && (
+          <Box flexDirection="row" marginTop={1}>
+            <Text color={theme.text.secondary}>
+              Execution Summary: {data.executionSummary.totalToolCalls} tool
+              uses · {data.executionSummary.totalTokens.toLocaleString()} tokens
+              · {fmtDuration(data.executionSummary.totalDurationMs)}
+            </Text>
+          </Box>
+        )}
+
+        {/* Failed/Cancelled state: Show error reason */}
+        {data.status === 'failed' && (
+          <Box flexDirection="row" marginTop={1}>
+            <Text color={theme.status.error}>
+              Failed: {data.terminateReason}
+            </Text>
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
+  // Default and verbose modes use normal layout
   return (
     <Box flexDirection="column" paddingX={1} gap={1}>
       {/* Header with subagent name and status */}
@@ -152,9 +240,11 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         <Box flexDirection="column">
           <ToolConfirmationMessage
             confirmationDetails={data.pendingConfirmation}
+            config={config}
             isFocused={true}
             availableTerminalHeight={availableHeight}
-            terminalWidth={childWidth ?? 80}
+            terminalWidth={childWidth}
+            compactMode={true}
           />
         </Box>
       )}
@@ -276,7 +366,8 @@ const ToolCallItem: React.FC<{
     resultDisplay?: string;
     description?: string;
   };
-}> = ({ toolCall }) => {
+  compact?: boolean;
+}> = ({ toolCall, compact = false }) => {
   const STATUS_INDICATOR_WIDTH = 3;
 
   // Map subagent status to ToolCallStatus-like display
@@ -331,8 +422,8 @@ const ToolCallItem: React.FC<{
         </Text>
       </Box>
 
-      {/* Second line: truncated returnDisplay output */}
-      {truncatedOutput && (
+      {/* Second line: truncated returnDisplay output - hidden in compact mode */}
+      {!compact && truncatedOutput && (
         <Box flexDirection="row" paddingLeft={STATUS_INDICATOR_WIDTH}>
           <Text color={Colors.Gray}>{truncatedOutput}</Text>
         </Box>

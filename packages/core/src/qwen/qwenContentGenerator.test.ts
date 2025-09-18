@@ -5,23 +5,20 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  IQwenOAuth2Client,
-  type QwenCredentials,
-  type ErrorData,
-} from './qwenOAuth2.js';
-import {
+import type { IQwenOAuth2Client } from './qwenOAuth2.js';
+import { type QwenCredentials, type ErrorData } from './qwenOAuth2.js';
+import type {
   GenerateContentParameters,
   GenerateContentResponse,
   CountTokensParameters,
   CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
-  FinishReason,
 } from '@google/genai';
+import { FinishReason } from '@google/genai';
 import { QwenContentGenerator } from './qwenContentGenerator.js';
 import { SharedTokenManager } from './sharedTokenManager.js';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 
 // Mock OpenAI client to avoid real network calls

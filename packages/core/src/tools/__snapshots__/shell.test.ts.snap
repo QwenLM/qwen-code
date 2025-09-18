@@ -1,8 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`ShellTool > getDescription > should return the non-windows description when not on windows 1`] = `
-"
-    This tool executes a given shell command as \`bash -c <command>\`. 
+"This tool executes a given shell command as \`bash -c <command>\`. Command can start background processes using \`&\`. Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.
 
       **Background vs Foreground Execution:**
       You should decide whether commands should run in background or foreground based on their nature:
@@ -21,8 +20,6 @@ exports[`ShellTool > getDescription > should return the non-windows description 
       - Git operations: \`git commit\`, \`git push\`
       - Test runs: \`npm test\`, \`pytest\`
       
-      Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.
-
       The following information is returned:
 
       Command: Executed command.
@@ -37,8 +34,7 @@ exports[`ShellTool > getDescription > should return the non-windows description 
 `;
 
 exports[`ShellTool > getDescription > should return the windows description when on windows 1`] = `
-"
-    This tool executes a given shell command as \`cmd.exe /c <command>\`.
+"This tool executes a given shell command as \`cmd.exe /c <command>\`. Command can start background processes using \`start /b\`.
 
       **Background vs Foreground Execution:**
       You should decide whether commands should run in background or foreground based on their nature:
@@ -57,8 +53,6 @@ exports[`ShellTool > getDescription > should return the windows description when
       - Git operations: \`git commit\`, \`git push\`
       - Test runs: \`npm test\`, \`pytest\`
       
-      
-
       The following information is returned:
 
       Command: Executed command.

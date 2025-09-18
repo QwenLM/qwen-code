@@ -6,10 +6,12 @@
 
 import React from 'react';
 import { render } from 'ink-testing-library';
-import { ToolMessage, ToolMessageProps } from './ToolMessage.js';
+import type { ToolMessageProps } from './ToolMessage.js';
+import { ToolMessage } from './ToolMessage.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 // Mock child components or utilities if they are complex or have side effects
 vi.mock('../GeminiRespondingSpinner.js', () => ({
@@ -67,6 +69,8 @@ const renderWithContext = (
 };
 
 describe('<ToolMessage />', () => {
+  const mockConfig = {} as Config;
+
   const baseProps: ToolMessageProps = {
     callId: 'tool-123',
     name: 'test-tool',
@@ -76,6 +80,7 @@ describe('<ToolMessage />', () => {
     terminalWidth: 80,
     confirmationDetails: undefined,
     emphasis: 'medium',
+    config: mockConfig,
   };
 
   it('renders basic tool information', () => {
@@ -211,6 +216,7 @@ describe('<ToolMessage />', () => {
       terminalWidth: 80,
       callId: 'test-call-id-2',
       confirmationDetails: undefined,
+      config: mockConfig,
     };
 
     const { lastFrame } = renderWithContext(

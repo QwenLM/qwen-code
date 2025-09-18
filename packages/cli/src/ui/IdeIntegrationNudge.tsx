@@ -4,12 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DetectedIde, getIdeInfo } from '@qwen-code/qwen-code-core';
+import { type DetectedIde, getIdeInfo } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
-import {
-  RadioButtonSelect,
-  RadioSelectItem,
-} from './components/shared/RadioButtonSelect.js';
+import type { RadioSelectItem } from './components/shared/RadioButtonSelect.js';
+import { RadioButtonSelect } from './components/shared/RadioButtonSelect.js';
 import { useKeypress } from './hooks/useKeypress.js';
 
 export type IdeIntegrationNudgeResult = {
@@ -88,7 +86,7 @@ export function IdeIntegrationNudge({
       <Box marginBottom={1} flexDirection="column">
         <Text>
           <Text color="yellow">{'> '}</Text>
-          {`Do you want to connect ${ideName ?? 'your'} editor to Qwen Code?`}
+          {`Do you want to connect ${ideName ?? 'your editor'} to Qwen Code?`}
         </Text>
         <Text dimColor>{installText}</Text>
       </Box>

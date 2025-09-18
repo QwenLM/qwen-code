@@ -133,6 +133,28 @@ Focus on creating clear, comprehensive documentation that helps both
 new contributors and end users understand the project.
 ```
 
+## Using Subagents Effectively
+
+### Automatic Delegation
+
+Qwen Code proactively delegates tasks based on:
+
+- The task description in your request
+- The description field in subagent configurations
+- Current context and available tools
+
+To encourage more proactive subagent use, include phrases like "use PROACTIVELY" or "MUST BE USED" in your description field.
+
+### Explicit Invocation
+
+Request a specific subagent by mentioning it in your command:
+
+```
+> Let the testing-expert subagent create unit tests for the payment module
+> Have the documentation-writer subagent update the API reference
+> Get the react-specialist subagent to optimize this component's performance
+```
+
 ## Examples
 
 ### Development Workflow Agents

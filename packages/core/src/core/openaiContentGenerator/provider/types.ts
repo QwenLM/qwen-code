@@ -1,4 +1,4 @@
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 
 // Extended types to support cache_control for DashScope
 export interface ChatCompletionContentPartTextWithCache

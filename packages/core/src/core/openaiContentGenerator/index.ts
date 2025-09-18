@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
-import { Config } from '../../config/config.js';
+import type { Config } from '../../config/config.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
   DashScopeOpenAICompatibleProvider,
