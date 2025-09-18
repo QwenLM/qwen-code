@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.0.13
+
+- Added AI-powered code review command with enhanced UI and detailed feedback.
+- Fixed Docker build issues by using correct workspace names in npm pack commands.
+- Added confirmation prompt for /init command when context file exists.
+- Added skipLoopDetection configuration option.
+- Improved handling of untrusted folders (disabled YOLO and AUTO_EDIT modes).
+- Fixed various UI issues (tool calls UI, slash command completion menu).
+- Fixed branding keywords to avoid ambiguity.
+- Fixed paste event handling with debounce timer.
+- Fixed npm pack workspace names in build scripts.
+- Synced with upstream gemini-cli changes.
+- Various bug fixes and improvements.
+
 ## 0.0.11
 
 - Added subagents feature with file-based configuration system for specialized AI assistants.
