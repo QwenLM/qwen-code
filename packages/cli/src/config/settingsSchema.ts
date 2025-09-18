@@ -826,6 +826,18 @@ export const SETTINGS_SCHEMA = {
         childKey: 'disableCacheControl',
         showInDialog: true,
       },
+      contextWindow: {
+        type: 'number',
+        label: 'Context Window',
+        category: 'Content Generator',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Context window size (max tokens) for OpenAI-compatible models.',
+        parentKey: 'contentGenerator',
+        childKey: 'contextWindow',
+        showInDialog: true,
+      },
     },
   },
   enableOpenAILogging: {

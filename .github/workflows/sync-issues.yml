@@ -1,0 +1,81 @@
+name: Sync Upstream Issues
+on:
+  schedule:
+    - cron: '0 0 * * *'  # Run daily at midnight
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Sync issues
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Configuration
+            const upstreamOwner = 'QwenLM';  // Upstream repository owner
+            const upstreamRepo = 'qwen-code';    // Upstream repository name
+            const forkOwner = context.repo.owner;
+            const forkRepo = context.repo.repo;
+            
+            try {
+              // Get issues from upstream repository
+              const upstreamIssues = await github.paginate(
+                github.rest.issues.listForRepo,
+                {
+                  owner: upstreamOwner,
+                  repo: upstreamRepo,
+                  state: 'open'
+                }
+              );
+              
+              // Get existing issues in fork
+              const forkIssues = await github.paginate(
+                github.rest.issues.listForRepo,
+                {
+                  owner: forkOwner,
+                  repo: forkRepo,
+                  state: 'all'
+                }
+              );
+              
+              // Create a map of fork issues by title for quick lookup
+              const forkIssueTitles = new Map();
+              forkIssues.forEach(issue => {
+                forkIssueTitles.set(issue.title, issue);
+              });
+              
+              console.log("Found", upstreamIssues.length);
+              console.log("Found", forkIssues.length);
+              
+              // Sync issues
+              let createdCount = 0;
+              for (const issue of upstreamIssues) {
+                // Skip pull requests (which are also issues in GitHub)
+                if (issue.pull_request) continue;
+                
+                // Check if issue already exists in fork
+                if (!forkIssueTitles.has(issue.title)) {
+                  // Create issue in fork
+                  await github.rest.issues.create({
+                    owner: forkOwner,
+                    repo: forkRepo,
+                    title: issue.title,
+                    body: ` upstream issue #${issue.number}\n\n${issue.body}`,
+                    labels: issue.labels.map(label => label.name)
+                  });
+                  
+                  console.log("Created issue:", issue.title);
+                  createdCount++;
+                }
+              }
+              
+              console.log("Created", createdCount);
+            } catch (error) {
+              console.error("Error:", error.message);
+              process.exit(1);
+            }

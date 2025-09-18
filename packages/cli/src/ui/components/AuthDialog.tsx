@@ -12,6 +12,7 @@ import {
   setOpenAIApiKey,
   setOpenAIBaseUrl,
   setOpenAIModel,
+  setOpenAIContextWindow,
   validateAuthMethod,
 } from '../../config/auth.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
@@ -96,10 +97,14 @@ export function AuthDialog({
     apiKey: string,
     baseUrl: string,
     model: string,
+    contextWindow?: number,
   ) => {
     setOpenAIApiKey(apiKey);
     setOpenAIBaseUrl(baseUrl);
     setOpenAIModel(model);
+    if (contextWindow !== undefined) {
+      setOpenAIContextWindow(contextWindow);
+    }
     setShowOpenAIKeyPrompt(false);
     onSelect(AuthType.USE_OPENAI, SettingScope.User);
   };

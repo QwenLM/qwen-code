@@ -225,6 +225,7 @@ export interface ConfigParameters {
     samplingParams?: {
       [key: string]: unknown;
     };
+    contextWindow?: number;
   };
   cliVersion?: string;
   loadMemoryFromIncludeDirectories?: boolean;
@@ -316,6 +317,7 @@ export class Config {
     maxRetries?: number;
     disableCacheControl?: boolean;
     samplingParams?: Record<string, unknown>;
+    contextWindow?: number;
   };
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
@@ -864,6 +866,10 @@ export class Config {
     return this.contentGenerator?.samplingParams as
       | ContentGeneratorConfig['samplingParams']
       | undefined;
+  }
+
+  getContentGeneratorContextWindow(): number | undefined {
+    return this.contentGenerator?.contextWindow;
   }
 
   getCliVersion(): string | undefined {

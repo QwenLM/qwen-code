@@ -33,6 +33,9 @@ qwen-code --openai-api-key "your-api-key-here" --openai-base-url "https://your-c
 
 # With custom model
 qwen-code --openai-api-key "your-api-key-here" --model "gpt-4-turbo"
+
+# With context window size
+qwen-code --openai-api-key "your-api-key-here" --openai-context-window 8192
 ```
 
 ### 3. Environment Variables

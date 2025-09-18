@@ -1,6 +1,6 @@
 {
-  "name": "@qwen-code/qwen-code",
-  "version": "0.0.11",
+  "name": "@successmove000/better-cli",
+  "version": "0.0.13",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -10,10 +10,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/QwenLM/qwen-code.git"
+    "url": "https://github.com/DS-Controller2/better-cli.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.11"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.0.13"
   },
   "scripts": {
     "start": "node scripts/start.js",
