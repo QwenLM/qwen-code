@@ -178,10 +178,10 @@ export async function main() {
       (error) => `Error in ${error.path}: ${error.message}`,
     );
     const configPaths = [
-      `User configuration: ${process.env.HOME}/.qwen/settings.json`,
-      `Workspace configuration: ${process.cwd()}/.qwen/settings.json`
+      `User configuration: ${process.env['HOME']}/.qwen/settings.json`,
+      `Workspace configuration: ${process.cwd()}/.qwen/settings.json`,
     ].join('\n');
-    
+
     throw new FatalConfigError(
       `${errorMessages.join('\n')}\n\nPlease fix the configuration file(s) and try again.\n\nConfiguration file locations:\n${configPaths}\n\nYou can edit these files with any text editor.`,
     );
