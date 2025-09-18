@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { getStartupWarnings } from './startupWarnings.js';
-import * as fs from 'fs/promises';
+import * as fs from 'node:fs/promises';
 import { getErrorMessage } from '@qwen-code/qwen-code-core';
 
 vi.mock('fs/promises');

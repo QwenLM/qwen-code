@@ -8,10 +8,10 @@
  * Integration test to verify circular reference handling with proxy agents
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { Config } from '../config/config.js';
+import type { RumEvent } from './qwen-logger/event-types.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
-import { RumEvent } from './qwen-logger/event-types.js';
-import { Config } from '../config/config.js';
 
 describe('Circular Reference Integration Test', () => {
   beforeEach(() => {

@@ -4,22 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { FunctionDeclaration } from '@google/genai';
-import {
+import type { FunctionDeclaration } from '@google/genai';
+import type {
   AnyDeclarativeTool,
-  Kind,
   ToolResult,
-  BaseDeclarativeTool,
-  BaseToolInvocation,
+  ToolResultDisplay,
   ToolInvocation,
 } from './tools.js';
-import { Config } from '../config/config.js';
+import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
+import type { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { connectAndDiscover } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
+import { ToolErrorType } from './tool-error.js';
+import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -36,12 +37,12 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return `Calling discovered tool: ${this.toolName}`;
+    return safeJsonStringify(this.params);
   }
 
   async execute(
     _signal: AbortSignal,
-    _updateOutput?: (output: string) => void,
+    _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
     const child = spawn(callCommand, [this.toolName]);
@@ -105,6 +106,10 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
       return {
         llmContent,
         returnDisplay: llmContent,
+        error: {
+          message: llmContent,
+          type: ToolErrorType.DISCOVERED_TOOL_EXECUTION_ERROR,
+        },
       };
     }
 
@@ -431,6 +436,13 @@ export class ToolRegistry {
       }
     }
     return declarations;
+  }
+
+  /**
+   * Returns an array of all registered and discovered tool names.
+   */
+  getAllToolNames(): string[] {
+    return Array.from(this.tools.keys());
   }
 
   /**

@@ -8,7 +8,7 @@
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
-import { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
 
 // Mock qrcode-terminal module
 vi.mock('qrcode-terminal', () => ({

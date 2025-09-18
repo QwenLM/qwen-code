@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { FunctionDeclaration, PartListUnion } from '@google/genai';
+import type { FunctionDeclaration, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
-import { DiffUpdateResult } from '../ide/ideContext.js';
+import type { DiffUpdateResult } from '../ide/ideContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
+import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -24,6 +25,7 @@ export interface ToolInvocation<
 
   /**
    * Gets a pre-execution description of the tool operation.
+   *
    * @returns A markdown string describing what the tool will do.
    */
   getDescription(): string;
@@ -50,7 +52,7 @@ export interface ToolInvocation<
    */
   execute(
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<TResult>;
 }
 
@@ -78,7 +80,7 @@ export abstract class BaseToolInvocation<
 
   abstract execute(
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<TResult>;
 }
 
@@ -196,7 +198,7 @@ export abstract class DeclarativeTool<
   async buildAndExecute(
     params: TParams,
     signal: AbortSignal,
-    updateOutput?: (output: string) => void,
+    updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<TResult> {
     const invocation = this.build(params);
     return invocation.execute(signal, updateOutput);
@@ -306,12 +308,22 @@ export abstract class BaseDeclarativeTool<
  */
 export type AnyDeclarativeTool = DeclarativeTool<object, ToolResult>;
 
+/**
+ * Type guard to check if an object is a Tool.
+ * @param obj The object to check.
+ * @returns True if the object is a Tool, false otherwise.
+ */
+export function isTool(obj: unknown): obj is AnyDeclarativeTool {
+  return (
+    typeof obj === 'object' &&
+    obj !== null &&
+    'name' in obj &&
+    'build' in obj &&
+    typeof (obj as AnyDeclarativeTool).build === 'function'
+  );
+}
+
 export interface ToolResult {
-  /**
-   * A short, one-line summary of the tool's action and result.
-   * e.g., "Read 5 files", "Wrote 256 bytes to foo.txt"
-   */
-  summary?: string;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -421,7 +433,38 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export type ToolResultDisplay = string | FileDiff | TodoResultDisplay;
+export interface TaskResultDisplay {
+  type: 'task_execution';
+  subagentName: string;
+  subagentColor?: string;
+  taskDescription: string;
+  taskPrompt: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  terminateReason?: string;
+  result?: string;
+  executionSummary?: SubagentStatsSummary;
+
+  // If the subagent is awaiting approval for a tool call,
+  // this contains the confirmation details for inline UI rendering.
+  pendingConfirmation?: ToolCallConfirmationDetails;
+
+  toolCalls?: Array<{
+    callId: string;
+    name: string;
+    status: 'executing' | 'awaiting_approval' | 'success' | 'failed';
+    error?: string;
+    args?: Record<string, unknown>;
+    result?: string;
+    resultDisplay?: string;
+    description?: string;
+  }>;
+}
+
+export type ToolResultDisplay =
+  | string
+  | FileDiff
+  | TodoResultDisplay
+  | TaskResultDisplay;
 
 export interface FileDiff {
   fileDiff: string;

@@ -4,15 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  MockInstance,
-  vi,
-  describe,
-  it,
-  expect,
-  beforeEach,
-  afterEach,
-} from 'vitest';
+import type { MockInstance } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ideCommand } from './ideCommand.js';
 import { type CommandContext } from './types.js';
 import { type Config, DetectedIde } from '@qwen-code/qwen-code-core';
@@ -20,7 +13,14 @@ import * as core from '@qwen-code/qwen-code-core';
 
 vi.mock('child_process');
 vi.mock('glob');
-vi.mock('@qwen-code/qwen-code-core');
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original = await importOriginal<typeof core>();
+  return {
+    ...original,
+    getOauthClient: vi.fn(original.getOauthClient),
+    getIdeInstaller: vi.fn(original.getIdeInstaller),
+  };
+});
 
 describe('ideCommand', () => {
   let mockContext: CommandContext;

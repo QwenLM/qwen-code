@@ -18,6 +18,8 @@ import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { MemoryTool, GEMINI_CONFIG_DIR } from '../tools/memoryTool.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
+import { TaskTool } from '../tools/task.js';
+import type { GenerateContentConfig } from '@google/genai';
 
 export interface ModelTemplateMapping {
   baseUrls?: string[];
@@ -42,6 +44,48 @@ function normalizeUrl(url: string): string {
 function urlMatches(urlArray: string[], targetUrl: string): boolean {
   const normalizedTarget = normalizeUrl(targetUrl);
   return urlArray.some((url) => normalizeUrl(url) === normalizedTarget);
+}
+
+/**
+ * Processes a custom system instruction by appending user memory if available.
+ * This function should only be used when there is actually a custom instruction.
+ *
+ * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
+ * @param userMemory - User memory to append
+ * @returns Processed custom system instruction with user memory appended
+ */
+export function getCustomSystemPrompt(
+  customInstruction: GenerateContentConfig['systemInstruction'],
+  userMemory?: string,
+): string {
+  // Extract text from custom instruction
+  let instructionText = '';
+
+  if (typeof customInstruction === 'string') {
+    instructionText = customInstruction;
+  } else if (Array.isArray(customInstruction)) {
+    // PartUnion[]
+    instructionText = customInstruction
+      .map((part) => (typeof part === 'string' ? part : part.text || ''))
+      .join('');
+  } else if (customInstruction && 'parts' in customInstruction) {
+    // Content
+    instructionText =
+      customInstruction.parts
+        ?.map((part) => (typeof part === 'string' ? part : part.text || ''))
+        .join('') || '';
+  } else if (customInstruction && 'text' in customInstruction) {
+    // PartUnion (single part)
+    instructionText = customInstruction.text || '';
+  }
+
+  // Append user memory using the same pattern as getCoreSystemPrompt
+  const memorySuffix =
+    userMemory && userMemory.trim().length > 0
+      ? `\n\n---\n\n${userMemory.trim()}`
+      : '';
+
+  return `${instructionText}${memorySuffix}`;
 }
 
 export function getCoreSystemPrompt(
@@ -241,6 +285,7 @@ IMPORTANT: Always use the ${TodoWriteTool.Name} tool to plan and track tasks thr
 - **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Task Management:** Use the '${TodoWriteTool.Name}' tool proactively for complex, multi-step tasks to track progress and provide visibility to users. This tool helps organize work systematically and ensures no requirements are missed.
+- **Subagent Delegation:** When doing file search, prefer to use the '${TaskTool.Name}' tool in order to reduce context usage. You should proactively use the '${TaskTool.Name}' tool with specialized agents when the task at hand matches the agent's description.
 - **Remembering Facts:** Use the '${MemoryTool.Name}' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information. If unsure whether to save something, you can ask the user, "Should I remember that for you?"
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
 
@@ -538,5 +583,35 @@ The structure MUST be as follows:
         -->
     </current_plan>
 </state_snapshot>
+`.trim();
+}
+
+/**
+ * Provides the system prompt for generating project summaries in markdown format.
+ * This prompt instructs the model to create a structured markdown summary
+ * that can be saved to a file for future reference.
+ */
+export function getProjectSummaryPrompt(): string {
+  return `Please analyze the conversation history above and generate a comprehensive project summary in markdown format. Focus on extracting the most important context, decisions, and progress that would be valuable for future sessions. Generate the summary directly without using any tools.
+You are a specialized context summarizer that creates a comprehensive markdown summary from chat history for future reference. The markdown format is as follows:
+
+# Project Summary
+
+## Overall Goal
+<!-- A single, concise sentence describing the user's high-level objective -->
+
+## Key Knowledge
+<!-- Crucial facts, conventions, and constraints the agent must remember -->
+<!-- Include: technology choices, architecture decisions, user preferences, build commands, testing procedures -->
+
+## Recent Actions
+<!-- Summary of significant recent work and outcomes -->
+<!-- Include: accomplishments, discoveries, recent changes -->
+
+## Current Plan
+<!-- The current development roadmap and next steps -->
+<!-- Use status markers: [DONE], [IN PROGRESS], [TODO] -->
+<!-- Example: 1. [DONE] Set up WebSocket server -->
+
 `.trim();
 }

@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import type React from 'react';
+import { memo } from 'react';
 import type { HistoryItem } from '../types.js';
 import { UserMessage } from './messages/UserMessage.js';
 import { UserShellMessage } from './messages/UserShellMessage.js';
@@ -14,27 +15,28 @@ import { ErrorMessage } from './messages/ErrorMessage.js';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { GeminiMessageContent } from './messages/GeminiMessageContent.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
+import { SummaryMessage } from './messages/SummaryMessage.js';
 import { Box } from 'ink';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import { ToolStatsDisplay } from './ToolStatsDisplay.js';
 import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
-import { Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { Help } from './Help.js';
-import { SlashCommand } from '../commands/types.js';
+import type { SlashCommand } from '../commands/types.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
   availableTerminalHeight?: number;
   terminalWidth: number;
   isPending: boolean;
-  config?: Config;
+  config: Config;
   isFocused?: boolean;
   commands?: readonly SlashCommand[];
 }
 
-export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
+const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   item,
   availableTerminalHeight,
   terminalWidth,
@@ -81,6 +83,9 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
     {item.type === 'model_stats' && <ModelStatsDisplay />}
     {item.type === 'tool_stats' && <ToolStatsDisplay />}
     {item.type === 'quit' && <SessionSummaryDisplay duration={item.duration} />}
+    {item.type === 'quit_confirmation' && (
+      <SessionSummaryDisplay duration={item.duration} />
+    )}
     {item.type === 'tool_group' && (
       <ToolGroupMessage
         toolCalls={item.tools}
@@ -94,5 +99,10 @@ export const HistoryItemDisplay: React.FC<HistoryItemDisplayProps> = ({
     {item.type === 'compression' && (
       <CompressionMessage compression={item.compression} />
     )}
+    {item.type === 'summary' && <SummaryMessage summary={item.summary} />}
   </Box>
 );
+
+HistoryItemDisplayComponent.displayName = 'HistoryItemDisplay';
+
+export const HistoryItemDisplay = memo(HistoryItemDisplayComponent);

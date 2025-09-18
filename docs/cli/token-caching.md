@@ -4,7 +4,7 @@ Qwen Code automatically optimizes API costs through token caching when using API
 
 **Token caching is available for:**
 
-- API key users (Gemini API key)
+- API key users (Qwen API key)
 - Vertex AI users (with project and location setup)
 
 **Token caching is not available for:**

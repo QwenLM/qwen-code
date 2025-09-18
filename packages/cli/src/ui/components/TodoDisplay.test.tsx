@@ -6,7 +6,8 @@
 
 import { render } from 'ink-testing-library';
 import { describe, it, expect } from 'vitest';
-import { TodoItem, TodoDisplay } from './TodoDisplay.js';
+import type { TodoItem } from './TodoDisplay.js';
+import { TodoDisplay } from './TodoDisplay.js';
 
 describe('TodoDisplay', () => {
   const mockTodos: TodoItem[] = [

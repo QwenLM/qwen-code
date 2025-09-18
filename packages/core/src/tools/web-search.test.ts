@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { WebSearchTool, WebSearchToolParams } from './web-search.js';
-import { Config } from '../config/config.js';
+import { WebSearchTool, type WebSearchToolParams } from './web-search.js';
+import type { Config } from '../config/config.js';
 import { GeminiClient } from '../core/client.js';
 
 // Mock GeminiClient and Config constructor

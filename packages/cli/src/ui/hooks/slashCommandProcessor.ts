@@ -7,26 +7,28 @@
 import { useCallback, useMemo, useEffect, useState } from 'react';
 import { type PartListUnion } from '@google/genai';
 import process from 'node:process';
-import { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  Config,
   GitService,
   Logger,
   logSlashCommand,
   makeSlashCommandEvent,
   SlashCommandStatus,
   ToolConfirmationOutcome,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
+import { formatDuration } from '../utils/formatters.js';
 import { runExitCleanup } from '../../utils/cleanup.js';
-import {
+import type {
   Message,
-  MessageType,
   HistoryItemWithoutId,
   HistoryItem,
   SlashCommandProcessorResult,
 } from '../types.js';
-import { LoadedSettings } from '../../config/settings.js';
+import { MessageType } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -51,9 +53,12 @@ export const useSlashCommandProcessor = (
   setQuittingMessages: (message: HistoryItem[]) => void,
   openPrivacyNotice: () => void,
   openSettingsDialog: () => void,
+  openSubagentCreateDialog: () => void,
+  openAgentsManagerDialog: () => void,
   toggleVimEnabled: () => Promise<boolean>,
   setIsProcessing: (isProcessing: boolean) => void,
   setGeminiMdFileCount: (count: number) => void,
+  _showQuitConfirmation: () => void,
 ) => {
   const session = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -74,6 +79,10 @@ export const useSlashCommandProcessor = (
     prompt: React.ReactNode;
     onConfirm: (confirmed: boolean) => void;
   }>(null);
+  const [quitConfirmationRequest, setQuitConfirmationRequest] =
+    useState<null | {
+      onConfirm: (shouldQuit: boolean, action?: string) => void;
+    }>(null);
 
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
     new Set<string>(),
@@ -82,11 +91,14 @@ export const useSlashCommandProcessor = (
     if (!config?.getProjectRoot()) {
       return;
     }
-    return new GitService(config.getProjectRoot());
+    return new GitService(config.getProjectRoot(), config.storage);
   }, [config]);
 
   const logger = useMemo(() => {
-    const l = new Logger(config?.getSessionId() || '');
+    const l = new Logger(
+      config?.getSessionId() || '',
+      config?.storage ?? new Storage(process.cwd()),
+    );
     // The logger's initialize is async, but we can create the instance
     // synchronously. Commands that use it will await its initialization.
     return l;
@@ -141,10 +153,20 @@ export const useSlashCommandProcessor = (
           type: 'quit',
           duration: message.duration,
         };
+      } else if (message.type === MessageType.QUIT_CONFIRMATION) {
+        historyItemContent = {
+          type: 'quit_confirmation',
+          duration: message.duration,
+        };
       } else if (message.type === MessageType.COMPRESSION) {
         historyItemContent = {
           type: 'compression',
           compression: message.compression,
+        };
+      } else if (message.type === MessageType.SUMMARY) {
+        historyItemContent = {
+          type: 'summary',
+          summary: message.summary,
         };
       } else {
         historyItemContent = {
@@ -351,16 +373,19 @@ export const useSlashCommandProcessor = (
                     toolArgs: result.toolArgs,
                   };
                 case 'message':
-                  addItem(
-                    {
-                      type:
-                        result.messageType === 'error'
-                          ? MessageType.ERROR
-                          : MessageType.INFO,
-                      text: result.content,
-                    },
-                    Date.now(),
-                  );
+                  if (result.messageType === 'info') {
+                    addMessage({
+                      type: MessageType.INFO,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
+                  } else {
+                    addMessage({
+                      type: MessageType.ERROR,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
+                  }
                   return { type: 'handled' };
                 case 'dialog':
                   switch (result.dialog) {
@@ -378,6 +403,12 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'settings':
                       openSettingsDialog();
+                      return { type: 'handled' };
+                    case 'subagent_create':
+                      openSubagentCreateDialog();
+                      return { type: 'handled' };
+                    case 'subagent_list':
+                      openAgentsManagerDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
@@ -398,6 +429,79 @@ export const useSlashCommandProcessor = (
                   });
                   return { type: 'handled' };
                 }
+                case 'quit_confirmation':
+                  // Show quit confirmation dialog instead of immediately quitting
+                  setQuitConfirmationRequest({
+                    onConfirm: (shouldQuit: boolean, action?: string) => {
+                      setQuitConfirmationRequest(null);
+                      if (!shouldQuit) {
+                        // User cancelled the quit operation - do nothing
+                        return;
+                      }
+                      if (shouldQuit) {
+                        if (action === 'save_and_quit') {
+                          // First save conversation with auto-generated tag, then quit
+                          const timestamp = new Date()
+                            .toISOString()
+                            .replace(/[:.]/g, '-');
+                          const autoSaveTag = `auto-save chat ${timestamp}`;
+                          handleSlashCommand(`/chat save "${autoSaveTag}"`);
+                          setTimeout(() => handleSlashCommand('/quit'), 100);
+                        } else if (action === 'summary_and_quit') {
+                          // Generate summary and then quit
+                          handleSlashCommand('/summary')
+                            .then(() => {
+                              // Wait for user to see the summary result
+                              setTimeout(() => {
+                                handleSlashCommand('/quit');
+                              }, 1200);
+                            })
+                            .catch((error) => {
+                              // If summary fails, still quit but show error
+                              addItem(
+                                {
+                                  type: 'error',
+                                  text: `Failed to generate summary before quit: ${
+                                    error instanceof Error
+                                      ? error.message
+                                      : String(error)
+                                  }`,
+                                },
+                                Date.now(),
+                              );
+                              // Give user time to see the error message
+                              setTimeout(() => {
+                                handleSlashCommand('/quit');
+                              }, 1000);
+                            });
+                        } else {
+                          // Just quit immediately - trigger the actual quit action
+                          const now = Date.now();
+                          const { sessionStartTime } = session.stats;
+                          const wallDuration = now - sessionStartTime.getTime();
+
+                          setQuittingMessages([
+                            {
+                              type: 'user',
+                              text: `/quit`,
+                              id: now - 1,
+                            },
+                            {
+                              type: 'quit',
+                              duration: formatDuration(wallDuration),
+                              id: now,
+                            },
+                          ]);
+                          setTimeout(async () => {
+                            await runExitCleanup();
+                            process.exit(0);
+                          }, 100);
+                        }
+                      }
+                    },
+                  });
+                  return { type: 'handled' };
+
                 case 'quit':
                   setQuittingMessages(result.messages);
                   setTimeout(async () => {
@@ -553,10 +657,13 @@ export const useSlashCommandProcessor = (
       openEditorDialog,
       setQuittingMessages,
       openSettingsDialog,
+      openSubagentCreateDialog,
+      openAgentsManagerDialog,
       setShellConfirmationRequest,
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      session.stats,
     ],
   );
 
@@ -567,5 +674,6 @@ export const useSlashCommandProcessor = (
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    quitConfirmationRequest,
   };
 };

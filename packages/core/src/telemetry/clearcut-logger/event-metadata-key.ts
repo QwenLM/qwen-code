@@ -163,6 +163,9 @@ export enum EventMetadataKey {
   // Logs the Gemini CLI Git commit hash
   GEMINI_CLI_GIT_COMMIT_HASH = 55,
 
+  // Logs the Gemini CLI OS
+  GEMINI_CLI_OS = 82,
+
   // ==========================================================================
   // Loop Detected Event Keys
   // ===========================================================================
@@ -247,6 +250,13 @@ export enum EventMetadataKey {
 
   // Logs tool type whether it is mcp or native.
   GEMINI_CLI_TOOL_TYPE = 62,
+
+  // Logs count of MCP servers in Start Session Event
+  GEMINI_CLI_START_SESSION_MCP_SERVERS_COUNT = 63,
+
+  // Logs count of MCP tools in Start Session Event
+  GEMINI_CLI_START_SESSION_MCP_TOOLS_COUNT = 64,
+
   // Logs name of MCP tools as comma separated string
   GEMINI_CLI_START_SESSION_MCP_TOOLS = 65,
 

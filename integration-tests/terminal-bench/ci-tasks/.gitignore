@@ -1,0 +1,13 @@
+# Ignore protected directories (contain solutions we don't need to commit)
+*/protected/
+
+# Ignore Docker-related files that can be large
+*.tar
+*.tar.gz
+
+# Ignore any generated files
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# Keep task.yaml and essential test files

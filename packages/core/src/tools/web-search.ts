@@ -8,12 +8,12 @@ import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
-  ToolInvocation,
-  ToolResult,
+  type ToolInvocation,
+  type ToolResult,
 } from './tools.js';
 
+import type { Config } from '../config/config.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { Config } from '../config/config.js';
 
 interface TavilyResultItem {
   title: string;
@@ -157,7 +157,7 @@ export class WebSearchTool extends BaseDeclarativeTool<
   constructor(private readonly config: Config) {
     super(
       WebSearchTool.Name,
-      'TavilySearch',
+      'WebSearch',
       'Performs a web search using the Tavily API and returns a concise answer with sources. Requires the TAVILY_API_KEY environment variable.',
       Kind.Search,
       {

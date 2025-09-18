@@ -7,24 +7,29 @@ Qwen Code offers several ways to configure its behavior, including environment v
 Configuration is applied in the following order of precedence (lower numbers are overridden by higher numbers):
 
 1.  **Default values:** Hardcoded defaults within the application.
-2.  **User settings file:** Global settings for the current user.
-3.  **Project settings file:** Project-specific settings.
-4.  **System settings file:** System-wide settings.
-5.  **Environment variables:** System-wide or session-specific variables, potentially loaded from `.env` files.
-6.  **Command-line arguments:** Values passed when launching the CLI.
+2.  **System defaults file:** System-wide default settings that can be overridden by other settings files.
+3.  **User settings file:** Global settings for the current user.
+4.  **Project settings file:** Project-specific settings.
+5.  **System settings file:** System-wide settings that override all other settings files.
+6.  **Environment variables:** System-wide or session-specific variables, potentially loaded from `.env` files.
+7.  **Command-line arguments:** Values passed when launching the CLI.
 
 ## Settings files
 
-Qwen Code uses `settings.json` files for persistent configuration. There are three locations for these files:
+Qwen Code uses JSON settings files for persistent configuration. There are four locations for these files:
 
+- **System defaults file:**
+  - **Location:** `/etc/qwen-code/system-defaults.json` (Linux), `C:\ProgramData\qwen-code\system-defaults.json` (Windows) or `/Library/Application Support/QwenCode/system-defaults.json` (macOS). The path can be overridden using the `QWEN_CODE_SYSTEM_DEFAULTS_PATH` environment variable.
+  - **Scope:** Provides a base layer of system-wide default settings. These settings have the lowest precedence and are intended to be overridden by user, project, or system override settings.
 - **User settings file:**
   - **Location:** `~/.qwen/settings.json` (where `~` is your home directory).
   - **Scope:** Applies to all Qwen Code sessions for the current user.
 - **Project settings file:**
   - **Location:** `.qwen/settings.json` within your project's root directory.
   - **Scope:** Applies only when running Qwen Code from that specific project. Project settings override user settings.
+
 - **System settings file:**
-  - **Location:** `/etc/gemini-cli/settings.json` (Linux), `C:\ProgramData\gemini-cli\settings.json` (Windows) or `/Library/Application Support/GeminiCli/settings.json` (macOS). The path can be overridden using the `GEMINI_CLI_SYSTEM_SETTINGS_PATH` environment variable.
+  - **Location:** `/etc/qwen-code/settings.json` (Linux), `C:\ProgramData\qwen-code\settings.json` (Windows) or `/Library/Application Support/QwenCode/settings.json` (macOS). The path can be overridden using the `QWEN_CODE_SYSTEM_SETTINGS_PATH` environment variable.
   - **Scope:** Applies to all Qwen Code sessions on the system, for all users. System settings override user and project settings. May be useful for system administrators at enterprises to have controls over users' Qwen Code setups.
 
 **Note on environment variables in settings:** String values within your `settings.json` files can reference environment variables using either `$VAR_NAME` or `${VAR_NAME}` syntax. These variables will be automatically resolved when the settings are loaded. For example, if you have an environment variable `MY_API_TOKEN`, you could use it in `settings.json` like this: `"apiKey": "$MY_API_TOKEN"`.
@@ -60,18 +65,35 @@ In addition to a project settings file, a project's `.qwen` directory can contai
   - **Properties:**
     - **`respectGitIgnore`** (boolean): Whether to respect .gitignore patterns when discovering files. When set to `true`, git-ignored files (like `node_modules/`, `dist/`, `.env`) are automatically excluded from @ commands and file listing operations.
     - **`enableRecursiveFileSearch`** (boolean): Whether to enable searching recursively for filenames under the current tree when completing @ prefixes in the prompt.
+    - **`disableFuzzySearch`** (boolean): When `true`, disables the fuzzy search capabilities when searching for files, which can improve performance on projects with a large number of files.
   - **Example:**
     ```json
     "fileFiltering": {
       "respectGitIgnore": true,
-      "enableRecursiveFileSearch": false
+      "enableRecursiveFileSearch": false,
+      "disableFuzzySearch": true
     }
     ```
+
+### Troubleshooting File Search Performance
+
+If you are experiencing performance issues with file searching (e.g., with `@` completions), especially in projects with a very large number of files, here are a few things you can try in order of recommendation:
+
+1.  **Use `.qwenignore`:** Create a `.qwenignore` file in your project root to exclude directories that contain a large number of files that you don't need to reference (e.g., build artifacts, logs, `node_modules`). Reducing the total number of files crawled is the most effective way to improve performance.
+
+2.  **Disable Fuzzy Search:** If ignoring files is not enough, you can disable fuzzy search by setting `disableFuzzySearch` to `true` in your `settings.json` file. This will use a simpler, non-fuzzy matching algorithm, which can be faster.
+
+3.  **Disable Recursive File Search:** As a last resort, you can disable recursive file search entirely by setting `enableRecursiveFileSearch` to `false`. This will be the fastest option as it avoids a recursive crawl of your project. However, it means you will need to type the full path to files when using `@` completions.
 
 - **`coreTools`** (array of strings):
   - **Description:** Allows you to specify a list of core tool names that should be made available to the model. This can be used to restrict the set of built-in tools. See [Built-in Tools](../core/tools-api.md#built-in-tools) for a list of core tools. You can also specify command-specific restrictions for tools that support it, like the `ShellTool`. For example, `"coreTools": ["ShellTool(ls -l)"]` will only allow the `ls -l` command to be executed.
   - **Default:** All tools available for use by the model.
   - **Example:** `"coreTools": ["ReadFileTool", "GlobTool", "ShellTool(ls)"]`.
+
+- **`allowedTools`** (array of strings):
+  - **Default:** `undefined`
+  - **Description:** A list of tool names that will bypass the confirmation dialog. This is useful for tools that you trust and use frequently. The match semantics are the same as `coreTools`.
+  - **Example:** `"allowedTools": ["ShellTool(git status)"]`.
 
 - **`excludeTools`** (array of strings):
   - **Description:** Allows you to specify a list of core tool names that should be excluded from the model. A tool listed in both `excludeTools` and `coreTools` is excluded. You can also specify command-specific restrictions for tools that support it, like the `ShellTool`. For example, `"excludeTools": ["ShellTool(rm -rf)"]` will block the `rm -rf` command.
@@ -114,12 +136,12 @@ In addition to a project settings file, a project's `.qwen` directory can contai
   - **Example:** `"sandbox": "docker"`
 
 - **`toolDiscoveryCommand`** (string):
-  - **Description:** Defines a custom shell command for discovering tools from your project. The shell command must return on `stdout` a JSON array of [function declarations](https://ai.google.dev/gemini-api/docs/function-calling#function-declarations). Tool wrappers are optional.
+  - **Description:** **Align with Gemini CLI.** Defines a custom shell command for discovering tools from your project. The shell command must return on `stdout` a JSON array of [function declarations](https://ai.google.dev/gemini-api/docs/function-calling#function-declarations). Tool wrappers are optional.
   - **Default:** Empty
   - **Example:** `"toolDiscoveryCommand": "bin/get_tools"`
 
 - **`toolCallCommand`** (string):
-  - **Description:** Defines a custom shell command for calling a specific tool that was discovered using `toolDiscoveryCommand`. The shell command must meet the following criteria:
+  - **Description:** **Align with Gemini CLI.** Defines a custom shell command for calling a specific tool that was discovered using `toolDiscoveryCommand`. The shell command must meet the following criteria:
     - It must take function `name` (exactly as in [function declaration](https://ai.google.dev/gemini-api/docs/function-calling#function-declarations)) as first command line argument.
     - It must read function arguments as JSON on `stdin`, analogous to [`functionCall.args`](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#functioncall).
     - It must return function output as JSON on `stdout`, analogous to [`functionResponse.response.content`](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#functionresponse).
@@ -267,7 +289,7 @@ In addition to a project settings file, a project's `.qwen` directory can contai
     ```
 
 - **`includeDirectories`** (array of strings):
-  - **Description:** Specifies an array of additional absolute or relative paths to include in the workspace context. This allows you to work with files across multiple directories as if they were one. Paths can use `~` to refer to the user's home directory. This setting can be combined with the `--include-directories` command-line flag.
+  - **Description:** Specifies an array of additional absolute or relative paths to include in the workspace context. Missing directories will be skipped with a warning by default. Paths can use `~` to refer to the user's home directory. This setting can be combined with the `--include-directories` command-line flag.
   - **Default:** `[]`
   - **Example:**
     ```json
@@ -310,6 +332,36 @@ In addition to a project settings file, a project's `.qwen` directory can contai
     "showLineNumbers": false
     ```
 
+- **`accessibility`** (object):
+  - **Description:** Configures accessibility features for the CLI.
+  - **Properties:**
+    - **`screenReader`** (boolean): Enables screen reader mode, which adjusts the TUI for better compatibility with screen readers. This can also be enabled with the `--screen-reader` command-line flag, which will take precedence over the setting.
+    - **`disableLoadingPhrases`** (boolean): Disables the display of loading phrases during operations.
+  - **Default:** `{"screenReader": false, "disableLoadingPhrases": false}`
+  - **Example:**
+    ```json
+    "accessibility": {
+      "screenReader": true,
+      "disableLoadingPhrases": true
+    }
+    ```
+
+- **`skipNextSpeakerCheck`** (boolean):
+  - **Description:** Skips the next speaker check after text responses. When enabled, the system bypasses analyzing whether the AI should continue speaking.
+  - **Default:** `false`
+  - **Example:**
+    ```json
+    "skipNextSpeakerCheck": true
+    ```
+
+- **`skipLoopDetection`** (boolean):
+  - **Description:** Disables all loop detection checks (streaming and LLM-based). Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.
+  - **Default:** `false`
+  - **Example:**
+    ```json
+    "skipLoopDetection": true
+    ```
+
 ### Example `settings.json`:
 
 ```json
@@ -337,6 +389,8 @@ In addition to a project settings file, a project's `.qwen` directory can contai
   "usageStatisticsEnabled": true,
   "hideTips": false,
   "hideBanner": false,
+  "skipNextSpeakerCheck": false,
+  "skipLoopDetection": false,
   "maxSessionTurns": 10,
   "summarizeToolOutput": {
     "run_shell_command": {
@@ -369,35 +423,16 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
 
 **Environment Variable Exclusion:** Some environment variables (like `DEBUG` and `DEBUG_MODE`) are automatically excluded from project `.env` files by default to prevent interference with the CLI behavior. Variables from `.qwen/.env` files are never excluded. You can customize this behavior using the `excludedProjectEnvVars` setting in your `settings.json` file.
 
-- **`GEMINI_API_KEY`**:
-  - Your API key for the Gemini API.
+- **`OPENAI_API_KEY`**:
   - One of several available [authentication methods](./authentication.md).
   - Set this in your shell profile (e.g., `~/.bashrc`, `~/.zshrc`) or an `.env` file.
-- **`GEMINI_MODEL`**:
-  - Specifies the default Gemini model to use.
+- **`OPENAI_BASE_URL`**:
+  - One of several available [authentication methods](./authentication.md).
+  - Set this in your shell profile (e.g., `~/.bashrc`, `~/.zshrc`) or an `.env` file.
+- **`OPENAI_MODEL`**:
+  - Specifies the default OPENAI model to use.
   - Overrides the hardcoded default
-  - Example: `export GEMINI_MODEL="gemini-2.5-flash"`
-- **`GOOGLE_API_KEY`**:
-  - Your Google Cloud API key.
-  - Required for using Vertex AI in express mode.
-  - Ensure you have the necessary permissions.
-  - Example: `export GOOGLE_API_KEY="YOUR_GOOGLE_API_KEY"`.
-- **`GOOGLE_CLOUD_PROJECT`**:
-  - Your Google Cloud Project ID.
-  - Required for using Code Assist or Vertex AI.
-  - If using Vertex AI, ensure you have the necessary permissions in this project.
-  - **Cloud Shell Note:** When running in a Cloud Shell environment, this variable defaults to a special project allocated for Cloud Shell users. If you have `GOOGLE_CLOUD_PROJECT` set in your global environment in Cloud Shell, it will be overridden by this default. To use a different project in Cloud Shell, you must define `GOOGLE_CLOUD_PROJECT` in a `.env` file.
-  - Example: `export GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"`.
-- **`GOOGLE_APPLICATION_CREDENTIALS`** (string):
-  - **Description:** The path to your Google Application Credentials JSON file.
-  - **Example:** `export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/credentials.json"`
-- **`OTLP_GOOGLE_CLOUD_PROJECT`**:
-  - Your Google Cloud Project ID for Telemetry in Google Cloud
-  - Example: `export OTLP_GOOGLE_CLOUD_PROJECT="YOUR_PROJECT_ID"`.
-- **`GOOGLE_CLOUD_LOCATION`**:
-  - Your Google Cloud Project Location (e.g., us-central1).
-  - Required for using Vertex AI in non express mode.
-  - Example: `export GOOGLE_CLOUD_LOCATION="YOUR_PROJECT_LOCATION"`.
+  - Example: `export OPENAI_MODEL="qwen3-coder-plus"`
 - **`GEMINI_SANDBOX`**:
   - Alternative to the `sandbox` setting in `settings.json`.
   - Accepts `true`, `false`, `docker`, `podman`, or a custom command string.
@@ -427,8 +462,8 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
 Arguments passed directly when running the CLI can override other configurations for that specific session.
 
 - **`--model <model_name>`** (**`-m <model_name>`**):
-  - Specifies the Gemini model to use for this session.
-  - Example: `npm start -- --model gemini-1.5-pro-latest`
+  - Specifies the Qwen model to use for this session.
+  - Example: `npm start -- --model qwen3-coder-plus`
 - **`--prompt <your_prompt>`** (**`-p <your_prompt>`**):
   - Used to pass a prompt directly to the command. This invokes Qwen Code in a non-interactive mode.
 - **`--prompt-interactive <your_prompt>`** (**`-i <your_prompt>`**):
@@ -453,10 +488,13 @@ Arguments passed directly when running the CLI can override other configurations
 - **`--approval-mode <mode>`**:
   - Sets the approval mode for tool calls. Available modes:
     - `default`: Prompt for approval on each tool call (default behavior)
-    - `auto_edit`: Automatically approve edit tools (replace, write_file) while prompting for others
+    - `auto_edit`: Automatically approve edit tools (edit, write_file) while prompting for others
     - `yolo`: Automatically approve all tool calls (equivalent to `--yolo`)
   - Cannot be used together with `--yolo`. Use `--approval-mode=yolo` instead of `--yolo` for the new unified approach.
   - Example: `qwen --approval-mode auto_edit`
+- **`--allowed-tools <tool1,tool2,...>`**:
+  - A comma-separated list of tool names that will bypass the confirmation dialog.
+  - Example: `qwen --allowed-tools "ShellTool(git status)"`
 - **`--telemetry`**:
   - Enables [telemetry](../telemetry.md).
 - **`--telemetry-target`**:
@@ -483,6 +521,8 @@ Arguments passed directly when running the CLI can override other configurations
   - Can be specified multiple times or as comma-separated values.
   - 5 directories can be added at maximum.
   - Example: `--include-directories /path/to/project1,/path/to/project2` or `--include-directories /path/to/project1 --include-directories /path/to/project2`
+- **`--screen-reader`**:
+  - Enables screen reader mode for accessibility.
 - **`--version`**:
   - Displays the version of the CLI.
 - **`--openai-logging`**:
@@ -495,7 +535,7 @@ Arguments passed directly when running the CLI can override other configurations
 
 While not strictly configuration for the CLI's _behavior_, context files (defaulting to `QWEN.md` but configurable via the `contextFileName` setting) are crucial for configuring the _instructional context_ (also referred to as "memory"). This powerful feature allows you to give project-specific instructions, coding style guides, or any relevant background information to the AI, making its responses more tailored and accurate to your needs. The CLI includes UI elements, such as an indicator in the footer showing the number of loaded context files, to keep you informed about the active context.
 
-- **Purpose:** These Markdown files contain instructions, guidelines, or context that you want the Gemini model to be aware of during your interactions. The system is designed to manage this instructional context hierarchically.
+- **Purpose:** These Markdown files contain instructions, guidelines, or context that you want the Qwen model to be aware of during your interactions. The system is designed to manage this instructional context hierarchically.
 
 ### Example Context File Content (e.g., `QWEN.md`)
 
@@ -607,3 +647,11 @@ You can opt out of usage statistics collection at any time by setting the `usage
 ```
 
 Note: When usage statistics are enabled, events are sent to an Alibaba Cloud RUM collection endpoint.
+
+- **`enableWelcomeBack`** (boolean):
+  - **Description:** Show welcome back dialog when returning to a project with conversation history.
+  - **Default:** `true`
+  - **Category:** UI
+  - **Requires Restart:** No
+  - **Example:** `"enableWelcomeBack": false`
+  - **Details:** When enabled, Qwen Code will automatically detect if you're returning to a project with a previously generated project summary (`.qwen/PROJECT_SUMMARY.md`) and show a dialog allowing you to continue your previous conversation or start fresh. This feature integrates with the `/chat summary` command and quit confirmation dialog. See the [Welcome Back documentation](./welcome-back.md) for more details.

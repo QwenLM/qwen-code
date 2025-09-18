@@ -4,22 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Content, GenerateContentConfig } from '@google/genai';
-import { GeminiClient } from '../core/client.js';
-import { EditToolParams, EditTool } from '../tools/edit.js';
+import type { Content, GenerateContentConfig } from '@google/genai';
+import type { GeminiClient } from '../core/client.js';
+import type { EditToolParams } from '../tools/edit.js';
+import { EditTool } from '../tools/edit.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
 import { GrepTool } from '../tools/grep.js';
 import { LruCache } from './LruCache.js';
-import { DEFAULT_GEMINI_FLASH_LITE_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import {
   isFunctionResponse,
   isFunctionCall,
 } from '../utils/messageInspectors.js';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 
-const EditModel = DEFAULT_GEMINI_FLASH_LITE_MODEL;
+const EditModel = DEFAULT_QWEN_FLASH_MODEL;
 const EditConfig: GenerateContentConfig = {
   thinkingConfig: {
     thinkingBudget: 0,

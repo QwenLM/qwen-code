@@ -4,37 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ReadableStream, WritableStream } from 'node:stream/web';
+import type { ReadableStream, WritableStream } from 'node:stream/web';
 
+import type { Content, FunctionCall, Part } from '@google/genai';
+import type {
+  Config,
+  GeminiChat,
+  ToolCallConfirmationDetails,
+  ToolResult,
+} from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   clearCachedCredentialFile,
-  Config,
-  GeminiChat,
-  logToolCall,
-  ToolResult,
   convertToFunctionResponse,
+  DiscoveredMCPTool,
   getErrorMessage,
   getErrorStatus,
   isNodeError,
   isWithinRoot,
+  logToolCall,
   MCPServerConfig,
-  ToolCallConfirmationDetails,
+  StreamEventType,
   ToolConfirmationOutcome,
-  DiscoveredMCPTool,
 } from '@qwen-code/qwen-code-core';
-import { AcpFileSystemService } from './fileSystemService.js';
-import { Content, Part, FunctionCall, PartListUnion } from '@google/genai';
-import * as fs from 'fs/promises';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import * as path from 'path';
 import { z } from 'zod';
-import { LoadedSettings, SettingScope } from '../config/settings.js';
+import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope } from '../config/settings.js';
 import * as acp from './acp.js';
+import { AcpFileSystemService } from './fileSystemService.js';
 
-import { randomUUID } from 'crypto';
-import { CliArgs, loadCliConfig } from '../config/config.js';
-import { Extension } from '../config/extension.js';
+import { randomUUID } from 'node:crypto';
+import type { CliArgs } from '../config/config.js';
+import { loadCliConfig } from '../config/config.js';
+import type { Extension } from '../config/extension.js';
 
 export async function runZedIntegration(
   config: Config,
@@ -113,7 +118,11 @@ class GeminiAgent {
 
     await clearCachedCredentialFile();
     await this.config.refreshAuth(method);
-    this.settings.setValue(SettingScope.User, 'selectedAuthType', method);
+    this.settings.setValue(
+      SettingScope.User,
+      'security.auth.selectedType',
+      method,
+    );
   }
 
   async newSession({
@@ -124,9 +133,11 @@ class GeminiAgent {
     const config = await this.newSessionConfig(sessionId, cwd, mcpServers);
 
     let isAuthenticated = false;
-    if (this.settings.merged.selectedAuthType) {
+    if (this.settings.merged.security?.auth?.selectedType) {
       try {
-        await config.refreshAuth(this.settings.merged.selectedAuthType);
+        await config.refreshAuth(
+          this.settings.merged.security.auth.selectedType,
+        );
         isAuthenticated = true;
       } catch (e) {
         console.error(`Authentication failed: ${e}`);
@@ -259,8 +270,12 @@ class Session {
             return { stopReason: 'cancelled' };
           }
 
-          if (resp.candidates && resp.candidates.length > 0) {
-            const candidate = resp.candidates[0];
+          if (
+            resp.type === StreamEventType.CHUNK &&
+            resp.value.candidates &&
+            resp.value.candidates.length > 0
+          ) {
+            const candidate = resp.value.candidates[0];
             for (const part of candidate.content?.parts ?? []) {
               if (!part.text) {
                 continue;
@@ -280,8 +295,8 @@ class Session {
             }
           }
 
-          if (resp.functionCalls) {
-            functionCalls.push(...resp.functionCalls);
+          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
+            functionCalls.push(...resp.value.functionCalls);
           }
         }
       } catch (error) {
@@ -300,16 +315,7 @@ class Session {
 
         for (const fc of functionCalls) {
           const response = await this.runTool(pendingSend.signal, promptId, fc);
-
-          const parts = Array.isArray(response) ? response : [response];
-
-          for (const part of parts) {
-            if (typeof part === 'string') {
-              toolResponseParts.push({ text: part });
-            } else if (part) {
-              toolResponseParts.push(part);
-            }
-          }
+          toolResponseParts.push(...response);
         }
 
         nextMessage = { role: 'user', parts: toolResponseParts };
@@ -332,7 +338,7 @@ class Session {
     abortSignal: AbortSignal,
     promptId: string,
     fc: FunctionCall,
-  ): Promise<PartListUnion> {
+  ): Promise<Part[]> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     const args = (fc.args ?? {}) as Record<string, unknown>;
 

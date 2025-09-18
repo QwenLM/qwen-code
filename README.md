@@ -17,15 +17,11 @@
 
 <div align="center">
   
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://readme-i18n.com/de/QwenLM/qwen-code">Deutsch</a> | 
-  <a href="https://readme-i18n.com/es/QwenLM/qwen-code">Español</a> | 
-  <a href="https://readme-i18n.com/fr/QwenLM/qwen-code">français</a> | 
-  <a href="https://readme-i18n.com/ja/QwenLM/qwen-code">日本語</a> | 
-  <a href="https://readme-i18n.com/ko/QwenLM/qwen-code">한국어</a> | 
-  <a href="https://readme-i18n.com/pt/QwenLM/qwen-code">Português</a> | 
-  <a href="https://readme-i18n.com/ru/QwenLM/qwen-code">Русский</a> | 
-  <a href="https://readme-i18n.com/zh/QwenLM/qwen-code">中文</a>
+  <a href="https://qwenlm.github.io/qwen-code-docs/de/">Deutsch</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/fr">français</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/ja/">日本語</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/ru">Русский</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/zh/">中文</a>
   
 </div>
 

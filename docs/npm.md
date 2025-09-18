@@ -148,7 +148,7 @@ This command will do the following:
 3.  Create the package tarballs that would be published to npm.
 4.  Print a summary of the packages that would be published.
 
-You can then inspect the generated tarballs to ensure that they contain the correct files and that the `package.json` files have been updated correctly. The tarballs will be created in the root of each package's directory (e.g., `packages/cli/google-gemini-cli-0.1.6.tgz`).
+You can then inspect the generated tarballs to ensure that they contain the correct files and that the `package.json` files have been updated correctly. The tarballs will be created in the root of each package's directory (e.g., `packages/cli/qwen-code-0.1.6.tgz`).
 
 By performing a dry run, you can be confident that your changes to the packaging process are correct and that the packages will be published successfully.
 
@@ -187,7 +187,7 @@ This is the most critical stage where files are moved and transformed into their
     - File movement: packages/cli/package.json -> (in-memory transformation) -> `bundle`/package.json
     - Why: The final package.json must be different from the one used in development. Key changes include:
       - Removing devDependencies.
-      - Removing workspace-specific "dependencies": { "@gemini-cli/core": "workspace:\*" } and ensuring the core code is
+      - Removing workspace-specific "dependencies": { "@qwen-code/core": "workspace:\*" } and ensuring the core code is
         bundled directly into the final JavaScript file.
       - Ensuring the bin, main, and files fields point to the correct locations within the final package structure.
 
@@ -277,4 +277,4 @@ This tells NPM that any folder inside the `packages` directory is a separate pac
 
 - **Simplified Dependency Management**: Running `npm install` from the root of the project will install all dependencies for all packages in the workspace and link them together. This means you don't need to run `npm install` in each package's directory.
 - **Automatic Linking**: Packages within the workspace can depend on each other. When you run `npm install`, NPM will automatically create symlinks between the packages. This means that when you make changes to one package, the changes are immediately available to other packages that depend on it.
-- **Simplified Script Execution**: You can run scripts in any package from the root of the project using the `--workspace` flag. For example, to run the `build` script in the `cli` package, you can run `npm run build --workspace @google/gemini-cli`.
+- **Simplified Script Execution**: You can run scripts in any package from the root of the project using the `--workspace` flag. For example, to run the `build` script in the `cli` package, you can run `npm run build --workspace @qwen-code/qwen-code`.

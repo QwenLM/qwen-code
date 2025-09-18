@@ -9,16 +9,6 @@ This guide provides solutions to common issues and debugging tips, including top
 
 ## Authentication or login errors
 
-- **Error: `Failed to login. Message: Request contains an invalid argument`**
-  - Users with Google Workspace accounts or Google Cloud accounts
-    associated with their Gmail accounts may not be able to activate the free
-    tier of the Google Code Assist plan.
-  - For Google Cloud accounts, you can work around this by setting
-    `GOOGLE_CLOUD_PROJECT` to your project ID.
-  - Alternatively, you can obtain the Gemini API key from
-    [Google AI Studio](http://aistudio.google.com/app/apikey), which also includes a
-    separate free tier.
-
 - **Error: `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` or `unable to get local issuer certificate`**
   - **Cause:** You may be on a corporate network with a firewall that intercepts and inspects SSL/TLS traffic. This often requires a custom root CA certificate to be trusted by Node.js.
   - **Solution:** Set the `NODE_EXTRA_CA_CERTS` environment variable to the absolute path of your corporate root CA certificate file.
@@ -37,7 +27,7 @@ This guide provides solutions to common issues and debugging tips, including top
     Refer to [Qwen Code Configuration](./cli/configuration.md) for more details.
 
 - **Q: Why don't I see cached token counts in my stats output?**
-  - A: Cached token information is only displayed when cached tokens are being used. This feature is available for API key users (Gemini API key or Google Cloud Vertex AI) but not for OAuth users (such as Google Personal/Enterprise accounts like Google Gmail or Google Workspace, respectively). This is because the Gemini Code Assist API does not support cached content creation. You can still view your total token usage using the `/stats` command.
+  - A: Cached token information is only displayed when cached tokens are being used. This feature is available for API key users (Qwen API key or Google Cloud Vertex AI) but not for OAuth users (such as Google Personal/Enterprise accounts like Google Gmail or Google Workspace, respectively). This is because the Qwen Code Assist API does not support cached content creation. You can still view your total token usage using the `/stats` command.
 
 ## Common error messages and solutions
 
@@ -82,6 +72,18 @@ This guide provides solutions to common issues and debugging tips, including top
   - `QWEN_CODE_IDE_SERVER_PORT`
 - If running in a container, verify `host.docker.internal` resolves. Otherwise, map the host appropriately.
 - Reinstall the companion with `/ide install` and use “Qwen Code: Run” in the Command Palette to verify it launches.
+
+## Exit Codes
+
+The Qwen Code uses specific exit codes to indicate the reason for termination. This is especially useful for scripting and automation.
+
+| Exit Code | Error Type                 | Description                                                                                         |
+| --------- | -------------------------- | --------------------------------------------------------------------------------------------------- |
+| 41        | `FatalAuthenticationError` | An error occurred during the authentication process.                                                |
+| 42        | `FatalInputError`          | Invalid or missing input was provided to the CLI. (non-interactive mode only)                       |
+| 44        | `FatalSandboxError`        | An error occurred with the sandboxing environment (e.g., Docker, Podman, or Seatbelt).              |
+| 52        | `FatalConfigError`         | A configuration file (`settings.json`) is invalid or contains errors.                               |
+| 53        | `FatalTurnLimitedError`    | The maximum number of conversational turns for the session was reached. (non-interactive mode only) |
 
 ## Debugging Tips
 

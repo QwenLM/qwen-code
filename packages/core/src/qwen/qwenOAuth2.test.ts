@@ -831,6 +831,32 @@ describe('getQwenOAuthClient', () => {
   });
 });
 
+describe('CredentialsClearRequiredError', () => {
+  it('should create error with correct name and message', async () => {
+    const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+    const message = 'Test error message';
+    const originalError = { status: 400, response: 'Bad Request' };
+    const error = new CredentialsClearRequiredError(message, originalError);
+
+    expect(error.name).toBe('CredentialsClearRequiredError');
+    expect(error.message).toBe(message);
+    expect(error.originalError).toBe(originalError);
+    expect(error instanceof Error).toBe(true);
+  });
+
+  it('should work without originalError', async () => {
+    const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+    const message = 'Test error message';
+    const error = new CredentialsClearRequiredError(message);
+
+    expect(error.name).toBe('CredentialsClearRequiredError');
+    expect(error.message).toBe(message);
+    expect(error.originalError).toBeUndefined();
+  });
+});
+
 describe('clearQwenCredentials', () => {
   it('should successfully clear credentials file', async () => {
     const { promises: fs } = await import('node:fs');
@@ -900,21 +926,6 @@ describe('QwenOAuth2Client - Additional Error Scenarios', () => {
       ).rejects.toThrow(
         'Device authorization failed: 500 Internal Server Error. Response: Server error occurred',
       );
-    });
-  });
-
-  describe('isTokenValid edge cases', () => {
-    it('should return false when expiry_date is undefined', () => {
-      client.setCredentials({
-        access_token: 'token',
-        // expiry_date is undefined
-      });
-
-      // Access private method for testing
-      const isValid = (
-        client as unknown as { isTokenValid(): boolean }
-      ).isTokenValid();
-      expect(isValid).toBe(false);
     });
   });
 });
@@ -1747,8 +1758,8 @@ describe('Enhanced Error Handling and Edge Cases', () => {
   });
 
   describe('QwenOAuth2Client getAccessToken enhanced scenarios', () => {
-    it('should handle SharedTokenManager failure and fall back to cached token', async () => {
-      // Set up client with valid credentials
+    it('should return undefined when SharedTokenManager fails (no fallback)', async () => {
+      // Set up client with valid credentials (but we don't use fallback anymore)
       client.setCredentials({
         access_token: 'fallback-token',
         expiry_date: Date.now() + 3600000, // Valid for 1 hour
@@ -1772,7 +1783,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
 
       const result = await client.getAccessToken();
 
-      expect(result.token).toBe('fallback-token');
+      // With our race condition fix, we no longer fall back to local credentials
+      // to ensure single source of truth
+      expect(result.token).toBeUndefined();
       expect(consoleSpy).toHaveBeenCalledWith(
         'Failed to get access token from shared manager:',
         expect.any(Error),
@@ -2025,6 +2038,43 @@ describe('Enhanced Error Handling and Edge Cases', () => {
       expect(fs.unlink).toHaveBeenCalled();
     });
 
+    it('should throw CredentialsClearRequiredError on 400 error', async () => {
+      const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+      client.setCredentials({
+        refresh_token: 'expired-refresh',
+      });
+
+      const { promises: fs } = await import('node:fs');
+      vi.mocked(fs.unlink).mockResolvedValue(undefined);
+
+      const mockResponse = {
+        ok: false,
+        status: 400,
+        text: async () => 'Bad Request',
+      };
+
+      vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
+
+      await expect(client.refreshAccessToken()).rejects.toThrow(
+        CredentialsClearRequiredError,
+      );
+
+      try {
+        await client.refreshAccessToken();
+      } catch (error) {
+        expect(error).toBeInstanceOf(CredentialsClearRequiredError);
+        if (error instanceof CredentialsClearRequiredError) {
+          expect(error.originalError).toEqual({
+            status: 400,
+            response: 'Bad Request',
+          });
+        }
+      }
+
+      expect(fs.unlink).toHaveBeenCalled();
+    });
+
     it('should preserve existing refresh token when new one not provided', async () => {
       const originalRefreshToken = 'original-refresh-token';
       client.setCredentials({
@@ -2070,36 +2120,6 @@ describe('Enhanced Error Handling and Edge Cases', () => {
 
       const credentials = client.getCredentials();
       expect(credentials.resource_url).toBe('https://new-resource-url.com');
-    });
-  });
-
-  describe('isTokenValid edge cases', () => {
-    it('should return false for tokens expiring within buffer time', () => {
-      const nearExpiryTime = Date.now() + 15000; // 15 seconds from now (within 30s buffer)
-
-      client.setCredentials({
-        access_token: 'test-token',
-        expiry_date: nearExpiryTime,
-      });
-
-      const isValid = (
-        client as unknown as { isTokenValid(): boolean }
-      ).isTokenValid();
-      expect(isValid).toBe(false);
-    });
-
-    it('should return true for tokens expiring well beyond buffer time', () => {
-      const futureExpiryTime = Date.now() + 120000; // 2 minutes from now (beyond 30s buffer)
-
-      client.setCredentials({
-        access_token: 'test-token',
-        expiry_date: futureExpiryTime,
-      });
-
-      const isValid = (
-        client as unknown as { isTokenValid(): boolean }
-      ).isTokenValid();
-      expect(isValid).toBe(true);
     });
   });
 });

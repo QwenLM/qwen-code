@@ -197,7 +197,7 @@ jobs:
       #   and when a command is used as a conditional.
       - name: 'Run shellcheck'
         run: |-
-          git ls-files | grep -E '^([^.]+|.*\.(sh|zsh|bash))$' | xargs file --mime-type \
+          git ls-files | grep -E '^([^.]+|.*\.(sh|zsh|bash))$' | grep -v '^integration-tests/terminal-bench/ci-tasks/' | xargs file --mime-type \
             | grep "text/x-shellscript" | awk '{ print substr($1, 1, length($1)-1) }' \
             | xargs shellcheck \
               --check-sourced \
@@ -230,7 +230,7 @@ jobs:
 
       - name: 'Run yamllint'
         run: |-
-          git ls-files | grep -E '\.(yaml|yml)' | xargs yamllint --format github
+          git ls-files | grep -E '\.(yaml|yml)' | grep -v '^integration-tests/terminal-bench/ci-tasks/' | xargs yamllint --format github
 
   #
   # Lint: All

@@ -35,7 +35,7 @@ save_memory(fact="My preferred programming language is Python.")
 Store a project-specific detail:
 
 ```
-save_memory(fact="The project I'm currently working on is called 'gemini-cli'.")
+save_memory(fact="The project I'm currently working on is called 'qwen-code'.")
 ```
 
 ## Important notes

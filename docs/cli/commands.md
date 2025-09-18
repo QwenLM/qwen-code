@@ -18,8 +18,8 @@ Slash commands provide meta-level control over the CLI itself.
       - **Description:** Saves the current conversation history. You must add a `<tag>` for identifying the conversation state.
       - **Usage:** `/chat save <tag>`
       - **Details on Checkpoint Location:** The default locations for saved chat checkpoints are:
-        - Linux/macOS: `~/.config/google-generative-ai/checkpoints/`
-        - Windows: `C:\Users\<YourUsername>\AppData\Roaming\google-generative-ai\checkpoints\`
+        - Linux/macOS: `~/.qwen/tmp/<project_hash>/`
+        - Windows: `C:\Users\<YourUsername>\.qwen\tmp\<project_hash>\`
         - When you run `/chat list`, the CLI only scans these specific directories to find available checkpoints.
         - **Note:** These checkpoints are for manually saving and resuming conversation states. For automatic checkpoints created before file modifications, see the [Checkpointing documentation](../checkpointing.md).
     - **`resume`**
@@ -34,6 +34,17 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/clear`**
   - **Description:** Clear the terminal screen, including the visible session history and scrollback within the CLI. The underlying session data (for history recall) might be preserved depending on the exact implementation, but the visual display is cleared.
   - **Keyboard shortcut:** Press **Ctrl+L** at any time to perform a clear action.
+
+- **`/summary`**
+  - **Description:** Generate a comprehensive project summary from the current conversation history and save it to `.qwen/PROJECT_SUMMARY.md`. This summary includes the overall goal, key knowledge, recent actions, and current plan, making it perfect for resuming work in future sessions.
+  - **Usage:** `/summary`
+  - **Features:**
+    - Analyzes the entire conversation history to extract important context
+    - Creates a structured markdown summary with sections for goals, knowledge, actions, and plans
+    - Automatically saves to `.qwen/PROJECT_SUMMARY.md` in your project root
+    - Shows progress indicators during generation and saving
+    - Integrates with the Welcome Back feature for seamless session resumption
+  - **Note:** This command requires an active conversation with at least 2 messages to generate a meaningful summary.
 
 - **`/compress`**
   - **Description:** Replace the entire chat context with a summary. This saves on tokens used for future tasks while retaining a high level summary of what has happened.
@@ -116,8 +127,23 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/about`**
   - **Description:** Show version info. Please share this information when filing issues.
 
+- **`/agents`**
+  - **Description:** Manage specialized AI subagents for focused tasks. Subagents are independent AI assistants configured with specific expertise and tool access.
+  - **Sub-commands:**
+    - **`create`**:
+      - **Description:** Launch an interactive wizard to create a new subagent. The wizard guides you through location selection, AI-powered prompt generation, tool selection, and visual customization.
+      - **Usage:** `/agents create`
+    - **`manage`**:
+      - **Description:** Open an interactive management dialog to view, edit, and delete existing subagents. Shows both project-level and user-level agents.
+      - **Usage:** `/agents manage`
+  - **Storage Locations:**
+    - **Project-level:** `.qwen/agents/` (shared with team, takes precedence)
+    - **User-level:** `~/.qwen/agents/` (personal agents, available across projects)
+  - **Note:** For detailed information on creating and managing subagents, see the [Subagents documentation](../subagents.md).
+
 - [**`/tools`**](../tools/index.md)
   - **Description:** Display a list of tools that are currently available within Qwen Code.
+  - **Usage:** `/tools [desc]`
   - **Sub-commands:**
     - **`desc`** or **`descriptions`**:
       - **Description:** Show detailed descriptions of each tool, including each tool's name with its full description as provided to the model.
@@ -127,8 +153,18 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/privacy`**
   - **Description:** Display the Privacy Notice and allow users to select whether they consent to the collection of their data for service improvement purposes.
 
+- **`/quit-confirm`**
+  - **Description:** Show a confirmation dialog before exiting Qwen Code, allowing you to choose how to handle your current session.
+  - **Usage:** `/quit-confirm`
+  - **Features:**
+    - **Quit immediately:** Exit without saving anything (equivalent to `/quit`)
+    - **Generate summary and quit:** Create a project summary using `/summary` before exiting
+    - **Save conversation and quit:** Save the current conversation with an auto-generated tag before exiting
+  - **Keyboard shortcut:** Press **Ctrl+C** twice to trigger the quit confirmation dialog
+  - **Note:** This command is automatically triggered when you press Ctrl+C once, providing a safety mechanism to prevent accidental exits.
+
 - **`/quit`** (or **`/exit`**)
-  - **Description:** Exit Qwen Code.
+  - **Description:** Exit Qwen Code immediately without any confirmation dialog.
 
 - **`/vim`**
   - **Description:** Toggle vim mode on or off. When vim mode is enabled, the input area supports vim-style navigation and editing commands in both NORMAL and INSERT modes.
@@ -278,7 +314,7 @@ When a custom command attempts to execute a shell command, Qwen Code will now pr
 
 1.  **Inject Commands:** Use the `!{...}` syntax.
 2.  **Argument Substitution:** If `{{args}}` is present inside the block, it is automatically shell-escaped (see [Context-Aware Injection](#1-context-aware-injection-with-args) above).
-3.  **Robust Parsing:** The parser correctly handles complex shell commands that include nested braces, such as JSON payloads.
+3.  **Robust Parsing:** The parser correctly handles complex shell commands that include nested braces, such as JSON payloads. **Note:** The content inside `!{...}` must have balanced braces (`{` and `}`). If you need to execute a command containing unbalanced braces, consider wrapping it in an external script file and calling the script within the `!{...}` block.
 4.  **Security Check and Confirmation:** The CLI performs a security check on the final, resolved command (after arguments are escaped and substituted). A dialog will appear showing the exact command(s) to be executed.
 5.  **Execution and Error Reporting:** The command is executed. If the command fails, the output injected into the prompt will include the error messages (stderr) followed by a status line, e.g., `[Shell command exited with code 1]`. This helps the model understand the context of the failure.
 
@@ -305,6 +341,41 @@ Please generate a Conventional Commit message based on the following git diff:
 ````
 
 When you run `/git:commit`, the CLI first executes `git diff --staged`, then replaces `!{git diff --staged}` with the output of that command before sending the final, complete prompt to the model.
+
+##### 4. Injecting File Content with `@{...}`
+
+You can directly embed the content of a file or a directory listing into your prompt using the `@{...}` syntax. This is useful for creating commands that operate on specific files.
+
+**How It Works:**
+
+- **File Injection**: `@{path/to/file.txt}` is replaced by the content of `file.txt`.
+- **Multimodal Support**: If the path points to a supported image (e.g., PNG, JPEG), PDF, audio, or video file, it will be correctly encoded and injected as multimodal input. Other binary files are handled gracefully and skipped.
+- **Directory Listing**: `@{path/to/dir}` is traversed and each file present within the directory and all subdirectories are inserted into the prompt. This respects `.gitignore` and `.qwenignore` if enabled.
+- **Workspace-Aware**: The command searches for the path in the current directory and any other workspace directories. Absolute paths are allowed if they are within the workspace.
+- **Processing Order**: File content injection with `@{...}` is processed _before_ shell commands (`!{...}`) and argument substitution (`{{args}}`).
+- **Parsing**: The parser requires the content inside `@{...}` (the path) to have balanced braces (`{` and `}`).
+
+**Example (`review.toml`):**
+
+This command injects the content of a _fixed_ best practices file (`docs/best-practices.md`) and uses the user's arguments to provide context for the review.
+
+```toml
+# In: <project>/.qwen/commands/review.toml
+# Invoked via: /review FileCommandLoader.ts
+
+description = "Reviews the provided context using a best practice guide."
+prompt = """
+You are an expert code reviewer.
+
+Your task is to review {{args}}.
+
+Use the following best practices when providing your review:
+
+@{docs/best-practices.md}
+"""
+```
+
+When you run `/review FileCommandLoader.ts`, the `@{docs/best-practices.md}` placeholder is replaced by the content of that file, and `{{args}}` is replaced by the text you provided, before the final prompt is sent to the model.
 
 ---
 

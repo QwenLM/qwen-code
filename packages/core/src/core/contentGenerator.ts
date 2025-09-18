@@ -4,22 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  CountTokensResponse,
-  GenerateContentResponse,
-  GenerateContentParameters,
+import type {
   CountTokensParameters,
-  EmbedContentResponse,
+  CountTokensResponse,
   EmbedContentParameters,
-  GoogleGenAI,
+  EmbedContentResponse,
+  GenerateContentParameters,
+  GenerateContentResponse,
 } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
+import type { Config } from '../config/config.js';
 import { DEFAULT_GEMINI_MODEL, DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { Config } from '../config/config.js';
 
-import { UserTierId } from '../code_assist/types.js';
+import type { UserTierId } from '../code_assist/types.js';
+import { InstallationManager } from '../utils/installationManager.js';
 import { LoggingContentGenerator } from './loggingContentGenerator.js';
-import { getInstallationId } from '../utils/user_id.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -186,7 +186,8 @@ export async function createContentGenerator(
   ) {
     let headers: Record<string, string> = { ...baseHeaders };
     if (gcConfig?.getUsageStatisticsEnabled()) {
-      const installationId = getInstallationId();
+      const installationManager = new InstallationManager();
+      const installationId = installationManager.getInstallationId();
       headers = {
         ...headers,
         'x-gemini-api-privileged-user-id': `${installationId}`,
@@ -208,19 +209,15 @@ export async function createContentGenerator(
     }
 
     // Import OpenAIContentGenerator dynamically to avoid circular dependencies
-    const { OpenAIContentGenerator } = await import(
-      './openaiContentGenerator.js'
+    const { createOpenAIContentGenerator } = await import(
+      './openaiContentGenerator/index.js'
     );
 
     // Always use OpenAIContentGenerator, logging is controlled by enableOpenAILogging flag
-    return new OpenAIContentGenerator(config, gcConfig);
+    return createOpenAIContentGenerator(config, gcConfig);
   }
 
   if (config.authType === AuthType.QWEN_OAUTH) {
-    if (config.apiKey !== 'QWEN_OAUTH_DYNAMIC_TOKEN') {
-      throw new Error('Invalid Qwen OAuth configuration');
-    }
-
     // Import required classes dynamically
     const { getQwenOAuthClient: getQwenOauthClient } = await import(
       '../qwen/qwenOAuth2.js'

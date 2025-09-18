@@ -47,3 +47,5 @@ packages/vscode-ide-companion/*.vsix
 logs/
 # GHA credentials
 gha-creds-*.json
+
+QWEN.md

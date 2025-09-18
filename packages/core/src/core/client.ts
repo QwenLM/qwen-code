@@ -4,47 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  EmbedContentParameters,
-  GenerateContentConfig,
-  PartListUnion,
+import type {
   Content,
-  Tool,
-  GenerateContentResponse,
+  EmbedContentParameters,
   FunctionDeclaration,
+  GenerateContentConfig,
+  GenerateContentResponse,
+  PartListUnion,
   Schema,
+  Tool,
 } from '@google/genai';
-import {
-  getDirectoryContextString,
-  getEnvironmentContext,
-} from '../utils/environmentContext.js';
-import {
-  Turn,
-  ServerGeminiStreamEvent,
-  GeminiEventType,
-  ChatCompressionInfo,
-} from './turn.js';
-import { Config } from '../config/config.js';
-import { UserTierId } from '../code_assist/types.js';
-import { getCoreSystemPrompt, getCompressionPrompt } from './prompts.js';
-import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import { reportError } from '../utils/errorReporting.js';
-import { GeminiChat } from './geminiChat.js';
-import { retryWithBackoff } from '../utils/retry.js';
-import { getErrorMessage } from '../utils/errors.js';
-import { isFunctionResponse } from '../utils/messageInspectors.js';
-import { tokenLimit } from './tokenLimits.js';
-import {
-  AuthType,
-  ContentGenerator,
-  ContentGeneratorConfig,
-  createContentGenerator,
-} from './contentGenerator.js';
-import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import type { UserTierId } from '../code_assist/types.js';
+import type { Config } from '../config/config.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
-import { LoopDetectionService } from '../services/loopDetectionService.js';
+import type { File, IdeContext } from '../ide/ideContext.js';
 import { ideContext } from '../ide/ideContext.js';
+import { LoopDetectionService } from '../services/loopDetectionService.js';
 import {
   logChatCompression,
   logNextSpeakerCheck,
@@ -53,7 +29,31 @@ import {
   makeChatCompressionEvent,
   NextSpeakerCheckEvent,
 } from '../telemetry/types.js';
-import { IdeContext, File } from '../ide/ideContext.js';
+import { TaskTool } from '../tools/task.js';
+import {
+  getDirectoryContextString,
+  getEnvironmentContext,
+} from '../utils/environmentContext.js';
+import { reportError } from '../utils/errorReporting.js';
+import { getErrorMessage } from '../utils/errors.js';
+import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
+import { isFunctionResponse } from '../utils/messageInspectors.js';
+import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
+import { retryWithBackoff } from '../utils/retry.js';
+import type {
+  ContentGenerator,
+  ContentGeneratorConfig,
+} from './contentGenerator.js';
+import { AuthType, createContentGenerator } from './contentGenerator.js';
+import { GeminiChat } from './geminiChat.js';
+import {
+  getCompressionPrompt,
+  getCoreSystemPrompt,
+  getCustomSystemPrompt,
+} from './prompts.js';
+import { tokenLimit } from './tokenLimits.js';
+import type { ChatCompressionInfo, ServerGeminiStreamEvent } from './turn.js';
+import { CompressionStatus, GeminiEventType, Turn } from './turn.js';
 
 function isThinkingSupported(model: string) {
   if (model.startsWith('gemini-2.5')) return true;
@@ -110,8 +110,8 @@ const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
 export class GeminiClient {
   private chat?: GeminiChat;
   private contentGenerator?: ContentGenerator;
-  private embeddingModel: string;
-  private generateContentConfig: GenerateContentConfig = {
+  private readonly embeddingModel: string;
+  private readonly generateContentConfig: GenerateContentConfig = {
     temperature: 0,
     topP: 1,
   };
@@ -122,7 +122,13 @@ export class GeminiClient {
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
 
-  constructor(private config: Config) {
+  /**
+   * At any point in this conversation, was compression triggered without
+   * being forced and did it fail?
+   */
+  private hasFailedCompressionAttempt = false;
+
+  constructor(private readonly config: Config) {
     if (config.getProxy()) {
       setGlobalDispatcher(new ProxyAgent(config.getProxy() as string));
     }
@@ -224,6 +230,7 @@ export class GeminiClient {
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
+    this.hasFailedCompressionAttempt = false;
     const envParts = await getEnvironmentContext(this.config);
     const toolRegistry = this.config.getToolRegistry();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
@@ -248,6 +255,7 @@ export class GeminiClient {
         ? {
             ...this.generateContentConfig,
             thinkingConfig: {
+              thinkingBudget: -1,
               includeThoughts: true,
             },
           }
@@ -448,7 +456,8 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
     originalModel?: string,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
-    if (this.lastPromptId !== prompt_id) {
+    const isNewPrompt = this.lastPromptId !== prompt_id;
+    if (isNewPrompt) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
@@ -471,7 +480,7 @@ export class GeminiClient {
 
     const compressed = await this.tryCompressChat(prompt_id);
 
-    if (compressed) {
+    if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
       yield { type: GeminiEventType.ChatCompressed, value: compressed };
     }
 
@@ -545,19 +554,41 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
+    if (isNewPrompt) {
+      const taskTool = this.config.getToolRegistry().getTool(TaskTool.Name);
+      const subagents = (
+        await this.config.getSubagentManager().listSubagents()
+      ).filter((subagent) => subagent.level !== 'builtin');
+
+      if (taskTool && subagents.length > 0) {
+        this.getChat().addHistory({
+          role: 'user',
+          parts: [
+            {
+              text: `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${subagents.map((subagent) => subagent.name).join(', ')}. PROACTIVELY use the ${TaskTool.Name} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`,
+            },
+          ],
+        });
+      }
+    }
+
     const turn = new Turn(this.getChat(), prompt_id);
 
-    const loopDetected = await this.loopDetector.turnStarted(signal);
-    if (loopDetected) {
-      yield { type: GeminiEventType.LoopDetected };
-      return turn;
+    if (!this.config.getSkipLoopDetection()) {
+      const loopDetected = await this.loopDetector.turnStarted(signal);
+      if (loopDetected) {
+        yield { type: GeminiEventType.LoopDetected };
+        return turn;
+      }
     }
 
     const resultStream = turn.run(request, signal);
     for await (const event of resultStream) {
-      if (this.loopDetector.addAndCheck(event)) {
-        yield { type: GeminiEventType.LoopDetected };
-        return turn;
+      if (!this.config.getSkipLoopDetection()) {
+        if (this.loopDetector.addAndCheck(event)) {
+          yield { type: GeminiEventType.LoopDetected };
+          return turn;
+        }
       }
       yield event;
       if (event.type === GeminiEventType.Error) {
@@ -618,11 +649,15 @@ export class GeminiClient {
       model || this.config.getModel() || DEFAULT_GEMINI_FLASH_MODEL;
     try {
       const userMemory = this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(userMemory);
+      const finalSystemInstruction = config.systemInstruction
+        ? getCustomSystemPrompt(config.systemInstruction, userMemory)
+        : getCoreSystemPrompt(userMemory);
+
       const requestConfig = {
         abortSignal,
         ...this.generateContentConfig,
         ...config,
+        systemInstruction: finalSystemInstruction,
       };
 
       // Convert schema to function declaration
@@ -644,7 +679,6 @@ export class GeminiClient {
             model: modelToUse,
             config: {
               ...requestConfig,
-              systemInstruction,
               tools,
             },
             contents,
@@ -706,12 +740,14 @@ export class GeminiClient {
 
     try {
       const userMemory = this.config.getUserMemory();
-      const systemInstruction = getCoreSystemPrompt(userMemory);
+      const finalSystemInstruction = generationConfig.systemInstruction
+        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        : getCoreSystemPrompt(userMemory);
 
       const requestConfig: GenerateContentConfig = {
         abortSignal,
         ...configToUse,
-        systemInstruction,
+        systemInstruction: finalSystemInstruction,
       };
 
       const apiCall = () =>
@@ -788,12 +824,19 @@ export class GeminiClient {
   async tryCompressChat(
     prompt_id: string,
     force: boolean = false,
-  ): Promise<ChatCompressionInfo | null> {
+  ): Promise<ChatCompressionInfo> {
     const curatedHistory = this.getChat().getHistory(true);
 
     // Regardless of `force`, don't do anything if the history is empty.
-    if (curatedHistory.length === 0) {
-      return null;
+    if (
+      curatedHistory.length === 0 ||
+      (this.hasFailedCompressionAttempt && !force)
+    ) {
+      return {
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      };
     }
 
     const model = this.config.getModel();
@@ -805,7 +848,13 @@ export class GeminiClient {
       });
     if (originalTokenCount === undefined) {
       console.warn(`Could not determine token count for model ${model}.`);
-      return null;
+      this.hasFailedCompressionAttempt = !force && true;
+      return {
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      };
     }
 
     const contextPercentageThreshold =
@@ -816,7 +865,11 @@ export class GeminiClient {
       const threshold =
         contextPercentageThreshold ?? COMPRESSION_TOKEN_THRESHOLD;
       if (originalTokenCount < threshold * tokenLimit(model)) {
-        return null;
+        return {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        };
       }
     }
 
@@ -845,11 +898,12 @@ export class GeminiClient {
         },
         config: {
           systemInstruction: { text: getCompressionPrompt() },
+          maxOutputTokens: originalTokenCount,
         },
       },
       prompt_id,
     );
-    this.chat = await this.startChat([
+    const chat = await this.startChat([
       {
         role: 'user',
         parts: [{ text: summary }],
@@ -866,11 +920,38 @@ export class GeminiClient {
       await this.getContentGenerator().countTokens({
         // model might change after calling `sendMessage`, so we get the newest value from config
         model: this.config.getModel(),
-        contents: this.getChat().getHistory(),
+        contents: chat.getHistory(),
       });
     if (newTokenCount === undefined) {
       console.warn('Could not determine compressed history token count.');
-      return null;
+      this.hasFailedCompressionAttempt = !force && true;
+      return {
+        originalTokenCount,
+        newTokenCount: originalTokenCount,
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      };
+    }
+
+    logChatCompression(
+      this.config,
+      makeChatCompressionEvent({
+        tokens_before: originalTokenCount,
+        tokens_after: newTokenCount,
+      }),
+    );
+
+    if (newTokenCount > originalTokenCount) {
+      this.getChat().setHistory(curatedHistory);
+      this.hasFailedCompressionAttempt = !force && true;
+      return {
+        originalTokenCount,
+        newTokenCount,
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      };
+    } else {
+      this.chat = chat; // Chat compression successful, set new state.
     }
 
     logChatCompression(
@@ -884,6 +965,7 @@ export class GeminiClient {
     return {
       originalTokenCount,
       newTokenCount,
+      compressionStatus: CompressionStatus.COMPRESSED,
     };
   }
 
