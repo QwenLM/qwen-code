@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { DiffRenderer } from './DiffRenderer.js';
 import { Colors } from '../../colors.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
+import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
@@ -233,6 +234,33 @@ export const ToolConfirmationMessage: React.FC<
             </Box>
           </MaxSizedBox>
         </Box>
+      </Box>
+    );
+  } else if (confirmationDetails.type === 'plan') {
+    const planProps = confirmationDetails;
+
+    question = planProps.title;
+    options.push({
+      label: 'Yes, and auto-accept edits',
+      value: ToolConfirmationOutcome.ProceedAlways,
+    });
+    options.push({
+      label: 'Yes, and manually approve edits',
+      value: ToolConfirmationOutcome.ProceedOnce,
+    });
+    options.push({
+      label: 'No, keep planning (esc)',
+      value: ToolConfirmationOutcome.Cancel,
+    });
+
+    bodyContent = (
+      <Box flexDirection="column" paddingX={1} marginLeft={1}>
+        <MarkdownDisplay
+          text={planProps.plan}
+          isPending={false}
+          availableTerminalHeight={availableBodyContentHeight()}
+          terminalWidth={childWidth}
+        />
       </Box>
     );
   } else if (confirmationDetails.type === 'info') {

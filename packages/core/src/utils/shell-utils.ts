@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import os from 'node:os';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
+import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -468,4 +469,20 @@ export function isCommandAllowed(
     return { allowed: true };
   }
   return { allowed: false, reason: blockReason };
+}
+
+export function isCommandNeedsPermission(command: string): {
+  requiresPermission: boolean;
+  reason?: string;
+} {
+  const isAllowed = isShellCommandReadOnly(command);
+
+  if (isAllowed) {
+    return { requiresPermission: false };
+  }
+
+  return {
+    requiresPermission: true,
+    reason: 'Command requires permission to execute.',
+  };
 }

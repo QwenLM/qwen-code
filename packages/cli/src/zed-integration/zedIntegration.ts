@@ -871,6 +871,16 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
         type: 'content',
         content: { type: 'text', text: todoText },
       };
+    } else if (
+      'type' in toolResult.returnDisplay &&
+      toolResult.returnDisplay.type === 'plan_summary'
+    ) {
+      const planDisplay = toolResult.returnDisplay;
+      const planText = `${planDisplay.message}\n\n${planDisplay.plan}`;
+      return {
+        type: 'content',
+        content: { type: 'text', text: planText },
+      };
     } else if ('fileDiff' in toolResult.returnDisplay) {
       // Handle FileDiff
       return {
@@ -938,6 +948,15 @@ function toPermissionOptions(
         {
           optionId: ToolConfirmationOutcome.ProceedAlways,
           name: `Always Allow`,
+          kind: 'allow_always',
+        },
+        ...basicPermissionOptions,
+      ];
+    case 'plan':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlways,
+          name: `Always Allow Plans`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,

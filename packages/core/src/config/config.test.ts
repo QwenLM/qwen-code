@@ -710,6 +710,18 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
   });
 
+  it('should NOT throw an error when setting PLAN mode in an untrusted folder', () => {
+    const config = new Config({
+      sessionId: 'test',
+      targetDir: '.',
+      debugMode: false,
+      model: 'test-model',
+      cwd: '.',
+      trustedFolder: false, // Untrusted
+    });
+    expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
+  });
+
   it('should NOT throw an error when setting any mode in a trusted folder', () => {
     const config = new Config({
       sessionId: 'test',
@@ -722,6 +734,7 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
+    expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
   it('should NOT throw an error when setting any mode if trustedFolder is undefined', () => {
@@ -736,5 +749,6 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
+    expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 });

@@ -882,6 +882,16 @@ export const SETTINGS_SCHEMA = {
     description: 'Disable all loop detection checks (streaming and LLM).',
     showInDialog: true,
   },
+  approvalMode: {
+    type: 'string',
+    label: 'Default Approval Mode',
+    category: 'General',
+    requiresRestart: false,
+    default: 'default',
+    description:
+      'Default approval mode for tool usage. Valid values: plan, default, auto_edit, yolo.',
+    showInDialog: true,
+  },
   enableWelcomeBack: {
     type: 'boolean',
     label: 'Enable Welcome Back',

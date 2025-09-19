@@ -293,6 +293,29 @@ describe('Configuration Integration Tests', () => {
       }
     });
 
+    it('should parse --approval-mode=plan correctly through the full argument parsing flow', async () => {
+      const originalArgv = process.argv;
+
+      try {
+        process.argv = [
+          'node',
+          'script.js',
+          '--approval-mode',
+          'plan',
+          '-p',
+          'test',
+        ];
+
+        const argv = await parseArguments({} as Settings);
+
+        expect(argv.approvalMode).toBe('plan');
+        expect(argv.prompt).toBe('test');
+        expect(argv.yolo).toBe(false);
+      } finally {
+        process.argv = originalArgv;
+      }
+    });
+
     it('should parse --approval-mode=yolo correctly through the full argument parsing flow', async () => {
       const originalArgv = process.argv;
 

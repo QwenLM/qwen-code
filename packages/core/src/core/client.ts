@@ -17,6 +17,7 @@ import type {
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type { UserTierId } from '../code_assist/types.js';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import type { File, IdeContext } from '../ide/ideContext.js';
 import { ideContext } from '../ide/ideContext.js';
@@ -40,6 +41,7 @@ import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { isFunctionResponse } from '../utils/messageInspectors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { retryWithBackoff } from '../utils/retry.js';
+import { flatMapTextParts } from '../utils/partUtils.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -50,6 +52,8 @@ import {
   getCompressionPrompt,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getPlanModeSystemReminder,
+  getSubagentSystemReminder,
 } from './prompts.js';
 import { tokenLimit } from './tokenLimits.js';
 import type { ChatCompressionInfo, ServerGeminiStreamEvent } from './turn.js';
@@ -598,24 +602,6 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
-    if (isNewPrompt) {
-      const taskTool = this.config.getToolRegistry().getTool(TaskTool.Name);
-      const subagents = (
-        await this.config.getSubagentManager().listSubagents()
-      ).filter((subagent) => subagent.level !== 'builtin');
-
-      if (taskTool && subagents.length > 0) {
-        this.getChat().addHistory({
-          role: 'user',
-          parts: [
-            {
-              text: `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${subagents.map((subagent) => subagent.name).join(', ')}. PROACTIVELY use the ${TaskTool.Name} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`,
-            },
-          ],
-        });
-      }
-    }
-
     const turn = new Turn(this.getChat(), prompt_id);
 
     if (!this.config.getSkipLoopDetection()) {
@@ -626,7 +612,30 @@ export class GeminiClient {
       }
     }
 
-    const resultStream = turn.run(request, signal);
+    // append system reminders to the request
+    let requestToSent = await flatMapTextParts(request, async (text) => [text]);
+    if (isNewPrompt) {
+      const systemReminders = [];
+
+      // add subagent system reminder if there are subagents
+      const hasTaskTool = this.config.getToolRegistry().getTool(TaskTool.Name);
+      const subagents = (await this.config.getSubagentManager().listSubagents())
+        .filter((subagent) => subagent.level !== 'builtin')
+        .map((subagent) => subagent.name);
+
+      if (hasTaskTool && subagents.length > 0) {
+        systemReminders.push(getSubagentSystemReminder(subagents));
+      }
+
+      // add plan mode system reminder if approval mode is plan
+      if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+        systemReminders.push(getPlanModeSystemReminder());
+      }
+
+      requestToSent = [...systemReminders, ...requestToSent];
+    }
+
+    const resultStream = turn.run(requestToSent, signal);
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {

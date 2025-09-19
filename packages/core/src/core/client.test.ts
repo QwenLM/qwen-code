@@ -23,6 +23,7 @@ import type {
 } from '@google/genai';
 import { GoogleGenAI } from '@google/genai';
 import { findIndexAfterFraction, GeminiClient } from './client.js';
+import { getPlanModeSystemReminder } from './prompts.js';
 import {
   AuthType,
   type ContentGenerator,
@@ -49,6 +50,10 @@ const mockChatCreateFn = vi.fn();
 const mockGenerateContentFn = vi.fn();
 const mockEmbedContentFn = vi.fn();
 const mockTurnRunFn = vi.fn();
+
+let ApprovalModeEnum: typeof import('../config/config.js').ApprovalMode;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let mockConfigObject: any;
 
 vi.mock('@google/genai');
 vi.mock('./turn', async (importOriginal) => {
@@ -178,6 +183,12 @@ describe('Gemini Client (client.ts)', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
 
+    ApprovalModeEnum = (
+      await vi.importActual<typeof import('../config/config.js')>(
+        '../config/config.js',
+      )
+    ).ApprovalMode;
+
     // Disable 429 simulation for tests
     setSimulate429(false);
 
@@ -229,7 +240,7 @@ describe('Gemini Client (client.ts)', () => {
     const mockSubagentManager = {
       listSubagents: vi.fn().mockResolvedValue([]),
     };
-    const mockConfigObject = {
+    mockConfigObject = {
       getContentGeneratorConfig: vi
         .fn()
         .mockReturnValue(contentGeneratorConfig),
@@ -252,6 +263,7 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getSystemPromptMappings: vi.fn().mockReturnValue(undefined),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalModeEnum.DEFAULT),
       getIdeModeFeature: vi.fn().mockReturnValue(false),
       getIdeMode: vi.fn().mockReturnValue(true),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -948,6 +960,42 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('sendMessageStream', () => {
+    it('injects a plan mode reminder before user queries when approval mode is PLAN', async () => {
+      const mockStream = (async function* () {})();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      mockConfigObject.getApprovalMode.mockReturnValue(ApprovalModeEnum.PLAN);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const mockGenerator: Partial<ContentGenerator> = {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 0 }),
+        generateContent: mockGenerateContentFn,
+      };
+      client['contentGenerator'] = mockGenerator as ContentGenerator;
+
+      const stream = client.sendMessageStream(
+        'Plan mode test',
+        new AbortController().signal,
+        'prompt-plan-1',
+      );
+
+      await fromAsync(stream);
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        [getPlanModeSystemReminder(), 'Plan mode test'],
+        expect.any(Object),
+      );
+
+      mockConfigObject.getApprovalMode.mockReturnValue(
+        ApprovalModeEnum.DEFAULT,
+      );
+    });
+
     it('emits a compression event when the context was automatically compressed', async () => {
       // Arrange
       const mockStream = (async function* () {
@@ -1176,10 +1224,7 @@ ${JSON.stringify(
 
       // Assert
       expect(ideContext.getIdeContext).toHaveBeenCalled();
-      expect(mockTurnRunFn).toHaveBeenCalledWith(
-        initialRequest,
-        expect.any(Object),
-      );
+      expect(mockTurnRunFn).toHaveBeenCalledWith(['Hi'], expect.any(Object));
     });
 
     it('should add context if ideMode is enabled and there is one active file', async () => {

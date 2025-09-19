@@ -20,4 +20,5 @@ export const ToolNames = {
   TODO_WRITE: 'todo_write',
   MEMORY: 'save_memory',
   TASK: 'task',
+  EXIT_PLAN_MODE: 'exit_plan_mode',
 } as const;

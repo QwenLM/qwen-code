@@ -1087,6 +1087,32 @@ describe('Approval mode tool exclusion logic', () => {
     expect(excludedTools).toContain(WriteFileTool.Name);
   });
 
+  it('should exclude all interactive tools in non-interactive mode with plan approval mode', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--approval-mode',
+      'plan',
+      '-p',
+      'test',
+    ];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {};
+    const extensions: Extension[] = [];
+
+    const config = await loadCliConfig(
+      settings,
+      extensions,
+      'test-session',
+      argv,
+    );
+
+    const excludedTools = config.getExcludeTools();
+    expect(excludedTools).toContain(ShellTool.Name);
+    expect(excludedTools).toContain(EditTool.Name);
+    expect(excludedTools).toContain(WriteFileTool.Name);
+  });
+
   it('should exclude all interactive tools in non-interactive mode with explicit default approval mode', async () => {
     process.argv = [
       'node',
@@ -1189,6 +1215,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const testCases = [
       { args: ['node', 'script.js'] }, // default
+      { args: ['node', 'script.js', '--approval-mode', 'plan'] },
       { args: ['node', 'script.js', '--approval-mode', 'default'] },
       { args: ['node', 'script.js', '--approval-mode', 'auto_edit'] },
       { args: ['node', 'script.js', '--approval-mode', 'yolo'] },
@@ -1262,7 +1289,7 @@ describe('Approval mode tool exclusion logic', () => {
         invalidArgv as CliArgs,
       ),
     ).rejects.toThrow(
-      'Invalid approval mode: invalid_mode. Valid values are: yolo, auto_edit, default',
+      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto_edit, yolo',
     );
   });
 });
@@ -1929,6 +1956,13 @@ describe('loadCliConfig approval mode', () => {
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
   });
 
+  it('should set PLAN approval mode when --approval-mode=plan', async () => {
+    process.argv = ['node', 'script.js', '--approval-mode', 'plan'];
+    const argv = await parseArguments({} as Settings);
+    const config = await loadCliConfig({}, [], 'test-session', argv);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
+  });
+
   it('should set YOLO approval mode when --yolo flag is used', async () => {
     process.argv = ['node', 'script.js', '--yolo'];
     const argv = await parseArguments({} as Settings);
@@ -1962,6 +1996,33 @@ describe('loadCliConfig approval mode', () => {
     const argv = await parseArguments({} as Settings);
     const config = await loadCliConfig({}, [], 'test-session', argv);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.YOLO);
+  });
+
+  it('should use approval mode from settings when CLI flags are not provided', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = { approvalMode: 'plan' };
+    const config = await loadCliConfig(settings, [], 'test-session', argv);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
+  });
+
+  it('should normalize approval mode values from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = { approvalMode: 'AutoEdit' };
+    const config = await loadCliConfig(settings, [], 'test-session', argv);
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
+  });
+
+  it('should throw when approval mode in settings is invalid', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = { approvalMode: 'invalid_mode' };
+    await expect(
+      loadCliConfig(settings, [], 'test-session', argv),
+    ).rejects.toThrow(
+      'Invalid approval mode: invalid_mode. Valid values are: plan, default, auto_edit, yolo',
+    );
   });
 
   it('should prioritize --approval-mode over --yolo when both would be valid (but validation prevents this)', async () => {
@@ -2014,6 +2075,13 @@ describe('loadCliConfig approval mode', () => {
       const argv = await parseArguments({} as Settings);
       const config = await loadCliConfig({}, [], 'test-session', argv);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+    });
+
+    it('should allow PLAN approval mode in untrusted folders', async () => {
+      process.argv = ['node', 'script.js', '--approval-mode', 'plan'];
+      const argv = await parseArguments({} as Settings);
+      const config = await loadCliConfig({}, [], 'test-session', argv);
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
     });
   });
 });

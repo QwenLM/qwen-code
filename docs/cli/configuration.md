@@ -362,6 +362,14 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
     "skipLoopDetection": true
     ```
 
+- **`approvalMode`** (string):
+  - **Description:** Sets the default approval mode for tool usage. Accepted values are `plan`, `default`, `auto_edit`, or `yolo`.
+  - **Default:** `"default"`
+  - **Example:**
+    ```json
+    "approvalMode": "plan"
+    ```
+
 ### Example `settings.json`:
 
 ```json

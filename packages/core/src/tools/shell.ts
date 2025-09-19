@@ -32,6 +32,7 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 import {
   getCommandRoots,
   isCommandAllowed,
+  isCommandNeedsPermission,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 
@@ -85,6 +86,11 @@ class ShellToolInvocation extends BaseToolInvocation<
 
     if (commandsToConfirm.length === 0) {
       return false; // already approved and whitelisted
+    }
+
+    const permissionCheck = isCommandNeedsPermission(command);
+    if (!permissionCheck.requiresPermission) {
+      return false;
     }
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {

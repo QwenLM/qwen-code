@@ -53,7 +53,7 @@ export function AgentsManagerDialog({
     const manager = config.getSubagentManager();
 
     // Load agents from all levels separately to show all agents including conflicts
-    const allAgents = await manager.listSubagents();
+    const allAgents = await manager.listSubagents({ force: true });
 
     setAvailableAgents(allAgents);
   }, [config]);

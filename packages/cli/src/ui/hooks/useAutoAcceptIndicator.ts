@@ -10,6 +10,13 @@ import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 
+const APPROVAL_MODE_SEQUENCE: ApprovalMode[] = [
+  ApprovalMode.PLAN,
+  ApprovalMode.DEFAULT,
+  ApprovalMode.AUTO_EDIT,
+  ApprovalMode.YOLO,
+];
+
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
@@ -29,34 +36,30 @@ export function useAutoAcceptIndicator({
 
   useKeypress(
     (key) => {
-      let nextApprovalMode: ApprovalMode | undefined;
-
-      if (key.ctrl && key.name === 'y') {
-        nextApprovalMode =
-          config.getApprovalMode() === ApprovalMode.YOLO
-            ? ApprovalMode.DEFAULT
-            : ApprovalMode.YOLO;
-      } else if (key.shift && key.name === 'tab') {
-        nextApprovalMode =
-          config.getApprovalMode() === ApprovalMode.AUTO_EDIT
-            ? ApprovalMode.DEFAULT
-            : ApprovalMode.AUTO_EDIT;
+      if (!(key.shift && key.name === 'tab')) {
+        return;
       }
 
-      if (nextApprovalMode) {
-        try {
-          config.setApprovalMode(nextApprovalMode);
-          // Update local state immediately for responsiveness
-          setShowAutoAcceptIndicator(nextApprovalMode);
-        } catch (e) {
-          addItem(
-            {
-              type: MessageType.INFO,
-              text: (e as Error).message,
-            },
-            Date.now(),
-          );
-        }
+      const currentMode = config.getApprovalMode();
+      const currentIndex = APPROVAL_MODE_SEQUENCE.indexOf(currentMode);
+      const nextIndex =
+        currentIndex === -1
+          ? 0
+          : (currentIndex + 1) % APPROVAL_MODE_SEQUENCE.length;
+      const nextApprovalMode = APPROVAL_MODE_SEQUENCE[nextIndex];
+
+      try {
+        config.setApprovalMode(nextApprovalMode);
+        // Update local state immediately for responsiveness
+        setShowAutoAcceptIndicator(nextApprovalMode);
+      } catch (e) {
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: (e as Error).message,
+          },
+          Date.now(),
+        );
       }
     },
     { isActive: true },

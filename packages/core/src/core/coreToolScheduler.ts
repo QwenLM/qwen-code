@@ -34,6 +34,7 @@ import {
 import * as Diff from 'diff';
 import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
+import { getPlanModeSystemReminder } from './prompts.js';
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -674,7 +675,27 @@ export class CoreToolScheduler {
           }
 
           const allowedTools = this.config.getAllowedTools() || [];
-          if (
+          const isPlanMode =
+            this.config.getApprovalMode() === ApprovalMode.PLAN;
+          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
+
+          if (isPlanMode && !isExitPlanModeTool) {
+            if (confirmationDetails) {
+              this.setStatusInternal(reqInfo.callId, 'error', {
+                callId: reqInfo.callId,
+                responseParts: convertToFunctionResponse(
+                  reqInfo.name,
+                  reqInfo.callId,
+                  getPlanModeSystemReminder(),
+                ),
+                resultDisplay: 'Plan mode blocked a non-read-only tool call.',
+                error: undefined,
+                errorType: undefined,
+              });
+            } else {
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+            }
+          } else if (
             this.config.getApprovalMode() === ApprovalMode.YOLO ||
             doesToolInvocationMatch(toolCall.tool, invocation, allowedTools)
           ) {

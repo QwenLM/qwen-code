@@ -9,6 +9,27 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Part, PartListUnion } from '@google/genai';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+
+// Mock the image format functions from core package
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    isSupportedImageMimeType: vi.fn((mimeType: string) =>
+      [
+        'image/png',
+        'image/jpeg',
+        'image/jpg',
+        'image/gif',
+        'image/webp',
+      ].includes(mimeType),
+    ),
+    getUnsupportedImageFormatWarning: vi.fn(
+      () =>
+        'Only the following image formats are supported: BMP, JPEG, JPG, PNG, TIFF, WEBP, HEIC. Other formats may not work as expected.',
+    ),
+  };
+});
 import {
   shouldOfferVisionSwitch,
   processVisionSwitchOutcome,
