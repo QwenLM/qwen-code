@@ -560,4 +560,146 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ]);
     });
   });
+
+  describe('output token limits', () => {
+    it('should limit max_tokens when it exceeds model limit for qwen3-coder-plus', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100000, // Exceeds the 65536 limit
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(65536); // Should be limited to model's output limit
+    });
+
+    it('should limit max_tokens when it exceeds model limit for qwen-vl-max-latest', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-vl-max-latest',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 20000, // Exceeds the 8192 limit
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(8192); // Should be limited to model's output limit
+    });
+
+    it('should not modify max_tokens when it is within model limit', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 1000, // Within the 65536 limit
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(1000); // Should remain unchanged
+    });
+
+    it('should not add max_tokens when not present in request', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+        // No max_tokens parameter
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBeUndefined(); // Should remain undefined
+    });
+
+    it('should handle null max_tokens parameter', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: null,
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBeNull(); // Should remain null
+    });
+
+    it('should use default output limit for unknown models', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'unknown-model',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 10000, // Exceeds the default 4096 limit
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(4096); // Should be limited to default output limit
+    });
+
+    it('should preserve other request parameters when limiting max_tokens', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100000, // Will be limited
+        temperature: 0.8,
+        top_p: 0.9,
+        frequency_penalty: 0.1,
+        presence_penalty: 0.2,
+        stop: ['END'],
+        user: 'test-user',
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      // max_tokens should be limited
+      expect(result.max_tokens).toBe(65536);
+
+      // Other parameters should be preserved
+      expect(result.temperature).toBe(0.8);
+      expect(result.top_p).toBe(0.9);
+      expect(result.frequency_penalty).toBe(0.1);
+      expect(result.presence_penalty).toBe(0.2);
+      expect(result.stop).toEqual(['END']);
+      expect(result.user).toBe('test-user');
+    });
+
+    it('should work with vision models and output token limits', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen-vl-max-latest',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Look at this image:' },
+              {
+                type: 'image_url',
+                image_url: { url: 'https://example.com/image.jpg' },
+              },
+            ],
+          },
+        ],
+        max_tokens: 20000, // Exceeds the 8192 limit
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(8192); // Should be limited
+      expect(
+        (result as { vl_high_resolution_images?: boolean })
+          .vl_high_resolution_images,
+      ).toBe(true); // Vision-specific parameter should be preserved
+    });
+
+    it('should handle streaming requests with output token limits', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-coder-plus',
+        messages: [{ role: 'user', content: 'Hello' }],
+        max_tokens: 100000, // Exceeds the 65536 limit
+        stream: true,
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(65536); // Should be limited
+      expect(result.stream).toBe(true); // Streaming should be preserved
+    });
+  });
 });

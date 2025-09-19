@@ -3,6 +3,7 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { tokenLimit } from '../../tokenLimits.js';
 import type {
   OpenAICompatibleProvider,
   DashScopeRequestMetadata,
@@ -65,6 +66,19 @@ export class DashScopeOpenAICompatibleProvider
     });
   }
 
+  /**
+   * Build and configure the request for DashScope API.
+   *
+   * This method applies DashScope-specific configurations including:
+   * - Cache control for system and user messages
+   * - Output token limits based on model capabilities
+   * - Vision model specific parameters (vl_high_resolution_images)
+   * - Request metadata for session tracking
+   *
+   * @param request - The original chat completion request parameters
+   * @param userPromptId - Unique identifier for the user prompt for session tracking
+   * @returns Configured request with DashScope-specific parameters applied
+   */
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
@@ -79,21 +93,28 @@ export class DashScopeOpenAICompatibleProvider
       messages = this.addDashScopeCacheControl(messages, cacheTarget);
     }
 
+    // Apply output token limits based on model capabilities
+    // This ensures max_tokens doesn't exceed the model's maximum output limit
+    const requestWithTokenLimits = this.applyOutputTokenLimit(
+      request,
+      request.model,
+    );
+
     if (request.model.startsWith('qwen-vl')) {
       return {
-        ...request,
+        ...requestWithTokenLimits,
         messages,
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
-      };
+      } as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
     return {
-      ...request, // Preserve all original parameters including sampling params
+      ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
       ...(this.buildMetadata(userPromptId) || {}),
-    };
+    } as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
@@ -244,6 +265,41 @@ export class DashScopeOpenAICompatibleProvider
     }
 
     return contentArray;
+  }
+
+  /**
+   * Apply output token limit to a request's max_tokens parameter.
+   *
+   * Ensures that existing max_tokens parameters don't exceed the model's maximum output
+   * token limit. Only modifies max_tokens when already present in the request.
+   *
+   * @param request - The chat completion request parameters
+   * @param model - The model name to get the output token limit for
+   * @returns The request with max_tokens adjusted to respect the model's limits (if present)
+   */
+  private applyOutputTokenLimit<T extends { max_tokens?: number | null }>(
+    request: T,
+    model: string,
+  ): T {
+    const currentMaxTokens = request.max_tokens;
+
+    // Only process if max_tokens is already present in the request
+    if (currentMaxTokens === undefined || currentMaxTokens === null) {
+      return request; // No max_tokens parameter, return unchanged
+    }
+
+    const modelLimit = tokenLimit(model, 'output');
+
+    // If max_tokens exceeds the model limit, cap it to the model's limit
+    if (currentMaxTokens > modelLimit) {
+      return {
+        ...request,
+        max_tokens: modelLimit,
+      };
+    }
+
+    // If max_tokens is within the limit, return the request unchanged
+    return request;
   }
 
   /**

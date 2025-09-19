@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { normalize, tokenLimit, DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
+import {
+  normalize,
+  tokenLimit,
+  DEFAULT_TOKEN_LIMIT,
+  DEFAULT_OUTPUT_TOKEN_LIMIT,
+} from './tokenLimits.js';
 
 describe('normalize', () => {
   it('should lowercase and trim the model string', () => {
@@ -223,5 +228,98 @@ describe('tokenLimit', () => {
   it('should handle case-insensitive model names', () => {
     expect(tokenLimit('GPT-4O')).toBe(131072);
     expect(tokenLimit('CLAUDE-3.5-SONNET')).toBe(200000);
+  });
+});
+
+describe('tokenLimit with output type', () => {
+  describe('Qwen models with output limits', () => {
+    it('should return the correct output limit for qwen3-coder-plus', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'output')).toBe(65536);
+      expect(tokenLimit('qwen3-coder-plus-20250601', 'output')).toBe(65536);
+    });
+
+    it('should return the correct output limit for qwen-vl-max-latest', () => {
+      expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192);
+    });
+  });
+
+  describe('Default output limits', () => {
+    it('should return the default output limit for unknown models', () => {
+      expect(tokenLimit('unknown-model', 'output')).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit('gpt-4', 'output')).toBe(DEFAULT_OUTPUT_TOKEN_LIMIT);
+      expect(tokenLimit('claude-3.5-sonnet', 'output')).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+    });
+
+    it('should return the default output limit for models without specific output patterns', () => {
+      expect(tokenLimit('qwen3-coder-7b', 'output')).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit('qwen-plus', 'output')).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit('qwen-vl-max', 'output')).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+    });
+  });
+
+  describe('Input vs Output limits comparison', () => {
+    it('should return different limits for input vs output for qwen3-coder-plus', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input')).toBe(1048576); // 1M input
+      expect(tokenLimit('qwen3-coder-plus', 'output')).toBe(65536); // 64K output
+    });
+
+    it('should return different limits for input vs output for qwen-vl-max-latest', () => {
+      expect(tokenLimit('qwen-vl-max-latest', 'input')).toBe(131072); // 128K input
+      expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192); // 8K output
+    });
+
+    it('should return same default limits for unknown models', () => {
+      expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT); // 128K input
+      expect(tokenLimit('unknown-model', 'output')).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      ); // 4K output
+    });
+  });
+
+  describe('Backward compatibility', () => {
+    it('should default to input type when no type is specified', () => {
+      expect(tokenLimit('qwen3-coder-plus')).toBe(1048576); // Should be input limit
+      expect(tokenLimit('qwen-vl-max-latest')).toBe(131072); // Should be input limit
+      expect(tokenLimit('unknown-model')).toBe(DEFAULT_TOKEN_LIMIT); // Should be input default
+    });
+
+    it('should work with explicit input type', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input')).toBe(1048576);
+      expect(tokenLimit('qwen-vl-max-latest', 'input')).toBe(131072);
+      expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT);
+    });
+  });
+
+  describe('Model normalization with output limits', () => {
+    it('should handle normalized model names for output limits', () => {
+      expect(tokenLimit('QWEN3-CODER-PLUS', 'output')).toBe(65536);
+      expect(tokenLimit('qwen3-coder-plus-20250601', 'output')).toBe(65536);
+      expect(tokenLimit('QWEN-VL-MAX-LATEST', 'output')).toBe(8192);
+    });
+
+    it('should handle complex model strings for output limits', () => {
+      expect(
+        tokenLimit(
+          '  a/b/c|QWEN3-CODER-PLUS:qwen3-coder-plus-2024-05-13  ',
+          'output',
+        ),
+      ).toBe(65536);
+      expect(
+        tokenLimit(
+          'provider/qwen-vl-max-latest:qwen-vl-max-latest-v1',
+          'output',
+        ),
+      ).toBe(8192);
+    });
   });
 });

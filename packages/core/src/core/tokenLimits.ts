@@ -1,7 +1,15 @@
 type Model = string;
 type TokenCount = number;
 
+/**
+ * Token limit types for different use cases.
+ * - 'input': Maximum input context window size
+ * - 'output': Maximum output tokens that can be generated in a single response
+ */
+export type TokenLimitType = 'input' | 'output';
+
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
+export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 4_096; // 4K tokens
 
 /**
  * Accurate numeric limits:
@@ -18,6 +26,10 @@ const LIMITS = {
   '1m': 1_048_576,
   '2m': 2_097_152,
   '10m': 10_485_760, // 10 million tokens
+  // Output token limits (typically much smaller than input limits)
+  '4k': 4_096,
+  '8k': 8_192,
+  '16k': 16_384,
 } as const;
 
 /** Robust normalizer: strips provider prefixes, pipes/colons, date/version suffixes, etc. */
@@ -36,7 +48,7 @@ export function normalize(model: string): string {
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
   s = s.replace(/-preview/g, '');
   // Special handling for Qwen model names that include "-latest" as part of the model name
-  if (!s.match(/^qwen-(?:plus|flash)-latest$/)) {
+  if (!s.match(/^qwen-(?:plus|flash|vl-max)-latest$/)) {
     // \d{6,} - Match 6 or more digits (dates) like -20250219 (6+ digit dates)
     // \d+x\d+b - Match patterns like 4x8b, -7b, -70b
     // v\d+(?:\.\d+)* - Match version patterns starting with 'v' like -v1, -v1.2, -v2.1.3
@@ -142,16 +154,48 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^mistral-large-2.*$/, LIMITS['128k']],
 ];
 
-/** Return the token limit for a model string (uses normalize + ordered regex list). */
-export function tokenLimit(model: Model): TokenCount {
+/**
+ * Output token limit patterns for specific model families.
+ * These patterns define the maximum number of tokens that can be generated
+ * in a single response for specific models.
+ */
+const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
+  // -------------------
+  // Alibaba / Qwen - DashScope Models
+  // -------------------
+  // Qwen3-Coder-Plus: 65,536 max output tokens
+  [/^qwen3-coder-plus(-.*)?$/, LIMITS['64k']],
+
+  // Qwen-VL-Max-Latest: 8,192 max output tokens
+  [/^qwen-vl-max-latest$/, LIMITS['8k']],
+];
+
+/**
+ * Return the token limit for a model string based on the specified type.
+ *
+ * This function determines the maximum number of tokens for either input context
+ * or output generation based on the model and token type. It uses the same
+ * normalization logic for consistency across both input and output limits.
+ *
+ * @param model - The model name to get the token limit for
+ * @param type - The type of token limit ('input' for context window, 'output' for generation)
+ * @returns The maximum number of tokens allowed for this model and type
+ */
+export function tokenLimit(
+  model: Model,
+  type: TokenLimitType = 'input',
+): TokenCount {
   const norm = normalize(model);
 
-  for (const [regex, limit] of PATTERNS) {
+  // Choose the appropriate patterns based on token type
+  const patterns = type === 'output' ? OUTPUT_PATTERNS : PATTERNS;
+
+  for (const [regex, limit] of patterns) {
     if (regex.test(norm)) {
       return limit;
     }
   }
 
-  // final fallback: DEFAULT_TOKEN_LIMIT (power-of-two 128K)
-  return DEFAULT_TOKEN_LIMIT;
+  // Return appropriate default based on token type
+  return type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT;
 }
