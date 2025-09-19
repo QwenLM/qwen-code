@@ -5,7 +5,7 @@
  */
 
 import { type PartListUnion, type Part } from '@google/genai';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config, ApprovalMode } from '@qwen-code/qwen-code-core';
 import { useCallback, useRef } from 'react';
 import { VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
 import {
@@ -250,6 +250,17 @@ export function useVisionAutoSwitch(
         )
       ) {
         return { shouldProceed: true };
+      }
+
+      // In YOLO mode, automatically switch to vision model without user interaction
+      if (config.getApprovalMode() === ApprovalMode.YOLO) {
+        const vlModelId = getDefaultVisionModel();
+        originalModelRef.current = config.getModel();
+        config.setModel(vlModelId);
+        return {
+          shouldProceed: true,
+          originalModel: originalModelRef.current,
+        };
       }
 
       try {

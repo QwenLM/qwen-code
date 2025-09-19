@@ -8,7 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Part, PartListUnion } from '@google/genai';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config, ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
   shouldOfferVisionSwitch,
   processVisionSwitchOutcome,
@@ -108,6 +108,56 @@ describe('useVisionAutoSwitch helpers', () => {
       );
       expect(result).toBe(false);
     });
+
+    it('returns true when image parts exist in YOLO mode context', () => {
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+      const result = shouldOfferVisionSwitch(
+        parts,
+        AuthType.QWEN_OAUTH,
+        'qwen3-coder-plus',
+        true,
+      );
+      expect(result).toBe(true);
+    });
+
+    it('returns false when no image parts exist in YOLO mode context', () => {
+      const parts: PartListUnion = [{ text: 'just text' }];
+      const result = shouldOfferVisionSwitch(
+        parts,
+        AuthType.QWEN_OAUTH,
+        'qwen3-coder-plus',
+        true,
+      );
+      expect(result).toBe(false);
+    });
+
+    it('returns false when already using vision model in YOLO mode context', () => {
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+      const result = shouldOfferVisionSwitch(
+        parts,
+        AuthType.QWEN_OAUTH,
+        'qwen-vl-max-latest',
+        true,
+      );
+      expect(result).toBe(false);
+    });
+
+    it('returns false when authType is not QWEN_OAUTH in YOLO mode context', () => {
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+      const result = shouldOfferVisionSwitch(
+        parts,
+        AuthType.USE_GEMINI,
+        'qwen3-coder-plus',
+        true,
+      );
+      expect(result).toBe(false);
+    });
   });
 
   describe('processVisionSwitchOutcome', () => {
@@ -151,13 +201,18 @@ describe('useVisionAutoSwitch hook', () => {
     ts: number,
   ) => any;
 
-  const createMockConfig = (authType: AuthType, initialModel: string) => {
+  const createMockConfig = (
+    authType: AuthType,
+    initialModel: string,
+    approvalMode: ApprovalMode = ApprovalMode.DEFAULT,
+  ) => {
     let currentModel = initialModel;
     const mockConfig: Partial<Config> = {
       getModel: vi.fn(() => currentModel),
       setModel: vi.fn((m: string) => {
         currentModel = m;
       }),
+      getApprovalMode: vi.fn(() => approvalMode),
       getContentGeneratorConfig: vi.fn(() => ({
         authType,
         model: currentModel,
@@ -370,5 +425,235 @@ describe('useVisionAutoSwitch hook', () => {
     });
     expect(res).toEqual({ shouldProceed: true });
     expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+  });
+
+  describe('YOLO mode behavior', () => {
+    it('automatically switches to vision model in YOLO mode without showing dialog', async () => {
+      const initialModel = 'qwen3-coder-plus';
+      const config = createMockConfig(
+        AuthType.QWEN_OAUTH,
+        initialModel,
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn(); // Should not be called in YOLO mode
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          true,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+
+      let res: any;
+      await act(async () => {
+        res = await result.current.handleVisionSwitch(parts, 7070, false);
+      });
+
+      // Should automatically switch without calling the dialog
+      expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+      expect(res).toEqual({
+        shouldProceed: true,
+        originalModel: initialModel,
+      });
+      expect(config.setModel).toHaveBeenCalledWith(getDefaultVisionModel());
+    });
+
+    it('does not switch in YOLO mode when no images are present', async () => {
+      const config = createMockConfig(
+        AuthType.QWEN_OAUTH,
+        'qwen3-coder-plus',
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn();
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          true,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [{ text: 'no images here' }];
+
+      let res: any;
+      await act(async () => {
+        res = await result.current.handleVisionSwitch(parts, 8080, false);
+      });
+
+      expect(res).toEqual({ shouldProceed: true });
+      expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+      expect(config.setModel).not.toHaveBeenCalled();
+    });
+
+    it('does not switch in YOLO mode when already using vision model', async () => {
+      const config = createMockConfig(
+        AuthType.QWEN_OAUTH,
+        'qwen-vl-max-latest',
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn();
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          true,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+
+      let res: any;
+      await act(async () => {
+        res = await result.current.handleVisionSwitch(parts, 9090, false);
+      });
+
+      expect(res).toEqual({ shouldProceed: true });
+      expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+      expect(config.setModel).not.toHaveBeenCalled();
+    });
+
+    it('restores original model after YOLO mode auto-switch', async () => {
+      const initialModel = 'qwen3-coder-plus';
+      const config = createMockConfig(
+        AuthType.QWEN_OAUTH,
+        initialModel,
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn();
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          true,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+
+      // First, trigger the auto-switch
+      await act(async () => {
+        await result.current.handleVisionSwitch(parts, 10100, false);
+      });
+
+      // Verify model was switched
+      expect(config.setModel).toHaveBeenCalledWith(getDefaultVisionModel());
+
+      // Now restore the original model
+      act(() => {
+        result.current.restoreOriginalModel();
+      });
+
+      // Verify model was restored
+      expect(config.setModel).toHaveBeenLastCalledWith(initialModel);
+    });
+
+    it('does not switch in YOLO mode when authType is not QWEN_OAUTH', async () => {
+      const config = createMockConfig(
+        AuthType.USE_GEMINI,
+        'qwen3-coder-plus',
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn();
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          true,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+
+      let res: any;
+      await act(async () => {
+        res = await result.current.handleVisionSwitch(parts, 11110, false);
+      });
+
+      expect(res).toEqual({ shouldProceed: true });
+      expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+      expect(config.setModel).not.toHaveBeenCalled();
+    });
+
+    it('does not switch in YOLO mode when visionModelPreviewEnabled is false', async () => {
+      const config = createMockConfig(
+        AuthType.QWEN_OAUTH,
+        'qwen3-coder-plus',
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn();
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          false,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [
+        { inlineData: { mimeType: 'image/png', data: '...' } },
+      ];
+
+      let res: any;
+      await act(async () => {
+        res = await result.current.handleVisionSwitch(parts, 12120, false);
+      });
+
+      expect(res).toEqual({ shouldProceed: true });
+      expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+      expect(config.setModel).not.toHaveBeenCalled();
+    });
+
+    it('handles multiple image formats in YOLO mode', async () => {
+      const initialModel = 'qwen3-coder-plus';
+      const config = createMockConfig(
+        AuthType.QWEN_OAUTH,
+        initialModel,
+        ApprovalMode.YOLO,
+      );
+      const onVisionSwitchRequired = vi.fn();
+      const { result } = renderHook(() =>
+        useVisionAutoSwitch(
+          config,
+          addItem as any,
+          true,
+          onVisionSwitchRequired,
+        ),
+      );
+
+      const parts: PartListUnion = [
+        { text: 'Here are some images:' },
+        { inlineData: { mimeType: 'image/jpeg', data: '...' } },
+        { fileData: { mimeType: 'image/png', fileUri: 'file://image.png' } },
+        { text: 'Please analyze them.' },
+      ];
+
+      let res: any;
+      await act(async () => {
+        res = await result.current.handleVisionSwitch(parts, 13130, false);
+      });
+
+      expect(res).toEqual({
+        shouldProceed: true,
+        originalModel: initialModel,
+      });
+      expect(config.setModel).toHaveBeenCalledWith(getDefaultVisionModel());
+      expect(onVisionSwitchRequired).not.toHaveBeenCalled();
+    });
   });
 });
