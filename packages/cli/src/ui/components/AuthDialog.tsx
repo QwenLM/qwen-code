@@ -49,6 +49,8 @@ export function AuthDialog({
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
   const items = [
     { label: 'Qwen OAuth', value: AuthType.QWEN_OAUTH },
+    { label: 'Google OAuth', value: AuthType.LOGIN_WITH_GOOGLE },
+    { label: 'VertexAI', value: AuthType.USE_VERTEX_AI },
     { label: 'OpenAI', value: AuthType.USE_OPENAI },
   ];
 
