@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, {
+import type React from 'react';
+import {
   createContext,
   useCallback,
   useContext,
@@ -13,12 +14,8 @@ import React, {
   useEffect,
 } from 'react';
 
-import {
-  uiTelemetryService,
-  SessionMetrics,
-  ModelMetrics,
-  sessionId,
-} from '@qwen-code/qwen-code-core';
+import type { SessionMetrics, ModelMetrics } from '@qwen-code/qwen-code-core';
+import { uiTelemetryService, sessionId } from '@qwen-code/qwen-code-core';
 
 // --- Interface Definitions ---
 

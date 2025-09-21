@@ -177,9 +177,10 @@ Logs are timestamped records of specific events. The following events are logged
 
 - `qwen-code.user_prompt`: This event occurs when a user submits a prompt.
   - **Attributes**:
-    - `prompt_length`
-    - `prompt` (this attribute is excluded if `log_prompts_enabled` is configured to be `false`)
-    - `auth_type`
+    - `prompt_length` (int)
+    - `prompt_id` (string)
+    - `prompt` (string, this attribute is excluded if `log_prompts_enabled` is configured to be `false`)
+    - `auth_type` (string)
 
 - `qwen-code.tool_call`: This event occurs for each function call.
   - **Attributes**:
@@ -272,6 +273,7 @@ Metrics are numerical measurements of behavior over time. The following metrics 
     - `ai_removed_lines` (Int, if applicable): Number of lines removed/changed by AI.
     - `user_added_lines` (Int, if applicable): Number of lines added/changed by user in AI proposed changes.
     - `user_removed_lines` (Int, if applicable): Number of lines removed/changed by user in AI proposed changes.
+    - `programming_language` (string, if applicable): The programming language of the file.
 
 - `qwen-code.chat_compression` (Counter, Int): Counts chat compression operations
   - **Attributes**:

@@ -14,8 +14,8 @@ import {
 } from 'vitest';
 import OpenAI from 'openai';
 import { DefaultOpenAICompatibleProvider } from './default.js';
-import { Config } from '../../../config/config.js';
-import { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { Config } from '../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 
 // Mock OpenAI

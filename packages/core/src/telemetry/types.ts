@@ -4,16 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GenerateContentResponseUsageMetadata } from '@google/genai';
-import { Config } from '../config/config.js';
-import { CompletedToolCall } from '../core/coreToolScheduler.js';
+import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import type { Config } from '../config/config.js';
+import type { ApprovalMode } from '../config/config.js';
+import type { CompletedToolCall } from '../core/coreToolScheduler.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
-import { FileDiff } from '../tools/tools.js';
+import type { DiffStat, FileDiff } from '../tools/tools.js';
 import { AuthType } from '../core/contentGenerator.js';
 import {
   getDecisionFromOutcome,
   ToolCallDecision,
 } from './tool-call-decision.js';
+import type { FileOperation } from './metrics.js';
+export { ToolCallDecision };
+import type { ToolRegistry } from '../tools/tool-registry.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -38,8 +42,11 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   telemetry_enabled: boolean;
   telemetry_log_user_prompts_enabled: boolean;
   file_filtering_respect_git_ignore: boolean;
+  mcp_servers_count: number;
+  mcp_tools_count?: number;
+  mcp_tools?: string;
 
-  constructor(config: Config) {
+  constructor(config: Config, toolRegistry?: ToolRegistry) {
     const generatorConfig = config.getContentGeneratorConfig();
     const mcpServers = config.getMcpServers();
 
@@ -66,6 +73,16 @@ export class StartSessionEvent implements BaseTelemetryEvent {
       config.getTelemetryLogPromptsEnabled();
     this.file_filtering_respect_git_ignore =
       config.getFileFilteringRespectGitIgnore();
+    this.mcp_servers_count = mcpServers ? Object.keys(mcpServers).length : 0;
+    if (toolRegistry) {
+      const mcpTools = toolRegistry
+        .getAllTools()
+        .filter((tool) => tool instanceof DiscoveredMCPTool);
+      this.mcp_tools_count = mcpTools.length;
+      this.mcp_tools = mcpTools
+        .map((tool) => (tool as DiscoveredMCPTool).name)
+        .join(',');
+    }
   }
 }
 
@@ -377,6 +394,20 @@ export class IdeConnectionEvent {
   }
 }
 
+export class ConversationFinishedEvent {
+  'event_name': 'conversation_finished';
+  'event.timestamp': string; // ISO 8601;
+  approvalMode: ApprovalMode;
+  turnCount: number;
+
+  constructor(approvalMode: ApprovalMode, turnCount: number) {
+    this['event_name'] = 'conversation_finished';
+    this['event.timestamp'] = new Date().toISOString();
+    this.approvalMode = approvalMode;
+    this.turnCount = turnCount;
+  }
+}
+
 export class KittySequenceOverflowEvent {
   'event.name': 'kitty_sequence_overflow';
   'event.timestamp': string; // ISO 8601
@@ -388,6 +419,38 @@ export class KittySequenceOverflowEvent {
     this.sequence_length = sequence_length;
     // Truncate to first 20 chars for logging (avoid logging sensitive data)
     this.truncated_sequence = truncated_sequence.substring(0, 20);
+  }
+}
+
+export class FileOperationEvent implements BaseTelemetryEvent {
+  'event.name': 'file_operation';
+  'event.timestamp': string;
+  tool_name: string;
+  operation: FileOperation;
+  lines?: number;
+  mimetype?: string;
+  extension?: string;
+  diff_stat?: DiffStat;
+  programming_language?: string;
+
+  constructor(
+    tool_name: string,
+    operation: FileOperation,
+    lines?: number,
+    mimetype?: string,
+    extension?: string,
+    diff_stat?: DiffStat,
+    programming_language?: string,
+  ) {
+    this['event.name'] = 'file_operation';
+    this['event.timestamp'] = new Date().toISOString();
+    this.tool_name = tool_name;
+    this.operation = operation;
+    this.lines = lines;
+    this.mimetype = mimetype;
+    this.extension = extension;
+    this.diff_stat = diff_stat;
+    this.programming_language = programming_language;
   }
 }
 
@@ -486,7 +549,9 @@ export type TelemetryEvent =
   | KittySequenceOverflowEvent
   | MalformedJsonResponseEvent
   | IdeConnectionEvent
+  | ConversationFinishedEvent
   | SlashCommandEvent
+  | FileOperationEvent
   | InvalidChunkEvent
   | ContentRetryEvent
   | ContentRetryFailureEvent

@@ -4,21 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { convert } from 'html-to-text';
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/config.js';
+import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
+import { getResponseText } from '../utils/partUtils.js';
+import { ToolErrorType } from './tool-error.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from './tools.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
-  ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
-  ToolInvocation,
-  ToolResult,
 } from './tools.js';
-
-import { Config, ApprovalMode } from '../config/config.js';
-import { getResponseText } from '../utils/generateContentResponseUtilities.js';
-import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
-import { convert } from 'html-to-text';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
 const URL_FETCH_TIMEOUT_MS = 10000;
 const MAX_CONTENT_LENGTH = 100000;
@@ -123,6 +126,10 @@ ${textContent}
       return {
         llmContent: `Error: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
+        error: {
+          message: errorMessage,
+          type: ToolErrorType.WEB_FETCH_FALLBACK_FAILED,
+        },
       };
     }
   }

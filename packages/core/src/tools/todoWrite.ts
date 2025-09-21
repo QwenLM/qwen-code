@@ -4,20 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
-  ToolResult,
-} from './tools.js';
-import { FunctionDeclaration } from '@google/genai';
+import type { ToolResult } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import type { FunctionDeclaration } from '@google/genai';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import * as process from 'process';
 
 import { QWEN_DIR } from '../utils/paths.js';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 
 export interface TodoItem {
   id: string;

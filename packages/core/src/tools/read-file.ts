@@ -4,27 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'path';
+import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind,
-  ToolInvocation,
-  ToolLocation,
-  ToolResult,
-} from './tools.js';
-import { ToolErrorType } from './tool-error.js';
-import { PartUnion } from '@google/genai';
+import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { ToolNames } from './tool-names.js';
+
+import type { PartUnion } from '@google/genai';
 import {
   processSingleFileContent,
   getSpecificMimeType,
 } from '../utils/fileUtils.js';
-import { Config } from '../config/config.js';
-import {
-  recordFileOperationMetric,
-  FileOperation,
-} from '../telemetry/metrics.js';
+import type { Config } from '../config/config.js';
+import { FileOperation } from '../telemetry/metrics.js';
+import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
+import { logFileOperation } from '../telemetry/loggers.js';
+import { FileOperationEvent } from '../telemetry/types.js';
 
 /**
  * Parameters for the ReadFile tool
@@ -79,44 +74,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     );
 
     if (result.error) {
-      // Map error messages to ToolErrorType
-      let errorType: ToolErrorType;
-      let llmContent: string;
-
-      // Check error message patterns to determine error type
-      if (
-        result.error.includes('File not found') ||
-        result.error.includes('does not exist') ||
-        result.error.includes('ENOENT')
-      ) {
-        errorType = ToolErrorType.FILE_NOT_FOUND;
-        llmContent =
-          'Could not read file because no file was found at the specified path.';
-      } else if (
-        result.error.includes('is a directory') ||
-        result.error.includes('EISDIR')
-      ) {
-        errorType = ToolErrorType.INVALID_TOOL_PARAMS;
-        llmContent =
-          'Could not read file because the provided path is a directory, not a file.';
-      } else if (
-        result.error.includes('too large') ||
-        result.error.includes('File size exceeds')
-      ) {
-        errorType = ToolErrorType.FILE_TOO_LARGE;
-        llmContent = `Could not read file. ${result.error}`;
-      } else {
-        // Other read errors map to READ_CONTENT_FAILURE
-        errorType = ToolErrorType.READ_CONTENT_FAILURE;
-        llmContent = `Could not read file. ${result.error}`;
-      }
-
       return {
-        llmContent,
+        llmContent: result.llmContent,
         returnDisplay: result.returnDisplay || 'Error reading file',
         error: {
           message: result.error,
-          type: errorType,
+          type: result.errorType,
         },
       };
     }
@@ -144,12 +107,20 @@ ${result.llmContent}`;
         ? result.llmContent.split('\n').length
         : undefined;
     const mimetype = getSpecificMimeType(this.params.absolute_path);
-    recordFileOperationMetric(
+    const programming_language = getProgrammingLanguage({
+      absolute_path: this.params.absolute_path,
+    });
+    logFileOperation(
       this.config,
-      FileOperation.READ,
-      lines,
-      mimetype,
-      path.extname(this.params.absolute_path),
+      new FileOperationEvent(
+        ReadFileTool.Name,
+        FileOperation.READ,
+        lines,
+        mimetype,
+        path.extname(this.params.absolute_path),
+        undefined,
+        programming_language,
+      ),
     );
 
     return {
@@ -166,7 +137,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
   ReadFileToolParams,
   ToolResult
 > {
-  static readonly Name: string = 'read_file';
+  static readonly Name: string = ToolNames.READ_FILE;
 
   constructor(private config: Config) {
     super(
@@ -224,7 +195,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
 
     const fileService = this.config.getFileService();
     if (fileService.shouldGeminiIgnoreFile(params.absolute_path)) {
-      return `File path '${filePath}' is ignored by .geminiignore pattern(s).`;
+      return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
     }
 
     return null;

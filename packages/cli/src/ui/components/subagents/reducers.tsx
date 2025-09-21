@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CreationWizardState, WizardAction } from './types.js';
+import { type CreationWizardState, type WizardAction } from './types.js';
 import { WIZARD_STEPS } from './constants.js';
 import { getStepKind, getTotalSteps } from './utils.js';
 

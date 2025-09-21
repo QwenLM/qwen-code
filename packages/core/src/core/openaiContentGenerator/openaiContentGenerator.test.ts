@@ -5,23 +5,46 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
+// Mock the request tokenizer module BEFORE importing the class that uses it
+const mockTokenizer = {
+  calculateTokens: vi.fn().mockResolvedValue({
+    totalTokens: 50,
+    breakdown: {
+      textTokens: 50,
+      imageTokens: 0,
+      audioTokens: 0,
+      otherTokens: 0,
+    },
+    processingTime: 1,
+  }),
+  dispose: vi.fn(),
+};
+
+vi.mock('../../../utils/request-tokenizer/index.js', () => ({
+  getDefaultTokenizer: vi.fn(() => mockTokenizer),
+  DefaultRequestTokenizer: vi.fn(() => mockTokenizer),
+  disposeDefaultTokenizer: vi.fn(),
+}));
+
+// Mock tiktoken as well for completeness
+vi.mock('tiktoken', () => ({
+  get_encoding: vi.fn(() => ({
+    encode: vi.fn(() => new Array(50)), // Mock 50 tokens
+    free: vi.fn(),
+  })),
+}));
+
+// Now import the modules that depend on the mocked modules
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
-import { Config } from '../../config/config.js';
+import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
 import type {
   GenerateContentParameters,
   CountTokensParameters,
 } from '@google/genai';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import OpenAI from 'openai';
-
-// Mock tiktoken
-vi.mock('tiktoken', () => ({
-  get_encoding: vi.fn().mockReturnValue({
-    encode: vi.fn().mockReturnValue(new Array(50)), // Mock 50 tokens
-    free: vi.fn(),
-  }),
-}));
+import type OpenAI from 'openai';
 
 describe('OpenAIContentGenerator (Refactored)', () => {
   let generator: OpenAIContentGenerator;

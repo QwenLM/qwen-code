@@ -4,20 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Content, GenerateContentConfig } from '@google/genai';
-import { GeminiClient } from '../core/client.js';
-import { EditToolParams, EditTool } from '../tools/edit.js';
-import { WriteFileTool } from '../tools/write-file.js';
-import { ReadFileTool } from '../tools/read-file.js';
-import { ReadManyFilesTool } from '../tools/read-many-files.js';
-import { GrepTool } from '../tools/grep.js';
+import type { Content, GenerateContentConfig } from '@google/genai';
+import type { GeminiClient } from '../core/client.js';
+import type { EditToolParams } from '../tools/edit.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { LruCache } from './LruCache.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import {
   isFunctionResponse,
   isFunctionCall,
 } from '../utils/messageInspectors.js';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 
 const EditModel = DEFAULT_QWEN_FLASH_MODEL;
 const EditConfig: GenerateContentConfig = {
@@ -84,14 +81,14 @@ async function findLastEditTimestamp(
   const history = (await client.getHistory()) ?? [];
 
   // Tools that may reference the file path in their FunctionResponse `output`.
-  const toolsInResp = new Set([
-    WriteFileTool.Name,
-    EditTool.Name,
-    ReadManyFilesTool.Name,
-    GrepTool.Name,
+  const toolsInResp = new Set<string>([
+    ToolNames.WRITE_FILE,
+    ToolNames.EDIT,
+    ToolNames.READ_MANY_FILES,
+    ToolNames.GREP,
   ]);
   // Tools that may reference the file path in their FunctionCall `args`.
-  const toolsInCall = new Set([...toolsInResp, ReadFileTool.Name]);
+  const toolsInCall = new Set<string>([...toolsInResp, ToolNames.READ_FILE]);
 
   // Iterate backwards to find the most recent relevant action.
   for (const entry of history.slice().reverse()) {

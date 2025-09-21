@@ -4,25 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  expect,
-  it,
-  describe,
-  vi,
-  beforeEach,
-  afterEach,
-  MockInstance,
-} from 'vitest';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type MockInstance,
+  vi,
+} from 'vitest';
+import type { Config } from '../config/config.js';
+import { getProjectHash } from '../utils/paths.js';
 import {
   ChatRecordingService,
-  ConversationRecord,
-  ToolCallRecord,
+  type ConversationRecord,
+  type ToolCallRecord,
 } from './chatRecordingService.js';
-import { Config } from '../config/config.js';
-import { getProjectHash } from '../utils/paths.js';
 
 vi.mock('node:fs');
 vi.mock('node:path');
@@ -40,9 +40,11 @@ describe('ChatRecordingService', () => {
     mockConfig = {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
-      getProjectTempDir: vi
-        .fn()
-        .mockReturnValue('/test/project/root/.gemini/tmp'),
+      storage: {
+        getProjectTempDir: vi
+          .fn()
+          .mockReturnValue('/test/project/root/.gemini/tmp'),
+      },
       getModel: vi.fn().mockReturnValue('gemini-pro'),
       getDebugMode: vi.fn().mockReturnValue(false),
     } as unknown as Config;

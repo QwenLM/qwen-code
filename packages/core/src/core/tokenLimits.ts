@@ -116,6 +116,9 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen-flash-latest$/, LIMITS['1m']],
   [/^qwen-turbo.*$/, LIMITS['128k']],
 
+  // Qwen Vision Models
+  [/^qwen-vl-max.*$/, LIMITS['128k']],
+
   // -------------------
   // ByteDance Seed-OSS (512K)
   // -------------------

@@ -53,7 +53,7 @@
 - Added deterministic cache control for the DashScope provider.
 - Added option to choose a project-level or global save location.
 - Limited `grep` results to 25 items by default.
-- `grep` now respects `.geminiignore`.
+- `grep` now respects `.qwenignore`.
 - Miscellaneous improvements and bug fixes.
 
 ## 0.0.7

@@ -6,7 +6,7 @@
 
 import { Box } from 'ink';
 import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
-import { WizardStepProps } from '../types.js';
+import type { WizardStepProps } from '../types.js';
 
 interface LocationOption {
   label: string;

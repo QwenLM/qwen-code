@@ -5,8 +5,8 @@
  */
 
 import { Box, Text } from 'ink';
-import { SubagentConfig } from '@qwen-code/qwen-code-core';
-import { StepNavigationProps } from '../types.js';
+import { type SubagentConfig } from '@qwen-code/qwen-code-core';
+import type { StepNavigationProps } from '../types.js';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 

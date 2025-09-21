@@ -1,8 +1,9 @@
 import OpenAI from 'openai';
-import { Config } from '../../../config/config.js';
-import { AuthType, ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { Config } from '../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import { AuthType } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
-import {
+import type {
   OpenAICompatibleProvider,
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
@@ -76,6 +77,16 @@ export class DashScopeOpenAICompatibleProvider
       // Only add cache control to system message for non-streaming requests
       const cacheTarget = request.stream ? 'both' : 'system';
       messages = this.addDashScopeCacheControl(messages, cacheTarget);
+    }
+
+    if (request.model.startsWith('qwen-vl')) {
+      return {
+        ...request,
+        messages,
+        ...(this.buildMetadata(userPromptId) || {}),
+        /* @ts-expect-error dashscope exclusive */
+        vl_high_resolution_images: true,
+      };
     }
 
     return {

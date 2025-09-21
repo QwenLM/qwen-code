@@ -1,8 +1,8 @@
 import OpenAI from 'openai';
-import { Config } from '../../../config/config.js';
-import { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { Config } from '../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
-import { OpenAICompatibleProvider } from './types.js';
+import type { OpenAICompatibleProvider } from './types.js';
 
 /**
  * Default provider for standard OpenAI-compatible APIs

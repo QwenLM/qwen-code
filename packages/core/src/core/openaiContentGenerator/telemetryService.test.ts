@@ -5,13 +5,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DefaultTelemetryService, RequestContext } from './telemetryService.js';
-import { Config } from '../../config/config.js';
+import type { RequestContext } from './telemetryService.js';
+import { DefaultTelemetryService } from './telemetryService.js';
+import type { Config } from '../../config/config.js';
 import { logApiError, logApiResponse } from '../../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../../telemetry/types.js';
 import { openaiLogger } from '../../utils/openaiLogger.js';
-import { GenerateContentResponse } from '@google/genai';
-import OpenAI from 'openai';
+import type { GenerateContentResponse } from '@google/genai';
+import type OpenAI from 'openai';
 
 // Mock dependencies
 vi.mock('../../telemetry/loggers.js');

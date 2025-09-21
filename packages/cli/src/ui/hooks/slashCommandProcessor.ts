@@ -7,27 +7,28 @@
 import { useCallback, useMemo, useEffect, useState } from 'react';
 import { type PartListUnion } from '@google/genai';
 import process from 'node:process';
-import { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  Config,
   GitService,
   Logger,
   logSlashCommand,
   makeSlashCommandEvent,
   SlashCommandStatus,
   ToolConfirmationOutcome,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { formatDuration } from '../utils/formatters.js';
 import { runExitCleanup } from '../../utils/cleanup.js';
-import {
+import type {
   Message,
-  MessageType,
   HistoryItemWithoutId,
   HistoryItem,
   SlashCommandProcessorResult,
 } from '../types.js';
-import { LoadedSettings } from '../../config/settings.js';
+import { MessageType } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -52,6 +53,7 @@ export const useSlashCommandProcessor = (
   setQuittingMessages: (message: HistoryItem[]) => void,
   openPrivacyNotice: () => void,
   openSettingsDialog: () => void,
+  openModelSelectionDialog: () => void,
   openSubagentCreateDialog: () => void,
   openAgentsManagerDialog: () => void,
   toggleVimEnabled: () => Promise<boolean>,
@@ -90,11 +92,14 @@ export const useSlashCommandProcessor = (
     if (!config?.getProjectRoot()) {
       return;
     }
-    return new GitService(config.getProjectRoot());
+    return new GitService(config.getProjectRoot(), config.storage);
   }, [config]);
 
   const logger = useMemo(() => {
-    const l = new Logger(config?.getSessionId() || '');
+    const l = new Logger(
+      config?.getSessionId() || '',
+      config?.storage ?? new Storage(process.cwd()),
+    );
     // The logger's initialize is async, but we can create the instance
     // synchronously. Commands that use it will await its initialization.
     return l;
@@ -400,6 +405,9 @@ export const useSlashCommandProcessor = (
                     case 'settings':
                       openSettingsDialog();
                       return { type: 'handled' };
+                    case 'model':
+                      openModelSelectionDialog();
+                      return { type: 'handled' };
                     case 'subagent_create':
                       openSubagentCreateDialog();
                       return { type: 'handled' };
@@ -659,6 +667,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      openModelSelectionDialog,
       session.stats,
     ],
   );

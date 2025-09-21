@@ -4,13 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  SubagentConfig,
-  ValidationResult,
-  SubagentError,
-  SubagentErrorCode,
+import { SubagentError, SubagentErrorCode } from './types.js';
+import type {
   ModelConfig,
   RunConfig,
+  SubagentConfig,
+  ValidationResult,
 } from './types.js';
 
 /**

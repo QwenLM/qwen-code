@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Config } from '../../config/config.js';
+import type { Config } from '../../config/config.js';
 import { logApiError, logApiResponse } from '../../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../../telemetry/types.js';
 import { openaiLogger } from '../../utils/openaiLogger.js';
-import { GenerateContentResponse } from '@google/genai';
-import OpenAI from 'openai';
+import type { GenerateContentResponse } from '@google/genai';
+import type OpenAI from 'openai';
 
 export interface RequestContext {
   userPromptId: string;

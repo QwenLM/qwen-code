@@ -1,7 +1,7 @@
-import { ContentGenerator } from '../contentGenerator.js';
-import { Config } from '../../config/config.js';
+import type { ContentGenerator } from '../contentGenerator.js';
+import type { Config } from '../../config/config.js';
 import { type OpenAICompatibleProvider } from './provider/index.js';
-import {
+import type {
   CountTokensParameters,
   CountTokensResponse,
   EmbedContentParameters,
@@ -9,10 +9,12 @@ import {
   GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import { ContentGenerationPipeline, PipelineConfig } from './pipeline.js';
+import type { PipelineConfig } from './pipeline.js';
+import { ContentGenerationPipeline } from './pipeline.js';
 import { DefaultTelemetryService } from './telemetryService.js';
 import { EnhancedErrorHandler } from './errorHandler.js';
-import { ContentGeneratorConfig } from '../contentGenerator.js';
+import { getDefaultTokenizer } from '../../utils/request-tokenizer/index.js';
+import type { ContentGeneratorConfig } from '../contentGenerator.js';
 
 export class OpenAIContentGenerator implements ContentGenerator {
   protected pipeline: ContentGenerationPipeline;
@@ -70,27 +72,30 @@ export class OpenAIContentGenerator implements ContentGenerator {
   async countTokens(
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
-    // Use tiktoken for accurate token counting
-    const content = JSON.stringify(request.contents);
-    let totalTokens = 0;
-
     try {
-      const { get_encoding } = await import('tiktoken');
-      const encoding = get_encoding('cl100k_base'); // GPT-4 encoding, but estimate for qwen
-      totalTokens = encoding.encode(content).length;
-      encoding.free();
+      // Use the new high-performance request tokenizer
+      const tokenizer = getDefaultTokenizer();
+      const result = await tokenizer.calculateTokens(request, {
+        textEncoding: 'cl100k_base', // Use GPT-4 encoding for consistency
+      });
+
+      return {
+        totalTokens: result.totalTokens,
+      };
     } catch (error) {
       console.warn(
-        'Failed to load tiktoken, falling back to character approximation:',
+        'Failed to calculate tokens with new tokenizer, falling back to simple method:',
         error,
       );
-      // Fallback: rough approximation using character count
-      totalTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
-    }
 
-    return {
-      totalTokens,
-    };
+      // Fallback to original simple method
+      const content = JSON.stringify(request.contents);
+      const totalTokens = Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
+
+      return {
+        totalTokens,
+      };
+    }
   }
 
   async embedContent(

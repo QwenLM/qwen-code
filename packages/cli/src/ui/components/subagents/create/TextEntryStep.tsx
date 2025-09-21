@@ -6,7 +6,7 @@
 
 import { useCallback } from 'react';
 import { Box, Text } from 'ink';
-import { WizardStepProps } from '../types.js';
+import type { WizardStepProps } from '../types.js';
 import { Colors } from '../../../colors.js';
 import { TextInput } from '../../shared/TextInput.js';
 

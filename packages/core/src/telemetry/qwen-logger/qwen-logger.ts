@@ -8,14 +8,14 @@ import { Buffer } from 'buffer';
 import * as https from 'https';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
-import {
+import type {
   StartSessionEvent,
-  EndSessionEvent,
   UserPromptEvent,
   ToolCallEvent,
   ApiRequestEvent,
   ApiResponseEvent,
   ApiErrorEvent,
+  FileOperationEvent,
   FlashFallbackEvent,
   LoopDetectedEvent,
   NextSpeakerCheckEvent,
@@ -27,9 +27,11 @@ import {
   InvalidChunkEvent,
   ContentRetryEvent,
   ContentRetryFailureEvent,
+  ConversationFinishedEvent,
   SubagentExecutionEvent,
 } from '../types.js';
-import {
+import { EndSessionEvent } from '../types.js';
+import type {
   RumEvent,
   RumViewEvent,
   RumActionEvent,
@@ -37,10 +39,10 @@ import {
   RumExceptionEvent,
   RumPayload,
 } from './event-types.js';
-import { Config } from '../../config/config.js';
+import type { Config } from '../../config/config.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
-import { HttpError, retryWithBackoff } from '../../utils/retry.js';
-import { getInstallationId } from '../../utils/user_id.js';
+import { type HttpError, retryWithBackoff } from '../../utils/retry.js';
+import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
 
@@ -76,6 +78,7 @@ export interface LogResponse {
 export class QwenLogger {
   private static instance: QwenLogger;
   private config?: Config;
+  private readonly installationManager: InstallationManager;
 
   /**
    * Queue of pending events that need to be flushed to the server. New events
@@ -107,6 +110,7 @@ export class QwenLogger {
   private constructor(config?: Config) {
     this.config = config;
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
+    this.installationManager = new InstallationManager();
     this.userId = this.generateUserId();
     this.sessionId =
       typeof this.config?.getSessionId === 'function'
@@ -115,8 +119,9 @@ export class QwenLogger {
   }
 
   private generateUserId(): string {
-    // Use installation ID as user ID for consistency
-    return `user-${getInstallationId()}`;
+    // Use InstallationManager to get installationId for userId
+    const installationId = this.installationManager.getInstallationId();
+    return `user-${installationId ?? 'unknown'}`;
   }
 
   static getInstance(config?: Config): QwenLogger | undefined {
@@ -422,6 +427,29 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logFileOperationEvent(event: FileOperationEvent): void {
+    const rumEvent = this.createActionEvent(
+      'file_operation',
+      `file_operation#${event.tool_name}`,
+      {
+        properties: {
+          tool_name: event.tool_name,
+          operation: event.operation,
+          lines: event.lines,
+          mimetype: event.mimetype,
+          extension: event.extension,
+          programming_language: event.programming_language,
+        },
+        snapshots: event.diff_stat
+          ? JSON.stringify({ diff_stat: event.diff_stat })
+          : undefined,
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logApiRequestEvent(event: ApiRequestEvent): void {
     const rumEvent = this.createResourceEvent('api', 'api_request', {
       properties: {
@@ -553,6 +581,22 @@ export class QwenLogger {
     const rumEvent = this.createActionEvent('connection', 'ide_connection', {
       snapshots: JSON.stringify({ connection_type: event.connection_type }),
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logConversationFinishedEvent(event: ConversationFinishedEvent): void {
+    const rumEvent = this.createActionEvent(
+      'conversation',
+      'conversation_finished',
+      {
+        snapshots: JSON.stringify({
+          approval_mode: event.approvalMode,
+          turn_count: event.turnCount,
+        }),
+      },
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

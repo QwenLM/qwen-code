@@ -5,8 +5,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  Config,
   CodeAssistServer,
   UserTierId,
   LoggingContentGenerator,

@@ -44,7 +44,10 @@ You can also install the extension directly from a marketplace.
 - **For Visual Studio Code:** Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion).
 - **For VS Code Forks:** To support forks of VS Code, the extension is also published on the [Open VSX Registry](https://open-vsx.org/extension/qwenlm/qwen-code-vscode-ide-companion). Follow your editor's instructions for installing extensions from this registry.
 
-After any installation method, it's recommended to open a new terminal window to ensure the integration is activated correctly. Once installed, you can use `/ide enable` to connect.
+> NOTE:
+> The "Qwen Code Companion" extension may appear towards the bottom of search results. If you don't see it immediately, try scrolling down or sorting by "Newly Published".
+>
+> After manually installing the extension, you must run `/ide enable` in the CLI to activate the integration.
 
 ## Usage
 
@@ -77,7 +80,7 @@ If connected, this command will show the IDE it's connected to and a list of rec
 
 ### Working with Diffs
 
-When you ask Gemini to modify a file, it can open a diff view directly in your editor.
+When you ask Qwen model to modify a file, it can open a diff view directly in your editor.
 
 **To accept a diff**, you can perform any of the following actions:
 
@@ -126,9 +129,9 @@ If you encounter issues with IDE integration, here are some common error message
   - **Cause:** The CLI's current working directory is outside the folder or workspace you have open in your IDE.
   - **Solution:** `cd` into the same directory that is open in your IDE and restart the CLI.
 
-- **Message:** `🔴 Disconnected: To use this feature, please open a single workspace folder in [IDE Name] and try again.`
-  - **Cause:** You have multiple workspace folders open in your IDE, or no folder is open at all. The IDE integration requires a single root workspace folder to operate correctly.
-  - **Solution:** Open a single project folder in your IDE and restart the CLI.
+- **Message:** `🔴 Disconnected: To use this feature, please open a workspace folder in [IDE Name] and try again.`
+  - **Cause:** You have no workspace open in your IDE.
+  - **Solution:** Open a workspace in your IDE and restart the CLI.
 
 ### General Errors
 
@@ -136,6 +139,6 @@ If you encounter issues with IDE integration, here are some common error message
   - **Cause:** You are running Qwen Code in a terminal or environment that is not a supported IDE.
   - **Solution:** Run Qwen Code from the integrated terminal of a supported IDE, like VS Code.
 
-- **Message:** `No installer is available for [IDE Name]. Please install the IDE companion manually from its marketplace.`
+- **Message:** `No installer is available for IDE. Please install the Qwen Code Companion extension manually from the marketplace.`
   - **Cause:** You ran `/ide install`, but the CLI does not have an automated installer for your specific IDE.
   - **Solution:** Open your IDE's extension marketplace, search for "Qwen Code Companion", and install it manually.

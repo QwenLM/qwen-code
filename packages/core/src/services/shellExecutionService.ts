@@ -4,14 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getPty, PtyImplementation } from '../utils/getPty.js';
+import pkg from '@xterm/headless';
 import { spawn as cpSpawn } from 'child_process';
-import { TextDecoder } from 'util';
 import os from 'os';
+import stripAnsi from 'strip-ansi';
+import { TextDecoder } from 'util';
+import type { PtyImplementation } from '../utils/getPty.js';
+import { getPty } from '../utils/getPty.js';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
-import pkg from '@xterm/headless';
-import stripAnsi from 'strip-ansi';
 const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
@@ -140,6 +141,7 @@ export class ShellExecutionService {
       const child = cpSpawn(commandToExecute, [], {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsVerbatimArguments: true,
         shell: isWindows ? true : 'bash',
         detached: !isWindows,
         env: {
@@ -321,7 +323,7 @@ export class ShellExecutionService {
       const isWindows = os.platform() === 'win32';
       const shell = isWindows ? 'cmd.exe' : 'bash';
       const args = isWindows
-        ? ['/c', commandToExecute]
+        ? `/c ${commandToExecute}`
         : ['-c', commandToExecute];
 
       const ptyProcess = ptyInfo?.module.spawn(shell, args, {

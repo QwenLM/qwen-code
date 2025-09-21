@@ -6,7 +6,7 @@
 
 import { useCallback } from 'react';
 import { useStdin } from 'ink';
-import { EditorType } from '@qwen-code/qwen-code-core';
+import type { EditorType } from '@qwen-code/qwen-code-core';
 import { spawnSync } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
 
@@ -39,7 +39,7 @@ export function useLaunchEditor() {
 
   const launchEditor = useCallback(
     async (filePath: string): Promise<void> => {
-      const preferredEditor = settings.merged.preferredEditor as
+      const preferredEditor = settings.merged.general?.preferredEditor as
         | EditorType
         | undefined;
       const editor = getEditorCommand(preferredEditor);
@@ -75,7 +75,7 @@ export function useLaunchEditor() {
         if (wasRaw) setRawMode?.(true);
       }
     },
-    [settings.merged.preferredEditor, setRawMode, stdin],
+    [settings.merged.general?.preferredEditor, setRawMode, stdin],
   );
 
   return launchEditor;

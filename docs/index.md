@@ -33,7 +33,7 @@ This documentation is organized into the following sections:
   - **[Memory Tool](./tools/memory.md):** Documentation for the `save_memory` tool.
 - **[Subagents](./subagents.md):** Specialized AI assistants for focused tasks with comprehensive management, configuration, and usage guidance.
 - **[Contributing & Development Guide](../CONTRIBUTING.md):** Information for contributors and developers, including setup, building, testing, and coding conventions.
-- **[NPM Workspaces and Publishing](./npm.md):** Details on how the project's packages are managed and published.
+- **[NPM](./npm.md):** Details on how the project's packages are structured
 - **[Troubleshooting Guide](./troubleshooting.md):** Find solutions to common problems and FAQs.
 - **[Terms of Service and Privacy Notice](./tos-privacy.md):** Information on the terms of service and privacy notices applicable to your use of Qwen Code.
 

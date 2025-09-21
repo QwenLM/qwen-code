@@ -5,18 +5,20 @@
  */
 
 import { vi } from 'vitest';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  ToolCallConfirmationDetails,
-  ToolInvocation,
-  ToolResult,
-  Kind,
-} from '../tools/tools.js';
-import {
+import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from '../tools/modifiable-tool.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from '../tools/tools.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind,
+} from '../tools/tools.js';
 
 class MockToolInvocation extends BaseToolInvocation<
   { [key: string]: unknown },

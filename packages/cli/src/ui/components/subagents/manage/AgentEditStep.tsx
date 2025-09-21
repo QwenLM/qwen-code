@@ -10,7 +10,7 @@ import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import { MANAGEMENT_STEPS } from '../types.js';
 import { theme } from '../../../semantic-colors.js';
 import { useLaunchEditor } from '../../../hooks/useLaunchEditor.js';
-import { SubagentConfig } from '@qwen-code/qwen-code-core';
+import { type SubagentConfig } from '@qwen-code/qwen-code-core';
 
 interface EditOption {
   id: string;

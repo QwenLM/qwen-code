@@ -5,11 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import { OpenRouterOpenAICompatibleProvider } from './openrouter.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
-import { Config } from '../../../config/config.js';
-import { ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { Config } from '../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 
 describe('OpenRouterOpenAICompatibleProvider', () => {
   let provider: OpenRouterOpenAICompatibleProvider;

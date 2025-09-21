@@ -4,15 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GlobTool, GlobToolParams, GlobPath, sortFileEntries } from './glob.js';
+import type { GlobToolParams, GlobPath } from './glob.js';
+import { GlobTool, sortFileEntries } from './glob.js';
 import { partListUnionToString } from '../core/geminiRequest.js';
-import path from 'path';
-import fs from 'fs/promises';
-import os from 'os';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import path from 'node:path';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { ToolErrorType } from './tool-error.js';
+import * as glob from 'glob';
+
+vi.mock('glob', { spy: true });
 
 describe('GlobTool', () => {
   let tempRootDir: string; // This will be the rootDirectory for the GlobTool instance
@@ -25,6 +30,9 @@ describe('GlobTool', () => {
     getFileFilteringRespectGitIgnore: () => true,
     getTargetDir: () => tempRootDir,
     getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+    getFileExclusions: () => ({
+      getGlobExcludes: () => [],
+    }),
   } as unknown as Config;
 
   beforeEach(async () => {
@@ -54,6 +62,9 @@ describe('GlobTool', () => {
     // Ensure a noticeable difference in modification time
     await new Promise((resolve) => setTimeout(resolve, 50));
     await fs.writeFile(path.join(tempRootDir, 'newer.sortme'), 'newer_content');
+
+    // For type coercion testing
+    await fs.mkdir(path.join(tempRootDir, '123'));
   });
 
   afterEach(async () => {
@@ -203,6 +214,29 @@ describe('GlobTool', () => {
         path.resolve(tempRootDir, 'older.sortme'),
       );
     });
+
+    it('should return a PATH_NOT_IN_WORKSPACE error if path is outside workspace', async () => {
+      // Bypassing validation to test execute method directly
+      vi.spyOn(globTool, 'validateToolParams').mockReturnValue(null);
+      const params: GlobToolParams = { pattern: '*.txt', path: '/etc' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.PATH_NOT_IN_WORKSPACE);
+      expect(result.returnDisplay).toBe('Path is not within workspace');
+    });
+
+    it('should return a GLOB_EXECUTION_ERROR on glob failure', async () => {
+      vi.mocked(glob.glob).mockRejectedValue(new Error('Glob failed'));
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.GLOB_EXECUTION_ERROR);
+      expect(result.llmContent).toContain(
+        'Error during glob search operation: Glob failed',
+      );
+      // Reset glob.
+      vi.mocked(glob.glob).mockReset();
+    });
   });
 
   describe('validateToolParams', () => {
@@ -248,26 +282,20 @@ describe('GlobTool', () => {
       );
     });
 
-    it('should return error if path is provided but is not a string (schema validation)', () => {
+    it('should pass if path is provided but is not a string (type coercion)', () => {
       const params = {
         pattern: '*.ts',
         path: 123,
-      };
-      // @ts-expect-error - We're intentionally creating invalid params for testing
-      expect(globTool.validateToolParams(params)).toBe(
-        'params/path must be string',
-      );
+      } as unknown as GlobToolParams; // Force incorrect type
+      expect(globTool.validateToolParams(params)).toBeNull();
     });
 
-    it('should return error if case_sensitive is provided but is not a boolean (schema validation)', () => {
+    it('should pass if case_sensitive is provided but is not a boolean (type coercion)', () => {
       const params = {
         pattern: '*.ts',
         case_sensitive: 'true',
-      };
-      // @ts-expect-error - We're intentionally creating invalid params for testing
-      expect(globTool.validateToolParams(params)).toBe(
-        'params/case_sensitive must be boolean',
-      );
+      } as unknown as GlobToolParams; // Force incorrect type
+      expect(globTool.validateToolParams(params)).toBeNull();
     });
 
     it("should return error if search path resolves outside the tool's root directory", () => {

@@ -6,10 +6,10 @@
 
 import { OpenAIContentGenerator } from '../core/openaiContentGenerator/index.js';
 import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
-import { IQwenOAuth2Client } from './qwenOAuth2.js';
+import type { IQwenOAuth2Client } from './qwenOAuth2.js';
 import { SharedTokenManager } from './sharedTokenManager.js';
-import { Config } from '../config/config.js';
-import {
+import type { Config } from '../config/config.js';
+import type {
   GenerateContentParameters,
   GenerateContentResponse,
   CountTokensParameters,
@@ -17,7 +17,7 @@ import {
   EmbedContentParameters,
   EmbedContentResponse,
 } from '@google/genai';
-import { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 
 // Default fallback base URL if no endpoint is provided
 const DEFAULT_QWEN_BASE_URL =
@@ -180,9 +180,7 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
   override async countTokens(
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
-    return this.executeWithCredentialManagement(() =>
-      super.countTokens(request),
-    );
+    return super.countTokens(request);
   }
 
   /**

@@ -4,23 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  Config,
   KittySequenceOverflowEvent,
   logKittySequenceOverflow,
 } from '@qwen-code/qwen-code-core';
 import { useStdin } from 'ink';
-import React, {
+import type React from 'react';
+import {
   createContext,
   useCallback,
   useContext,
   useEffect,
   useRef,
 } from 'react';
-import readline from 'readline';
-import { PassThrough } from 'stream';
+import readline from 'node:readline';
+import { PassThrough } from 'node:stream';
 import {
   BACKSLASH_ENTER_DETECTION_WINDOW_MS,
+  CHAR_CODE_ESC,
   KITTY_CTRL_C,
   KITTY_KEYCODE_BACKSPACE,
   KITTY_KEYCODE_ENTER,
@@ -71,11 +73,13 @@ export function KeypressProvider({
   kittyProtocolEnabled,
   pasteWorkaround = false,
   config,
+  debugKeystrokeLogging,
 }: {
   children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
   pasteWorkaround?: boolean;
   config?: Config;
+  debugKeystrokeLogging?: boolean;
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
@@ -124,48 +128,17 @@ export function KeypressProvider({
       const alt = (modifierBits & 2) === 2;
       const ctrl = (modifierBits & 4) === 4;
 
-      if (keyCode === 27) {
-        return {
-          name: 'escape',
-          ctrl,
-          meta: alt,
-          shift,
-          paste: false,
-          sequence,
-          kittyProtocol: true,
-        };
-      }
+      const keyNameMap: Record<number, string> = {
+        [CHAR_CODE_ESC]: 'escape',
+        [KITTY_KEYCODE_TAB]: 'tab',
+        [KITTY_KEYCODE_BACKSPACE]: 'backspace',
+        [KITTY_KEYCODE_ENTER]: 'return',
+        [KITTY_KEYCODE_NUMPAD_ENTER]: 'return',
+      };
 
-      if (keyCode === KITTY_KEYCODE_TAB) {
+      if (keyCode in keyNameMap) {
         return {
-          name: 'tab',
-          ctrl,
-          meta: alt,
-          shift,
-          paste: false,
-          sequence,
-          kittyProtocol: true,
-        };
-      }
-
-      if (keyCode === KITTY_KEYCODE_BACKSPACE) {
-        return {
-          name: 'backspace',
-          ctrl,
-          meta: alt,
-          shift,
-          paste: false,
-          sequence,
-          kittyProtocol: true,
-        };
-      }
-
-      if (
-        keyCode === KITTY_KEYCODE_ENTER ||
-        keyCode === KITTY_KEYCODE_NUMPAD_ENTER
-      ) {
-        return {
-          name: 'return',
+          name: keyNameMap[keyCode],
           ctrl,
           meta: alt,
           shift,
@@ -271,6 +244,12 @@ export function KeypressProvider({
         (key.ctrl && key.name === 'c') ||
         key.sequence === `${ESC}${KITTY_CTRL_C}`
       ) {
+        if (kittySequenceBuffer && debugKeystrokeLogging) {
+          console.log(
+            '[DEBUG] Kitty buffer cleared on Ctrl+C:',
+            kittySequenceBuffer,
+          );
+        }
         kittySequenceBuffer = '';
         if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
           broadcast({
@@ -298,14 +277,28 @@ export function KeypressProvider({
             !key.sequence.startsWith(FOCUS_OUT))
         ) {
           kittySequenceBuffer += key.sequence;
+
+          if (debugKeystrokeLogging) {
+            console.log(
+              '[DEBUG] Kitty buffer accumulating:',
+              kittySequenceBuffer,
+            );
+          }
+
           const kittyKey = parseKittySequence(kittySequenceBuffer);
           if (kittyKey) {
+            if (debugKeystrokeLogging) {
+              console.log(
+                '[DEBUG] Kitty sequence parsed successfully:',
+                kittySequenceBuffer,
+              );
+            }
             kittySequenceBuffer = '';
             broadcast(kittyKey);
             return;
           }
 
-          if (config?.getDebugMode()) {
+          if (config?.getDebugMode() || debugKeystrokeLogging) {
             const codes = Array.from(kittySequenceBuffer).map((ch) =>
               ch.charCodeAt(0),
             );
@@ -313,6 +306,12 @@ export function KeypressProvider({
           }
 
           if (kittySequenceBuffer.length > MAX_KITTY_SEQUENCE_LENGTH) {
+            if (debugKeystrokeLogging) {
+              console.log(
+                '[DEBUG] Kitty buffer overflow, clearing:',
+                kittySequenceBuffer,
+              );
+            }
             if (config) {
               const event = new KittySequenceOverflowEvent(
                 kittySequenceBuffer.length,
@@ -496,6 +495,7 @@ export function KeypressProvider({
     stdin,
     setRawMode,
     kittyProtocolEnabled,
+    debugKeystrokeLogging,
     pasteWorkaround,
     config,
     subscribers,

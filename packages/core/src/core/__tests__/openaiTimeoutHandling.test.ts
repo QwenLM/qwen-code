@@ -5,9 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OpenAIContentGenerator } from '../openaiContentGenerator.js';
-import { Config } from '../../config/config.js';
+import { OpenAIContentGenerator } from '../openaiContentGenerator/openaiContentGenerator.js';
+import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
+import type { OpenAICompatibleProvider } from '../openaiContentGenerator/provider/index.js';
 import OpenAI from 'openai';
 
 // Mock OpenAI
@@ -30,6 +31,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
   let mockConfig: Config;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockOpenAIClient: any;
+  let mockProvider: OpenAICompatibleProvider;
 
   beforeEach(() => {
     // Reset mocks
@@ -42,6 +44,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
     mockConfig = {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         authType: 'openai',
+        enableOpenAILogging: false,
       }),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
     } as unknown as Config;
@@ -53,17 +56,34 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
           create: vi.fn(),
         },
       },
+      embeddings: {
+        create: vi.fn(),
+      },
     };
 
     vi.mocked(OpenAI).mockImplementation(() => mockOpenAIClient);
+
+    // Create mock provider
+    mockProvider = {
+      buildHeaders: vi.fn().mockReturnValue({
+        'User-Agent': 'QwenCode/1.0.0 (test; test)',
+      }),
+      buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
+      buildRequest: vi.fn().mockImplementation((req) => req),
+    };
 
     // Create generator instance
     const contentGeneratorConfig = {
       model: 'gpt-4',
       apiKey: 'test-key',
       authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
     };
-    generator = new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
+    generator = new OpenAIContentGenerator(
+      contentGeneratorConfig,
+      mockConfig,
+      mockProvider,
+    );
   });
 
   afterEach(() => {
@@ -209,7 +229,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
       await expect(
         generator.generateContentStream(request, 'test-prompt-id'),
       ).rejects.toThrow(
-        /Streaming setup timeout after \d+s\. Try reducing input length or increasing timeout in config\./,
+        /Streaming request timeout after \d+s\. Try reducing input length or increasing timeout in config\./,
       );
     });
 
@@ -227,12 +247,8 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
       } catch (error: unknown) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        expect(errorMessage).toContain(
-          'Streaming setup timeout troubleshooting:',
-        );
-        expect(errorMessage).toContain(
-          'Check network connectivity and firewall settings',
-        );
+        expect(errorMessage).toContain('Streaming timeout troubleshooting:');
+        expect(errorMessage).toContain('Check network connectivity');
         expect(errorMessage).toContain('Consider using non-streaming mode');
       }
     });
@@ -246,23 +262,21 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         authType: AuthType.USE_OPENAI,
         baseUrl: 'http://localhost:8080',
       };
-      new OpenAIContentGenerator(contentGeneratorConfig, mockConfig);
+      new OpenAIContentGenerator(
+        contentGeneratorConfig,
+        mockConfig,
+        mockProvider,
+      );
 
-      // Verify OpenAI client was created with timeout config
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-key',
-        baseURL: 'http://localhost:8080',
-        timeout: 120000,
-        maxRetries: 3,
-        defaultHeaders: {
-          'User-Agent': expect.stringMatching(/^QwenCode/),
-        },
-      });
+      // Verify provider buildClient was called
+      expect(mockProvider.buildClient).toHaveBeenCalled();
     });
 
     it('should use custom timeout from config', () => {
       const customConfig = {
-        getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          enableOpenAILogging: false,
+        }),
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
@@ -274,22 +288,31 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         timeout: 300000,
         maxRetries: 5,
       };
-      new OpenAIContentGenerator(contentGeneratorConfig, customConfig);
 
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-key',
-        baseURL: 'http://localhost:8080',
-        timeout: 300000,
-        maxRetries: 5,
-        defaultHeaders: {
-          'User-Agent': expect.stringMatching(/^QwenCode/),
-        },
-      });
+      // Create a custom mock provider for this test
+      const customMockProvider: OpenAICompatibleProvider = {
+        buildHeaders: vi.fn().mockReturnValue({
+          'User-Agent': 'QwenCode/1.0.0 (test; test)',
+        }),
+        buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
+        buildRequest: vi.fn().mockImplementation((req) => req),
+      };
+
+      new OpenAIContentGenerator(
+        contentGeneratorConfig,
+        customConfig,
+        customMockProvider,
+      );
+
+      // Verify provider buildClient was called
+      expect(customMockProvider.buildClient).toHaveBeenCalled();
     });
 
     it('should handle missing timeout config gracefully', () => {
       const noTimeoutConfig = {
-        getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+        getContentGeneratorConfig: vi.fn().mockReturnValue({
+          enableOpenAILogging: false,
+        }),
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       } as unknown as Config;
 
@@ -299,17 +322,24 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         authType: AuthType.USE_OPENAI,
         baseUrl: 'http://localhost:8080',
       };
-      new OpenAIContentGenerator(contentGeneratorConfig, noTimeoutConfig);
 
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-key',
-        baseURL: 'http://localhost:8080',
-        timeout: 120000, // default
-        maxRetries: 3, // default
-        defaultHeaders: {
-          'User-Agent': expect.stringMatching(/^QwenCode/),
-        },
-      });
+      // Create a custom mock provider for this test
+      const noTimeoutMockProvider: OpenAICompatibleProvider = {
+        buildHeaders: vi.fn().mockReturnValue({
+          'User-Agent': 'QwenCode/1.0.0 (test; test)',
+        }),
+        buildClient: vi.fn().mockReturnValue(mockOpenAIClient),
+        buildRequest: vi.fn().mockImplementation((req) => req),
+      };
+
+      new OpenAIContentGenerator(
+        contentGeneratorConfig,
+        noTimeoutConfig,
+        noTimeoutMockProvider,
+      );
+
+      // Verify provider buildClient was called
+      expect(noTimeoutMockProvider.buildClient).toHaveBeenCalled();
     });
   });
 

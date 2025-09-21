@@ -18,7 +18,7 @@ describe('AuthDialog', () => {
   beforeEach(() => {
     originalEnv = { ...process.env };
     process.env['GEMINI_API_KEY'] = '';
-    process.env['GEMINI_DEFAULT_AUTH_TYPE'] = '';
+    process.env['QWEN_DEFAULT_AUTH_TYPE'] = '';
     vi.clearAllMocks();
   });
 
@@ -31,20 +31,30 @@ describe('AuthDialog', () => {
 
     const settings: LoadedSettings = new LoadedSettings(
       {
-        settings: { customThemes: {}, mcpServers: {} },
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
         path: '',
       },
       {
         settings: {
-          selectedAuthType: AuthType.USE_GEMINI,
+          security: {
+            auth: {
+              selectedType: AuthType.USE_GEMINI,
+            },
+          },
         },
         path: '',
       },
       {
-        settings: { customThemes: {}, mcpServers: {} },
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
         path: '',
       },
       [],
+      true,
+      new Set(),
     );
 
     const { lastFrame } = renderWithProviders(
@@ -67,21 +77,27 @@ describe('AuthDialog', () => {
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
-            selectedAuthType: undefined,
-            customThemes: {},
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
             mcpServers: {},
           },
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: {},
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
           path: '',
         },
         [],
+        true,
+        new Set(),
       );
 
       const { lastFrame } = renderWithProviders(
@@ -93,28 +109,34 @@ describe('AuthDialog', () => {
       expect(lastFrame()).toContain('OpenAI');
     });
 
-    it('should not show the GEMINI_API_KEY message if GEMINI_DEFAULT_AUTH_TYPE is set to something else', () => {
+    it('should not show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to something else', () => {
       process.env['GEMINI_API_KEY'] = 'foobar';
-      process.env['GEMINI_DEFAULT_AUTH_TYPE'] = AuthType.LOGIN_WITH_GOOGLE;
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.LOGIN_WITH_GOOGLE;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
-            selectedAuthType: undefined,
-            customThemes: {},
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
             mcpServers: {},
           },
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: {},
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
           path: '',
         },
         [],
+        true,
+        new Set(),
       );
 
       const { lastFrame } = renderWithProviders(
@@ -126,28 +148,34 @@ describe('AuthDialog', () => {
       );
     });
 
-    it('should show the GEMINI_API_KEY message if GEMINI_DEFAULT_AUTH_TYPE is set to use api key', () => {
+    it('should show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to use api key', () => {
       process.env['GEMINI_API_KEY'] = 'foobar';
-      process.env['GEMINI_DEFAULT_AUTH_TYPE'] = AuthType.USE_GEMINI;
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.USE_GEMINI;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
-            selectedAuthType: undefined,
-            customThemes: {},
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
             mcpServers: {},
           },
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: {},
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
           path: '',
         },
         [],
+        true,
+        new Set(),
       );
 
       const { lastFrame } = renderWithProviders(
@@ -160,28 +188,34 @@ describe('AuthDialog', () => {
     });
   });
 
-  describe('GEMINI_DEFAULT_AUTH_TYPE environment variable', () => {
-    it('should select the auth type specified by GEMINI_DEFAULT_AUTH_TYPE', () => {
-      process.env['GEMINI_DEFAULT_AUTH_TYPE'] = AuthType.USE_OPENAI;
+  describe('QWEN_DEFAULT_AUTH_TYPE environment variable', () => {
+    it('should select the auth type specified by QWEN_DEFAULT_AUTH_TYPE', () => {
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.USE_OPENAI;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
-            selectedAuthType: undefined,
-            customThemes: {},
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
             mcpServers: {},
           },
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: {},
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
           path: '',
         },
         [],
+        true,
+        new Set(),
       );
 
       const { lastFrame } = renderWithProviders(
@@ -192,25 +226,31 @@ describe('AuthDialog', () => {
       expect(lastFrame()).toContain('● 2. OpenAI');
     });
 
-    it('should fall back to default if GEMINI_DEFAULT_AUTH_TYPE is not set', () => {
+    it('should fall back to default if QWEN_DEFAULT_AUTH_TYPE is not set', () => {
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
-            selectedAuthType: undefined,
-            customThemes: {},
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
             mcpServers: {},
           },
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: {},
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
           path: '',
         },
         [],
+        true,
+        new Set(),
       );
 
       const { lastFrame } = renderWithProviders(
@@ -221,59 +261,116 @@ describe('AuthDialog', () => {
       expect(lastFrame()).toContain('● 1. Qwen OAuth');
     });
 
-    it('should show an error and fall back to default if GEMINI_DEFAULT_AUTH_TYPE is invalid', () => {
-      process.env['GEMINI_DEFAULT_AUTH_TYPE'] = 'invalid-auth-type';
+    it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = 'invalid-auth-type';
 
       const settings: LoadedSettings = new LoadedSettings(
         {
           settings: {
-            selectedAuthType: undefined,
-            customThemes: {},
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
             mcpServers: {},
           },
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: {},
           path: '',
         },
         {
-          settings: { customThemes: {}, mcpServers: {} },
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
           path: '',
         },
         [],
+        true,
+        new Set(),
       );
 
       const { lastFrame } = renderWithProviders(
         <AuthDialog onSelect={() => {}} settings={settings} />,
       );
 
-      // Since the auth dialog doesn't show GEMINI_DEFAULT_AUTH_TYPE errors anymore,
+      // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
       // it will just show the default Qwen OAuth option
       expect(lastFrame()).toContain('● 1. Qwen OAuth');
     });
+  });
+
+  it('should prevent exiting when no auth method is selected and show error message', async () => {
+    const onSelect = vi.fn();
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        path: '',
+      },
+      {
+        settings: {
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
+          mcpServers: {},
+        },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      [],
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, stdin, unmount } = renderWithProviders(
+      <AuthDialog onSelect={onSelect} settings={settings} />,
+    );
+    await wait();
+
+    // Simulate pressing escape key
+    stdin.write('\u001b'); // ESC key
+    await wait();
+
+    // Should show error message instead of calling onSelect
+    expect(lastFrame()).toContain(
+      'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+    unmount();
   });
 
   it('should not exit if there is already an error message', async () => {
     const onSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
-        settings: { customThemes: {}, mcpServers: {} },
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
         path: '',
       },
       {
         settings: {
-          selectedAuthType: undefined,
-          customThemes: {},
+          security: { auth: { selectedType: undefined } },
+          ui: { customThemes: {} },
           mcpServers: {},
         },
         path: '',
       },
       {
-        settings: { customThemes: {}, mcpServers: {} },
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
         path: '',
       },
       [],
+      true,
+      new Set(),
     );
 
     const { lastFrame, stdin, unmount } = renderWithProviders(
@@ -300,22 +397,28 @@ describe('AuthDialog', () => {
     const onSelect = vi.fn();
     const settings: LoadedSettings = new LoadedSettings(
       {
-        settings: { customThemes: {}, mcpServers: {} },
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
         path: '',
       },
       {
         settings: {
-          selectedAuthType: AuthType.USE_GEMINI,
-          customThemes: {},
+          security: { auth: { selectedType: AuthType.LOGIN_WITH_GOOGLE } },
+          ui: { customThemes: {} },
           mcpServers: {},
         },
         path: '',
       },
       {
-        settings: { customThemes: {}, mcpServers: {} },
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
         path: '',
       },
       [],
+      true,
+      new Set(),
     );
 
     const { stdin, unmount } = renderWithProviders(

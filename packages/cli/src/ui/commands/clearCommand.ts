@@ -5,7 +5,8 @@
  */
 
 import { uiTelemetryService } from '@qwen-code/qwen-code-core';
-import { CommandKind, SlashCommand } from './types.js';
+import type { SlashCommand } from './types.js';
+import { CommandKind } from './types.js';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',

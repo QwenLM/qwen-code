@@ -14,8 +14,9 @@ import {
 } from 'vitest';
 import OpenAI from 'openai';
 import { DashScopeOpenAICompatibleProvider } from './dashscope.js';
-import { Config } from '../../../config/config.js';
-import { AuthType, ContentGeneratorConfig } from '../../contentGenerator.js';
+import type { Config } from '../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import { AuthType } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 
 // Mock OpenAI

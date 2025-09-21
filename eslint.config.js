@@ -10,9 +10,10 @@ import reactPlugin from 'eslint-plugin-react';
 import reactHooks from 'eslint-plugin-react-hooks';
 import prettierConfig from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import';
+import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
 import licenseHeader from 'eslint-plugin-license-header';
-import path from 'node:path'; // Use node: prefix for built-ins
+import path from 'node:path';
 import url from 'node:url';
 
 // --- ESM way to get __dirname ---
@@ -29,10 +30,7 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'eslint.config.js',
-      'packages/cli/dist/**',
-      'packages/core/dist/**',
-      'packages/server/dist/**',
-      'packages/vscode-ide-companion/dist/**',
+      'packages/**/dist/**',
       'bundle/**',
       'package/bundle/**',
       '.integration-tests/**',
@@ -105,6 +103,10 @@ export default tseslint.config(
         'error',
         { ignoreParameters: true, ignoreProperties: true },
       ],
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        { disallowTypeAnnotations: false },
+      ],
       '@typescript-eslint/no-namespace': ['error', { allowDeclarations: true }],
       '@typescript-eslint/no-unused-vars': [
         'error',
@@ -122,6 +124,7 @@ export default tseslint.config(
             'memfs/lib/volume.js',
             'yargs/**',
             'msw/node',
+            '**/generated/**'
           ],
         },
       ],
@@ -155,6 +158,17 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
+    },
+  },
+  {
+    files: ['packages/*/src/**/*.test.{ts,tsx}'],
+    plugins: {
+      vitest,
+    },
+    rules: {
+      ...vitest.configs.recommended.rules,
+      'vitest/expect-expect': 'off',
+      'vitest/no-commented-out-tests': 'off',
     },
   },
   // extra settings for scripts that we run directly with node

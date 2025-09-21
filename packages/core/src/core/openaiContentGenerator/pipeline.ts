@@ -4,20 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import OpenAI from 'openai';
+import type OpenAI from 'openai';
 import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import { Config } from '../../config/config.js';
-import { type ContentGeneratorConfig } from '../contentGenerator.js';
-import { type OpenAICompatibleProvider } from './provider/index.js';
+import type { Config } from '../../config/config.js';
+import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
-import {
-  type TelemetryService,
-  type RequestContext,
-} from './telemetryService.js';
-import { type ErrorHandler } from './errorHandler.js';
+import type { TelemetryService, RequestContext } from './telemetryService.js';
+import type { ErrorHandler } from './errorHandler.js';
 
 export interface PipelineConfig {
   cliConfig: Config;
@@ -101,7 +98,7 @@ export class ContentGenerationPipeline {
    * 2. Filter empty responses
    * 3. Handle chunk merging for providers that send finishReason and usageMetadata separately
    * 4. Collect both formats for logging
-   * 5. Handle success/error logging with original OpenAI format
+   * 5. Handle success/error logging
    */
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
@@ -169,19 +166,11 @@ export class ContentGenerationPipeline {
         collectedOpenAIChunks,
       );
     } catch (error) {
-      // Stage 2e: Stream failed - handle error and logging
-      context.duration = Date.now() - context.startTime;
-
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
 
-      await this.config.telemetryService.logError(
-        context,
-        error,
-        openaiRequest,
-      );
-
-      this.config.errorHandler.handle(error, context, request);
+      // Use shared error handling logic
+      await this.handleError(error, context, request);
     }
   }
 
@@ -365,23 +354,57 @@ export class ContentGenerationPipeline {
       context.duration = Date.now() - context.startTime;
       return result;
     } catch (error) {
-      context.duration = Date.now() - context.startTime;
-
-      // Log error
-      const openaiRequest = await this.buildRequest(
+      // Use shared error handling logic
+      return await this.handleError(
+        error,
+        context,
         request,
         userPromptId,
         isStreaming,
       );
-      await this.config.telemetryService.logError(
-        context,
-        error,
-        openaiRequest,
-      );
-
-      // Handle and throw enhanced error
-      this.config.errorHandler.handle(error, context, request);
     }
+  }
+
+  /**
+   * Shared error handling logic for both executeWithErrorHandling and processStreamWithLogging
+   * This centralizes the common error processing steps to avoid duplication
+   */
+  private async handleError(
+    error: unknown,
+    context: RequestContext,
+    request: GenerateContentParameters,
+    userPromptId?: string,
+    isStreaming?: boolean,
+  ): Promise<never> {
+    context.duration = Date.now() - context.startTime;
+
+    // Build request for logging (may fail, but we still want to log the error)
+    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams;
+    try {
+      if (userPromptId !== undefined && isStreaming !== undefined) {
+        openaiRequest = await this.buildRequest(
+          request,
+          userPromptId,
+          isStreaming,
+        );
+      } else {
+        // For processStreamWithLogging, we don't have userPromptId/isStreaming,
+        // so create a minimal request
+        openaiRequest = {
+          model: this.contentGeneratorConfig.model,
+          messages: [],
+        };
+      }
+    } catch (_buildError) {
+      // If we can't build the request, create a minimal one for logging
+      openaiRequest = {
+        model: this.contentGeneratorConfig.model,
+        messages: [],
+      };
+    }
+
+    await this.config.telemetryService.logError(context, error, openaiRequest);
+    this.config.errorHandler.handle(error, context, request);
   }
 
   /**

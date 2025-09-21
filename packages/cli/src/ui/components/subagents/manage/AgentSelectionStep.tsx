@@ -9,7 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { Colors } from '../../../colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
-import { SubagentConfig } from '@qwen-code/qwen-code-core';
+import { type SubagentConfig } from '@qwen-code/qwen-code-core';
 
 interface NavigationState {
   currentBlock: 'project' | 'user' | 'builtin';
@@ -227,7 +227,7 @@ export const AgentSelectionStep = ({
     const textColor = isSelected ? theme.text.accent : theme.text.primary;
 
     return (
-      <Box key={agent.name} alignItems="center">
+      <Box key={`${agent.name}-${agent.level}`} alignItems="center">
         <Box minWidth={2} flexShrink={0}>
           <Text color={isSelected ? theme.text.accent : theme.text.primary}>
             {isSelected ? '●' : ' '}

@@ -5,10 +5,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { TodoWriteTool, TodoWriteParams, TodoItem } from './todoWrite.js';
+import type { TodoWriteParams, TodoItem } from './todoWrite.js';
+import { TodoWriteTool } from './todoWrite.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 
 // Mock fs modules
 vi.mock('fs/promises');

@@ -5,9 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { GenerateContentParameters } from '@google/genai';
+import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
-import { RequestContext } from './telemetryService.js';
+import type { RequestContext } from './telemetryService.js';
 
 describe('EnhancedErrorHandler', () => {
   let errorHandler: EnhancedErrorHandler;

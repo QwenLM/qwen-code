@@ -5,10 +5,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import {
-  StreamingToolCallParser,
-  ToolCallParseResult,
-} from './streamingToolCallParser.js';
+import type { ToolCallParseResult } from './streamingToolCallParser.js';
+import { StreamingToolCallParser } from './streamingToolCallParser.js';
 
 describe('StreamingToolCallParser', () => {
   let parser: StreamingToolCallParser;

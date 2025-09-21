@@ -14,11 +14,8 @@ defaults:
     shell: 'bash'
 
 permissions:
-  contents: 'read'
   id-token: 'write'
   issues: 'write'
-  statuses: 'write'
-  packages: 'read'
 
 jobs:
   triage-issues:
@@ -70,18 +67,14 @@ jobs:
             {
               "maxSessionTurns": 25,
               "coreTools": [
-                "run_shell_command(echo)",
-                "run_shell_command(gh label list)",
-                "run_shell_command(gh issue edit)",
-                "run_shell_command(gh issue view)",
-                "run_shell_command(gh issue list)"
+                "run_shell_command(echo)"
               ],
               "sandbox": false
             }
           prompt: |-
             ## Role
 
-            You are an issue triage assistant. Analyze issues and apply
+            You are an issue triage assistant. Analyze issues and identify
             appropriate labels. Use the available tools to gather information;
             do not ask for information to be provided.
 
@@ -114,13 +107,15 @@ jobs:
 
             ## Guidelines
 
+            - Output only valid JSON format
+            - Do not include any explanation or additional text, just the JSON
             - Only use labels that already exist in the repository.
               - Do not add comments or modify the issue content.
               - Do not remove labels titled help wanted or good first issue.
               - Triage only the current issue.
-              - Apply only one area/ label
-              - Apply only one kind/ label (Do not apply kind/duplicate or kind/parent-issue)
-              - Apply all applicable sub-area/* and priority/* labels based on the issue content. It's ok to have multiple of these.
+              - Identify only one area/ label
+              - Identify only one kind/ label (Do not apply kind/duplicate or kind/parent-issue)
+              - Identify all applicable sub-area/* and priority/* labels based on the issue content. It's ok to have multiple of these.
               - Once you categorize the issue if it needs information bump down the priority by 1 eg.. a p0 would become a p1 a p1 would become a p2. P2 and P3 can stay as is in this scenario.
             Categorization Guidelines:
             P0: Critical / Blocker
