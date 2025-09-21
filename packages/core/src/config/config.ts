@@ -54,6 +54,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   DEFAULT_GEMINI_EMBEDDING_MODEL,
   DEFAULT_GEMINI_FLASH_MODEL,
+  DEFAULT_MODELS_FOR_AUTH_TYPE,
 } from './models.js';
 import { Storage } from './storage.js';
 
@@ -457,7 +458,7 @@ export class Config {
     logCliConfiguration(this, new StartSessionEvent(this, this.toolRegistry));
   }
 
-  async refreshAuth(authMethod: AuthType) {
+  async refreshAuth(authMethod: AuthType, options?: { setDefaultModel?: boolean }) {
     // Save the current conversation history before creating a new client
     let existingHistory: Content[] = [];
     if (this.geminiClient && this.geminiClient.isInitialized()) {
@@ -469,6 +470,11 @@ export class Config {
       this,
       authMethod,
     );
+
+    // Set default model if requested
+    if (options?.setDefaultModel) {
+      newContentGeneratorConfig.model = DEFAULT_MODELS_FOR_AUTH_TYPE[authMethod];
+    }
 
     // Create and initialize new client in local variable first
     const newGeminiClient = new GeminiClient(this);
