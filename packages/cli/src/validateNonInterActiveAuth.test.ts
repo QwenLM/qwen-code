@@ -126,6 +126,18 @@ describe('validateNonInterActiveAuth', () => {
     expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
+  it('uses configured QWEN_OAUTH if provided', async () => {
+    const nonInteractiveConfig: NonInteractiveConfig = {
+      refreshAuth: refreshAuthMock,
+    };
+    await validateNonInteractiveAuth(
+      AuthType.QWEN_OAUTH,
+      undefined,
+      nonInteractiveConfig,
+    );
+    expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.QWEN_OAUTH);
+  });
+
   it('uses USE_VERTEX_AI if GOOGLE_GENAI_USE_VERTEXAI is true (with GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION)', async () => {
     process.env['GOOGLE_GENAI_USE_VERTEXAI'] = 'true';
     process.env['GOOGLE_CLOUD_PROJECT'] = 'test-project';
