@@ -600,7 +600,8 @@ describe('retryWithBackoff', () => {
         initialDelayMs: 1000,
       });
 
-      const assertionPromise = expect(promise).rejects.toThrow('Too Many Requests');
+      const assertionPromise =
+        expect(promise).rejects.toThrow('Too Many Requests');
       await vi.runAllTimersAsync();
       await assertionPromise;
 
@@ -630,7 +631,8 @@ describe('retryWithBackoff', () => {
         initialDelayMs: 1000,
       });
 
-      const assertionPromise = expect(promise).rejects.toThrow('Too Many Requests');
+      const assertionPromise =
+        expect(promise).rejects.toThrow('Too Many Requests');
       await vi.runAllTimersAsync();
       await assertionPromise;
 
@@ -657,7 +659,8 @@ describe('retryWithBackoff', () => {
         initialDelayMs: 1000,
       });
 
-      const assertionPromise = expect(promise).rejects.toThrow('Too Many Requests');
+      const assertionPromise =
+        expect(promise).rejects.toThrow('Too Many Requests');
       await vi.runAllTimersAsync();
       await assertionPromise;
 
@@ -682,12 +685,16 @@ describe('retryWithBackoff', () => {
         initialDelayMs: 1000,
       });
 
-      const assertionPromise = expect(promise).rejects.toThrow('Too Many Requests');
+      const assertionPromise =
+        expect(promise).rejects.toThrow('Too Many Requests');
       await vi.runAllTimersAsync();
       await assertionPromise;
 
       expect(mockFn).toHaveBeenCalledTimes(2);
-      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), expect.any(Number));
+      expect(setTimeoutSpy).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.any(Number),
+      );
       const delay = setTimeoutSpy.mock.calls[0][1] as number;
       expect(delay).toBeGreaterThanOrEqual(700);
       expect(delay).toBeLessThanOrEqual(1300);
@@ -712,12 +719,16 @@ describe('retryWithBackoff', () => {
         initialDelayMs: 1000,
       });
 
-      const assertionPromise = expect(promise).rejects.toThrow('Too Many Requests');
+      const assertionPromise =
+        expect(promise).rejects.toThrow('Too Many Requests');
       await vi.runAllTimersAsync();
       await assertionPromise;
 
       expect(mockFn).toHaveBeenCalledTimes(2);
-      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), expect.any(Number));
+      expect(setTimeoutSpy).toHaveBeenCalledWith(
+        expect.any(Function),
+        expect.any(Number),
+      );
       const delay = setTimeoutSpy.mock.calls[0][1] as number;
       expect(delay).toBeGreaterThanOrEqual(700);
       expect(delay).toBeLessThanOrEqual(1300);
