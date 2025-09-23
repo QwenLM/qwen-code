@@ -37,7 +37,7 @@ export const useAuthCommand = (
 
       try {
         setIsAuthenticating(true);
-        await config.refreshAuth(authType);
+        await config.refreshAuth(authType, { setDefaultModel: true });
         console.log(`Authenticated via "${authType}".`);
       } catch (e) {
         setAuthError(`Failed to login. Message: ${getErrorMessage(e)}`);
@@ -56,6 +56,16 @@ export const useAuthCommand = (
         await clearCachedCredentialFile();
 
         settings.setValue(scope, 'security.auth.selectedType', authType);
+        
+        // Refresh auth with default model for the selected provider
+        if (authType && config) {
+          try {
+            await config.refreshAuth(authType, { setDefaultModel: true });
+          } catch (e) {
+            console.error('Failed to refresh auth with default model:', e);
+          }
+        }
+        
         if (
           authType === AuthType.LOGIN_WITH_GOOGLE &&
           config.isBrowserLaunchSuppressed()

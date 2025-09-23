@@ -21,6 +21,10 @@ vi.mock('../models/availableModels.js', () => ({
     { id: 'qwen3-coder-plus', label: 'qwen3-coder-plus' },
     { id: 'qwen-vl-max-latest', label: 'qwen-vl-max', isVision: true },
   ],
+  AVAILABLE_MODELS_GEMINI: [
+    { id: 'gemini-2.0-flash', label: 'gemini-2.0-flash' },
+    { id: 'gemini-1.5-pro', label: 'gemini-1.5-pro' },
+  ],
   getOpenAIAvailableModelFromEnv: vi.fn(),
 }));
 
@@ -114,6 +118,21 @@ describe('modelCommand', () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: AuthType.USE_OPENAI,
+    });
+    mockContext.services.config = mockConfig as Config;
+
+    const result = await modelCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'dialog',
+      dialog: 'model',
+    });
+  });
+
+  it('should return dialog action for LOGIN_WITH_GOOGLE auth type', async () => {
+    const mockConfig = createMockConfig({
+      model: 'test-model',
+      authType: AuthType.LOGIN_WITH_GOOGLE,
     });
     mockContext.services.config = mockConfig as Config;
 

@@ -14,6 +14,7 @@ import type {
 import { CommandKind } from './types.js';
 import {
   AVAILABLE_MODELS_QWEN,
+  AVAILABLE_MODELS_GEMINI,
   getOpenAIAvailableModelFromEnv,
   type AvailableModel,
 } from '../models/availableModels.js';
@@ -22,6 +23,10 @@ function getAvailableModelsForAuthType(authType: AuthType): AvailableModel[] {
   switch (authType) {
     case AuthType.QWEN_OAUTH:
       return AVAILABLE_MODELS_QWEN;
+    case AuthType.LOGIN_WITH_GOOGLE:
+      // For Google OAuth, we show available Gemini models
+      // TODO: In the future, we might want to fetch available models dynamically from the API
+      return AVAILABLE_MODELS_GEMINI;
     case AuthType.USE_OPENAI: {
       const openAIModel = getOpenAIAvailableModelFromEnv();
       return openAIModel ? [openAIModel] : [];
