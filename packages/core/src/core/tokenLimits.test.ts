@@ -143,6 +143,11 @@ describe('tokenLimit', () => {
       expect(tokenLimit('qwen3-coder-30b-a3b-instruct')).toBe(262144);
     });
 
+    it('should return the correct limit for qwen3-vl-plus vision models', () => {
+      expect(tokenLimit('qwen3-vl-plus')).toBe(262144);
+      expect(tokenLimit('qwen3-vl-plus-latest')).toBe(262144);
+    });
+
     it('should return the correct limit for qwen3 2507 variants', () => {
       expect(tokenLimit('qwen3-some-model-2507-instruct')).toBe(262144);
     });
@@ -241,6 +246,11 @@ describe('tokenLimit with output type', () => {
     it('should return the correct output limit for qwen-vl-max-latest', () => {
       expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192);
     });
+
+    it('should return the correct output limit for qwen3-vl-plus', () => {
+      expect(tokenLimit('qwen3-vl-plus', 'output')).toBe(32768);
+      expect(tokenLimit('qwen3-vl-plus-latest', 'output')).toBe(32768);
+    });
   });
 
   describe('Default output limits', () => {
@@ -278,6 +288,11 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192); // 8K output
     });
 
+    it('should return different limits for input vs output for qwen3-vl-plus', () => {
+      expect(tokenLimit('qwen3-vl-plus', 'input')).toBe(262144); // 256K input
+      expect(tokenLimit('qwen3-vl-plus', 'output')).toBe(32768); // 32K output
+    });
+
     it('should return same default limits for unknown models', () => {
       expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT); // 128K input
       expect(tokenLimit('unknown-model', 'output')).toBe(
@@ -305,6 +320,7 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('QWEN3-CODER-PLUS', 'output')).toBe(65536);
       expect(tokenLimit('qwen3-coder-plus-20250601', 'output')).toBe(65536);
       expect(tokenLimit('QWEN-VL-MAX-LATEST', 'output')).toBe(8192);
+      expect(tokenLimit('QWEN3-VL-PLUS', 'output')).toBe(32768);
     });
 
     it('should handle complex model strings for output limits', () => {
