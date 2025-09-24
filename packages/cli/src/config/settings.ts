@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { homedir, platform } from 'node:os';
 import * as dotenv from 'dotenv';
 import {
+  AuthType,
   GEMINI_CONFIG_DIR as GEMINI_DIR,
   getErrorMessage,
   Storage,
@@ -467,6 +468,7 @@ export class LoadedSettings {
   readonly errors: SettingsError[];
   readonly isTrusted: boolean;
   readonly migratedInMemorScopes: Set<SettingScope>;
+  authType: AuthType | undefined;
 
   private _merged: Settings;
 
@@ -475,13 +477,33 @@ export class LoadedSettings {
   }
 
   private computeMergedSettings(): Settings {
-    return mergeSettings(
+    let merged = mergeSettings(
       this.system.settings,
       this.systemDefaults.settings,
       this.user.settings,
       this.workspace.settings,
       this.isTrusted,
     );
+    // Overwrite from user config (arg or env or settings.json)
+    if (this.authType) {
+      merged.security ??= {};
+      merged.security.auth ??= {};
+      merged.security.auth.selectedType = this.authType;
+    }
+    return merged;
+  }
+
+  /**
+   * Apply the user configured auth type (i.e. "openai").
+   *
+   * Priority:
+   * 1. command line arg --openai-api-key "my-key" implicitly sets "openai"
+   * 2. env variables or .env file (i.e. OPENAI_API_KEY)
+   * 3. <code>{ "selectedAuthType": "openai" }</code> in settings.json
+   */
+  applyConfiguredAuthType(authType: AuthType | undefined): void {
+    this.authType = authType;
+    this._merged = this.computeMergedSettings();
   }
 
   forScope(scope: SettingScope): SettingsFile {
