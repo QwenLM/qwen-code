@@ -54,6 +54,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   DEFAULT_GEMINI_EMBEDDING_MODEL,
   DEFAULT_GEMINI_FLASH_MODEL,
+  DEFAULT_QWEN_MODEL,
 } from './models.js';
 import { Storage } from './storage.js';
 
@@ -1017,4 +1018,4 @@ export class Config {
   }
 }
 // Export model constants for use in CLI
-export { DEFAULT_GEMINI_FLASH_MODEL };
+export { DEFAULT_GEMINI_FLASH_MODEL, DEFAULT_QWEN_MODEL };
