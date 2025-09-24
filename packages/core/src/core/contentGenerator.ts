@@ -133,7 +133,10 @@ export function createContentGeneratorConfig(
   if (authType === AuthType.USE_OPENAI && openaiApiKey) {
     contentGeneratorConfig.apiKey = openaiApiKey;
     contentGeneratorConfig.baseUrl = openaiBaseUrl;
-    contentGeneratorConfig.model = openaiModel || DEFAULT_QWEN_MODEL;
+    // Prioritize: 1) Model from config (CLI --model), 2) OPENAI_MODEL env var, 3) DEFAULT_QWEN_MODEL
+    // Only use effectiveModel if it came from config, not from DEFAULT_GEMINI_MODEL fallback
+    const modelFromConfig = config.getModel();
+    contentGeneratorConfig.model = modelFromConfig || openaiModel || DEFAULT_QWEN_MODEL;
 
     return contentGeneratorConfig;
   }
@@ -143,9 +146,10 @@ export function createContentGeneratorConfig(
     // Set a special marker to indicate this is Qwen OAuth
     contentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
 
-    // Prefer to use qwen3-coder-plus as the default Qwen model if QWEN_MODEL is not set.
+    // Prioritize: 1) Model from config (CLI --model), 2) QWEN_MODEL env var, 3) DEFAULT_QWEN_MODEL
+    const modelFromConfig = config.getModel();
     contentGeneratorConfig.model =
-      process.env['QWEN_MODEL'] || DEFAULT_QWEN_MODEL;
+      modelFromConfig || process.env['QWEN_MODEL'] || DEFAULT_QWEN_MODEL;
 
     return contentGeneratorConfig;
   }
