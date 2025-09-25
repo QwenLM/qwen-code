@@ -688,6 +688,60 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ).toBe(true); // Vision-specific parameter should be preserved
     });
 
+    it('should set high resolution flag for qwen3-vl-plus', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'qwen3-vl-plus',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Please inspect the image.' },
+              {
+                type: 'image_url',
+                image_url: { url: 'https://example.com/vl.jpg' },
+              },
+            ],
+          },
+        ],
+        max_tokens: 50000,
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(32768);
+      expect(
+        (result as { vl_high_resolution_images?: boolean })
+          .vl_high_resolution_images,
+      ).toBe(true);
+    });
+
+    it('should set high resolution flag for the vision-model alias', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'vision-model',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: 'Alias payload' },
+              {
+                type: 'image_url',
+                image_url: { url: 'https://example.com/alias.png' },
+              },
+            ],
+          },
+        ],
+        max_tokens: 9000,
+      };
+
+      const result = provider.buildRequest(request, 'test-prompt-id');
+
+      expect(result.max_tokens).toBe(8192);
+      expect(
+        (result as { vl_high_resolution_images?: boolean })
+          .vl_high_resolution_images,
+      ).toBe(true);
+    });
+
     it('should handle streaming requests with output token limits', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-coder-plus',

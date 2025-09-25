@@ -100,7 +100,7 @@ export class DashScopeOpenAICompatibleProvider
       request.model,
     );
 
-    if (request.model.startsWith('qwen-vl')) {
+    if (this.isVisionModel(request.model)) {
       return {
         ...requestWithTokenLimits,
         messages,
@@ -265,6 +265,28 @@ export class DashScopeOpenAICompatibleProvider
     }
 
     return contentArray;
+  }
+
+  private isVisionModel(model: string | undefined): boolean {
+    if (!model) {
+      return false;
+    }
+
+    const normalized = model.toLowerCase();
+
+    if (normalized === 'vision-model') {
+      return true;
+    }
+
+    if (normalized.startsWith('qwen-vl')) {
+      return true;
+    }
+
+    if (normalized.startsWith('qwen3-vl-plus')) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
