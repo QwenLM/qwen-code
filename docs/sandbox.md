@@ -77,6 +77,8 @@ Built-in profiles (set via `SEATBELT_PROFILE` env var):
 - `restrictive-open`: Strict restrictions, network allowed
 - `restrictive-closed`: Maximum restrictions
 
+For custom profiles, the system first looks for a file `.qwen/sandbox-macos-<profile>.sb` under your project settings directory. If not found there, it will check for the file in your user settings directory at `~/.qwen/sandbox-macos-<profile>.sb`.
+
 ### Custom Sandbox Flags
 
 For container-based sandboxing, you can inject custom flags into the `docker` or `podman` command using the `SANDBOX_FLAGS` environment variable. This is useful for advanced configurations, such as disabling security features for specific use cases.
