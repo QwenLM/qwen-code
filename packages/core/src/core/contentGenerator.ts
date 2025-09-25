@@ -133,7 +133,7 @@ export function createContentGeneratorConfig(
   if (authType === AuthType.USE_OPENAI && openaiApiKey) {
     contentGeneratorConfig.apiKey = openaiApiKey;
     contentGeneratorConfig.baseUrl = openaiBaseUrl;
-    contentGeneratorConfig.model = openaiModel || DEFAULT_QWEN_MODEL;
+    contentGeneratorConfig.model = openaiModel || effectiveModel || DEFAULT_QWEN_MODEL;
 
     return contentGeneratorConfig;
   }
@@ -145,7 +145,7 @@ export function createContentGeneratorConfig(
 
     // Prefer to use qwen3-coder-plus as the default Qwen model if QWEN_MODEL is not set.
     contentGeneratorConfig.model =
-      process.env['QWEN_MODEL'] || DEFAULT_QWEN_MODEL;
+      process.env['QWEN_MODEL'] || effectiveModel || DEFAULT_QWEN_MODEL;
 
     return contentGeneratorConfig;
   }
