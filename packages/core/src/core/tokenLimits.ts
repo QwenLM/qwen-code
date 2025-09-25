@@ -135,6 +135,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen-turbo.*$/, LIMITS['128k']],
 
   // Qwen Vision Models
+  [/^qwen3-vl-plus$/, LIMITS['256k']], // Qwen3-VL-Plus: 256K input
   [/^qwen-vl-max.*$/, LIMITS['128k']],
 
   // Generic vision-model: same as qwen-vl-max (128K token context)
@@ -187,8 +188,8 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Generic vision-model: same as qwen-vl-max-latest (8K max output tokens)
   [/^vision-model$/, LIMITS['8k']],
 
-  // Qwen3-VL-Plus: 8,192 max output tokens
-  [/^qwen3-vl-plus$/, LIMITS['8k']],
+  // Qwen3-VL-Plus: 32K max output tokens
+  [/^qwen3-vl-plus$/, LIMITS['32k']],
 ];
 
 /**

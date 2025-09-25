@@ -278,6 +278,11 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192); // 8K output
     });
 
+    it('should return different limits for input vs output for qwen3-vl-plus', () => {
+      expect(tokenLimit('qwen3-vl-plus', 'input')).toBe(262144); // 256K input
+      expect(tokenLimit('qwen3-vl-plus', 'output')).toBe(32768); // 32K output
+    });
+
     it('should return same default limits for unknown models', () => {
       expect(tokenLimit('unknown-model', 'input')).toBe(DEFAULT_TOKEN_LIMIT); // 128K input
       expect(tokenLimit('unknown-model', 'output')).toBe(
