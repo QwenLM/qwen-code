@@ -10,6 +10,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { WorkspaceContext } from './workspaceContext.js';
 
+// Symlink creation on Windows requires special permissions that are not
+// available in the standard CI environment. Therefore, we skip these tests
+// on Windows to prevent CI failures. The core functionality is still
+// validated on Linux and macOS.
+const itif = (condition: boolean) => (condition ? it : it.skip);
+
 describe('WorkspaceContext with real filesystem', () => {
   let tempDir: string;
   let cwd: string;
@@ -83,18 +89,27 @@ describe('WorkspaceContext with real filesystem', () => {
       expect(directories).toHaveLength(2);
     });
 
-    it('should handle symbolic links correctly', () => {
-      const realDir = path.join(tempDir, 'real');
-      fs.mkdirSync(realDir, { recursive: true });
-      const symlinkDir = path.join(tempDir, 'symlink-to-real');
-      fs.symlinkSync(realDir, symlinkDir, 'dir');
-      const workspaceContext = new WorkspaceContext(cwd);
-      workspaceContext.addDirectory(symlinkDir);
+    // Symlink creation on Windows requires special permissions that are not
+    // available in the standard CI environment. Therefore, we skip these tests
+    // on Windows to prevent CI failures. The core functionality is still
+    // validated on Linux and macOS.
+    const itif = (condition: boolean) => (condition ? it : it.skip);
 
-      const directories = workspaceContext.getDirectories();
+    itif(process.platform !== 'win32')(
+      'should handle symbolic links correctly',
+      () => {
+        const realDir = path.join(tempDir, 'real');
+        fs.mkdirSync(realDir, { recursive: true });
+        const symlinkDir = path.join(tempDir, 'symlink-to-real');
+        fs.symlinkSync(realDir, symlinkDir, 'dir');
+        const workspaceContext = new WorkspaceContext(cwd);
+        workspaceContext.addDirectory(symlinkDir);
 
-      expect(directories).toEqual([cwd, realDir]);
-    });
+        const directories = workspaceContext.getDirectories();
+
+        expect(directories).toEqual([cwd, realDir]);
+      },
+    );
   });
 
   describe('path validation', () => {
@@ -170,27 +185,37 @@ describe('WorkspaceContext with real filesystem', () => {
           fs.symlinkSync(realDir, symlinkDir, 'dir');
         });
 
-        it('should accept dir paths', () => {
+        itif(process.platform !== 'win32')('should accept dir paths', () => {
           const workspaceContext = new WorkspaceContext(cwd);
 
           expect(workspaceContext.isPathWithinWorkspace(symlinkDir)).toBe(true);
         });
 
-        it('should accept non-existent paths', () => {
-          const filePath = path.join(symlinkDir, 'does-not-exist.txt');
+        itif(process.platform !== 'win32')(
+          'should accept non-existent paths',
+          () => {
+            const filePath = path.join(symlinkDir, 'does-not-exist.txt');
 
-          const workspaceContext = new WorkspaceContext(cwd);
+            const workspaceContext = new WorkspaceContext(cwd);
 
-          expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(true);
-        });
+            expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(true);
+          },
+        );
 
-        it('should accept non-existent deep paths', () => {
-          const filePath = path.join(symlinkDir, 'deep', 'does-not-exist.txt');
+        itif(process.platform !== 'win32')(
+          'should accept non-existent deep paths',
+          () => {
+            const filePath = path.join(
+              symlinkDir,
+              'deep',
+              'does-not-exist.txt',
+            );
 
-          const workspaceContext = new WorkspaceContext(cwd);
+            const workspaceContext = new WorkspaceContext(cwd);
 
-          expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(true);
-        });
+            expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(true);
+          },
+        );
       });
 
       describe('outside the workspace', () => {
@@ -204,7 +229,7 @@ describe('WorkspaceContext with real filesystem', () => {
           fs.symlinkSync(realDir, symlinkDir, 'dir');
         });
 
-        it('should reject dir paths', () => {
+        itif(process.platform !== 'win32')('should reject dir paths', () => {
           const workspaceContext = new WorkspaceContext(cwd);
 
           expect(workspaceContext.isPathWithinWorkspace(symlinkDir)).toBe(
@@ -212,69 +237,101 @@ describe('WorkspaceContext with real filesystem', () => {
           );
         });
 
-        it('should reject non-existent paths', () => {
-          const filePath = path.join(symlinkDir, 'does-not-exist.txt');
+        itif(process.platform !== 'win32')(
+          'should reject non-existent paths',
+          () => {
+            const filePath = path.join(symlinkDir, 'does-not-exist.txt');
+
+            const workspaceContext = new WorkspaceContext(cwd);
+
+            expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(
+              false,
+            );
+          },
+        );
+
+        itif(process.platform !== 'win32')(
+          'should reject non-existent deep paths',
+          () => {
+            const filePath = path.join(
+              symlinkDir,
+              'deep',
+              'does-not-exist.txt',
+            );
+
+            const workspaceContext = new WorkspaceContext(cwd);
+
+            expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(
+              false,
+            );
+          },
+        );
+
+        itif(process.platform !== 'win32')(
+          'should reject partially non-existent deep paths',
+          () => {
+            const deepDir = path.join(symlinkDir, 'deep');
+            fs.mkdirSync(deepDir, { recursive: true });
+            const filePath = path.join(deepDir, 'does-not-exist.txt');
+
+            const workspaceContext = new WorkspaceContext(cwd);
+
+            expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(
+              false,
+            );
+          },
+        );
+      });
+
+      itif(process.platform !== 'win32')(
+        'should reject symbolic file links outside the workspace',
+        () => {
+          const realFile = path.join(tempDir, 'real-file.txt');
+          fs.writeFileSync(realFile, 'content');
+
+          const symlinkFile = path.join(cwd, 'symlink-to-real-file');
+          fs.symlinkSync(realFile, symlinkFile, 'file');
 
           const workspaceContext = new WorkspaceContext(cwd);
 
-          expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(false);
-        });
+          expect(workspaceContext.isPathWithinWorkspace(symlinkFile)).toBe(
+            false,
+          );
+        },
+      );
 
-        it('should reject non-existent deep paths', () => {
-          const filePath = path.join(symlinkDir, 'deep', 'does-not-exist.txt');
+      itif(process.platform !== 'win32')(
+        'should reject non-existent symbolic file links outside the workspace',
+        () => {
+          const realFile = path.join(tempDir, 'real-file.txt');
 
-          const workspaceContext = new WorkspaceContext(cwd);
-
-          expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(false);
-        });
-
-        it('should reject partially non-existent deep paths', () => {
-          const deepDir = path.join(symlinkDir, 'deep');
-          fs.mkdirSync(deepDir, { recursive: true });
-          const filePath = path.join(deepDir, 'does-not-exist.txt');
+          const symlinkFile = path.join(cwd, 'symlink-to-real-file');
+          fs.symlinkSync(realFile, symlinkFile, 'file');
 
           const workspaceContext = new WorkspaceContext(cwd);
 
-          expect(workspaceContext.isPathWithinWorkspace(filePath)).toBe(false);
-        });
-      });
+          expect(workspaceContext.isPathWithinWorkspace(symlinkFile)).toBe(
+            false,
+          );
+        },
+      );
 
-      it('should reject symbolic file links outside the workspace', () => {
-        const realFile = path.join(tempDir, 'real-file.txt');
-        fs.writeFileSync(realFile, 'content');
+      itif(process.platform !== 'win32')(
+        'should handle circular symlinks gracefully',
+        () => {
+          const workspaceContext = new WorkspaceContext(cwd);
+          const linkA = path.join(cwd, 'link-a');
+          const linkB = path.join(cwd, 'link-b');
+          // Create a circular dependency: linkA -> linkB -> linkA
+          fs.symlinkSync(linkB, linkA, 'dir');
+          fs.symlinkSync(linkA, linkB, 'dir');
 
-        const symlinkFile = path.join(cwd, 'symlink-to-real-file');
-        fs.symlinkSync(realFile, symlinkFile, 'file');
-
-        const workspaceContext = new WorkspaceContext(cwd);
-
-        expect(workspaceContext.isPathWithinWorkspace(symlinkFile)).toBe(false);
-      });
-
-      it('should reject non-existent symbolic file links outside the workspace', () => {
-        const realFile = path.join(tempDir, 'real-file.txt');
-
-        const symlinkFile = path.join(cwd, 'symlink-to-real-file');
-        fs.symlinkSync(realFile, symlinkFile, 'file');
-
-        const workspaceContext = new WorkspaceContext(cwd);
-
-        expect(workspaceContext.isPathWithinWorkspace(symlinkFile)).toBe(false);
-      });
-
-      it('should handle circular symlinks gracefully', () => {
-        const workspaceContext = new WorkspaceContext(cwd);
-        const linkA = path.join(cwd, 'link-a');
-        const linkB = path.join(cwd, 'link-b');
-        // Create a circular dependency: linkA -> linkB -> linkA
-        fs.symlinkSync(linkB, linkA, 'dir');
-        fs.symlinkSync(linkA, linkB, 'dir');
-
-        // fs.realpathSync should throw ELOOP, and isPathWithinWorkspace should
-        // handle it gracefully and return false.
-        expect(workspaceContext.isPathWithinWorkspace(linkA)).toBe(false);
-        expect(workspaceContext.isPathWithinWorkspace(linkB)).toBe(false);
-      });
+          // fs.realpathSync should throw ELOOP, and isPathWithinWorkspace should
+          // handle it gracefully and return false.
+          expect(workspaceContext.isPathWithinWorkspace(linkA)).toBe(false);
+          expect(workspaceContext.isPathWithinWorkspace(linkB)).toBe(false);
+        },
+      );
     });
   });
 
