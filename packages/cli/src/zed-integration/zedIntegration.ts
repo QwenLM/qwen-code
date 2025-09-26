@@ -82,22 +82,6 @@ class GeminiAgent {
     this.clientCapabilities = args.clientCapabilities;
     const authMethods = [
       {
-        id: AuthType.LOGIN_WITH_GOOGLE,
-        name: 'Log in with Google',
-        description: null,
-      },
-      {
-        id: AuthType.USE_GEMINI,
-        name: 'Use Gemini API key',
-        description:
-          'Requires setting the `GEMINI_API_KEY` environment variable',
-      },
-      {
-        id: AuthType.USE_VERTEX_AI,
-        name: 'Vertex AI',
-        description: null,
-      },
-      {
         id: AuthType.USE_OPENAI,
         name: 'Use OpenAI API key',
         description:
