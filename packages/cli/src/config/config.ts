@@ -41,6 +41,9 @@ import { annotateActiveExtensions } from './extension.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getAuthTypeFromEnv
+} from "../validateNonInterActiveAuth.js";
 
 // Simple console logger for now - replace with actual logger if available
 const logger = {
@@ -415,6 +418,10 @@ export async function loadCliConfig(
     process.env['OPENAI_API_KEY'] = argv.openaiApiKey;
   }
 
+  // Determine authType from env, falling back to settings.json selectedAuthType.
+  // If undefined, the "Get started" wizard is run to configure settings.json.
+  const authType = getAuthTypeFromEnv() || settings.security?.auth?.selectedType;
+
   // Handle OpenAI base URL from command line
   if (argv.openaiBaseUrl) {
     process.env['OPENAI_BASE_URL'] = argv.openaiBaseUrl;
@@ -647,7 +654,7 @@ export async function loadCliConfig(
           'SYSTEM_TEMPLATE:{"name":"qwen3_coder","params":{"is_git_repository":{RUNTIME_VARS_IS_GIT_REPO},"sandbox":"{RUNTIME_VARS_SANDBOX}"}}',
       },
     ]) as ConfigParameters['systemPromptMappings'],
-    authType: settings.security?.auth?.selectedType,
+    authType: authType,
     contentGenerator: settings.contentGenerator,
     cliVersion,
     tavilyApiKey:
