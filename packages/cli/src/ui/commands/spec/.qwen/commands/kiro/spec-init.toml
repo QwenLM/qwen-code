@@ -61,7 +61,7 @@ Create requirements.md with project description:
 <!-- Will be generated in /kiro:spec-requirements phase -->
 ```
 
-### 5. Update GEMINI.md Reference
+### 5. Update QWEN.md Reference
 Add the new spec to the active specifications list with the generated feature name and a brief description.
 
 ## Next Steps After Initialization
