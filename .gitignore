@@ -48,8 +48,4 @@ logs/
 # GHA credentials
 gha-creds-*.json
 
-QWEN.md
-
-# Ensure the CLI command `spec` folder is not ignored so its files can be committed
-!packages/cli/src/ui/commands/spec/
-!packages/cli/src/ui/commands/spec/**
+/QWEN.md
