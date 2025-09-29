@@ -118,6 +118,9 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        // Always collect OpenAI chunks for logging, regardless of Gemini conversion result
+        collectedOpenAIChunks.push(chunk);
+
         const response = this.converter.convertOpenAIChunkToGemini(chunk);
 
         // Stage 2b: Filter empty responses to avoid downstream issues
@@ -132,9 +135,7 @@ export class ContentGenerationPipeline {
         // Stage 2c: Handle chunk merging for providers that send finishReason and usageMetadata separately
         const shouldYield = this.handleChunkMerging(
           response,
-          chunk,
           collectedGeminiResponses,
-          collectedOpenAIChunks,
           (mergedResponse) => {
             pendingFinishResponse = mergedResponse;
           },
@@ -182,17 +183,13 @@ export class ContentGenerationPipeline {
    * finishReason and the most up-to-date usage information from any provider pattern.
    *
    * @param response Current Gemini response
-   * @param chunk Current OpenAI chunk
    * @param collectedGeminiResponses Array to collect responses for logging
-   * @param collectedOpenAIChunks Array to collect chunks for logging
    * @param setPendingFinish Callback to set pending finish response
    * @returns true if the response should be yielded, false if it should be held for merging
    */
   private handleChunkMerging(
     response: GenerateContentResponse,
-    chunk: OpenAI.Chat.ChatCompletionChunk,
     collectedGeminiResponses: GenerateContentResponse[],
-    collectedOpenAIChunks: OpenAI.Chat.ChatCompletionChunk[],
     setPendingFinish: (response: GenerateContentResponse) => void,
   ): boolean {
     const isFinishChunk = response.candidates?.[0]?.finishReason;
@@ -206,7 +203,6 @@ export class ContentGenerationPipeline {
     if (isFinishChunk) {
       // This is a finish reason chunk
       collectedGeminiResponses.push(response);
-      collectedOpenAIChunks.push(chunk);
       setPendingFinish(response);
       return false; // Don't yield yet, wait for potential subsequent chunks to merge
     } else if (hasPendingFinish) {
@@ -228,7 +224,6 @@ export class ContentGenerationPipeline {
       // Update the collected responses with the merged response
       collectedGeminiResponses[collectedGeminiResponses.length - 1] =
         mergedResponse;
-      collectedOpenAIChunks.push(chunk);
 
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
@@ -236,7 +231,6 @@ export class ContentGenerationPipeline {
 
     // Normal chunk - collect and yield
     collectedGeminiResponses.push(response);
-    collectedOpenAIChunks.push(chunk);
     return true;
   }
 
@@ -254,26 +248,23 @@ export class ContentGenerationPipeline {
       ...this.buildSamplingParameters(request),
     };
 
-    // Let provider enhance the request (e.g., add metadata, cache control)
-    const enhancedRequest = this.config.provider.buildRequest(
-      baseRequest,
-      userPromptId,
-    );
+    // Add streaming options if present
+    if (streaming) {
+      (
+        baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming
+      ).stream = true;
+      baseRequest.stream_options = { include_usage: true };
+    }
 
     // Add tools if present
     if (request.config?.tools) {
-      enhancedRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
+      baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
     }
 
-    // Add streaming options if needed
-    if (streaming) {
-      enhancedRequest.stream = true;
-      enhancedRequest.stream_options = { include_usage: true };
-    }
-
-    return enhancedRequest;
+    // Let provider enhance the request (e.g., add metadata, cache control)
+    return this.config.provider.buildRequest(baseRequest, userPromptId);
   }
 
   private buildSamplingParameters(

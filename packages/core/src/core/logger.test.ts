@@ -755,4 +755,84 @@ describe('Logger', () => {
       expect(logger['messageId']).toBe(0);
     });
   });
+
+  describe('Model Switch Logging', () => {
+    it('should log model switch events correctly', async () => {
+      const testSessionId = 'test-session-model-switch';
+      const logger = new Logger(testSessionId, new Storage(process.cwd()));
+      await logger.initialize();
+
+      const modelSwitchEvent = {
+        fromModel: 'qwen3-coder-plus',
+        toModel: 'qwen-vl-max-latest',
+        reason: 'vision_auto_switch' as const,
+        context: 'YOLO mode auto-switch for image content',
+      };
+
+      await logger.logModelSwitch(modelSwitchEvent);
+
+      // Read the log file to verify the entry was written
+      const logContent = await fs.readFile(TEST_LOG_FILE_PATH, 'utf-8');
+      const logs: LogEntry[] = JSON.parse(logContent);
+
+      const modelSwitchLog = logs.find(
+        (log) =>
+          log.sessionId === testSessionId &&
+          log.type === MessageSenderType.MODEL_SWITCH,
+      );
+
+      expect(modelSwitchLog).toBeDefined();
+      expect(modelSwitchLog!.type).toBe(MessageSenderType.MODEL_SWITCH);
+
+      const loggedEvent = JSON.parse(modelSwitchLog!.message);
+      expect(loggedEvent.fromModel).toBe('qwen3-coder-plus');
+      expect(loggedEvent.toModel).toBe('qwen-vl-max-latest');
+      expect(loggedEvent.reason).toBe('vision_auto_switch');
+      expect(loggedEvent.context).toBe(
+        'YOLO mode auto-switch for image content',
+      );
+    });
+
+    it('should handle multiple model switch events', async () => {
+      const testSessionId = 'test-session-multiple-switches';
+      const logger = new Logger(testSessionId, new Storage(process.cwd()));
+      await logger.initialize();
+
+      // Log first switch
+      await logger.logModelSwitch({
+        fromModel: 'qwen3-coder-plus',
+        toModel: 'qwen-vl-max-latest',
+        reason: 'vision_auto_switch',
+        context: 'Auto-switch for image',
+      });
+
+      // Log second switch (restore)
+      await logger.logModelSwitch({
+        fromModel: 'qwen-vl-max-latest',
+        toModel: 'qwen3-coder-plus',
+        reason: 'vision_auto_switch',
+        context: 'Restoring original model',
+      });
+
+      // Read the log file to verify both entries were written
+      const logContent = await fs.readFile(TEST_LOG_FILE_PATH, 'utf-8');
+      const logs: LogEntry[] = JSON.parse(logContent);
+
+      const modelSwitchLogs = logs.filter(
+        (log) =>
+          log.sessionId === testSessionId &&
+          log.type === MessageSenderType.MODEL_SWITCH,
+      );
+
+      expect(modelSwitchLogs).toHaveLength(2);
+
+      const firstSwitch = JSON.parse(modelSwitchLogs[0].message);
+      expect(firstSwitch.fromModel).toBe('qwen3-coder-plus');
+      expect(firstSwitch.toModel).toBe('qwen-vl-max-latest');
+
+      const secondSwitch = JSON.parse(modelSwitchLogs[1].message);
+      expect(secondSwitch.fromModel).toBe('qwen-vl-max-latest');
+      expect(secondSwitch.toModel).toBe('qwen3-coder-plus');
+    });
+  });
 });

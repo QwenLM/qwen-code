@@ -97,6 +97,18 @@ class GeminiAgent {
         name: 'Vertex AI',
         description: null,
       },
+      {
+        id: AuthType.USE_OPENAI,
+        name: 'Use OpenAI API key',
+        description:
+          'Requires setting the `OPENAI_API_KEY` environment variable',
+      },
+      {
+        id: AuthType.QWEN_OAUTH,
+        name: 'Qwen OAuth',
+        description:
+          'OAuth authentication for Qwen models with 2000 daily requests',
+      },
     ];
 
     return {
@@ -871,6 +883,16 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
         type: 'content',
         content: { type: 'text', text: todoText },
       };
+    } else if (
+      'type' in toolResult.returnDisplay &&
+      toolResult.returnDisplay.type === 'plan_summary'
+    ) {
+      const planDisplay = toolResult.returnDisplay;
+      const planText = `${planDisplay.message}\n\n${planDisplay.plan}`;
+      return {
+        type: 'content',
+        content: { type: 'text', text: planText },
+      };
     } else if ('fileDiff' in toolResult.returnDisplay) {
       // Handle FileDiff
       return {
@@ -938,6 +960,15 @@ function toPermissionOptions(
         {
           optionId: ToolConfirmationOutcome.ProceedAlways,
           name: `Always Allow`,
+          kind: 'allow_always',
+        },
+        ...basicPermissionOptions,
+      ];
+    case 'plan':
+      return [
+        {
+          optionId: ToolConfirmationOutcome.ProceedAlways,
+          name: `Always Allow Plans`,
           kind: 'allow_always',
         },
         ...basicPermissionOptions,

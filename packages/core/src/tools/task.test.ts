@@ -43,6 +43,7 @@ describe('TaskTool', () => {
   let config: Config;
   let taskTool: TaskTool;
   let mockSubagentManager: SubagentManager;
+  let changeListeners: Array<() => void>;
 
   const mockSubagents: SubagentConfig[] = [
     {
@@ -70,13 +71,25 @@ describe('TaskTool', () => {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSubagentManager: vi.fn(),
+      getGeminiClient: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
+
+    changeListeners = [];
 
     // Setup SubagentManager mock
     mockSubagentManager = {
       listSubagents: vi.fn().mockResolvedValue(mockSubagents),
       loadSubagent: vi.fn(),
       createSubagentScope: vi.fn(),
+      addChangeListener: vi.fn((listener: () => void) => {
+        changeListeners.push(listener);
+        return () => {
+          const index = changeListeners.indexOf(listener);
+          if (index >= 0) {
+            changeListeners.splice(index, 1);
+          }
+        };
+      }),
     } as unknown as SubagentManager;
 
     MockedSubagentManager.mockImplementation(() => mockSubagentManager);
@@ -104,6 +117,10 @@ describe('TaskTool', () => {
 
     it('should load available subagents during initialization', () => {
       expect(mockSubagentManager.listSubagents).toHaveBeenCalled();
+    });
+
+    it('should subscribe to subagent manager changes', () => {
+      expect(mockSubagentManager.addChangeListener).toHaveBeenCalledTimes(1);
     });
 
     it('should update description with available subagents', () => {
@@ -232,6 +249,31 @@ describe('TaskTool', () => {
   });
 
   describe('refreshSubagents', () => {
+    it('should refresh when change listener fires', async () => {
+      const newSubagents: SubagentConfig[] = [
+        {
+          name: 'new-agent',
+          description: 'A brand new agent',
+          systemPrompt: 'Do new things.',
+          level: 'project',
+          filePath: '/project/.qwen/agents/new-agent.md',
+        },
+      ];
+
+      vi.mocked(mockSubagentManager.listSubagents).mockResolvedValueOnce(
+        newSubagents,
+      );
+
+      const listener = changeListeners[0];
+      expect(listener).toBeDefined();
+
+      listener?.();
+      await vi.runAllTimersAsync();
+
+      expect(taskTool.description).toContain('new-agent');
+      expect(taskTool.description).toContain('A brand new agent');
+    });
+
     it('should refresh available subagents and update description', async () => {
       const newSubagents: SubagentConfig[] = [
         {

@@ -89,7 +89,7 @@ export const useGeminiStream = (
   setModelSwitchedFromQuotaError: React.Dispatch<React.SetStateAction<boolean>>,
   onEditorClose: () => void,
   onCancelSubmit: () => void,
-  visionModelPreviewEnabled: boolean = false,
+  visionModelPreviewEnabled: boolean,
   onVisionSwitchRequired?: (query: PartListUnion) => Promise<{
     modelOverride?: string;
     persistSessionModel?: string;
@@ -765,7 +765,9 @@ export const useGeminiStream = (
 
         if (processingStatus === StreamProcessingStatus.UserCancelled) {
           // Restore original model if it was temporarily overridden
-          restoreOriginalModel();
+          restoreOriginalModel().catch((error) => {
+            console.error('Failed to restore original model:', error);
+          });
           isSubmittingQueryRef.current = false;
           return;
         }
@@ -780,10 +782,14 @@ export const useGeminiStream = (
         }
 
         // Restore original model if it was temporarily overridden
-        restoreOriginalModel();
+        restoreOriginalModel().catch((error) => {
+          console.error('Failed to restore original model:', error);
+        });
       } catch (error: unknown) {
         // Restore original model if it was temporarily overridden
-        restoreOriginalModel();
+        restoreOriginalModel().catch((error) => {
+          console.error('Failed to restore original model:', error);
+        });
 
         if (error instanceof UnauthorizedError) {
           onAuthError();

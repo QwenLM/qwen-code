@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { EOL } from 'node:os';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import type {
   ToolCallConfirmationDetails,
@@ -64,6 +65,30 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame()).toContain(
       '- https://raw.githubusercontent.com/google/gemini-react/main/README.md',
     );
+  });
+
+  it('should render plan confirmation with markdown plan content', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'plan',
+      title: 'Would you like to proceed?',
+      plan: '# Implementation Plan\n- Step one\n- Step two'.replace(/\n/g, EOL),
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        terminalWidth={80}
+      />,
+    );
+
+    expect(lastFrame()).toContain('Yes, and auto-accept edits');
+    expect(lastFrame()).toContain('Yes, and manually approve edits');
+    expect(lastFrame()).toContain('No, keep planning');
+    expect(lastFrame()).toContain('Implementation Plan');
+    expect(lastFrame()).toContain('Step one');
   });
 
   describe('with folder trust', () => {

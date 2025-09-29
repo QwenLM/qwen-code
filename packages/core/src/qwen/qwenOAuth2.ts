@@ -712,8 +712,6 @@ async function authWithQwenDeviceFlow(
             `Polling... (attempt ${attempt + 1}/${maxAttempts})`,
           );
 
-          process.stdout.write('.');
-
           // Wait with cancellation check every 100ms
           await new Promise<void>((resolve) => {
             const checkInterval = 100; // Check every 100ms

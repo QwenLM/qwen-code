@@ -124,6 +124,18 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/auth`**
   - **Description:** Open a dialog that lets you change the authentication method.
 
+- **`/approval-mode`**
+  - **Description:** Change the approval mode for tool usage.
+  - **Usage:** `/approval-mode [mode] [--session|--project|--user]`
+  - **Available Modes:**
+    - **`plan`**: Analyze only; do not modify files or execute commands
+    - **`default`**: Require approval for file edits or shell commands
+    - **`auto-edit`**: Automatically approve file edits
+    - **`yolo`**: Automatically approve all tools
+  - **Examples:**
+    - `/approval-mode plan --project` (persist plan mode for this project)
+    - `/approval-mode yolo --user` (persist YOLO mode for this user across projects)
+
 - **`/about`**
   - **Description:** Show version info. Please share this information when filing issues.
 

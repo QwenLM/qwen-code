@@ -13,6 +13,7 @@ const LOG_FILE_NAME = 'logs.json';
 
 export enum MessageSenderType {
   USER = 'user',
+  MODEL_SWITCH = 'model_switch',
 }
 
 export interface LogEntry {
@@ -21,6 +22,13 @@ export interface LogEntry {
   timestamp: string;
   type: MessageSenderType;
   message: string;
+}
+
+export interface ModelSwitchEvent {
+  fromModel: string;
+  toModel: string;
+  reason: 'vision_auto_switch' | 'manual' | 'fallback' | 'other';
+  context?: string;
 }
 
 // This regex matches any character that is NOT a letter (a-z, A-Z),
@@ -268,6 +276,17 @@ export class Logger {
     } catch (_error) {
       // Error already logged by _updateLogFile or _readLogFile
     }
+  }
+
+  async logModelSwitch(event: ModelSwitchEvent): Promise<void> {
+    const message = JSON.stringify({
+      fromModel: event.fromModel,
+      toModel: event.toModel,
+      reason: event.reason,
+      context: event.context,
+    });
+
+    await this.logMessage(MessageSenderType.MODEL_SWITCH, message);
   }
 
   private _checkpointPath(tag: string): string {

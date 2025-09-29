@@ -777,6 +777,19 @@ describe('ShellTool', () => {
   });
 
   describe('shouldConfirmExecute', () => {
+    it('should not request confirmation for read-only commands', async () => {
+      const invocation = shellTool.build({
+        command: 'ls -la',
+        is_background: false,
+      });
+
+      const confirmation = await invocation.shouldConfirmExecute(
+        new AbortController().signal,
+      );
+
+      expect(confirmation).toBe(false);
+    });
+
     it('should request confirmation for a new command and whitelist it on "Always"', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);

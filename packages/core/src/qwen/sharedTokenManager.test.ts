@@ -901,5 +901,37 @@ describe('SharedTokenManager', () => {
         );
       }
     });
+
+    it('should properly clean up timeout when file operation completes before timeout', async () => {
+      const tokenManager = SharedTokenManager.getInstance();
+      tokenManager.clearCache();
+
+      const mockClient = {
+        getCredentials: vi.fn().mockReturnValue(null),
+        setCredentials: vi.fn(),
+        getAccessToken: vi.fn(),
+        requestDeviceAuthorization: vi.fn(),
+        pollDeviceToken: vi.fn(),
+        refreshAccessToken: vi.fn(),
+      };
+
+      // Mock clearTimeout to verify it's called
+      const clearTimeoutSpy = vi.spyOn(global, 'clearTimeout');
+
+      // Mock file stat to resolve quickly (before timeout)
+      mockFs.stat.mockResolvedValue({ mtimeMs: 12345 } as Stats);
+
+      // Call checkAndReloadIfNeeded which uses withTimeout internally
+      const checkMethod = getPrivateProperty(
+        tokenManager,
+        'checkAndReloadIfNeeded',
+      ) as (client?: IQwenOAuth2Client) => Promise<void>;
+      await checkMethod.call(tokenManager, mockClient);
+
+      // Verify that clearTimeout was called to clean up the timer
+      expect(clearTimeoutSpy).toHaveBeenCalled();
+
+      clearTimeoutSpy.mockRestore();
+    });
   });
 });

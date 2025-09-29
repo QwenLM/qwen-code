@@ -69,7 +69,11 @@ const MOCK_WORKSPACE_SETTINGS_PATH = pathActual.join(
 );
 
 // A more flexible type for test data that allows arbitrary properties.
-type TestSettings = Settings & { [key: string]: unknown };
+type TestSettings = Settings & {
+  [key: string]: unknown;
+  nested?: { [key: string]: unknown };
+  nestedObj?: { [key: string]: unknown };
+};
 
 vi.mock('fs', async (importOriginal) => {
   // Get all the functions from the real 'fs' module
@@ -137,6 +141,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -197,6 +204,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -260,6 +270,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -320,6 +333,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -385,6 +401,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -477,6 +496,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -562,6 +584,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -691,6 +716,9 @@ describe('Settings Loading and Merging', () => {
             '/system/dir',
           ],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -1431,6 +1459,9 @@ describe('Settings Loading and Merging', () => {
         advanced: {
           excludedEnvVars: [],
         },
+        experimental: {},
+        contentGenerator: {},
+        systemPromptMappings: {},
         extensions: {
           disabled: [],
           workspacesWithMigrationNudge: [],
@@ -1516,7 +1547,11 @@ describe('Settings Loading and Merging', () => {
         'workspace_endpoint_from_env/api',
       );
       expect(
-        (settings.workspace.settings as TestSettings)['nested']['value'],
+        (
+          (settings.workspace.settings as TestSettings).nested as {
+            [key: string]: unknown;
+          }
+        )['value'],
       ).toBe('workspace_endpoint_from_env');
       expect((settings.merged as TestSettings)['endpoint']).toBe(
         'workspace_endpoint_from_env/api',
@@ -1766,19 +1801,39 @@ describe('Settings Loading and Merging', () => {
       ).toBeUndefined();
 
       expect(
-        (settings.user.settings as TestSettings)['nestedObj']['nestedNull'],
+        (
+          (settings.user.settings as TestSettings).nestedObj as {
+            [key: string]: unknown;
+          }
+        )['nestedNull'],
       ).toBeNull();
       expect(
-        (settings.user.settings as TestSettings)['nestedObj']['nestedBool'],
+        (
+          (settings.user.settings as TestSettings).nestedObj as {
+            [key: string]: unknown;
+          }
+        )['nestedBool'],
       ).toBe(true);
       expect(
-        (settings.user.settings as TestSettings)['nestedObj']['nestedNum'],
+        (
+          (settings.user.settings as TestSettings).nestedObj as {
+            [key: string]: unknown;
+          }
+        )['nestedNum'],
       ).toBe(0);
       expect(
-        (settings.user.settings as TestSettings)['nestedObj']['nestedString'],
+        (
+          (settings.user.settings as TestSettings).nestedObj as {
+            [key: string]: unknown;
+          }
+        )['nestedString'],
       ).toBe('literal');
       expect(
-        (settings.user.settings as TestSettings)['nestedObj']['anotherEnv'],
+        (
+          (settings.user.settings as TestSettings).nestedObj as {
+            [key: string]: unknown;
+          }
+        )['anotherEnv'],
       ).toBe('env_string_nested_value');
 
       delete process.env['MY_ENV_STRING'];
@@ -1864,6 +1919,9 @@ describe('Settings Loading and Merging', () => {
           advanced: {
             excludedEnvVars: [],
           },
+          experimental: {},
+          contentGenerator: {},
+          systemPromptMappings: {},
           extensions: {
             disabled: [],
             workspacesWithMigrationNudge: [],
@@ -2336,14 +2394,14 @@ describe('Settings Loading and Merging', () => {
           vimMode: false,
         },
         model: {
-          maxSessionTurns: 0,
+          maxSessionTurns: -1,
         },
         context: {
           includeDirectories: [],
         },
         security: {
           folderTrust: {
-            enabled: null,
+            enabled: false,
           },
         },
       };
@@ -2352,9 +2410,9 @@ describe('Settings Loading and Merging', () => {
 
       expect(v1Settings).toEqual({
         vimMode: false,
-        maxSessionTurns: 0,
+        maxSessionTurns: -1,
         includeDirectories: [],
-        folderTrust: null,
+        folderTrust: false,
       });
     });
 

@@ -376,28 +376,22 @@ export class OpenAIContentConverter {
     parsedParts: Pick<ParsedParts, 'textParts' | 'mediaParts'>,
   ): OpenAI.Chat.ChatCompletionMessageParam | null {
     const { textParts, mediaParts } = parsedParts;
-    const combinedText = textParts.join('');
+    const content = textParts.map((text) => ({ type: 'text' as const, text }));
 
     // If no media parts, return simple text message
     if (mediaParts.length === 0) {
-      return combinedText ? { role, content: combinedText } : null;
+      return content.length > 0 ? { role, content } : null;
     }
 
     // For assistant messages with media, convert to text only
     // since OpenAI assistant messages don't support media content arrays
     if (role === 'assistant') {
-      return combinedText
-        ? { role: 'assistant' as const, content: combinedText }
+      return content.length > 0
+        ? { role: 'assistant' as const, content }
         : null;
     }
 
-    // Create multimodal content array for user messages
-    const contentArray: OpenAI.Chat.ChatCompletionContentPart[] = [];
-
-    // Add text content
-    if (combinedText) {
-      contentArray.push({ type: 'text', text: combinedText });
-    }
+    const contentArray: OpenAI.Chat.ChatCompletionContentPart[] = [...content];
 
     // Add media content
     for (const mediaPart of mediaParts) {
@@ -405,14 +399,14 @@ export class OpenAIContentConverter {
         if (mediaPart.fileUri) {
           // For file URIs, use the URI directly
           contentArray.push({
-            type: 'image_url',
+            type: 'image_url' as const,
             image_url: { url: mediaPart.fileUri },
           });
         } else if (mediaPart.data) {
           // For inline data, create data URL
           const dataUrl = `data:${mediaPart.mimeType};base64,${mediaPart.data}`;
           contentArray.push({
-            type: 'image_url',
+            type: 'image_url' as const,
             image_url: { url: dataUrl },
           });
         }
@@ -421,7 +415,7 @@ export class OpenAIContentConverter {
         const format = this.getAudioFormat(mediaPart.mimeType);
         if (format) {
           contentArray.push({
-            type: 'input_audio',
+            type: 'input_audio' as const,
             input_audio: {
               data: mediaPart.data,
               format: format as 'wav' | 'mp3',

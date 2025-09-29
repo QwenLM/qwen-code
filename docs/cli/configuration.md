@@ -362,6 +362,18 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
     "skipLoopDetection": true
     ```
 
+- **`approvalMode`** (string):
+  - **Description:** Sets the default approval mode for tool usage. Accepted values are:
+    - `plan`: Analyze only, do not modify files or execute commands.
+    - `default`: Require approval before file edits or shell commands run.
+    - `auto-edit`: Automatically approve file edits.
+    - `yolo`: Automatically approve all tool calls.
+  - **Default:** `"default"`
+  - **Example:**
+    ```json
+    "approvalMode": "plan"
+    ```
+
 ### Example `settings.json`:
 
 ```json
@@ -486,12 +498,13 @@ Arguments passed directly when running the CLI can override other configurations
 - **`--yolo`**:
   - Enables YOLO mode, which automatically approves all tool calls.
 - **`--approval-mode <mode>`**:
-  - Sets the approval mode for tool calls. Available modes:
-    - `default`: Prompt for approval on each tool call (default behavior)
-    - `auto_edit`: Automatically approve edit tools (edit, write_file) while prompting for others
-    - `yolo`: Automatically approve all tool calls (equivalent to `--yolo`)
+  - Sets the approval mode for tool calls. Supported modes:
+    - `plan`: Analyze only—do not modify files or execute commands.
+    - `default`: Require approval for file edits or shell commands (default behavior).
+    - `auto-edit`: Automatically approve edit tools (edit, write_file) while prompting for others.
+    - `yolo`: Automatically approve all tool calls (equivalent to `--yolo`).
   - Cannot be used together with `--yolo`. Use `--approval-mode=yolo` instead of `--yolo` for the new unified approach.
-  - Example: `qwen --approval-mode auto_edit`
+  - Example: `qwen --approval-mode auto-edit`
 - **`--allowed-tools <tool1,tool2,...>`**:
   - A comma-separated list of tool names that will bypass the confirmation dialog.
   - Example: `qwen --allowed-tools "ShellTool(git status)"`

@@ -60,7 +60,9 @@ const mockParseAndFormatApiError = vi.hoisted(() => vi.fn());
 const mockHandleVisionSwitch = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ shouldProceed: true }),
 );
-const mockRestoreOriginalModel = vi.hoisted(() => vi.fn());
+const mockRestoreOriginalModel = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -301,6 +303,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         );
       },
       {
@@ -462,6 +466,8 @@ describe('useGeminiStream', () => {
         () => {},
         () => {},
         () => {},
+        false, // visionModelPreviewEnabled
+        undefined, // onVisionSwitchRequired (optional)
       ),
     );
 
@@ -541,6 +547,8 @@ describe('useGeminiStream', () => {
         () => {},
         () => {},
         () => {},
+        false, // visionModelPreviewEnabled
+        undefined, // onVisionSwitchRequired (optional)
       ),
     );
 
@@ -649,6 +657,8 @@ describe('useGeminiStream', () => {
         () => {},
         () => {},
         () => {},
+        false, // visionModelPreviewEnabled
+        undefined, // onVisionSwitchRequired (optional)
       ),
     );
 
@@ -758,6 +768,8 @@ describe('useGeminiStream', () => {
         () => {},
         () => {},
         () => {},
+        false, // visionModelPreviewEnabled
+        undefined, // onVisionSwitchRequired (optional)
       ),
     );
 
@@ -887,6 +899,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           cancelSubmitSpy,
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1198,6 +1212,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1251,6 +1267,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1301,6 +1319,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1349,6 +1369,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1398,6 +1420,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1487,6 +1511,8 @@ describe('useGeminiStream', () => {
             () => {},
             () => {},
             () => {},
+            false, // visionModelPreviewEnabled
+            undefined, // onVisionSwitchRequired (optional)
           ),
         );
 
@@ -1537,6 +1563,8 @@ describe('useGeminiStream', () => {
         vi.fn(), // setModelSwitched
         vi.fn(), // onEditorClose
         vi.fn(), // onCancelSubmit
+        false, // visionModelPreviewEnabled
+        undefined, // onVisionSwitchRequired (optional)
       ),
     );
 
@@ -1602,6 +1630,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1680,6 +1710,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1734,6 +1766,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1943,6 +1977,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -1975,6 +2011,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -2028,6 +2066,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 
@@ -2065,6 +2105,8 @@ describe('useGeminiStream', () => {
           () => {},
           () => {},
           () => {},
+          false, // visionModelPreviewEnabled
+          undefined, // onVisionSwitchRequired (optional)
         ),
       );
 

@@ -14,9 +14,9 @@ import {
 import { useKeypress } from '../hooks/useKeypress.js';
 
 export enum VisionSwitchOutcome {
-  SwitchOnce = 'switch_once',
-  SwitchSessionToVL = 'switch_session_to_vl',
-  DisallowWithGuidance = 'disallow_with_guidance',
+  SwitchOnce = 'once',
+  SwitchSessionToVL = 'session',
+  ContinueWithCurrentModel = 'persist',
 }
 
 export interface ModelSwitchDialogProps {
@@ -29,7 +29,7 @@ export const ModelSwitchDialog: React.FC<ModelSwitchDialogProps> = ({
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
-        onSelect(VisionSwitchOutcome.DisallowWithGuidance);
+        onSelect(VisionSwitchOutcome.ContinueWithCurrentModel);
       }
     },
     { isActive: true },
@@ -45,8 +45,8 @@ export const ModelSwitchDialog: React.FC<ModelSwitchDialogProps> = ({
       value: VisionSwitchOutcome.SwitchSessionToVL,
     },
     {
-      label: 'Do not switch, show guidance',
-      value: VisionSwitchOutcome.DisallowWithGuidance,
+      label: 'Continue with current model',
+      value: VisionSwitchOutcome.ContinueWithCurrentModel,
     },
   ];
 

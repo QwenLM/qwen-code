@@ -464,6 +464,7 @@ export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
+  | PlanResultDisplay
   | TaskResultDisplay;
 
 export interface FileDiff {
@@ -488,6 +489,12 @@ export interface TodoResultDisplay {
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
   }>;
+}
+
+export interface PlanResultDisplay {
+  type: 'plan_summary';
+  message: string;
+  plan: string;
 }
 
 export interface ToolEditConfirmationDetails {
@@ -541,7 +548,15 @@ export type ToolCallConfirmationDetails =
   | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
-  | ToolInfoConfirmationDetails;
+  | ToolInfoConfirmationDetails
+  | ToolPlanConfirmationDetails;
+
+export interface ToolPlanConfirmationDetails {
+  type: 'plan';
+  title: string;
+  plan: string;
+  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+}
 
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',

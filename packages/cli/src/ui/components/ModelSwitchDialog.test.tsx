@@ -46,8 +46,8 @@ describe('ModelSwitchDialog', () => {
         value: VisionSwitchOutcome.SwitchSessionToVL,
       },
       {
-        label: 'Do not switch, show guidance',
-        value: VisionSwitchOutcome.DisallowWithGuidance,
+        label: 'Continue with current model',
+        value: VisionSwitchOutcome.ContinueWithCurrentModel,
       },
     ];
 
@@ -81,18 +81,18 @@ describe('ModelSwitchDialog', () => {
     );
   });
 
-  it('should call onSelect with DisallowWithGuidance when third option is selected', () => {
+  it('should call onSelect with ContinueWithCurrentModel when third option is selected', () => {
     render(<ModelSwitchDialog onSelect={mockOnSelect} />);
 
     const onSelectCallback = mockRadioButtonSelect.mock.calls[0][0].onSelect;
-    onSelectCallback(VisionSwitchOutcome.DisallowWithGuidance);
+    onSelectCallback(VisionSwitchOutcome.ContinueWithCurrentModel);
 
     expect(mockOnSelect).toHaveBeenCalledWith(
-      VisionSwitchOutcome.DisallowWithGuidance,
+      VisionSwitchOutcome.ContinueWithCurrentModel,
     );
   });
 
-  it('should setup escape key handler to call onSelect with DisallowWithGuidance', () => {
+  it('should setup escape key handler to call onSelect with ContinueWithCurrentModel', () => {
     render(<ModelSwitchDialog onSelect={mockOnSelect} />);
 
     expect(mockUseKeypress).toHaveBeenCalledWith(expect.any(Function), {
@@ -104,7 +104,7 @@ describe('ModelSwitchDialog', () => {
     keypressHandler({ name: 'escape' });
 
     expect(mockOnSelect).toHaveBeenCalledWith(
-      VisionSwitchOutcome.DisallowWithGuidance,
+      VisionSwitchOutcome.ContinueWithCurrentModel,
     );
   });
 
@@ -126,13 +126,9 @@ describe('ModelSwitchDialog', () => {
 
   describe('VisionSwitchOutcome enum', () => {
     it('should have correct enum values', () => {
-      expect(VisionSwitchOutcome.SwitchOnce).toBe('switch_once');
-      expect(VisionSwitchOutcome.SwitchSessionToVL).toBe(
-        'switch_session_to_vl',
-      );
-      expect(VisionSwitchOutcome.DisallowWithGuidance).toBe(
-        'disallow_with_guidance',
-      );
+      expect(VisionSwitchOutcome.SwitchOnce).toBe('once');
+      expect(VisionSwitchOutcome.SwitchSessionToVL).toBe('session');
+      expect(VisionSwitchOutcome.ContinueWithCurrentModel).toBe('persist');
     });
   });
 
@@ -144,7 +140,7 @@ describe('ModelSwitchDialog', () => {
     // Call multiple times
     onSelectCallback(VisionSwitchOutcome.SwitchOnce);
     onSelectCallback(VisionSwitchOutcome.SwitchSessionToVL);
-    onSelectCallback(VisionSwitchOutcome.DisallowWithGuidance);
+    onSelectCallback(VisionSwitchOutcome.ContinueWithCurrentModel);
 
     expect(mockOnSelect).toHaveBeenCalledTimes(3);
     expect(mockOnSelect).toHaveBeenNthCalledWith(
@@ -157,7 +153,7 @@ describe('ModelSwitchDialog', () => {
     );
     expect(mockOnSelect).toHaveBeenNthCalledWith(
       3,
-      VisionSwitchOutcome.DisallowWithGuidance,
+      VisionSwitchOutcome.ContinueWithCurrentModel,
     );
   });
 
@@ -179,7 +175,7 @@ describe('ModelSwitchDialog', () => {
 
     expect(mockOnSelect).toHaveBeenCalledTimes(2);
     expect(mockOnSelect).toHaveBeenCalledWith(
-      VisionSwitchOutcome.DisallowWithGuidance,
+      VisionSwitchOutcome.ContinueWithCurrentModel,
     );
   });
 });

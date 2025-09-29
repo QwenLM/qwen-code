@@ -135,12 +135,6 @@ export const Help: React.FC<Help> = ({ commands }) => (
     </Text>
     <Text color={Colors.Foreground}>
       <Text bold color={Colors.AccentPurple}>
-        Ctrl+Y
-      </Text>{' '}
-      - Toggle YOLO mode
-    </Text>
-    <Text color={Colors.Foreground}>
-      <Text bold color={Colors.AccentPurple}>
         Enter
       </Text>{' '}
       - Send message
@@ -155,7 +149,7 @@ export const Help: React.FC<Help> = ({ commands }) => (
       <Text bold color={Colors.AccentPurple}>
         Shift+Tab
       </Text>{' '}
-      - Toggle auto-accepting edits
+      - Cycle approval modes
     </Text>
     <Text color={Colors.Foreground}>
       <Text bold color={Colors.AccentPurple}>

@@ -41,7 +41,7 @@ describe('Flash Model Fallback Configuration', () => {
   // with the fallback mechanism. This will be necessary we introduce more
   // intelligent model routing.
   describe('setModel', () => {
-    it('should only mark as switched if contentGeneratorConfig exists', () => {
+    it('should only mark as switched if contentGeneratorConfig exists', async () => {
       // Create config without initializing contentGeneratorConfig
       const newConfig = new Config({
         sessionId: 'test-session-2',
@@ -52,15 +52,15 @@ describe('Flash Model Fallback Configuration', () => {
       });
 
       // Should not crash when contentGeneratorConfig is undefined
-      newConfig.setModel(DEFAULT_GEMINI_FLASH_MODEL);
+      await newConfig.setModel(DEFAULT_GEMINI_FLASH_MODEL);
       expect(newConfig.isInFallbackMode()).toBe(false);
     });
   });
 
   describe('getModel', () => {
-    it('should return contentGeneratorConfig model if available', () => {
+    it('should return contentGeneratorConfig model if available', async () => {
       // Simulate initialized content generator config
-      config.setModel(DEFAULT_GEMINI_FLASH_MODEL);
+      await config.setModel(DEFAULT_GEMINI_FLASH_MODEL);
       expect(config.getModel()).toBe(DEFAULT_GEMINI_FLASH_MODEL);
     });
 
@@ -88,8 +88,8 @@ describe('Flash Model Fallback Configuration', () => {
       expect(config.isInFallbackMode()).toBe(false);
     });
 
-    it('should persist switched state throughout session', () => {
-      config.setModel(DEFAULT_GEMINI_FLASH_MODEL);
+    it('should persist switched state throughout session', async () => {
+      await config.setModel(DEFAULT_GEMINI_FLASH_MODEL);
       // Setting state for fallback mode as is expected of clients
       config.setFallbackMode(true);
       expect(config.isInFallbackMode()).toBe(true);

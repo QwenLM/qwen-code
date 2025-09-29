@@ -53,6 +53,39 @@ const logger = {
   error: (...args: any[]) => console.error('[ERROR]', ...args),
 };
 
+const VALID_APPROVAL_MODE_VALUES = [
+  'plan',
+  'default',
+  'auto-edit',
+  'yolo',
+] as const;
+
+function formatApprovalModeError(value: string): Error {
+  return new Error(
+    `Invalid approval mode: ${value}. Valid values are: ${VALID_APPROVAL_MODE_VALUES.join(
+      ', ',
+    )}`,
+  );
+}
+
+function parseApprovalModeValue(value: string): ApprovalMode {
+  const normalized = value.trim().toLowerCase();
+  switch (normalized) {
+    case 'plan':
+      return ApprovalMode.PLAN;
+    case 'default':
+      return ApprovalMode.DEFAULT;
+    case 'yolo':
+      return ApprovalMode.YOLO;
+    case 'auto_edit':
+    case 'autoedit':
+    case 'auto-edit':
+      return ApprovalMode.AUTO_EDIT;
+    default:
+      throw formatApprovalModeError(value);
+  }
+}
+
 export interface CliArgs {
   model: string | undefined;
   sandbox: boolean | string | undefined;
@@ -86,6 +119,7 @@ export interface CliArgs {
   verbose: boolean | undefined;
   verboseToStdout: boolean | undefined;
   screenReader: boolean | undefined;
+  vlmSwitchMode: string | undefined;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -150,9 +184,9 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['default', 'auto_edit', 'yolo'],
+          choices: ['plan', 'default', 'auto-edit', 'yolo'],
           description:
-            'Set the approval mode: default (prompt for approval), auto_edit (auto-approve edit tools), yolo (auto-approve all tools)',
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
         })
         .option('telemetry', {
           type: 'boolean',
@@ -267,6 +301,13 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'boolean',
           description: 'Enable screen reader mode for accessibility.',
           default: false,
+        })
+        .option('vlm-switch-mode', {
+          type: 'string',
+          choices: ['once', 'session', 'persist'],
+          description:
+            'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). Overrides settings files.',
+          default: process.env['VLM_SWITCH_MODE'],
         })
         .check((argv) => {
           if (argv.prompt && argv['promptInteractive']) {
@@ -454,30 +495,21 @@ export async function loadCliConfig(
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
   if (argv.approvalMode) {
-    // New --approval-mode flag takes precedence
-    switch (argv.approvalMode) {
-      case 'yolo':
-        approvalMode = ApprovalMode.YOLO;
-        break;
-      case 'auto_edit':
-        approvalMode = ApprovalMode.AUTO_EDIT;
-        break;
-      case 'default':
-        approvalMode = ApprovalMode.DEFAULT;
-        break;
-      default:
-        throw new Error(
-          `Invalid approval mode: ${argv.approvalMode}. Valid values are: yolo, auto_edit, default`,
-        );
-    }
+    approvalMode = parseApprovalModeValue(argv.approvalMode);
+  } else if (argv.yolo) {
+    approvalMode = ApprovalMode.YOLO;
+  } else if (settings.approvalMode) {
+    approvalMode = parseApprovalModeValue(settings.approvalMode);
   } else {
-    // Fallback to legacy --yolo flag behavior
-    approvalMode =
-      argv.yolo || false ? ApprovalMode.YOLO : ApprovalMode.DEFAULT;
+    approvalMode = ApprovalMode.DEFAULT;
   }
 
   // Force approval mode to default if the folder is not trusted.
-  if (!trustedFolder && approvalMode !== ApprovalMode.DEFAULT) {
+  if (
+    !trustedFolder &&
+    approvalMode !== ApprovalMode.DEFAULT &&
+    approvalMode !== ApprovalMode.PLAN
+  ) {
     logger.warn(
       `Approval mode overridden to "default" because the current folder is not trusted.`,
     );
@@ -490,6 +522,7 @@ export async function loadCliConfig(
   const extraExcludes: string[] = [];
   if (!interactive && !argv.experimentalAcp) {
     switch (approvalMode) {
+      case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // In default non-interactive mode, all tools that require approval are excluded.
         extraExcludes.push(ShellTool.Name, EditTool.Name, WriteFileTool.Name);
@@ -548,6 +581,9 @@ export async function loadCliConfig(
     argv.screenReader !== undefined
       ? argv.screenReader
       : (settings.ui?.accessibility?.screenReader ?? false);
+
+  const vlmSwitchMode =
+    argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
   return new Config({
     sessionId,
     embeddingModel: DEFAULT_GEMINI_EMBEDDING_MODEL,
@@ -654,6 +690,7 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     enablePromptCompletion: settings.general?.enablePromptCompletion ?? false,
     skipLoopDetection: settings.skipLoopDetection ?? false,
+    vlmSwitchMode,
   });
 }
 

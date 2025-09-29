@@ -407,7 +407,11 @@ export function KeypressProvider({
         return;
       }
 
-      if (rawDataBuffer.length <= 2 || isPaste) {
+      if (
+        (rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d)) ||
+        !rawDataBuffer.includes(0x0d) ||
+        isPaste
+      ) {
         keypressStream.write(rawDataBuffer);
       } else {
         // Flush raw data buffer as a paste event

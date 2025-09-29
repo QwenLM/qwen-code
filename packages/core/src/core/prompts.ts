@@ -820,7 +820,65 @@ function getToolCallExamples(model?: string): string {
     if (/qwen[^-]*-vl/i.test(model)) {
       return qwenVlToolCallExamples;
     }
+    // Match coder-model pattern (same as qwen3-coder)
+    if (/coder-model/i.test(model)) {
+      return qwenCoderToolCallExamples;
+    }
+    // Match vision-model pattern (same as qwen3-vl)
+    if (/vision-model/i.test(model)) {
+      return qwenVlToolCallExamples;
+    }
   }
 
   return generalToolCallExamples;
+}
+
+/**
+ * Generates a system reminder message about available subagents for the AI assistant.
+ *
+ * This function creates an internal system message that informs the AI about specialized
+ * agents it can delegate tasks to. The reminder encourages proactive use of the TASK tool
+ * when user requests match agent capabilities.
+ *
+ * @param agentTypes - Array of available agent type names (e.g., ['python', 'web', 'analysis'])
+ * @returns A formatted system reminder string wrapped in XML tags for internal AI processing
+ *
+ * @example
+ * ```typescript
+ * const reminder = getSubagentSystemReminder(['python', 'web']);
+ * // Returns: "<system-reminder>You have powerful specialized agents..."
+ * ```
+ */
+export function getSubagentSystemReminder(agentTypes: string[]): string {
+  return `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${agentTypes.join(', ')}. PROACTIVELY use the ${ToolNames.TASK} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
+}
+
+/**
+ * Generates a system reminder message for plan mode operation.
+ *
+ * This function creates an internal system message that enforces plan mode constraints,
+ * preventing the AI from making any modifications to the system until the user confirms
+ * the proposed plan. It overrides other instructions to ensure read-only behavior.
+ *
+ * @returns A formatted system reminder string that enforces plan mode restrictions
+ *
+ * @example
+ * ```typescript
+ * const reminder = getPlanModeSystemReminder();
+ * // Returns: "<system-reminder>Plan mode is active..."
+ * ```
+ *
+ * @remarks
+ * Plan mode ensures the AI will:
+ * - Only perform read-only operations (research, analysis)
+ * - Present a comprehensive plan via ExitPlanMode tool
+ * - Wait for user confirmation before making any changes
+ * - Override any other instructions that would modify system state
+ */
+export function getPlanModeSystemReminder(): string {
+  return `<system-reminder>
+Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supercedes any other instructions you have received (for example, to make edits). Instead, you should:
+1. Answer the user's query comprehensively
+2. When you're done researching, present your plan by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+</system-reminder>`;
 }

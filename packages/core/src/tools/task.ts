@@ -86,16 +86,19 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     );
 
     this.subagentManager = config.getSubagentManager();
+    this.subagentManager.addChangeListener(() => {
+      void this.refreshSubagents();
+    });
 
     // Initialize the tool asynchronously
-    this.initializeAsync();
+    this.refreshSubagents();
   }
 
   /**
    * Asynchronously initializes the tool by loading available subagents
    * and updating the description and schema.
    */
-  private async initializeAsync(): Promise<void> {
+  async refreshSubagents(): Promise<void> {
     try {
       this.availableSubagents = await this.subagentManager.listSubagents();
       this.updateDescriptionAndSchema();
@@ -103,6 +106,12 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
       console.warn('Failed to load subagents for Task tool:', error);
       this.availableSubagents = [];
       this.updateDescriptionAndSchema();
+    } finally {
+      // Update the client with the new tools
+      const geminiClient = this.config.getGeminiClient();
+      if (geminiClient) {
+        await geminiClient.setTools();
+      }
     }
   }
 
@@ -199,14 +208,6 @@ assistant: "I'm going to use the Task tool to launch the with the greeting-respo
         delete schema.properties.subagent_type.enum;
       }
     }
-  }
-
-  /**
-   * Refreshes the available subagents and updates the tool description.
-   * This can be called when subagents are added or removed.
-   */
-  async refreshSubagents(): Promise<void> {
-    await this.initializeAsync();
   }
 
   override validateToolParams(params: TaskParams): string | null {

@@ -21,7 +21,6 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { ensureCorrectEdit } from '../utils/editCorrector.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames } from './tool-names.js';
@@ -116,16 +115,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @returns An object describing the potential edit outcome
    * @throws File system errors if reading the file fails unexpectedly (e.g., permissions)
    */
-  private async calculateEdit(
-    params: EditToolParams,
-    abortSignal: AbortSignal,
-  ): Promise<CalculatedEdit> {
+  private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
     const expectedReplacements = params.expected_replacements ?? 1;
     let currentContent: string | null = null;
     let fileExists = false;
     let isNewFile = false;
-    let finalNewString = params.new_string;
-    let finalOldString = params.old_string;
+    const finalNewString = params.new_string;
+    const finalOldString = params.old_string;
     let occurrences = 0;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
@@ -157,18 +153,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         type: ToolErrorType.FILE_NOT_FOUND,
       };
     } else if (currentContent !== null) {
-      // Editing an existing file
-      const correctedEdit = await ensureCorrectEdit(
-        params.file_path,
-        currentContent,
-        params,
-        this.config.getGeminiClient(),
-        abortSignal,
-      );
-      finalOldString = correctedEdit.params.old_string;
-      finalNewString = correctedEdit.params.new_string;
-      occurrences = correctedEdit.occurrences;
-
+      occurrences = this.countOccurrences(currentContent, params.old_string);
       if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
@@ -235,11 +220,27 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
+   * Counts occurrences of a substring in a string
+   */
+  private countOccurrences(str: string, substr: string): number {
+    if (substr === '') {
+      return 0;
+    }
+    let count = 0;
+    let pos = str.indexOf(substr);
+    while (pos !== -1) {
+      count++;
+      pos = str.indexOf(substr, pos + substr.length); // Start search after the current match
+    }
+    return count;
+  }
+
+  /**
    * Handles the confirmation prompt for the Edit tool in the CLI.
    * It needs to calculate the diff to show the user.
    */
   async shouldConfirmExecute(
-    abortSignal: AbortSignal,
+    _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails | false> {
     if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
       return false;
@@ -247,7 +248,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
     let editData: CalculatedEdit;
     try {
-      editData = await this.calculateEdit(this.params, abortSignal);
+      editData = await this.calculateEdit(this.params);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.log(`Error preparing edit: ${errorMsg}`);
@@ -330,10 +331,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @param params Parameters for the edit operation
    * @returns Result of the edit operation
    */
-  async execute(signal: AbortSignal): Promise<ToolResult> {
+  async execute(_signal: AbortSignal): Promise<ToolResult> {
     let editData: CalculatedEdit;
     try {
-      editData = await this.calculateEdit(this.params, signal);
+      editData = await this.calculateEdit(this.params);
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       return {

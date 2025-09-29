@@ -566,7 +566,9 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       }
 
       // Switch model for future use but return false to stop current retry
-      config.setModel(fallbackModel);
+      config.setModel(fallbackModel).catch((error) => {
+        console.error('Failed to switch to fallback model:', error);
+      });
       config.setFallbackMode(true);
       logFlashFallback(
         config,
@@ -650,17 +652,28 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   }, []);
 
   const handleModelSelect = useCallback(
-    (modelId: string) => {
-      config.setModel(modelId);
-      setCurrentModel(modelId);
-      setIsModelSelectionDialogOpen(false);
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: `Switched model to \`${modelId}\` for this session.`,
-        },
-        Date.now(),
-      );
+    async (modelId: string) => {
+      try {
+        await config.setModel(modelId);
+        setCurrentModel(modelId);
+        setIsModelSelectionDialogOpen(false);
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: `Switched model to \`${modelId}\` for this session.`,
+          },
+          Date.now(),
+        );
+      } catch (error) {
+        console.error('Failed to switch model:', error);
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: `Failed to switch to model \`${modelId}\`. Please try again.`,
+          },
+          Date.now(),
+        );
+      }
     },
     [config, setCurrentModel, addItem],
   );
@@ -670,7 +683,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     if (!contentGeneratorConfig) return [];
 
     const visionModelPreviewEnabled =
-      settings.merged.experimental?.visionModelPreview ?? false;
+      settings.merged.experimental?.visionModelPreview ?? true;
 
     switch (contentGeneratorConfig.authType) {
       case AuthType.QWEN_OAUTH:
@@ -759,7 +772,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     setModelSwitchedFromQuotaError,
     refreshStatic,
     () => cancelHandlerRef.current(),
-    settings.merged.experimental?.visionModelPreview ?? false,
+    settings.merged.experimental?.visionModelPreview ?? true,
     handleVisionSwitchRequired,
   );
 

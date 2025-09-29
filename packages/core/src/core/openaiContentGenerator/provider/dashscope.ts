@@ -3,11 +3,13 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { tokenLimit } from '../../tokenLimits.js';
 import type {
   OpenAICompatibleProvider,
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
+  ChatCompletionToolWithCache,
 } from './types.js';
 
 export class DashScopeOpenAICompatibleProvider
@@ -65,35 +67,62 @@ export class DashScopeOpenAICompatibleProvider
     });
   }
 
+  /**
+   * Build and configure the request for DashScope API.
+   *
+   * This method applies DashScope-specific configurations including:
+   * - Cache control for the system message, last tool message (when tools are configured),
+   *   and the latest history message
+   * - Output token limits based on model capabilities
+   * - Vision model specific parameters (vl_high_resolution_images)
+   * - Request metadata for session tracking
+   *
+   * @param request - The original chat completion request parameters
+   * @param userPromptId - Unique identifier for the user prompt for session tracking
+   * @returns Configured request with DashScope-specific parameters applied
+   */
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
+    let tools = request.tools;
 
     // Apply DashScope cache control only if not disabled
     if (!this.shouldDisableCacheControl()) {
-      // Add cache control to system and last messages for DashScope providers
-      // Only add cache control to system message for non-streaming requests
-      const cacheTarget = request.stream ? 'both' : 'system';
-      messages = this.addDashScopeCacheControl(messages, cacheTarget);
+      const { messages: updatedMessages, tools: updatedTools } =
+        this.addDashScopeCacheControl(
+          request,
+          request.stream ? 'all' : 'system_only',
+        );
+      messages = updatedMessages;
+      tools = updatedTools;
     }
 
-    if (request.model.startsWith('qwen-vl')) {
+    // Apply output token limits based on model capabilities
+    // This ensures max_tokens doesn't exceed the model's maximum output limit
+    const requestWithTokenLimits = this.applyOutputTokenLimit(
+      request,
+      request.model,
+    );
+
+    if (this.isVisionModel(request.model)) {
       return {
-        ...request,
+        ...requestWithTokenLimits,
         messages,
+        ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
-      };
+      } as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
     return {
-      ...request, // Preserve all original parameters including sampling params
+      ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
+      ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
-    };
+    } as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
@@ -109,75 +138,67 @@ export class DashScopeOpenAICompatibleProvider
    * Add cache control flag to specified message(s) for DashScope providers
    */
   private addDashScopeCacheControl(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    target: 'system' | 'last' | 'both' = 'both',
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    if (messages.length === 0) {
-      return messages;
-    }
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+    cacheControl: 'system_only' | 'all',
+  ): {
+    messages: OpenAI.Chat.ChatCompletionMessageParam[];
+    tools?: ChatCompletionToolWithCache[];
+  } {
+    const messages = request.messages;
 
-    let updatedMessages = [...messages];
+    const systemIndex = messages.findIndex((msg) => msg.role === 'system');
+    const lastIndex = messages.length - 1;
 
-    // Add cache control to system message if requested
-    if (target === 'system' || target === 'both') {
-      updatedMessages = this.addCacheControlToMessage(
-        updatedMessages,
-        'system',
-      );
-    }
+    const updatedMessages =
+      messages.length === 0
+        ? messages
+        : messages.map((message, index) => {
+            const shouldAddCacheControl = Boolean(
+              (index === systemIndex && systemIndex !== -1) ||
+                (index === lastIndex && cacheControl === 'all'),
+            );
 
-    // Add cache control to last message if requested
-    if (target === 'last' || target === 'both') {
-      updatedMessages = this.addCacheControlToMessage(updatedMessages, 'last');
-    }
+            if (
+              !shouldAddCacheControl ||
+              !('content' in message) ||
+              message.content === null ||
+              message.content === undefined
+            ) {
+              return message;
+            }
 
-    return updatedMessages;
+            return {
+              ...message,
+              content: this.addCacheControlToContent(message.content),
+            } as OpenAI.Chat.ChatCompletionMessageParam;
+          });
+
+    const updatedTools =
+      cacheControl === 'all' && request.tools?.length
+        ? this.addCacheControlToTools(request.tools)
+        : (request.tools as ChatCompletionToolWithCache[] | undefined);
+
+    return {
+      messages: updatedMessages,
+      tools: updatedTools,
+    };
   }
 
-  /**
-   * Helper method to add cache control to a specific message
-   */
-  private addCacheControlToMessage(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    target: 'system' | 'last',
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    const updatedMessages = [...messages];
-    const messageIndex = this.findTargetMessageIndex(messages, target);
-
-    if (messageIndex === -1) {
-      return updatedMessages;
+  private addCacheControlToTools(
+    tools: OpenAI.Chat.ChatCompletionTool[],
+  ): ChatCompletionToolWithCache[] {
+    if (tools.length === 0) {
+      return tools as ChatCompletionToolWithCache[];
     }
 
-    const message = updatedMessages[messageIndex];
+    const updatedTools = [...tools] as ChatCompletionToolWithCache[];
+    const lastToolIndex = tools.length - 1;
+    updatedTools[lastToolIndex] = {
+      ...updatedTools[lastToolIndex],
+      cache_control: { type: 'ephemeral' },
+    };
 
-    // Only process messages that have content
-    if (
-      'content' in message &&
-      message.content !== null &&
-      message.content !== undefined
-    ) {
-      const updatedContent = this.addCacheControlToContent(message.content);
-      updatedMessages[messageIndex] = {
-        ...message,
-        content: updatedContent,
-      } as OpenAI.Chat.ChatCompletionMessageParam;
-    }
-
-    return updatedMessages;
-  }
-
-  /**
-   * Find the index of the target message (system or last)
-   */
-  private findTargetMessageIndex(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    target: 'system' | 'last',
-  ): number {
-    if (target === 'system') {
-      return messages.findIndex((msg) => msg.role === 'system');
-    } else {
-      return messages.length - 1;
-    }
+    return updatedTools;
   }
 
   /**
@@ -244,6 +265,63 @@ export class DashScopeOpenAICompatibleProvider
     }
 
     return contentArray;
+  }
+
+  private isVisionModel(model: string | undefined): boolean {
+    if (!model) {
+      return false;
+    }
+
+    const normalized = model.toLowerCase();
+
+    if (normalized === 'vision-model') {
+      return true;
+    }
+
+    if (normalized.startsWith('qwen-vl')) {
+      return true;
+    }
+
+    if (normalized.startsWith('qwen3-vl-plus')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Apply output token limit to a request's max_tokens parameter.
+   *
+   * Ensures that existing max_tokens parameters don't exceed the model's maximum output
+   * token limit. Only modifies max_tokens when already present in the request.
+   *
+   * @param request - The chat completion request parameters
+   * @param model - The model name to get the output token limit for
+   * @returns The request with max_tokens adjusted to respect the model's limits (if present)
+   */
+  private applyOutputTokenLimit<T extends { max_tokens?: number | null }>(
+    request: T,
+    model: string,
+  ): T {
+    const currentMaxTokens = request.max_tokens;
+
+    // Only process if max_tokens is already present in the request
+    if (currentMaxTokens === undefined || currentMaxTokens === null) {
+      return request; // No max_tokens parameter, return unchanged
+    }
+
+    const modelLimit = tokenLimit(model, 'output');
+
+    // If max_tokens exceeds the model limit, cap it to the model's limit
+    if (currentMaxTokens > modelLimit) {
+      return {
+        ...request,
+        max_tokens: modelLimit,
+      };
+    }
+
+    // If max_tokens is within the limit, return the request unchanged
+    return request;
   }
 
   /**

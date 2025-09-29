@@ -33,6 +33,7 @@ import {
 import { logCliConfiguration, logIdeConnection } from '../telemetry/loggers.js';
 import { IdeConnectionEvent, IdeConnectionType } from '../telemetry/types.js';
 import { EditTool } from '../tools/edit.js';
+import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { GlobTool } from '../tools/glob.js';
 import { GrepTool } from '../tools/grep.js';
 import { LSTool } from '../tools/ls.js';
@@ -56,15 +57,19 @@ import {
   DEFAULT_GEMINI_FLASH_MODEL,
 } from './models.js';
 import { Storage } from './storage.js';
+import { Logger, type ModelSwitchEvent } from '../core/logger.js';
 
 // Re-export OAuth config type
 export type { AnyToolInvocation, MCPOAuthConfig };
 
 export enum ApprovalMode {
+  PLAN = 'plan',
   DEFAULT = 'default',
-  AUTO_EDIT = 'autoEdit',
+  AUTO_EDIT = 'auto-edit',
   YOLO = 'yolo',
 }
+
+export const APPROVAL_MODES = Object.values(ApprovalMode);
 
 export interface AccessibilitySettings {
   disableLoadingPhrases?: boolean;
@@ -239,6 +244,7 @@ export interface ConfigParameters {
   extensionManagement?: boolean;
   enablePromptCompletion?: boolean;
   skipLoopDetection?: boolean;
+  vlmSwitchMode?: string;
 }
 
 export class Config {
@@ -330,9 +336,11 @@ export class Config {
   private readonly extensionManagement: boolean;
   private readonly enablePromptCompletion: boolean = false;
   private readonly skipLoopDetection: boolean;
+  private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
+  private logger: Logger | null = null;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -424,7 +432,14 @@ export class Config {
     this.extensionManagement = params.extensionManagement ?? false;
     this.storage = new Storage(this.targetDir);
     this.enablePromptCompletion = params.enablePromptCompletion ?? false;
+    this.vlmSwitchMode = params.vlmSwitchMode;
     this.fileExclusions = new FileExclusions(this);
+
+    // Initialize logger asynchronously
+    this.logger = new Logger(this.sessionId, this.storage);
+    this.logger.initialize().catch((error) => {
+      console.debug('Failed to initialize logger:', error);
+    });
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -517,21 +532,47 @@ export class Config {
     return this.contentGeneratorConfig?.model || this.model;
   }
 
-  setModel(newModel: string): void {
+  async setModel(
+    newModel: string,
+    options?: {
+      reason?: ModelSwitchEvent['reason'];
+      context?: string;
+    },
+  ): Promise<void> {
+    const oldModel = this.getModel();
+
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
+    }
+
+    // Log the model switch if the model actually changed
+    if (oldModel !== newModel && this.logger) {
+      const switchEvent: ModelSwitchEvent = {
+        fromModel: oldModel,
+        toModel: newModel,
+        reason: options?.reason || 'manual',
+        context: options?.context,
+      };
+
+      // Log asynchronously to avoid blocking
+      this.logger.logModelSwitch(switchEvent).catch((error) => {
+        console.debug('Failed to log model switch:', error);
+      });
     }
 
     // Reinitialize chat with updated configuration while preserving history
     const geminiClient = this.getGeminiClient();
     if (geminiClient && geminiClient.isInitialized()) {
-      // Use async operation but don't await to avoid blocking
-      geminiClient.reinitialize().catch((error) => {
+      // Now await the reinitialize operation to ensure completion
+      try {
+        await geminiClient.reinitialize();
+      } catch (error) {
         console.error(
           'Failed to reinitialize chat with updated config:',
           error,
         );
-      });
+        throw error; // Re-throw to let callers handle the error
+      }
     }
   }
 
@@ -663,7 +704,11 @@ export class Config {
   }
 
   setApprovalMode(mode: ApprovalMode): void {
-    if (this.isTrustedFolder() === false && mode !== ApprovalMode.DEFAULT) {
+    if (
+      this.isTrustedFolder() === false &&
+      mode !== ApprovalMode.DEFAULT &&
+      mode !== ApprovalMode.PLAN
+    ) {
       throw new Error(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
@@ -938,6 +983,10 @@ export class Config {
     return this.skipLoopDetection;
   }
 
+  getVlmSwitchMode(): string | undefined {
+    return this.vlmSwitchMode;
+  }
+
   async getGitService(): Promise<GitService> {
     if (!this.gitService) {
       this.gitService = new GitService(this.targetDir, this.storage);
@@ -1002,11 +1051,12 @@ export class Config {
     registerCoreTool(GlobTool, this);
     registerCoreTool(EditTool, this);
     registerCoreTool(WriteFileTool, this);
-    registerCoreTool(WebFetchTool, this);
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
+    registerCoreTool(ExitPlanModeTool, this);
+    registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool only if Tavily API key is set
     if (this.getTavilyApiKey()) {
       registerCoreTool(WebSearchTool, this);

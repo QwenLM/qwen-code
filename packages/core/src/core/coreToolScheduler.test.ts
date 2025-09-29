@@ -10,11 +10,13 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   Config,
   ToolCallConfirmationDetails,
+  ToolCallRequestInfo,
   ToolConfirmationPayload,
   ToolInvocation,
   ToolResult,
   ToolResultDisplay,
   ToolRegistry,
+  SuccessfulToolCall,
 } from '../index.js';
 import {
   ApprovalMode,
@@ -24,11 +26,16 @@ import {
   ToolConfirmationOutcome,
 } from '../index.js';
 import { MockModifiableTool, MockTool } from '../test-utils/tools.js';
-import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
+import type {
+  ToolCall,
+  WaitingToolCall,
+  ErroredToolCall,
+} from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
   convertToFunctionResponse,
 } from './coreToolScheduler.js';
+import { getPlanModeSystemReminder } from './prompts.js';
 
 class TestApprovalTool extends BaseDeclarativeTool<{ id: string }, ToolResult> {
   static readonly Name = 'testApprovalTool';
@@ -98,6 +105,49 @@ class TestApprovalInvocation extends BaseToolInvocation<
       llmContent: `Executed test tool ${this.params.id}`,
       returnDisplay: `Executed test tool ${this.params.id}`,
     };
+  }
+}
+
+class SimpleToolInvocation extends BaseToolInvocation<
+  Record<string, unknown>,
+  ToolResult
+> {
+  constructor(
+    params: Record<string, unknown>,
+    private readonly executeImpl: () => Promise<ToolResult> | ToolResult,
+  ) {
+    super(params);
+  }
+
+  getDescription(): string {
+    return 'simple tool invocation';
+  }
+
+  async execute(): Promise<ToolResult> {
+    return await Promise.resolve(this.executeImpl());
+  }
+}
+
+class SimpleTool extends BaseDeclarativeTool<
+  Record<string, unknown>,
+  ToolResult
+> {
+  constructor(
+    name: string,
+    kind: Kind,
+    private readonly executeImpl: () => Promise<ToolResult> | ToolResult,
+  ) {
+    super(name, name, 'Simple test tool', kind, {
+      type: 'object',
+      properties: {},
+      additionalProperties: true,
+    });
+  }
+
+  protected createInvocation(
+    params: Record<string, unknown>,
+  ): ToolInvocation<Record<string, unknown>, ToolResult> {
+    return new SimpleToolInvocation(params, this.executeImpl);
   }
 }
 
@@ -195,6 +245,249 @@ describe('CoreToolScheduler', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('cancelled');
+  });
+
+  describe('plan mode enforcement', () => {
+    it('returns plan reminder and skips execution for edit tools', async () => {
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      // Use MockTool with shouldConfirm=true to simulate a tool that requires confirmation
+      const tool = new MockTool('write_file');
+      tool.shouldConfirm = true;
+      tool.executeFn = executeSpy;
+
+      const mockToolRegistry = {
+        getTool: vi.fn().mockReturnValue(tool),
+        getAllToolNames: vi.fn().mockReturnValue([tool.name]),
+      } as unknown as ToolRegistry;
+
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+
+      const mockConfig = {
+        getSessionId: () => 'plan-session',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getAllowedTools: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'oauth-personal',
+        }),
+        getToolRegistry: () => mockToolRegistry,
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const request: ToolCallRequestInfo = {
+        callId: 'plan-1',
+        name: 'write_file',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-plan',
+      };
+
+      await scheduler.schedule([request], new AbortController().signal);
+
+      const errorCall = (await waitForStatus(
+        onToolCallsUpdate,
+        'error',
+      )) as ErroredToolCall;
+
+      expect(executeSpy).not.toHaveBeenCalled();
+      expect(
+        errorCall.response.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ],
+      ).toBe(getPlanModeSystemReminder());
+      expect(errorCall.response.resultDisplay).toContain('Plan mode');
+    });
+
+    it('allows read tools to execute in plan mode', async () => {
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'read ok',
+        returnDisplay: 'read ok',
+      });
+      const tool = new SimpleTool('read_file', Kind.Read, executeSpy);
+
+      const mockToolRegistry = {
+        getTool: vi.fn().mockReturnValue(tool),
+        getAllToolNames: vi.fn().mockReturnValue([tool.name]),
+      } as unknown as ToolRegistry;
+
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+
+      const mockConfig = {
+        getSessionId: () => 'plan-session',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getAllowedTools: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'oauth-personal',
+        }),
+        getToolRegistry: () => mockToolRegistry,
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const request: ToolCallRequestInfo = {
+        callId: 'plan-2',
+        name: tool.name,
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-plan',
+      };
+
+      await scheduler.schedule([request], new AbortController().signal);
+
+      const successCall = (await waitForStatus(
+        onToolCallsUpdate,
+        'success',
+      )) as SuccessfulToolCall;
+
+      expect(executeSpy).toHaveBeenCalledTimes(1);
+      expect(
+        successCall.response.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ],
+      ).toBe('read ok');
+    });
+
+    it('enforces shell command restrictions in plan mode', async () => {
+      const executeSpyAllowed = vi.fn().mockResolvedValue({
+        llmContent: 'shell ok',
+        returnDisplay: 'shell ok',
+      });
+      const allowedTool = new SimpleTool(
+        'run_shell_command',
+        Kind.Execute,
+        executeSpyAllowed,
+      );
+
+      const allowedToolRegistry = {
+        getTool: vi.fn().mockReturnValue(allowedTool),
+        getAllToolNames: vi.fn().mockReturnValue([allowedTool.name]),
+      } as unknown as ToolRegistry;
+
+      const allowedConfig = {
+        getSessionId: () => 'plan-session',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getAllowedTools: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'oauth-personal',
+        }),
+        getToolRegistry: () => allowedToolRegistry,
+      } as unknown as Config;
+
+      const allowedUpdates = vi.fn();
+      const allowedScheduler = new CoreToolScheduler({
+        config: allowedConfig,
+        onAllToolCallsComplete: vi.fn(),
+        onToolCallsUpdate: allowedUpdates,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const allowedRequest: ToolCallRequestInfo = {
+        callId: 'plan-shell-allowed',
+        name: allowedTool.name,
+        args: { command: 'ls -la' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-plan',
+      };
+
+      await allowedScheduler.schedule(
+        [allowedRequest],
+        new AbortController().signal,
+      );
+
+      await waitForStatus(allowedUpdates, 'success');
+      expect(executeSpyAllowed).toHaveBeenCalledTimes(1);
+
+      const executeSpyBlocked = vi.fn().mockResolvedValue({
+        llmContent: 'blocked',
+        returnDisplay: 'blocked',
+      });
+      // Use MockTool with shouldConfirm=true to simulate a shell tool that requires confirmation
+      const blockedTool = new MockTool('run_shell_command');
+      blockedTool.shouldConfirm = true;
+      blockedTool.executeFn = executeSpyBlocked;
+
+      const blockedToolRegistry = {
+        getTool: vi.fn().mockReturnValue(blockedTool),
+        getAllToolNames: vi.fn().mockReturnValue([blockedTool.name]),
+      } as unknown as ToolRegistry;
+
+      const blockedConfig = {
+        getSessionId: () => 'plan-session',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getAllowedTools: () => [],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'oauth-personal',
+        }),
+        getToolRegistry: () => blockedToolRegistry,
+      } as unknown as Config;
+
+      const blockedUpdates = vi.fn();
+      const blockedScheduler = new CoreToolScheduler({
+        config: blockedConfig,
+        onAllToolCallsComplete: vi.fn(),
+        onToolCallsUpdate: blockedUpdates,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const blockedRequest: ToolCallRequestInfo = {
+        callId: 'plan-shell-blocked',
+        name: 'run_shell_command',
+        args: { command: 'rm -rf tmp' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-plan',
+      };
+
+      await blockedScheduler.schedule(
+        [blockedRequest],
+        new AbortController().signal,
+      );
+
+      const blockedCall = (await waitForStatus(
+        blockedUpdates,
+        'error',
+      )) as ErroredToolCall;
+      expect(executeSpyBlocked).not.toHaveBeenCalled();
+      expect(
+        blockedCall.response.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ],
+      ).toBe(getPlanModeSystemReminder());
+      const observedStatuses = blockedUpdates.mock.calls
+        .flatMap((call) => call[0] as ToolCall[])
+        .map((tc) => tc.status);
+      expect(observedStatuses).not.toContain('awaiting_approval');
+    });
   });
 
   describe('getToolSuggestion', () => {

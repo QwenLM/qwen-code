@@ -8,7 +8,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
-import { rgPath } from '@lvce-editor/ripgrep';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
@@ -17,6 +16,14 @@ import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 
 const DEFAULT_TOTAL_MAX_MATCHES = 20000;
+
+/**
+ * Lazy loads the ripgrep binary path to avoid loading the library until needed
+ */
+async function getRipgrepPath(): Promise<string> {
+  const { rgPath } = await import('@lvce-editor/ripgrep');
+  return rgPath;
+}
 
 /**
  * Parameters for the GrepTool
@@ -292,8 +299,9 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push(absolutePath);
 
     try {
+      const ripgrepPath = await getRipgrepPath();
       const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(rgPath, rgArgs, {
+        const child = spawn(ripgrepPath, rgArgs, {
           windowsHide: true,
         });
 

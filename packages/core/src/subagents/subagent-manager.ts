@@ -40,9 +40,27 @@ const AGENT_CONFIG_DIR = 'agents';
 export class SubagentManager {
   private readonly validator: SubagentValidator;
   private subagentsCache: Map<SubagentLevel, SubagentConfig[]> | null = null;
+  private readonly changeListeners: Set<() => void> = new Set();
 
   constructor(private readonly config: Config) {
     this.validator = new SubagentValidator();
+  }
+
+  addChangeListener(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  private notifyChangeListeners(): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener();
+      } catch (error) {
+        console.warn('Subagent change listener threw an error:', error);
+      }
+    }
   }
 
   /**
@@ -93,8 +111,8 @@ export class SubagentManager {
 
     try {
       await fs.writeFile(filePath, content, 'utf8');
-      // Clear cache after successful creation
-      this.clearCache();
+      // Refresh cache after successful creation
+      await this.refreshCache();
     } catch (error) {
       throw new SubagentError(
         `Failed to write subagent file: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -183,8 +201,8 @@ export class SubagentManager {
 
     try {
       await fs.writeFile(existing.filePath, content, 'utf8');
-      // Clear cache after successful update
-      this.clearCache();
+      // Refresh cache after successful update
+      await this.refreshCache();
     } catch (error) {
       throw new SubagentError(
         `Failed to update subagent file: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -242,8 +260,8 @@ export class SubagentManager {
       );
     }
 
-    // Clear cache after successful deletion
-    this.clearCache();
+    // Refresh cache after successful deletion
+    await this.refreshCache();
   }
 
   /**
@@ -327,21 +345,17 @@ export class SubagentManager {
    * @private
    */
   private async refreshCache(): Promise<void> {
-    this.subagentsCache = new Map();
+    const subagentsCache = new Map();
 
     const levels: SubagentLevel[] = ['project', 'user', 'builtin'];
 
     for (const level of levels) {
       const levelSubagents = await this.listSubagentsAtLevel(level);
-      this.subagentsCache.set(level, levelSubagents);
+      subagentsCache.set(level, levelSubagents);
     }
-  }
 
-  /**
-   * Clears the subagents cache, forcing the next listSubagents call to reload from disk.
-   */
-  clearCache(): void {
-    this.subagentsCache = null;
+    this.subagentsCache = subagentsCache;
+    this.notifyChangeListeners();
   }
 
   /**

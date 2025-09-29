@@ -746,10 +746,20 @@ export const SETTINGS_SCHEMA = {
         label: 'Vision Model Preview',
         category: 'Experimental',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
         showInDialog: true,
+      },
+      vlmSwitchMode: {
+        type: 'string',
+        label: 'VLM Switch Mode',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
+        showInDialog: false,
       },
     },
   },
@@ -880,6 +890,16 @@ export const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: false,
     description: 'Disable all loop detection checks (streaming and LLM).',
+    showInDialog: true,
+  },
+  approvalMode: {
+    type: 'string',
+    label: 'Default Approval Mode',
+    category: 'General',
+    requiresRestart: false,
+    default: 'default',
+    description:
+      'Default approval mode for tool usage. Valid values: plan, default, auto-edit, yolo.',
     showInDialog: true,
   },
   enableWelcomeBack: {

@@ -291,6 +291,36 @@ export class SharedTokenManager {
   }
 
   /**
+   * Utility method to add timeout to any promise operation
+   * Properly cleans up the timeout when the promise completes
+   */
+  private withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    operationType = 'Operation',
+  ): Promise<T> {
+    let timeoutId: NodeJS.Timeout;
+
+    return Promise.race([
+      promise.finally(() => {
+        // Clear timeout when main promise completes (success or failure)
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(
+              new Error(`${operationType} timed out after ${timeoutMs}ms`),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  }
+
+  /**
    * Perform the actual file check and reload operation
    * This is separated to enable proper promise-based synchronization
    */
@@ -303,25 +333,12 @@ export class SharedTokenManager {
 
     try {
       const filePath = this.getCredentialFilePath();
-      // Add timeout to file stat operation
-      const withTimeout = async <T>(
-        promise: Promise<T>,
-        timeoutMs: number,
-      ): Promise<T> =>
-        Promise.race([
-          promise,
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () =>
-                reject(
-                  new Error(`File operation timed out after ${timeoutMs}ms`),
-                ),
-              timeoutMs,
-            ),
-          ),
-        ]);
 
-      const stats = await withTimeout(fs.stat(filePath), 3000);
+      const stats = await this.withTimeout(
+        fs.stat(filePath),
+        3000,
+        'File operation',
+      );
       const fileModTime = stats.mtimeMs;
 
       // Reload credentials if file has been modified since last cache
@@ -451,7 +468,7 @@ export class SharedTokenManager {
       // Check if we have a refresh token before attempting refresh
       const currentCredentials = qwenClient.getCredentials();
       if (!currentCredentials.refresh_token) {
-        console.debug('create a NO_REFRESH_TOKEN error');
+        // console.debug('create a NO_REFRESH_TOKEN error');
         throw new TokenManagerError(
           TokenError.NO_REFRESH_TOKEN,
           'No refresh token available for token refresh',
@@ -589,26 +606,12 @@ export class SharedTokenManager {
     const dirPath = path.dirname(filePath);
     const tempPath = `${filePath}.tmp.${randomUUID()}`;
 
-    // Add timeout wrapper for file operations
-    const withTimeout = async <T>(
-      promise: Promise<T>,
-      timeoutMs: number,
-    ): Promise<T> =>
-      Promise.race([
-        promise,
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error(`Operation timed out after ${timeoutMs}ms`)),
-            timeoutMs,
-          ),
-        ),
-      ]);
-
     // Create directory with restricted permissions
     try {
-      await withTimeout(
+      await this.withTimeout(
         fs.mkdir(dirPath, { recursive: true, mode: 0o700 }),
         5000,
+        'File operation',
       );
     } catch (error) {
       throw new TokenManagerError(
@@ -622,21 +625,30 @@ export class SharedTokenManager {
 
     try {
       // Write to temporary file first with restricted permissions
-      await withTimeout(
+      await this.withTimeout(
         fs.writeFile(tempPath, credString, { mode: 0o600 }),
         5000,
+        'File operation',
       );
 
       // Atomic move to final location
-      await withTimeout(fs.rename(tempPath, filePath), 5000);
+      await this.withTimeout(
+        fs.rename(tempPath, filePath),
+        5000,
+        'File operation',
+      );
 
       // Update cached file modification time atomically after successful write
-      const stats = await withTimeout(fs.stat(filePath), 5000);
+      const stats = await this.withTimeout(
+        fs.stat(filePath),
+        5000,
+        'File operation',
+      );
       this.memoryCache.fileModTime = stats.mtimeMs;
     } catch (error) {
       // Clean up temp file if it exists
       try {
-        await withTimeout(fs.unlink(tempPath), 1000);
+        await this.withTimeout(fs.unlink(tempPath), 1000, 'File operation');
       } catch (_cleanupError) {
         // Ignore cleanup errors - temp file might not exist
       }

@@ -826,7 +826,7 @@ export class SubAgentScope {
       );
 
       if (this.modelConfig.model) {
-        this.runtimeContext.setModel(this.modelConfig.model);
+        await this.runtimeContext.setModel(this.modelConfig.model);
       }
 
       return new GeminiChat(

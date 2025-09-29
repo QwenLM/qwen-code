@@ -1105,5 +1105,164 @@ describe('ContentGenerationPipeline', () => {
         expect.any(Array),
       );
     });
+
+    it('should collect all OpenAI chunks for logging even when Gemini responses are filtered', async () => {
+      // Create chunks that would produce empty Gemini responses (partial tool calls)
+      const partialToolCallChunk1: OpenAI.Chat.ChatCompletionChunk = {
+        id: 'chunk-1',
+        object: 'chat.completion.chunk',
+        created: Date.now(),
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_123',
+                  type: 'function',
+                  function: { name: 'test_function', arguments: '{"par' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      };
+
+      const partialToolCallChunk2: OpenAI.Chat.ChatCompletionChunk = {
+        id: 'chunk-2',
+        object: 'chat.completion.chunk',
+        created: Date.now(),
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  function: { arguments: 'am": "value"}' },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      };
+
+      const finishChunk: OpenAI.Chat.ChatCompletionChunk = {
+        id: 'chunk-3',
+        object: 'chat.completion.chunk',
+        created: Date.now(),
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+          },
+        ],
+      };
+
+      // Mock empty Gemini responses for partial chunks (they get filtered)
+      const emptyGeminiResponse1 = new GenerateContentResponse();
+      emptyGeminiResponse1.candidates = [
+        {
+          content: { parts: [], role: 'model' },
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+
+      const emptyGeminiResponse2 = new GenerateContentResponse();
+      emptyGeminiResponse2.candidates = [
+        {
+          content: { parts: [], role: 'model' },
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+
+      // Mock final Gemini response with tool call
+      const finalGeminiResponse = new GenerateContentResponse();
+      finalGeminiResponse.candidates = [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_123',
+                  name: 'test_function',
+                  args: { param: 'value' },
+                },
+              },
+            ],
+            role: 'model',
+          },
+          finishReason: FinishReason.STOP,
+          index: 0,
+          safetyRatings: [],
+        },
+      ];
+
+      // Setup converter mocks
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'test' },
+      ]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock)
+        .mockReturnValueOnce(emptyGeminiResponse1) // First partial chunk -> empty response
+        .mockReturnValueOnce(emptyGeminiResponse2) // Second partial chunk -> empty response
+        .mockReturnValueOnce(finalGeminiResponse); // Finish chunk -> complete response
+
+      // Mock stream
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield partialToolCallChunk1;
+          yield partialToolCallChunk2;
+          yield finishChunk;
+        },
+      };
+
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+      };
+
+      // Collect responses
+      const responses: GenerateContentResponse[] = [];
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      for await (const response of resultGenerator) {
+        responses.push(response);
+      }
+
+      // Should only yield the final response (empty ones are filtered)
+      expect(responses).toHaveLength(1);
+      expect(responses[0]).toBe(finalGeminiResponse);
+
+      // Verify telemetry was called with ALL OpenAI chunks, including the filtered ones
+      expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'test-model',
+          duration: expect.any(Number),
+          userPromptId: 'test-prompt-id',
+          authType: 'openai',
+        }),
+        [finalGeminiResponse], // Only the non-empty Gemini response
+        expect.objectContaining({
+          model: 'test-model',
+          messages: [{ role: 'user', content: 'test' }],
+        }),
+        [partialToolCallChunk1, partialToolCallChunk2, finishChunk], // ALL OpenAI chunks
+      );
+    });
   });
 });

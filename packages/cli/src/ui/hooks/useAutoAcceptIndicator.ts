@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import {
+  type ApprovalMode,
+  APPROVAL_MODES,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { useEffect, useState } from 'react';
 import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
@@ -29,34 +33,28 @@ export function useAutoAcceptIndicator({
 
   useKeypress(
     (key) => {
-      let nextApprovalMode: ApprovalMode | undefined;
-
-      if (key.ctrl && key.name === 'y') {
-        nextApprovalMode =
-          config.getApprovalMode() === ApprovalMode.YOLO
-            ? ApprovalMode.DEFAULT
-            : ApprovalMode.YOLO;
-      } else if (key.shift && key.name === 'tab') {
-        nextApprovalMode =
-          config.getApprovalMode() === ApprovalMode.AUTO_EDIT
-            ? ApprovalMode.DEFAULT
-            : ApprovalMode.AUTO_EDIT;
+      if (!(key.shift && key.name === 'tab')) {
+        return;
       }
 
-      if (nextApprovalMode) {
-        try {
-          config.setApprovalMode(nextApprovalMode);
-          // Update local state immediately for responsiveness
-          setShowAutoAcceptIndicator(nextApprovalMode);
-        } catch (e) {
-          addItem(
-            {
-              type: MessageType.INFO,
-              text: (e as Error).message,
-            },
-            Date.now(),
-          );
-        }
+      const currentMode = config.getApprovalMode();
+      const currentIndex = APPROVAL_MODES.indexOf(currentMode);
+      const nextIndex =
+        currentIndex === -1 ? 0 : (currentIndex + 1) % APPROVAL_MODES.length;
+      const nextApprovalMode = APPROVAL_MODES[nextIndex];
+
+      try {
+        config.setApprovalMode(nextApprovalMode);
+        // Update local state immediately for responsiveness
+        setShowAutoAcceptIndicator(nextApprovalMode);
+      } catch (e) {
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: (e as Error).message,
+          },
+          Date.now(),
+        );
       }
     },
     { isActive: true },

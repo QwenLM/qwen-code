@@ -396,6 +396,24 @@ function mergeSettings(
         ]),
       ],
     },
+    experimental: {
+      ...(systemDefaults.experimental || {}),
+      ...(user.experimental || {}),
+      ...(safeWorkspaceWithoutFolderTrust.experimental || {}),
+      ...(system.experimental || {}),
+    },
+    contentGenerator: {
+      ...(systemDefaults.contentGenerator || {}),
+      ...(user.contentGenerator || {}),
+      ...(safeWorkspaceWithoutFolderTrust.contentGenerator || {}),
+      ...(system.contentGenerator || {}),
+    },
+    systemPromptMappings: {
+      ...(systemDefaults.systemPromptMappings || {}),
+      ...(user.systemPromptMappings || {}),
+      ...(safeWorkspaceWithoutFolderTrust.systemPromptMappings || {}),
+      ...(system.systemPromptMappings || {}),
+    },
     extensions: {
       ...(systemDefaults.extensions || {}),
       ...(user.extensions || {}),

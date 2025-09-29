@@ -10,9 +10,12 @@ export type AvailableModel = {
   isVision?: boolean;
 };
 
+export const MAINLINE_VLM = 'vision-model';
+export const MAINLINE_CODER = 'coder-model';
+
 export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
-  { id: 'qwen3-coder-plus', label: 'qwen3-coder-plus' },
-  { id: 'qwen-vl-max-latest', label: 'qwen-vl-max', isVision: true },
+  { id: MAINLINE_CODER, label: MAINLINE_CODER },
+  { id: MAINLINE_VLM, label: MAINLINE_VLM, isVision: true },
 ];
 
 /**
@@ -42,7 +45,7 @@ export function getOpenAIAvailableModelFromEnv(): AvailableModel | null {
  * until our coding model supports multimodal.
  */
 export function getDefaultVisionModel(): string {
-  return 'qwen-vl-max-latest';
+  return MAINLINE_VLM;
 }
 
 export function isVisionModel(modelId: string): boolean {

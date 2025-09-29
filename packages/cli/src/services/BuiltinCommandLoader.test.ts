@@ -15,6 +15,14 @@ vi.mock('../ui/commands/aboutCommand.js', async () => {
   };
 });
 
+vi.mock('../ui/commands/approvalModeCommand.js', () => ({
+  approvalModeCommand: {
+    name: 'approval-mode',
+    description: 'Approval mode command',
+    kind: 'built-in',
+  },
+}));
+
 vi.mock('../ui/commands/ideCommand.js', () => ({ ideCommand: vi.fn() }));
 vi.mock('../ui/commands/restoreCommand.js', () => ({
   restoreCommand: vi.fn(),
@@ -127,6 +135,10 @@ describe('BuiltinCommandLoader', () => {
     const aboutCmd = commands.find((c) => c.name === 'about');
     expect(aboutCmd).toBeDefined();
     expect(aboutCmd?.kind).toBe(CommandKind.BUILT_IN);
+
+    const approvalModeCmd = commands.find((c) => c.name === 'approval-mode');
+    expect(approvalModeCmd).toBeDefined();
+    expect(approvalModeCmd?.kind).toBe(CommandKind.BUILT_IN);
 
     const ideCmd = commands.find((c) => c.name === 'ide');
     expect(ideCmd).toBeDefined();

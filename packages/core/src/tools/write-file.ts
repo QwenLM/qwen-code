@@ -26,10 +26,6 @@ import {
 import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import {
-  ensureCorrectEdit,
-  ensureCorrectFileContent,
-} from '../utils/editCorrector.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ToolNames } from './tool-names.js';
 import type {
@@ -79,11 +75,10 @@ export async function getCorrectedFileContent(
   config: Config,
   filePath: string,
   proposedContent: string,
-  abortSignal: AbortSignal,
 ): Promise<GetCorrectedFileContentResult> {
   let originalContent = '';
   let fileExists = false;
-  let correctedContent = proposedContent;
+  const correctedContent = proposedContent;
 
   try {
     originalContent = await config
@@ -107,32 +102,6 @@ export async function getCorrectedFileContent(
     }
   }
 
-  // If readError is set, we have returned.
-  // So, file was either read successfully (fileExists=true, originalContent set)
-  // or it was ENOENT (fileExists=false, originalContent='').
-
-  if (fileExists) {
-    // This implies originalContent is available
-    const { params: correctedParams } = await ensureCorrectEdit(
-      filePath,
-      originalContent,
-      {
-        old_string: originalContent, // Treat entire current content as old_string
-        new_string: proposedContent,
-        file_path: filePath,
-      },
-      config.getGeminiClient(),
-      abortSignal,
-    );
-    correctedContent = correctedParams.new_string;
-  } else {
-    // This implies new file (ENOENT)
-    correctedContent = await ensureCorrectFileContent(
-      proposedContent,
-      config.getGeminiClient(),
-      abortSignal,
-    );
-  }
   return { originalContent, correctedContent, fileExists };
 }
 
@@ -160,7 +129,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   override async shouldConfirmExecute(
-    abortSignal: AbortSignal,
+    _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails | false> {
     if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
       return false;
@@ -170,7 +139,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       this.config,
       this.params.file_path,
       this.params.content,
-      abortSignal,
     );
 
     if (correctedContentResult.error) {
@@ -226,14 +194,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  async execute(abortSignal: AbortSignal): Promise<ToolResult> {
+  async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
     const correctedContentResult = await getCorrectedFileContent(
       this.config,
       file_path,
       content,
-      abortSignal,
     );
 
     if (correctedContentResult.error) {
@@ -476,7 +443,7 @@ export class WriteFileTool
   }
 
   getModifyContext(
-    abortSignal: AbortSignal,
+    _abortSignal: AbortSignal,
   ): ModifyContext<WriteFileToolParams> {
     return {
       getFilePath: (params: WriteFileToolParams) => params.file_path,
@@ -485,7 +452,6 @@ export class WriteFileTool
           this.config,
           params.file_path,
           params.content,
-          abortSignal,
         );
         return correctedContentResult.originalContent;
       },
@@ -494,7 +460,6 @@ export class WriteFileTool
           this.config,
           params.file_path,
           params.content,
-          abortSignal,
         );
         return correctedContentResult.correctedContent;
       },

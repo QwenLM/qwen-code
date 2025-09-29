@@ -41,12 +41,14 @@ import type {
   ToolConfig,
 } from './types.js';
 import { SubagentTerminateMode } from './types.js';
+import { GeminiClient } from '../core/client.js';
 
 vi.mock('../core/geminiChat.js');
 vi.mock('../core/contentGenerator.js');
 vi.mock('../utils/environmentContext.js');
 vi.mock('../core/nonInteractiveToolExecutor.js');
 vi.mock('../ide/ide-client.js');
+vi.mock('../core/client.js');
 
 async function createMockConfig(
   toolRegistryMocks = {},
@@ -72,6 +74,19 @@ async function createMockConfig(
   } as unknown as ToolRegistry;
 
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(mockToolRegistry);
+
+  // Mock getContentGeneratorConfig to return a valid config
+  vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+    model: DEFAULT_GEMINI_MODEL,
+    authType: AuthType.USE_GEMINI,
+  });
+
+  // Mock setModel method
+  vi.spyOn(config, 'setModel').mockResolvedValue();
+
+  // Mock getSessionId method
+  vi.spyOn(config, 'getSessionId').mockReturnValue('test-session');
+
   return { config, toolRegistry: mockToolRegistry };
 }
 
@@ -179,6 +194,28 @@ describe('subagent.ts', () => {
           ({
             sendMessageStream: mockSendMessageStream,
           }) as unknown as GeminiChat,
+      );
+
+      // Mock GeminiClient constructor to return a properly mocked client
+      const mockGeminiChat = {
+        setTools: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
+        sendMessageStream: vi.fn(),
+      };
+
+      const mockGeminiClient = {
+        getChat: vi.fn().mockReturnValue(mockGeminiChat),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(true),
+        getHistory: vi.fn().mockReturnValue([]),
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setHistory: vi.fn(),
+      };
+
+      // Mock the GeminiClient constructor
+      vi.mocked(GeminiClient).mockImplementation(
+        () => mockGeminiClient as unknown as GeminiClient,
       );
 
       // Default mock for executeToolCall

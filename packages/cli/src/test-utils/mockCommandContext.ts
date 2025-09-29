@@ -35,7 +35,10 @@ export const createMockCommandContext = (
     },
     services: {
       config: null,
-      settings: { merged: {} } as LoadedSettings,
+      settings: {
+        merged: {},
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings,
       git: undefined as GitService | undefined,
       logger: {
         log: vi.fn(),
