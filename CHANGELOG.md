@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.14
+
+- Added plan mode support for task planning
+- Fixed unreliable editCorrector that injects extra escape characters
+- Fixed task tool dynamic updates
+- Added Qwen3-VL-Plus token limits (256K input, 32K output) and highres support
+- Enhanced dashScope cache control
+
 ## 0.0.13
 
 - Added YOLO mode support for automatic vision model switching with CLI arguments and environment variables.

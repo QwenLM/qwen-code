@@ -17,6 +17,7 @@ import { DashScopeOpenAICompatibleProvider } from './dashscope.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
+import type { ChatCompletionToolWithCache } from './types.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 
 // Mock OpenAI
@@ -253,17 +254,110 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         },
       ]);
 
-      // Last message should NOT have cache control for non-streaming
+      // Last message should NOT have cache control for non-streaming requests
       const lastMessage = result.messages[1];
       expect(lastMessage.role).toBe('user');
       expect(lastMessage.content).toBe('Hello!');
     });
 
-    it('should add cache control to both system and last messages for streaming requests', () => {
-      const request = { ...baseRequest, stream: true };
-      const result = provider.buildRequest(request, 'test-prompt-id');
+    it('should add cache control to system message only for non-streaming requests with tools', () => {
+      const requestWithTool: OpenAI.Chat.ChatCompletionCreateParams = {
+        ...baseRequest,
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant.' },
+          {
+            role: 'tool',
+            content: 'First tool output',
+            tool_call_id: 'call_1',
+          },
+          {
+            role: 'tool',
+            content: 'Second tool output',
+            tool_call_id: 'call_2',
+          },
+          { role: 'user', content: 'Hello!' },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'mockTool',
+              parameters: { type: 'object', properties: {} },
+            },
+          },
+        ],
+        stream: false,
+      };
 
-      expect(result.messages).toHaveLength(2);
+      const result = provider.buildRequest(requestWithTool, 'test-prompt-id');
+
+      expect(result.messages).toHaveLength(4);
+
+      const systemMessage = result.messages[0];
+      expect(systemMessage.content).toEqual([
+        {
+          type: 'text',
+          text: 'You are a helpful assistant.',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
+
+      // Tool messages should remain unchanged
+      const firstToolMessage = result.messages[1];
+      expect(firstToolMessage.role).toBe('tool');
+      expect(firstToolMessage.content).toBe('First tool output');
+
+      const secondToolMessage = result.messages[2];
+      expect(secondToolMessage.role).toBe('tool');
+      expect(secondToolMessage.content).toBe('Second tool output');
+
+      // Last message should NOT have cache control for non-streaming requests
+      const lastMessage = result.messages[3];
+      expect(lastMessage.role).toBe('user');
+      expect(lastMessage.content).toBe('Hello!');
+
+      // Tools should NOT have cache control for non-streaming requests
+      const tools = result.tools as ChatCompletionToolWithCache[];
+      expect(tools).toBeDefined();
+      expect(tools).toHaveLength(1);
+      expect(tools[0].cache_control).toBeUndefined();
+    });
+
+    it('should add cache control to system, last history message, and last tool definition for streaming requests', () => {
+      const request = { ...baseRequest, stream: true };
+      const requestWithToolMessage: OpenAI.Chat.ChatCompletionCreateParams = {
+        ...request,
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant.' },
+          {
+            role: 'tool',
+            content: 'First tool output',
+            tool_call_id: 'call_1',
+          },
+          {
+            role: 'tool',
+            content: 'Second tool output',
+            tool_call_id: 'call_2',
+          },
+          { role: 'user', content: 'Hello!' },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: 'mockTool',
+              parameters: { type: 'object', properties: {} },
+            },
+          },
+        ],
+      };
+
+      const result = provider.buildRequest(
+        requestWithToolMessage,
+        'test-prompt-id',
+      );
+
+      expect(result.messages).toHaveLength(4);
 
       // System message should have cache control
       const systemMessage = result.messages[0];
@@ -275,8 +369,17 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         },
       ]);
 
-      // Last message should also have cache control for streaming
-      const lastMessage = result.messages[1];
+      // Tool messages should remain unchanged
+      const firstToolMessage = result.messages[1];
+      expect(firstToolMessage.role).toBe('tool');
+      expect(firstToolMessage.content).toBe('First tool output');
+
+      const secondToolMessage = result.messages[2];
+      expect(secondToolMessage.role).toBe('tool');
+      expect(secondToolMessage.content).toBe('Second tool output');
+
+      // Last message should also have cache control
+      const lastMessage = result.messages[3];
       expect(lastMessage.content).toEqual([
         {
           type: 'text',
@@ -284,6 +387,40 @@ describe('DashScopeOpenAICompatibleProvider', () => {
           cache_control: { type: 'ephemeral' },
         },
       ]);
+
+      const tools = result.tools as ChatCompletionToolWithCache[];
+      expect(tools).toBeDefined();
+      expect(tools).toHaveLength(1);
+      expect(tools[0].cache_control).toEqual({ type: 'ephemeral' });
+    });
+
+    it('should not add cache control to tool messages when request.tools is undefined', () => {
+      const requestWithoutConfiguredTools: OpenAI.Chat.ChatCompletionCreateParams =
+        {
+          ...baseRequest,
+          messages: [
+            { role: 'system', content: 'You are a helpful assistant.' },
+            {
+              role: 'tool',
+              content: 'Tool output',
+              tool_call_id: 'call_1',
+            },
+            { role: 'user', content: 'Hello!' },
+          ],
+        };
+
+      const result = provider.buildRequest(
+        requestWithoutConfiguredTools,
+        'test-prompt-id',
+      );
+
+      expect(result.messages).toHaveLength(3);
+
+      const toolMessage = result.messages[1];
+      expect(toolMessage.role).toBe('tool');
+      expect(toolMessage.content).toBe('Tool output');
+
+      expect(result.tools).toBeUndefined();
     });
 
     it('should include metadata in the request', () => {

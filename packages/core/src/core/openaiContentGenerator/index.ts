@@ -12,6 +12,7 @@ import type { Config } from '../../config/config.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
   DashScopeOpenAICompatibleProvider,
+  DeepSeekOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
@@ -23,6 +24,7 @@ export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
 export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
+  DeepSeekOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
 } from './provider/index.js';
 
@@ -56,6 +58,13 @@ export function determineProvider(
   // Check for DashScope provider
   if (DashScopeOpenAICompatibleProvider.isDashScopeProvider(config)) {
     return new DashScopeOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  if (DeepSeekOpenAICompatibleProvider.isDeepSeekProvider(config)) {
+    return new DeepSeekOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );

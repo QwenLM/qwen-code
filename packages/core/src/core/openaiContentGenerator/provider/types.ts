@@ -11,6 +11,10 @@ export type ChatCompletionContentPartWithCache =
   | OpenAI.Chat.ChatCompletionContentPartImage
   | OpenAI.Chat.ChatCompletionContentPartRefusal;
 
+export type ChatCompletionToolWithCache = OpenAI.Chat.ChatCompletionTool & {
+  cache_control?: { type: 'ephemeral' };
+};
+
 export interface OpenAICompatibleProvider {
   buildHeaders(): Record<string, string | undefined>;
   buildClient(): OpenAI;

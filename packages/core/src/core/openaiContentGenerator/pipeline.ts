@@ -248,26 +248,23 @@ export class ContentGenerationPipeline {
       ...this.buildSamplingParameters(request),
     };
 
-    // Let provider enhance the request (e.g., add metadata, cache control)
-    const enhancedRequest = this.config.provider.buildRequest(
-      baseRequest,
-      userPromptId,
-    );
+    // Add streaming options if present
+    if (streaming) {
+      (
+        baseRequest as unknown as OpenAI.Chat.ChatCompletionCreateParamsStreaming
+      ).stream = true;
+      baseRequest.stream_options = { include_usage: true };
+    }
 
     // Add tools if present
     if (request.config?.tools) {
-      enhancedRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
+      baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
     }
 
-    // Add streaming options if needed
-    if (streaming) {
-      enhancedRequest.stream = true;
-      enhancedRequest.stream_options = { include_usage: true };
-    }
-
-    return enhancedRequest;
+    // Let provider enhance the request (e.g., add metadata, cache control)
+    return this.config.provider.buildRequest(baseRequest, userPromptId);
   }
 
   private buildSamplingParameters(

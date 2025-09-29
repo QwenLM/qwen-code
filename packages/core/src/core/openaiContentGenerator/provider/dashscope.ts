@@ -9,6 +9,7 @@ import type {
   DashScopeRequestMetadata,
   ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
+  ChatCompletionToolWithCache,
 } from './types.js';
 
 export class DashScopeOpenAICompatibleProvider
@@ -70,7 +71,8 @@ export class DashScopeOpenAICompatibleProvider
    * Build and configure the request for DashScope API.
    *
    * This method applies DashScope-specific configurations including:
-   * - Cache control for system and user messages
+   * - Cache control for the system message, last tool message (when tools are configured),
+   *   and the latest history message
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
@@ -84,13 +86,17 @@ export class DashScopeOpenAICompatibleProvider
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
     let messages = request.messages;
+    let tools = request.tools;
 
     // Apply DashScope cache control only if not disabled
     if (!this.shouldDisableCacheControl()) {
-      // Add cache control to system and last messages for DashScope providers
-      // Only add cache control to system message for non-streaming requests
-      const cacheTarget = request.stream ? 'both' : 'system';
-      messages = this.addDashScopeCacheControl(messages, cacheTarget);
+      const { messages: updatedMessages, tools: updatedTools } =
+        this.addDashScopeCacheControl(
+          request,
+          request.stream ? 'all' : 'system_only',
+        );
+      messages = updatedMessages;
+      tools = updatedTools;
     }
 
     // Apply output token limits based on model capabilities
@@ -104,6 +110,7 @@ export class DashScopeOpenAICompatibleProvider
       return {
         ...requestWithTokenLimits,
         messages,
+        ...(tools ? { tools } : {}),
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
@@ -113,6 +120,7 @@ export class DashScopeOpenAICompatibleProvider
     return {
       ...requestWithTokenLimits, // Preserve all original parameters including sampling params and adjusted max_tokens
       messages,
+      ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
     } as OpenAI.Chat.ChatCompletionCreateParams;
   }
@@ -130,75 +138,67 @@ export class DashScopeOpenAICompatibleProvider
    * Add cache control flag to specified message(s) for DashScope providers
    */
   private addDashScopeCacheControl(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    target: 'system' | 'last' | 'both' = 'both',
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    if (messages.length === 0) {
-      return messages;
-    }
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+    cacheControl: 'system_only' | 'all',
+  ): {
+    messages: OpenAI.Chat.ChatCompletionMessageParam[];
+    tools?: ChatCompletionToolWithCache[];
+  } {
+    const messages = request.messages;
 
-    let updatedMessages = [...messages];
+    const systemIndex = messages.findIndex((msg) => msg.role === 'system');
+    const lastIndex = messages.length - 1;
 
-    // Add cache control to system message if requested
-    if (target === 'system' || target === 'both') {
-      updatedMessages = this.addCacheControlToMessage(
-        updatedMessages,
-        'system',
-      );
-    }
+    const updatedMessages =
+      messages.length === 0
+        ? messages
+        : messages.map((message, index) => {
+            const shouldAddCacheControl = Boolean(
+              (index === systemIndex && systemIndex !== -1) ||
+                (index === lastIndex && cacheControl === 'all'),
+            );
 
-    // Add cache control to last message if requested
-    if (target === 'last' || target === 'both') {
-      updatedMessages = this.addCacheControlToMessage(updatedMessages, 'last');
-    }
+            if (
+              !shouldAddCacheControl ||
+              !('content' in message) ||
+              message.content === null ||
+              message.content === undefined
+            ) {
+              return message;
+            }
 
-    return updatedMessages;
+            return {
+              ...message,
+              content: this.addCacheControlToContent(message.content),
+            } as OpenAI.Chat.ChatCompletionMessageParam;
+          });
+
+    const updatedTools =
+      cacheControl === 'all' && request.tools?.length
+        ? this.addCacheControlToTools(request.tools)
+        : (request.tools as ChatCompletionToolWithCache[] | undefined);
+
+    return {
+      messages: updatedMessages,
+      tools: updatedTools,
+    };
   }
 
-  /**
-   * Helper method to add cache control to a specific message
-   */
-  private addCacheControlToMessage(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    target: 'system' | 'last',
-  ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    const updatedMessages = [...messages];
-    const messageIndex = this.findTargetMessageIndex(messages, target);
-
-    if (messageIndex === -1) {
-      return updatedMessages;
+  private addCacheControlToTools(
+    tools: OpenAI.Chat.ChatCompletionTool[],
+  ): ChatCompletionToolWithCache[] {
+    if (tools.length === 0) {
+      return tools as ChatCompletionToolWithCache[];
     }
 
-    const message = updatedMessages[messageIndex];
+    const updatedTools = [...tools] as ChatCompletionToolWithCache[];
+    const lastToolIndex = tools.length - 1;
+    updatedTools[lastToolIndex] = {
+      ...updatedTools[lastToolIndex],
+      cache_control: { type: 'ephemeral' },
+    };
 
-    // Only process messages that have content
-    if (
-      'content' in message &&
-      message.content !== null &&
-      message.content !== undefined
-    ) {
-      const updatedContent = this.addCacheControlToContent(message.content);
-      updatedMessages[messageIndex] = {
-        ...message,
-        content: updatedContent,
-      } as OpenAI.Chat.ChatCompletionMessageParam;
-    }
-
-    return updatedMessages;
-  }
-
-  /**
-   * Find the index of the target message (system or last)
-   */
-  private findTargetMessageIndex(
-    messages: OpenAI.Chat.ChatCompletionMessageParam[],
-    target: 'system' | 'last',
-  ): number {
-    if (target === 'system') {
-      return messages.findIndex((msg) => msg.role === 'system');
-    } else {
-      return messages.length - 1;
-    }
+    return updatedTools;
   }
 
   /**
