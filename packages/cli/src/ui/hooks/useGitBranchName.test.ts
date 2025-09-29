@@ -12,7 +12,6 @@ import { useGitBranchName } from './useGitBranchName.js';
 import { fs, vol } from 'memfs'; // For mocking fs
 import { EventEmitter } from 'node:events';
 import { exec as mockExec, type ChildProcess } from 'node:child_process';
-import type { FSWatcher } from 'memfs/lib/volume.js';
 
 // Mock child_process
 vi.mock('child_process');
@@ -207,7 +206,7 @@ describe('useGitBranchName', () => {
     const closeMock = vi.fn();
     const watchMock = vi.spyOn(fs, 'watch').mockReturnValue({
       close: closeMock,
-    } as unknown as FSWatcher);
+    } as any);
 
     (mockExec as MockedFunction<typeof mockExec>).mockImplementation(
       (_command, _options, callback) => {

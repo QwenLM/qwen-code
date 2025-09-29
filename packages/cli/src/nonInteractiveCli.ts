@@ -24,6 +24,12 @@ import {
 } from './utils/sessionManager.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 
+interface FunctionCall {
+  name: string;
+  args: unknown;
+  id: string;
+}
+
 export async function runNonInteractive(
   config: Config,
   input: string,
@@ -90,6 +96,7 @@ export async function runNonInteractive(
       { role: 'user', parts: processedQuery as Part[] },
     ];
 
+    const functionCalls: FunctionCall[] = [];
     let turnCount = 0;
     while (true) {
       turnCount++;
@@ -138,7 +145,10 @@ export async function runNonInteractive(
 
       if (toolCallRequests.length > 0) {
         const toolResponseParts: Part[] = [];
-        for (const requestInfo of toolCallRequests) {
+        for (let i = 0; i < toolCallRequests.length; i++) {
+          const requestInfo = toolCallRequests[i];
+          const fc = functionCalls[i]; // Get corresponding function call
+          
           const toolResponse = await executeToolCall(
             config,
             requestInfo,

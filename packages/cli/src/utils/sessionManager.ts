@@ -7,7 +7,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { Content } from '@google/genai';
+import type { Content } from '@google/genai';
 
 const SESSIONS_DIR_NAME = '.qwen_sessions';
 

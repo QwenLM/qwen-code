@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { homedir } from 'node:os';
-import yargs from 'yargs/yargs';
-import { hideBin } from 'yargs/helpers';
 import process from 'node:process';
+import { hideBin } from 'yargs/helpers';
+import yargs from 'yargs/yargs';
+import { extensionsCommand } from '../commands/extensions.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { sessionCommand } from '../commands/sessionCommand.js';
 import type {
@@ -32,14 +33,6 @@ import {
   ShellTool,
   WriteFileTool,
 } from '@qwen-code/qwen-code-core';
-import * as fs from 'node:fs';
-import { homedir } from 'node:os';
-import * as path from 'node:path';
-import process from 'node:process';
-import { hideBin } from 'yargs/helpers';
-import yargs from 'yargs/yargs';
-import { extensionsCommand } from '../commands/extensions.js';
-import { mcpCommand } from '../commands/mcp.js';
 import type { Settings } from './settings.js';
 
 import { resolvePath } from '../utils/resolvePath.js';
