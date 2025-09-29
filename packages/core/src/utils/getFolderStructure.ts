@@ -99,22 +99,30 @@ async function readFullStructure(
       const rawEntries = await fs.readdir(currentPath, { withFileTypes: true });
       // Sort entries alphabetically by name for consistent processing order
       entries = rawEntries.sort((a, b) => a.name.localeCompare(b.name));
-    } catch (error: unknown) {
-      if (
-        isNodeError(error) &&
-        (error.code === 'EACCES' || error.code === 'ENOENT')
-      ) {
-        console.warn(
-          `Warning: Could not read directory ${currentPath}: ${error.message}`,
-        );
-        if (currentPath === rootPath && error.code === 'ENOENT') {
-          return null; // Root directory itself not found
+        } catch (error: unknown) {
+          if (
+            isNodeError(error) &&
+            (error.code === 'EACCES' || error.code === 'ENOENT')
+          ) {
+            console.warn(
+              `Warning: Could not read directory ${currentPath}: ${error.message}`,
+            );
+            if (currentPath === rootPath && error.code === 'ENOENT') {
+              return null; // Root directory itself not found
+            }
+            // For other EACCES/ENOENT on subdirectories, just skip them.
+            continue;
+          }
+          // Handle other types of errors more gracefully
+          console.warn(
+            `Warning: Unexpected error reading directory ${currentPath}: ${getErrorMessage(error)}`,
+          );
+          if (currentPath === rootPath) {
+            return null; // If root directory has issues, return null
+          }
+          // For subdirectories, just skip them
+          continue;
         }
-        // For other EACCES/ENOENT on subdirectories, just skip them.
-        continue;
-      }
-      throw error;
-    }
 
     const filesInCurrentDir: string[] = [];
     const subFoldersInCurrentDir: FullFolderInfo[] = [];
