@@ -20,7 +20,7 @@ const LIMITS = {
   '32k': 32_768,
   '64k': 65_536,
   '128k': 131_072,
-  '200k': 200_000, // vendor-declared decimal (OpenAI / Anthropic use 200k)
+  '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, GLM etc.
   '256k': 262_144,
   '512k': 524_288,
   '1m': 1_048_576,
@@ -52,15 +52,15 @@ export function normalize(model: string): string {
     // Regex breakdown:
     // -(?:...)$ - Non-capturing group for suffixes at the end of the string
     // The following patterns are matched within the group:
-    //   \d{6,} - Match 6 or more digits (dates) like -20250219 (6+ digit dates)
+    //   \d{4,} - Match 4 or more digits (dates) like -20250219 -0528 (4+ digit dates)
     //   \d+x\d+b - Match patterns like 4x8b, -7b, -70b
     //   v\d+(?:\.\d+)* - Match version patterns starting with 'v' like -v1, -v1.2, -v2.1.3
     //   (?<=-[^-]+-)\d+(?:\.\d+)+ - Match version numbers with dots that are preceded by another dash,
     //     like -1.1, -2.0.1 but only when they are preceded by another dash, Example: model-test-1.1 → model-test;
     //     Note: this does NOT match 4.1 in gpt-4.1 because there's no dash before -4.1 in that context.
-    //   latest - Match the literal string "latest"
+    //   latest|exp - Match the literal string "latest" or "exp"
     s = s.replace(
-      /-(?:\d{6,}|\d+x\d+b|v\d+(?:\.\d+)*|(?<=-[^-]+-)\d+(?:\.\d+)+|latest)$/g,
+      /-(?:\d{4,}|\d+x\d+b|v\d+(?:\.\d+)*|(?<=-[^-]+-)\d+(?:\.\d+)+|latest|exp)$/g,
       '',
     );
   }
@@ -152,15 +152,21 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Zhipu GLM
   // -------------------
-  [/^glm-4\.5v.*$/, LIMITS['64k']],
-  [/^glm-4\.5-air.*$/, LIMITS['128k']],
-  [/^glm-4\.5.*$/, LIMITS['128k']],
+  [/^glm-4\.5v(?:-.*)?$/, LIMITS['64k']],
+  [/^glm-4\.5-air(?:-.*)?$/, LIMITS['128k']],
+  [/^glm-4\.5(?:-.*)?$/, LIMITS['128k']],
+  [/^glm-4\.6(?:-.*)?$/, LIMITS['200k']],
 
   // -------------------
-  // DeepSeek / GPT-OSS / Kimi / Llama & Mistral examples
+  // DeepSeek
   // -------------------
-  [/^deepseek-r1.*$/, LIMITS['128k']],
-  [/^deepseek-v3(?:\.1)?.*$/, LIMITS['128k']],
+  [/^deepseek$/, LIMITS['128k']],
+  [/^deepseek-r1(?:-.*)?$/, LIMITS['128k']],
+  [/^deepseek-v3(?:\.\d+)?(?:-.*)?$/, LIMITS['128k']],
+
+  // -------------------
+  // GPT-OSS / Kimi / Llama & Mistral examples
+  // -------------------
   [/^kimi-k2-instruct.*$/, LIMITS['128k']],
   [/^gpt-oss.*$/, LIMITS['128k']],
   [/^llama-4-scout.*$/, LIMITS['10m'] as unknown as TokenCount], // ultra-long variants - handle carefully
