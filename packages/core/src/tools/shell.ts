@@ -30,15 +30,12 @@ import type { ShellOutputEvent } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import {
+  containCdCommand,
   getCommandRoots,
   isCommandAllowed,
   isCommandNeedsPermission,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
-
-import type {
-  Content
-} from '@google/genai';
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 
@@ -144,6 +141,19 @@ class ShellToolInvocation extends BaseToolInvocation<
         finalCommand = finalCommand.trim() + ' &';
       }
 
+      let isCd = containCdCommand(finalCommand);
+
+      if (isCd && !finalCommand.trim().endsWith('&')) {
+        // force cd to output the new directory
+        if (isWindows) {
+          // Windows cmd.exe
+          finalCommand += ' && cd';
+        } else {
+          // Unix bash
+          finalCommand += ' && pwd';
+        }
+      }
+
       // pgrep is not available on Windows, so we can't get background PIDs
       const commandToExecute = isWindows
         ? finalCommand
@@ -162,8 +172,6 @@ class ShellToolInvocation extends BaseToolInvocation<
       let cumulativeOutput = '';
       let lastUpdateTime = Date.now();
       let isBinaryStream = false;
-
-      let isCd = finalCommand.trim().startsWith('cd ');
 
       const { result: resultPromise } = await ShellExecutionService.execute(
         commandToExecute,
@@ -282,18 +290,7 @@ class ShellToolInvocation extends BaseToolInvocation<
               const newDir = path.resolve(
                 result.output.trim()
               );
-              this.config.changeDir(newDir);
-              // add user content to chat to tell them the directory changed
-              let userContent = {
-                role: 'user',
-                parts: [
-                 {
-                  text: "Changed working directory to: " + newDir,
-                 }
-                ],
-              } as Content;
-              // add to history directly
-              this.config.getGeminiClient().getChat().addHistory(userContent);
+              this.config.getGeminiClient().updateDirectoryContext(newDir);
             }
           } else {
             returnDisplayMessage = result.output;

@@ -34,6 +34,7 @@ import { TaskTool } from '../tools/task.js';
 import {
   getDirectoryContextString,
   getEnvironmentContext,
+  updateEnvironmentContext,
 } from '../utils/environmentContext.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -263,6 +264,28 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: await getDirectoryContextString(this.config) }],
     });
+  }
+
+  async addDirectoryContextWithContent(content: Content): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    this.getChat().addHistory(content);
+  }
+
+  async updateDirectoryContext(newDir: string): Promise<void> {
+    if (this.chat) {
+      this.config.changeDir(newDir);
+      const envParts = await updateEnvironmentContext(this.config);
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: envParts,
+        }
+      ];
+      history.forEach((content) => this.addDirectoryContextWithContent(content));
+    }
   }
 
   async startChat(

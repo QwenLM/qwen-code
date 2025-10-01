@@ -33,21 +33,7 @@ export const shellCommand: SlashCommand = {
       };
     }
 
-    // if s is windows, and command is "cd some_dir" command, then append "&& cd" to the command
-    const isWindows = process.platform === 'win32';
     let finalCommand = command;
-    if (finalCommand.trim().startsWith('cd ')) {
-      const dir = finalCommand.trim().slice(3).trim();
-      if (dir) {
-        if (isWindows) {
-          // Append '&& cd' to get current directory after command execution
-          finalCommand += ` && cd`;
-        } else {
-          // For Unix-like systems, use 'pwd' to get current directory
-          finalCommand += ` && pwd`;
-        }
-      }
-    }
 
     return {
       type: 'tool',

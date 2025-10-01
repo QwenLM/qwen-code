@@ -486,3 +486,14 @@ export function isCommandNeedsPermission(command: string): {
     reason: 'Command requires permission to execute.',
   };
 }
+
+export function containCdCommand(command: string): boolean {
+  const commands = splitCommands(command);
+  for (const cmd of commands) {
+    const root = getCommandRoot(cmd);
+    if (root && root.toLowerCase() === 'cd') {
+      return true;
+    }
+  }
+  return false;
+}
