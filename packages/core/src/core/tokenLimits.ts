@@ -155,7 +155,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^glm-4\.5v(?:-.*)?$/, LIMITS['64k']],
   [/^glm-4\.5-air(?:-.*)?$/, LIMITS['128k']],
   [/^glm-4\.5(?:-.*)?$/, LIMITS['128k']],
-  [/^glm-4\.6(?:-.*)?$/, LIMITS['200k']],
+  [/^glm-4\.6(?:-.*)?$/, 202_752 as unknown as TokenCount], // exact limit from the model config file
 
   // -------------------
   // DeepSeek
@@ -169,7 +169,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   [/^kimi-k2-instruct.*$/, LIMITS['128k']],
   [/^gpt-oss.*$/, LIMITS['128k']],
-  [/^llama-4-scout.*$/, LIMITS['10m'] as unknown as TokenCount], // ultra-long variants - handle carefully
+  [/^llama-4-scout.*$/, LIMITS['10m']],
   [/^mistral-large-2.*$/, LIMITS['128k']],
 ];
 

@@ -209,7 +209,7 @@ describe('tokenLimit', () => {
       expect(tokenLimit('glm-4.5')).toBe(131072);
     });
     it('should return the correct limit for glm-4.6', () => {
-      expect(tokenLimit('glm-4.6')).toBe(200000);
+      expect(tokenLimit('glm-4.6')).toBe(202752);
     });
   });
 
