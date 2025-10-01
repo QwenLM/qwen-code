@@ -58,9 +58,20 @@ describe('normalize', () => {
     expect(normalize('gemini-2.0-flash-preview')).toBe('gemini-2.0-flash');
   });
 
+  it('should remove date like suffixes', () => {
   it('should remove version numbers with dots when they are at the end', () => {
     expect(normalize('gpt-4.1.1-latest')).toBe('gpt-4.1.1');
     expect(normalize('gpt-4.1-latest')).toBe('gpt-4.1');
+  });
+
+    it('should remove suffix version numbers with "v" prefix', () => {
+    expect(normalize('model-test-v1.1')).toBe('model-test');
+    expect(normalize('model-v1.1')).toBe('model');
+  });
+
+  it('should remove suffix version numbers w/o "v" prefix only if they are preceded by another dash', () => {
+    expect(normalize('model-test-1.1')).toBe('model-test');
+    expect(normalize('gpt-4.1')).toBe('gpt-4.1');
   });
 });
 

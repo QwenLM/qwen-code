@@ -49,15 +49,18 @@ export function normalize(model: string): string {
   s = s.replace(/-preview/g, '');
   // Special handling for Qwen model names that include "-latest" as part of the model name
   if (!s.match(/^qwen-(?:plus|flash|vl-max)-latest$/)) {
-    // \d{6,} - Match 6 or more digits (dates) like -20250219 (6+ digit dates)
-    // \d+x\d+b - Match patterns like 4x8b, -7b, -70b
-    // v\d+(?:\.\d+)* - Match version patterns starting with 'v' like -v1, -v1.2, -v2.1.3
-    // -\d+(?:\.\d+)+ - Match version numbers with dots (that are preceded by a dash),
-    //   like -1.1, -2.0.1 but only when they're suffixes, Example: model-test-1.1 → model-test;
-    //   Note: this does NOT match 4.1 in gpt-4.1 because there's no dash before 4.1 in that context.
-    // latest - Match the literal string "latest"
+    // Regex breakdown:
+    // -(?:...)$ - Non-capturing group for suffixes at the end of the string
+    // The following patterns are matched within the group:
+    //   \d{6,} - Match 6 or more digits (dates) like -20250219 (6+ digit dates)
+    //   \d+x\d+b - Match patterns like 4x8b, -7b, -70b
+    //   v\d+(?:\.\d+)* - Match version patterns starting with 'v' like -v1, -v1.2, -v2.1.3
+    //   (?<=-[^-]+-)\d+(?:\.\d+)+ - Match version numbers with dots that are preceded by another dash,
+    //     like -1.1, -2.0.1 but only when they are preceded by another dash, Example: model-test-1.1 → model-test;
+    //     Note: this does NOT match 4.1 in gpt-4.1 because there's no dash before -4.1 in that context.
+    //   latest - Match the literal string "latest"
     s = s.replace(
-      /-(?:\d{6,}|\d+x\d+b|v\d+(?:\.\d+)*|-\d+(?:\.\d+)+|latest)$/g,
+      /-(?:\d{6,}|\d+x\d+b|v\d+(?:\.\d+)*|(?<=-[^-]+-)\d+(?:\.\d+)+|latest)$/g,
       '',
     );
   }
