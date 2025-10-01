@@ -159,6 +159,8 @@ class ShellToolInvocation extends BaseToolInvocation<
       let lastUpdateTime = Date.now();
       let isBinaryStream = false;
 
+      let isCd = finalCommand.trim().startsWith('cd ');
+
       const { result: resultPromise } = await ShellExecutionService.execute(
         commandToExecute,
         cwd,
@@ -269,7 +271,18 @@ class ShellToolInvocation extends BaseToolInvocation<
         returnDisplayMessage = llmContent;
       } else {
         if (result.output.trim()) {
-          returnDisplayMessage = result.output;
+          if (isCd) {
+            returnDisplayMessage = `Changed working directory to: ${result.output.trim()}`;
+            // update global config target dir if cd was successful
+            if (result.exitCode === 0) {
+              const newDir = path.resolve(
+                result.output.trim()
+              );
+              this.config.changeDir(newDir);
+            }
+          } else {
+            returnDisplayMessage = result.output;
+          }
         } else {
           if (result.aborted) {
             returnDisplayMessage = 'Command cancelled by user.';

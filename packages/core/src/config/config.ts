@@ -256,7 +256,7 @@ export class Config {
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private readonly embeddingModel: string;
   private readonly sandbox: SandboxConfig | undefined;
-  private readonly targetDir: string;
+  private targetDir: string;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly question: string | undefined;
@@ -338,7 +338,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
-  readonly storage: Storage;
+  storage: Storage;
   private readonly fileExclusions: FileExclusions;
   private logger: Logger | null = null;
 
@@ -518,6 +518,13 @@ export class Config {
 
   setSessionId(sessionId: string): void {
     this.sessionId = sessionId;
+  }
+
+  // add setter for targetDir/workspaceContext/storage
+  changeDir(targetDir: string): void {
+    this.targetDir = path.resolve(targetDir);
+    this.workspaceContext = new WorkspaceContext(this.targetDir, []);
+    this.storage = new Storage(this.targetDir);
   }
 
   shouldLoadMemoryFromIncludeDirectories(): boolean {
