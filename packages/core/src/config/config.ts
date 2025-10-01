@@ -287,7 +287,7 @@ export class Config {
   private gitService: GitService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
-  private readonly cwd: string;
+  private cwd: string;
   private readonly bugCommand: BugCommandSettings | undefined;
   private readonly model: string;
   private readonly extensionContextFilePaths: string[];
@@ -523,6 +523,7 @@ export class Config {
   // add setter for targetDir/workspaceContext/storage
   changeDir(targetDir: string): void {
     this.targetDir = path.resolve(targetDir);
+    this.cwd = this.targetDir;
     this.workspaceContext = new WorkspaceContext(this.targetDir, []);
     this.storage = new Storage(this.targetDir);
   }

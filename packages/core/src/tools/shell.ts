@@ -36,6 +36,10 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 
+import type {
+  Content
+} from '@google/genai';
+
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 
 export interface ShellToolParams {
@@ -279,6 +283,17 @@ class ShellToolInvocation extends BaseToolInvocation<
                 result.output.trim()
               );
               this.config.changeDir(newDir);
+              // add user content to chat to tell them the directory changed
+              let userContent = {
+                role: 'user',
+                parts: [
+                 {
+                  text: "Changed working directory to: " + newDir,
+                 }
+                ],
+              } as Content;
+              // add to history directly
+              this.config.getGeminiClient().getChat().addHistory(userContent);
             }
           } else {
             returnDisplayMessage = result.output;
