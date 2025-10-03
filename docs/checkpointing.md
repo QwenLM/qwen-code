@@ -4,7 +4,7 @@ Qwen Code includes a Checkpointing feature that automatically saves a snapshot o
 
 ## How It Works
 
-When you approve a tool that modifies the file system (like `write_file` or `replace`), the CLI automatically creates a "checkpoint." This checkpoint includes:
+When you approve a tool that modifies the file system (like `write_file` or `edit`), the CLI automatically creates a "checkpoint." This checkpoint includes:
 
 1.  **A Git Snapshot:** A commit is made in a special, shadow Git repository located in your home directory (`~/.qwen/history/<project_hash>`). This snapshot captures the complete state of your project files at that moment. It does **not** interfere with your own project's Git repository.
 2.  **Conversation History:** The entire conversation you've had with the agent up to that point is saved.

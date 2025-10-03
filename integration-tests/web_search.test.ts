@@ -10,7 +10,7 @@ import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
 describe('web_search', () => {
   it('should be able to search the web', async () => {
     // Skip if Tavily key is not configured
-    if (!process.env.TAVILY_API_KEY) {
+    if (!process.env['TAVILY_API_KEY']) {
       console.warn('Skipping web search test: TAVILY_API_KEY not set');
       return;
     }

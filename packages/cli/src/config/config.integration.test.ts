@@ -5,14 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import { tmpdir } from 'os';
-import {
-  Config,
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { tmpdir } from 'node:os';
+import type {
   ConfigParameters,
   ContentGeneratorConfig,
 } from '@qwen-code/qwen-code-core';
+import { Config } from '@qwen-code/qwen-code-core';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 
@@ -53,19 +53,17 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
 
 describe('Configuration Integration Tests', () => {
   let tempDir: string;
-  let originalEnv: NodeJS.ProcessEnv;
 
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(tmpdir(), 'qwen-code-test-'));
     server.resetHandlers(http.post(CLEARCUT_URL, () => HttpResponse.text()));
 
-    originalEnv = { ...process.env };
-    process.env.GEMINI_API_KEY = 'test-api-key';
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     vi.clearAllMocks();
   });
 
   afterEach(() => {
-    process.env = originalEnv;
+    vi.unstubAllEnvs();
     if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true });
     }
@@ -271,7 +269,7 @@ describe('Configuration Integration Tests', () => {
       parseArguments = parseArgs;
     });
 
-    it('should parse --approval-mode=auto_edit correctly through the full argument parsing flow', async () => {
+    it('should parse --approval-mode=auto-edit correctly through the full argument parsing flow', async () => {
       const originalArgv = process.argv;
 
       try {
@@ -279,15 +277,38 @@ describe('Configuration Integration Tests', () => {
           'node',
           'script.js',
           '--approval-mode',
-          'auto_edit',
+          'auto-edit',
           '-p',
           'test',
         ];
 
-        const argv = await parseArguments();
+        const argv = await parseArguments({} as Settings);
 
         // Verify that the argument was parsed correctly
-        expect(argv.approvalMode).toBe('auto_edit');
+        expect(argv.approvalMode).toBe('auto-edit');
+        expect(argv.prompt).toBe('test');
+        expect(argv.yolo).toBe(false);
+      } finally {
+        process.argv = originalArgv;
+      }
+    });
+
+    it('should parse --approval-mode=plan correctly through the full argument parsing flow', async () => {
+      const originalArgv = process.argv;
+
+      try {
+        process.argv = [
+          'node',
+          'script.js',
+          '--approval-mode',
+          'plan',
+          '-p',
+          'test',
+        ];
+
+        const argv = await parseArguments({} as Settings);
+
+        expect(argv.approvalMode).toBe('plan');
         expect(argv.prompt).toBe('test');
         expect(argv.yolo).toBe(false);
       } finally {
@@ -308,7 +329,7 @@ describe('Configuration Integration Tests', () => {
           'test',
         ];
 
-        const argv = await parseArguments();
+        const argv = await parseArguments({} as Settings);
 
         expect(argv.approvalMode).toBe('yolo');
         expect(argv.prompt).toBe('test');
@@ -331,7 +352,7 @@ describe('Configuration Integration Tests', () => {
           'test',
         ];
 
-        const argv = await parseArguments();
+        const argv = await parseArguments({} as Settings);
 
         expect(argv.approvalMode).toBe('default');
         expect(argv.prompt).toBe('test');
@@ -347,7 +368,7 @@ describe('Configuration Integration Tests', () => {
       try {
         process.argv = ['node', 'script.js', '--yolo', '-p', 'test'];
 
-        const argv = await parseArguments();
+        const argv = await parseArguments({} as Settings);
 
         expect(argv.yolo).toBe(true);
         expect(argv.approvalMode).toBeUndefined(); // Should NOT be set when using --yolo
@@ -364,7 +385,7 @@ describe('Configuration Integration Tests', () => {
         process.argv = ['node', 'script.js', '--approval-mode', 'invalid_mode'];
 
         // Should throw during argument parsing due to yargs validation
-        await expect(parseArguments()).rejects.toThrow();
+        await expect(parseArguments({} as Settings)).rejects.toThrow();
       } finally {
         process.argv = originalArgv;
       }
@@ -383,7 +404,7 @@ describe('Configuration Integration Tests', () => {
         ];
 
         // Should throw during argument parsing due to conflict validation
-        await expect(parseArguments()).rejects.toThrow();
+        await expect(parseArguments({} as Settings)).rejects.toThrow();
       } finally {
         process.argv = originalArgv;
       }
@@ -396,7 +417,7 @@ describe('Configuration Integration Tests', () => {
         // Test that no approval mode arguments defaults to no flags set
         process.argv = ['node', 'script.js', '-p', 'test'];
 
-        const argv = await parseArguments();
+        const argv = await parseArguments({} as Settings);
 
         expect(argv.approvalMode).toBeUndefined();
         expect(argv.yolo).toBe(false);

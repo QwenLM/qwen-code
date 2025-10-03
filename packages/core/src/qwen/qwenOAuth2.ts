@@ -11,7 +11,7 @@ import * as os from 'os';
 
 import open from 'open';
 import { EventEmitter } from 'events';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
 import {
   SharedTokenManager,
@@ -34,9 +34,6 @@ const QWEN_OAUTH_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code';
 // File System Configuration
 const QWEN_DIR = '.qwen';
 const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
-
-// Token Configuration
-const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // 30 seconds
 
 /**
  * PKCE (Proof Key for Code Exchange) utilities
@@ -92,6 +89,21 @@ function objectToUrlEncoded(data: Record<string, string>): string {
 export interface ErrorData {
   error: string;
   error_description: string;
+}
+
+/**
+ * Custom error class to indicate that credentials should be cleared
+ * This is thrown when a 400 error occurs during token refresh, indicating
+ * that the refresh token is expired or invalid
+ */
+export class CredentialsClearRequiredError extends Error {
+  constructor(
+    message: string,
+    public originalError?: unknown,
+  ) {
+    super(message);
+    this.name = 'CredentialsClearRequiredError';
+  }
 }
 
 /**
@@ -255,20 +267,16 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
 
   async getAccessToken(): Promise<{ token?: string }> {
     try {
-      // Use shared manager to get valid credentials with cross-session synchronization
+      // Always use shared manager for consistency - this prevents race conditions
+      // between local credential state and shared state
       const credentials = await this.sharedManager.getValidCredentials(this);
       return { token: credentials.access_token };
     } catch (error) {
       console.warn('Failed to get access token from shared manager:', error);
 
-      // Only return cached token if it's still valid, don't refresh uncoordinated
-      // This prevents the cross-session token invalidation issue
-      if (this.credentials.access_token && this.isTokenValid()) {
-        return { token: this.credentials.access_token };
-      }
-
-      // If we can't get valid credentials through shared manager, fail gracefully
-      // All token refresh operations should go through the SharedTokenManager
+      // Don't use fallback to local credentials to prevent race conditions
+      // All token management should go through SharedTokenManager for consistency
+      // This ensures single source of truth and prevents cross-session issues
       return { token: undefined };
     }
   }
@@ -402,11 +410,12 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
 
     if (!response.ok) {
       const errorData = await response.text();
-      // Handle 401 errors which might indicate refresh token expiry
+      // Handle 400 errors which might indicate refresh token expiry
       if (response.status === 400) {
         await clearQwenCredentials();
-        throw new Error(
+        throw new CredentialsClearRequiredError(
           "Refresh token expired or invalid. Please use '/auth' to re-authenticate.",
+          { status: response.status, response: errorData },
         );
       }
       throw new Error(
@@ -441,14 +450,6 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
     // to prevent cross-session token invalidation issues
 
     return responseData;
-  }
-
-  private isTokenValid(): boolean {
-    if (!this.credentials.expiry_date) {
-      return false;
-    }
-    // Check if token expires within the refresh buffer time
-    return Date.now() < this.credentials.expiry_date - TOKEN_REFRESH_BUFFER_MS;
   }
 }
 
@@ -710,8 +711,6 @@ async function authWithQwenDeviceFlow(
             'polling',
             `Polling... (attempt ${attempt + 1}/${maxAttempts})`,
           );
-
-          process.stdout.write('.');
 
           // Wait with cancellation check every 100ms
           await new Promise<void>((resolve) => {

@@ -5,10 +5,14 @@
  */
 
 import AjvPkg from 'ajv';
+import * as addFormats from 'ajv-formats';
 // Ajv's ESM/CJS interop: use 'any' for compatibility as recommended by Ajv docs
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const AjvClass = (AjvPkg as any).default || AjvPkg;
-const ajValidator = new AjvClass();
+const ajValidator = new AjvClass({ coerceTypes: true });
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const addFormatsFunc = (addFormats as any).default || addFormats;
+addFormatsFunc(ajValidator);
 
 /**
  * Simple utility to validate objects against JSON Schemas
@@ -28,8 +32,27 @@ export class SchemaValidator {
     const validate = ajValidator.compile(schema);
     const valid = validate(data);
     if (!valid && validate.errors) {
-      return ajValidator.errorsText(validate.errors, { dataVar: 'params' });
+      // Find any True or False values and lowercase them
+      fixBooleanCasing(data as Record<string, unknown>);
+
+      const validate = ajValidator.compile(schema);
+      const valid = validate(data);
+
+      if (!valid && validate.errors) {
+        return ajValidator.errorsText(validate.errors, { dataVar: 'params' });
+      }
     }
     return null;
+  }
+}
+
+function fixBooleanCasing(data: Record<string, unknown>) {
+  for (const key of Object.keys(data)) {
+    if (!(key in data)) continue;
+
+    if (typeof data[key] === 'object') {
+      fixBooleanCasing(data[key] as Record<string, unknown>);
+    } else if (data[key] === 'True') data[key] = 'true';
+    else if (data[key] === 'False') data[key] = 'false';
   }
 }

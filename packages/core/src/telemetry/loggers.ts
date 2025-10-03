@@ -4,19 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LogAttributes, LogRecord, logs } from '@opentelemetry/api-logs';
+import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
+import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
-import { Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { UserAccountManager } from '../utils/userAccountManager.js';
 import {
   EVENT_API_ERROR,
   EVENT_API_REQUEST,
   EVENT_API_RESPONSE,
+  EVENT_CHAT_COMPRESSION,
   EVENT_CLI_CONFIG,
+  EVENT_CONTENT_RETRY,
+  EVENT_CONTENT_RETRY_FAILURE,
+  EVENT_CONVERSATION_FINISHED,
   EVENT_FLASH_FALLBACK,
   EVENT_IDE_CONNECTION,
+  EVENT_INVALID_CHUNK,
   EVENT_NEXT_SPEAKER_CHECK,
   EVENT_SLASH_COMMAND,
+  EVENT_SUBAGENT_EXECUTION,
   EVENT_TOOL_CALL,
   EVENT_USER_PROMPT,
   SERVICE_NAME,
@@ -24,33 +32,49 @@ import {
 import {
   recordApiErrorMetrics,
   recordApiResponseMetrics,
+  recordChatCompressionMetrics,
+  recordContentRetry,
+  recordContentRetryFailure,
+  recordFileOperationMetric,
+  recordInvalidChunk,
+  recordSubagentExecutionMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
-import {
+import type {
   ApiErrorEvent,
   ApiRequestEvent,
   ApiResponseEvent,
+  ChatCompressionEvent,
+  ContentRetryEvent,
+  ContentRetryFailureEvent,
+  ConversationFinishedEvent,
+  FileOperationEvent,
   FlashFallbackEvent,
   IdeConnectionEvent,
+  InvalidChunkEvent,
   KittySequenceOverflowEvent,
   LoopDetectedEvent,
   NextSpeakerCheckEvent,
   SlashCommandEvent,
   StartSessionEvent,
+  SubagentExecutionEvent,
   ToolCallEvent,
   UserPromptEvent,
 } from './types.js';
-import { UiEvent, uiTelemetryService } from './uiTelemetry.js';
+import { type UiEvent, uiTelemetryService } from './uiTelemetry.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
 
 function getCommonAttributes(config: Config): LogAttributes {
+  const userAccountManager = new UserAccountManager();
+  const email = userAccountManager.getCachedGoogleAccount();
   return {
     'session.id': config.getSessionId(),
+    ...(email && { 'user.email': email }),
   };
 }
 
@@ -76,6 +100,9 @@ export function logCliConfiguration(
     file_filtering_respect_git_ignore: event.file_filtering_respect_git_ignore,
     debug_mode: event.debug_enabled,
     mcp_servers: event.mcp_servers,
+    mcp_servers_count: event.mcp_servers_count,
+    mcp_tools: event.mcp_tools,
+    mcp_tools_count: event.mcp_tools_count,
   };
 
   const logger = logs.getLogger(SERVICE_NAME);
@@ -95,10 +122,15 @@ export function logUserPrompt(config: Config, event: UserPromptEvent): void {
     'event.name': EVENT_USER_PROMPT,
     'event.timestamp': new Date().toISOString(),
     prompt_length: event.prompt_length,
+    prompt_id: event.prompt_id,
   };
 
+  if (event.auth_type) {
+    attributes['auth_type'] = event.auth_type;
+  }
+
   if (shouldLogUserPrompts(config)) {
-    attributes.prompt = event.prompt;
+    attributes['prompt'] = event.prompt;
   }
 
   const logger = logs.getLogger(SERVICE_NAME);
@@ -145,6 +177,25 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     event.duration_ms,
     event.success,
     event.decision,
+    event.tool_type,
+  );
+}
+
+export function logFileOperation(
+  config: Config,
+  event: FileOperationEvent,
+): void {
+  QwenLogger.getInstance(config)?.logFileOperationEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  recordFileOperationMetric(
+    config,
+    event.operation,
+    event.lines,
+    event.mimetype,
+    event.extension,
+    event.diff_stat,
+    event.programming_language,
   );
 }
 
@@ -247,7 +298,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.timestamp': new Date().toISOString(),
   };
   if (event.response_text) {
-    attributes.response_text = event.response_text;
+    attributes['response_text'] = event.response_text;
   }
   if (event.error) {
     attributes['error.message'] = event.error;
@@ -380,6 +431,52 @@ export function logIdeConnection(
   logger.emit(logRecord);
 }
 
+export function logConversationFinishedEvent(
+  config: Config,
+  event: ConversationFinishedEvent,
+): void {
+  QwenLogger.getInstance(config)?.logConversationFinishedEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CONVERSATION_FINISHED,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Conversation finished.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logChatCompression(
+  config: Config,
+  event: ChatCompressionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logChatCompressionEvent(event);
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CHAT_COMPRESSION,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Chat compression (Saved ${event.tokens_before - event.tokens_after} tokens)`,
+    attributes,
+  };
+  logger.emit(logRecord);
+
+  recordChatCompressionMetrics(config, {
+    tokens_before: event.tokens_before,
+    tokens_after: event.tokens_after,
+  });
+}
+
 export function logKittySequenceOverflow(
   config: Config,
   event: KittySequenceOverflowEvent,
@@ -396,4 +493,101 @@ export function logKittySequenceOverflow(
     attributes,
   };
   logger.emit(logRecord);
+}
+export function logInvalidChunk(
+  config: Config,
+  event: InvalidChunkEvent,
+): void {
+  QwenLogger.getInstance(config)?.logInvalidChunkEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_INVALID_CHUNK,
+    'event.timestamp': event['event.timestamp'],
+  };
+
+  if (event.error_message) {
+    attributes['error.message'] = event.error_message;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Invalid chunk received from stream.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordInvalidChunk(config);
+}
+
+export function logContentRetry(
+  config: Config,
+  event: ContentRetryEvent,
+): void {
+  QwenLogger.getInstance(config)?.logContentRetryEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CONTENT_RETRY,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Content retry attempt ${event.attempt_number} due to ${event.error_type}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordContentRetry(config);
+}
+
+export function logContentRetryFailure(
+  config: Config,
+  event: ContentRetryFailureEvent,
+): void {
+  QwenLogger.getInstance(config)?.logContentRetryFailureEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_CONTENT_RETRY_FAILURE,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `All content retries failed after ${event.total_attempts} attempts.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordContentRetryFailure(config);
+}
+
+export function logSubagentExecution(
+  config: Config,
+  event: SubagentExecutionEvent,
+): void {
+  QwenLogger.getInstance(config)?.logSubagentExecutionEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_SUBAGENT_EXECUTION,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Subagent execution: ${event.subagent_name}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+  recordSubagentExecutionMetrics(
+    config,
+    event.subagent_name,
+    event.status,
+    event.terminate_reason,
+  );
 }

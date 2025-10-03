@@ -14,6 +14,12 @@ Another paragraph.
 "
 `;
 
+exports[`<MarkdownDisplay /> > correctly splits lines using \\n regardless of platform EOL 1`] = `
+"Line 1
+Line 2
+Line 3"
+`;
+
 exports[`<MarkdownDisplay /> > handles a table at the end of the input 1`] = `
 "Some text before.
 | A | B |

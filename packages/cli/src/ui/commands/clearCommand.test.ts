@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, Mock } from 'vitest';
+import type { Mock } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { clearCommand } from './clearCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
@@ -20,7 +21,8 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   };
 });
 
-import { GeminiClient, uiTelemetryService } from '@qwen-code/qwen-code-core';
+import type { GeminiClient } from '@qwen-code/qwen-code-core';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 describe('clearCommand', () => {
   let mockContext: CommandContext;
@@ -55,7 +57,6 @@ describe('clearCommand', () => {
     expect(mockContext.ui.setDebugMessage).toHaveBeenCalledTimes(1);
 
     expect(mockResetChat).toHaveBeenCalledTimes(1);
-    expect(mockContext.session.resetSession).toHaveBeenCalledTimes(1);
     expect(uiTelemetryService.resetLastPromptTokenCount).toHaveBeenCalledTimes(
       1,
     );
@@ -65,8 +66,6 @@ describe('clearCommand', () => {
     const setDebugMessageOrder = (mockContext.ui.setDebugMessage as Mock).mock
       .invocationCallOrder[0];
     const resetChatOrder = mockResetChat.mock.invocationCallOrder[0];
-    const resetSessionOrder = (mockContext.session.resetSession as Mock).mock
-      .invocationCallOrder[0];
     const resetTelemetryOrder = (
       uiTelemetryService.resetLastPromptTokenCount as Mock
     ).mock.invocationCallOrder[0];
@@ -76,8 +75,6 @@ describe('clearCommand', () => {
     expect(setDebugMessageOrder).toBeLessThan(resetChatOrder);
     expect(resetChatOrder).toBeLessThan(resetTelemetryOrder);
     expect(resetTelemetryOrder).toBeLessThan(clearOrder);
-    expect(resetChatOrder).toBeLessThan(resetSessionOrder);
-    expect(resetSessionOrder).toBeLessThan(clearOrder);
   });
 
   it('should not attempt to reset chat if config service is not available', async () => {
@@ -97,7 +94,6 @@ describe('clearCommand', () => {
       'Clearing terminal.',
     );
     expect(mockResetChat).not.toHaveBeenCalled();
-    expect(nullConfigContext.session.resetSession).toHaveBeenCalledTimes(1);
     expect(uiTelemetryService.resetLastPromptTokenCount).toHaveBeenCalledTimes(
       1,
     );

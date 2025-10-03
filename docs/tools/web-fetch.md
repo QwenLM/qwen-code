@@ -42,7 +42,7 @@ web_fetch(url="https://arxiv.org/abs/2401.0001", prompt="What are the key findin
 Analyze GitHub documentation:
 
 ```
-web_fetch(url="https://github.com/google/gemini-react/blob/main/README.md", prompt="What are the installation steps and main features?")
+web_fetch(url="https://github.com/QwenLM/Qwen/blob/main/README.md", prompt="What are the installation steps and main features?")
 ```
 
 ## Important notes

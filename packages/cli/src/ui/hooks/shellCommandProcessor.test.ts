@@ -41,10 +41,10 @@ import {
   type ShellExecutionResult,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import * as crypto from 'crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import { ToolCallStatus } from '../types.js';
 
 describe('useShellCommandProcessor', () => {
@@ -65,7 +65,10 @@ describe('useShellCommandProcessor', () => {
     setPendingHistoryItemMock = vi.fn();
     onExecMock = vi.fn();
     onDebugMessageMock = vi.fn();
-    mockConfig = { getTargetDir: () => '/test/dir' } as Config;
+    mockConfig = {
+      getTargetDir: () => '/test/dir',
+      getShouldUseNodePtyShell: () => false,
+    } as Config;
     mockGeminiClient = { addHistory: vi.fn() } as unknown as GeminiClient;
 
     vi.mocked(os.platform).mockReturnValue('linux');
@@ -104,13 +107,12 @@ describe('useShellCommandProcessor', () => {
   ): ShellExecutionResult => ({
     rawOutput: Buffer.from(overrides.output || ''),
     output: 'Success',
-    stdout: 'Success',
-    stderr: '',
     exitCode: 0,
     signal: null,
     error: null,
     aborted: false,
     pid: 12345,
+    executionMethod: 'child_process',
     ...overrides,
   });
 
@@ -141,6 +143,7 @@ describe('useShellCommandProcessor', () => {
       '/test/dir',
       expect.any(Function),
       expect.any(Object),
+      false,
     );
     expect(onExecMock).toHaveBeenCalledWith(expect.any(Promise));
   });
@@ -223,7 +226,6 @@ describe('useShellCommandProcessor', () => {
       act(() => {
         mockShellOutputCallback({
           type: 'data',
-          stream: 'stdout',
           chunk: 'hello',
         });
       });
@@ -238,7 +240,6 @@ describe('useShellCommandProcessor', () => {
       act(() => {
         mockShellOutputCallback({
           type: 'data',
-          stream: 'stdout',
           chunk: ' world',
         });
       });
@@ -319,6 +320,7 @@ describe('useShellCommandProcessor', () => {
       '/test/dir',
       expect.any(Function),
       expect.any(Object),
+      false,
     );
   });
 

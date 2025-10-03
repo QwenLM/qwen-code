@@ -4,16 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type React from 'react';
+import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
-import React, { useState } from 'react';
 import {
   setOpenAIApiKey,
   setOpenAIBaseUrl,
   setOpenAIModel,
   validateAuthMethod,
 } from '../../config/auth.js';
-import { LoadedSettings, SettingScope } from '../../config/settings.js';
+import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
@@ -54,18 +55,18 @@ export function AuthDialog({
   const initialAuthIndex = Math.max(
     0,
     items.findIndex((item) => {
-      if (settings.merged.selectedAuthType) {
-        return item.value === settings.merged.selectedAuthType;
+      if (settings.merged.security?.auth?.selectedType) {
+        return item.value === settings.merged.security?.auth?.selectedType;
       }
 
       const defaultAuthType = parseDefaultAuthType(
-        process.env.GEMINI_DEFAULT_AUTH_TYPE,
+        process.env['QWEN_DEFAULT_AUTH_TYPE'],
       );
       if (defaultAuthType) {
         return item.value === defaultAuthType;
       }
 
-      if (process.env.GEMINI_API_KEY) {
+      if (process.env['GEMINI_API_KEY']) {
         return item.value === AuthType.USE_GEMINI;
       }
 
@@ -76,7 +77,10 @@ export function AuthDialog({
   const handleAuthSelect = (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);
     if (error) {
-      if (authMethod === AuthType.USE_OPENAI && !process.env.OPENAI_API_KEY) {
+      if (
+        authMethod === AuthType.USE_OPENAI &&
+        !process.env['OPENAI_API_KEY']
+      ) {
         setShowOpenAIKeyPrompt(true);
         setErrorMessage(null);
       } else {
@@ -117,10 +121,10 @@ export function AuthDialog({
         if (errorMessage) {
           return;
         }
-        if (settings.merged.selectedAuthType === undefined) {
+        if (settings.merged.security?.auth?.selectedType === undefined) {
           // Prevent exiting if no auth method is set
           setErrorMessage(
-            'You must select an auth method to proceed. Press Ctrl+C twice to exit.',
+            'You must select an auth method to proceed. Press Ctrl+C again to exit.',
           );
           return;
         }
@@ -156,7 +160,6 @@ export function AuthDialog({
           items={items}
           initialIndex={initialAuthIndex}
           onSelect={handleAuthSelect}
-          isFocused={true}
         />
       </Box>
       {errorMessage && (

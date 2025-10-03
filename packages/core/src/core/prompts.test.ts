@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getCoreSystemPrompt } from './prompts.js';
+import {
+  getCoreSystemPrompt,
+  getCustomSystemPrompt,
+  getSubagentSystemReminder,
+  getPlanModeSystemReminder,
+} from './prompts.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,7 +19,7 @@ import { GEMINI_CONFIG_DIR } from '../tools/memoryTool.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
-vi.mock('../tools/edit', () => ({ EditTool: { Name: 'replace' } }));
+vi.mock('../tools/edit', () => ({ EditTool: { Name: 'edit' } }));
 vi.mock('../tools/glob', () => ({ GlobTool: { Name: 'glob' } }));
 vi.mock('../tools/grep', () => ({ GrepTool: { Name: 'search_file_content' } }));
 vi.mock('../tools/read-file', () => ({ ReadFileTool: { Name: 'read_file' } }));
@@ -361,5 +366,211 @@ describe('URL matching with trailing slash compatibility', () => {
 
     // Restore original environment variables
     process.env = originalEnv;
+  });
+});
+
+describe('Model-specific tool call formats', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('SANDBOX', undefined);
+  });
+
+  it('should use XML format for qwen3-coder model', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt(undefined, undefined, 'qwen3-coder-7b');
+
+    // Should contain XML-style tool calls
+    expect(prompt).toContain('<tool_call>');
+    expect(prompt).toContain('<function=run_shell_command>');
+    expect(prompt).toContain('<parameter=command>');
+    expect(prompt).toContain('</function>');
+    expect(prompt).toContain('</tool_call>');
+
+    // Should NOT contain bracket-style tool calls
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+
+    // Should NOT contain JSON-style tool calls
+    expect(prompt).not.toContain('{"name": "run_shell_command"');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should use JSON format for qwen-vl model', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt(undefined, undefined, 'qwen-vl-max');
+
+    // Should contain JSON-style tool calls
+    expect(prompt).toContain('<tool_call>');
+    expect(prompt).toContain('{"name": "run_shell_command"');
+    expect(prompt).toContain('"arguments": {"command": "node server.js &"}');
+    expect(prompt).toContain('</tool_call>');
+
+    // Should NOT contain bracket-style tool calls
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+
+    // Should NOT contain XML-style tool calls with parameters
+    expect(prompt).not.toContain('<function=run_shell_command>');
+    expect(prompt).not.toContain('<parameter=command>');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should use bracket format for generic models', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt(undefined, undefined, 'gpt-4');
+
+    // Should contain bracket-style tool calls
+    expect(prompt).toContain('[tool_call: run_shell_command for');
+    expect(prompt).toContain('because it must run in the background]');
+
+    // Should NOT contain XML-style tool calls
+    expect(prompt).not.toContain('<function=run_shell_command>');
+    expect(prompt).not.toContain('<parameter=command>');
+
+    // Should NOT contain JSON-style tool calls
+    expect(prompt).not.toContain('{"name": "run_shell_command"');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should use bracket format when no model is specified', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt();
+
+    // Should contain bracket-style tool calls (default behavior)
+    expect(prompt).toContain('[tool_call: run_shell_command for');
+    expect(prompt).toContain('because it must run in the background]');
+
+    // Should NOT contain XML or JSON formats
+    expect(prompt).not.toContain('<function=run_shell_command>');
+    expect(prompt).not.toContain('{"name": "run_shell_command"');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should preserve model-specific formats with user memory', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const userMemory = 'User prefers concise responses.';
+    const prompt = getCoreSystemPrompt(
+      userMemory,
+      undefined,
+      'qwen3-coder-14b',
+    );
+
+    // Should contain XML-style tool calls
+    expect(prompt).toContain('<tool_call>');
+    expect(prompt).toContain('<function=run_shell_command>');
+
+    // Should contain user memory with separator
+    expect(prompt).toContain('---');
+    expect(prompt).toContain('User prefers concise responses.');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should preserve model-specific formats with sandbox environment', () => {
+    vi.stubEnv('SANDBOX', 'true');
+    vi.mocked(isGitRepository).mockReturnValue(false);
+    const prompt = getCoreSystemPrompt(undefined, undefined, 'qwen-vl-plus');
+
+    // Should contain JSON-style tool calls
+    expect(prompt).toContain('{"name": "run_shell_command"');
+
+    // Should contain sandbox instructions
+    expect(prompt).toContain('# Sandbox');
+
+    expect(prompt).toMatchSnapshot();
+  });
+});
+
+describe('getCustomSystemPrompt', () => {
+  it('should handle string custom instruction without user memory', () => {
+    const customInstruction =
+      'You are a helpful assistant specialized in code review.';
+    const result = getCustomSystemPrompt(customInstruction);
+
+    expect(result).toBe(
+      'You are a helpful assistant specialized in code review.',
+    );
+    expect(result).not.toContain('---');
+  });
+
+  it('should handle string custom instruction with user memory', () => {
+    const customInstruction =
+      'You are a helpful assistant specialized in code review.';
+    const userMemory =
+      'Remember to be extra thorough.\nFocus on security issues.';
+    const result = getCustomSystemPrompt(customInstruction, userMemory);
+
+    expect(result).toBe(
+      'You are a helpful assistant specialized in code review.\n\n---\n\nRemember to be extra thorough.\nFocus on security issues.',
+    );
+    expect(result).toContain('---');
+  });
+
+  it('should handle Content object with parts array and user memory', () => {
+    const customInstruction = {
+      parts: [
+        { text: 'You are a code assistant. ' },
+        { text: 'Always provide examples.' },
+      ],
+    };
+    const userMemory = 'User prefers TypeScript examples.';
+    const result = getCustomSystemPrompt(customInstruction, userMemory);
+
+    expect(result).toBe(
+      'You are a code assistant. Always provide examples.\n\n---\n\nUser prefers TypeScript examples.',
+    );
+    expect(result).toContain('---');
+  });
+});
+
+describe('getSubagentSystemReminder', () => {
+  it('should format single agent type correctly', () => {
+    const result = getSubagentSystemReminder(['python']);
+
+    expect(result).toMatch(/^<system-reminder>.*<\/system-reminder>$/);
+    expect(result).toContain('available agent types are: python');
+    expect(result).toContain('PROACTIVELY use the');
+  });
+
+  it('should join multiple agent types with commas', () => {
+    const result = getSubagentSystemReminder(['python', 'web', 'analysis']);
+
+    expect(result).toContain(
+      'available agent types are: python, web, analysis',
+    );
+  });
+
+  it('should handle empty array', () => {
+    const result = getSubagentSystemReminder([]);
+
+    expect(result).toContain('available agent types are: ');
+    expect(result).toContain('<system-reminder>');
+  });
+});
+
+describe('getPlanModeSystemReminder', () => {
+  it('should return plan mode system reminder with proper structure', () => {
+    const result = getPlanModeSystemReminder();
+
+    expect(result).toMatch(/^<system-reminder>[\s\S]*<\/system-reminder>$/);
+    expect(result).toContain('Plan mode is active');
+    expect(result).toContain('MUST NOT make any edits');
+  });
+
+  it('should include workflow instructions', () => {
+    const result = getPlanModeSystemReminder();
+
+    expect(result).toContain("1. Answer the user's query comprehensively");
+    expect(result).toContain("2. When you're done researching");
+    expect(result).toContain('exit_plan_mode tool');
+  });
+
+  it('should be deterministic', () => {
+    const result1 = getPlanModeSystemReminder();
+    const result2 = getPlanModeSystemReminder();
+
+    expect(result1).toBe(result2);
   });
 });

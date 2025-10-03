@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'main'
+      - 'feat/e2e/**'
   merge_group:
 
 jobs:

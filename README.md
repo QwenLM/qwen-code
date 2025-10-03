@@ -17,15 +17,11 @@
 
 <div align="center">
   
-  <!-- Keep these links. Translations will automatically update with the README. -->
-  <a href="https://readme-i18n.com/de/QwenLM/qwen-code">Deutsch</a> | 
-  <a href="https://readme-i18n.com/es/QwenLM/qwen-code">Español</a> | 
-  <a href="https://readme-i18n.com/fr/QwenLM/qwen-code">français</a> | 
-  <a href="https://readme-i18n.com/ja/QwenLM/qwen-code">日本語</a> | 
-  <a href="https://readme-i18n.com/ko/QwenLM/qwen-code">한국어</a> | 
-  <a href="https://readme-i18n.com/pt/QwenLM/qwen-code">Português</a> | 
-  <a href="https://readme-i18n.com/ru/QwenLM/qwen-code">Русский</a> | 
-  <a href="https://readme-i18n.com/zh/QwenLM/qwen-code">中文</a>
+  <a href="https://qwenlm.github.io/qwen-code-docs/de/">Deutsch</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/fr">français</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/ja/">日本語</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/ru">Русский</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/zh/">中文</a>
   
 </div>
 
@@ -58,6 +54,7 @@ For detailed setup instructions, see [Authorization](#authorization).
 - **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits
 - **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
 - **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
+- **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis
 
 ## Installation
 
@@ -83,6 +80,12 @@ git clone https://github.com/QwenLM/qwen-code.git
 cd qwen-code
 npm install
 npm install -g .
+```
+
+### Install globally with Homebrew (macOS/Linux)
+
+```bash
+brew install qwen-code
 ```
 
 ## Quick Start
@@ -118,6 +121,58 @@ Create or edit `.qwen/settings.json` in your home directory:
 - **`/stats`** - Check current token usage and limits
 
 > 📝 **Note**: Session token limit applies to a single conversation, not cumulative API calls.
+
+### Vision Model Configuration
+
+Qwen Code includes intelligent vision model auto-switching that detects images in your input and can automatically switch to vision-capable models for multimodal analysis. **This feature is enabled by default** - when you include images in your queries, you'll see a dialog asking how you'd like to handle the vision model switch.
+
+#### Skip the Switch Dialog (Optional)
+
+If you don't want to see the interactive dialog each time, configure the default behavior in your `.qwen/settings.json`:
+
+```json
+{
+  "experimental": {
+    "vlmSwitchMode": "once"
+  }
+}
+```
+
+**Available modes:**
+
+- **`"once"`** - Switch to vision model for this query only, then revert
+- **`"session"`** - Switch to vision model for the entire session
+- **`"persist"`** - Continue with current model (no switching)
+- **Not set** - Show interactive dialog each time (default)
+
+#### Command Line Override
+
+You can also set the behavior via command line:
+
+```bash
+# Switch once per query
+qwen --vlm-switch-mode once
+
+# Switch for entire session
+qwen --vlm-switch-mode session
+
+# Never switch automatically
+qwen --vlm-switch-mode persist
+```
+
+#### Disable Vision Models (Optional)
+
+To completely disable vision model support, add to your `.qwen/settings.json`:
+
+```json
+{
+  "experimental": {
+    "visionModelPreview": false
+  }
+}
+```
+
+> 💡 **Tip**: In YOLO mode (`--yolo`), vision switching happens automatically without prompts when images are detected.
 
 ### Authorization
 

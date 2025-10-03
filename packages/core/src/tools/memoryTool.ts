@@ -4,23 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolEditConfirmationDetails, ToolResult } from './tools.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
-  ToolResult,
-  ToolEditConfirmationDetails,
   ToolConfirmationOutcome,
 } from './tools.js';
-import { FunctionDeclaration } from '@google/genai';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { homedir } from 'os';
+import type { FunctionDeclaration } from '@google/genai';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { Storage } from '../config/storage.js';
 import * as Diff from 'diff';
 import { DEFAULT_DIFF_OPTIONS } from './diffOptions.js';
 import { tildeifyPath } from '../utils/paths.js';
-import { ModifiableDeclarativeTool, ModifyContext } from './modifiable-tool.js';
-import { SchemaValidator } from '../utils/schemaValidator.js';
+import type {
+  ModifiableDeclarativeTool,
+  ModifyContext,
+} from './modifiable-tool.js';
+import { ToolErrorType } from './tool-error.js';
 
 const memoryToolSchemaData: FunctionDeclaration = {
   name: 'save_memory',
@@ -108,7 +110,7 @@ interface SaveMemoryParams {
 }
 
 function getGlobalMemoryFilePath(): string {
-  return path.join(homedir(), GEMINI_CONFIG_DIR, getCurrentGeminiMdFilename());
+  return path.join(Storage.getGlobalGeminiDir(), getCurrentGeminiMdFilename());
 }
 
 function getProjectMemoryFilePath(): string {
@@ -376,6 +378,10 @@ Project: ${projectPath} (current project only)`;
           error: `Failed to save memory. Detail: ${errorMessage}`,
         }),
         returnDisplay: `Error saving memory: ${errorMessage}`,
+        error: {
+          message: errorMessage,
+          type: ToolErrorType.MEMORY_TOOL_EXECUTION_ERROR,
+        },
       };
     }
   }
@@ -389,22 +395,16 @@ export class MemoryTool
   constructor() {
     super(
       MemoryTool.Name,
-      'Save Memory',
+      'SaveMemory',
       memoryToolDescription,
       Kind.Think,
       memoryToolSchemaData.parametersJsonSchema as Record<string, unknown>,
     );
   }
 
-  override validateToolParams(params: SaveMemoryParams): string | null {
-    const errors = SchemaValidator.validate(
-      this.schema.parametersJsonSchema,
-      params,
-    );
-    if (errors) {
-      return errors;
-    }
-
+  protected override validateToolParamValues(
+    params: SaveMemoryParams,
+  ): string | null {
     if (params.fact.trim() === '') {
       return 'Parameter "fact" must be a non-empty string.';
     }

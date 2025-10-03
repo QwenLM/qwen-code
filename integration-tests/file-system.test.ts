@@ -44,11 +44,7 @@ describe('file-system', () => {
     const result = await rig.run(`edit test.txt to have a hello world message`);
 
     // Accept multiple valid tools for editing files
-    const foundToolCall = await rig.waitForAnyToolCall([
-      'write_file',
-      'edit',
-      'replace',
-    ]);
+    const foundToolCall = await rig.waitForAnyToolCall(['write_file', 'edit']);
 
     // Add debugging information
     if (!foundToolCall) {
@@ -57,7 +53,7 @@ describe('file-system', () => {
 
     expect(
       foundToolCall,
-      'Expected to find a write_file, edit, or replace tool call',
+      'Expected to find a write_file or edit tool call',
     ).toBeTruthy();
 
     // Validate model output - will throw if no output
@@ -86,7 +82,7 @@ describe('file-system', () => {
     ).toBeTruthy();
 
     // Log success info if verbose
-    if (process.env.VERBOSE === 'true') {
+    if (process.env['VERBOSE'] === 'true') {
       console.log('File written successfully with hello message.');
     }
   });

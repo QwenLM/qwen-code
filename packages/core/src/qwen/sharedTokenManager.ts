@@ -9,12 +9,13 @@ import { promises as fs, unlinkSync } from 'node:fs';
 import * as os from 'os';
 import { randomUUID } from 'node:crypto';
 
+import type { IQwenOAuth2Client } from './qwenOAuth2.js';
 import {
-  IQwenOAuth2Client,
   type QwenCredentials,
   type TokenRefreshData,
   type ErrorData,
   isErrorResponse,
+  CredentialsClearRequiredError,
 } from './qwenOAuth2.js';
 
 // File System Configuration
@@ -25,17 +26,20 @@ const QWEN_LOCK_FILENAME = 'oauth_creds.lock';
 // Token and Cache Configuration
 const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // 30 seconds
 const LOCK_TIMEOUT_MS = 10000; // 10 seconds lock timeout
-const CACHE_CHECK_INTERVAL_MS = 1000; // 1 second cache check interval
+const CACHE_CHECK_INTERVAL_MS = 5000; // 5 seconds cache check interval (increased from 1 second)
 
 // Lock acquisition configuration (can be overridden for testing)
 interface LockConfig {
   maxAttempts: number;
   attemptInterval: number;
+  // Add exponential backoff parameters
+  maxInterval: number;
 }
 
 const DEFAULT_LOCK_CONFIG: LockConfig = {
-  maxAttempts: 50,
-  attemptInterval: 200,
+  maxAttempts: 20, // Reduced from 50 to prevent excessive waiting
+  attemptInterval: 100, // Reduced from 200ms to check more frequently
+  maxInterval: 2000, // Maximum interval for exponential backoff
 };
 
 /**
@@ -127,6 +131,11 @@ export class SharedTokenManager {
   private refreshPromise: Promise<QwenCredentials> | null = null;
 
   /**
+   * Promise tracking any ongoing file check operation to prevent concurrent checks
+   */
+  private checkPromise: Promise<void> | null = null;
+
+  /**
    * Whether cleanup handlers have been registered
    */
   private cleanupHandlersRegistered = false;
@@ -200,7 +209,7 @@ export class SharedTokenManager {
   ): Promise<QwenCredentials> {
     try {
       // Check if credentials file has been updated by other sessions
-      await this.checkAndReloadIfNeeded();
+      await this.checkAndReloadIfNeeded(qwenClient);
 
       // Return valid cached credentials if available (unless force refresh is requested)
       if (
@@ -211,23 +220,26 @@ export class SharedTokenManager {
         return this.memoryCache.credentials;
       }
 
-      // If refresh is already in progress, wait for it to complete
-      if (this.refreshPromise) {
-        return this.refreshPromise;
+      // Use a local promise variable to avoid race conditions
+      let currentRefreshPromise = this.refreshPromise;
+
+      if (!currentRefreshPromise) {
+        // Start new refresh operation with distributed locking
+        currentRefreshPromise = this.performTokenRefresh(
+          qwenClient,
+          forceRefresh,
+        );
+        this.refreshPromise = currentRefreshPromise;
       }
 
-      // Start new refresh operation with distributed locking
-      this.refreshPromise = this.performTokenRefresh(qwenClient, forceRefresh);
-
       try {
-        const credentials = await this.refreshPromise;
-        return credentials;
-      } catch (error) {
-        // Ensure refreshPromise is cleared on error before re-throwing
-        this.refreshPromise = null;
-        throw error;
+        // Wait for the refresh to complete
+        const result = await currentRefreshPromise;
+        return result;
       } finally {
-        this.refreshPromise = null;
+        if (this.refreshPromise === currentRefreshPromise) {
+          this.refreshPromise = null;
+        }
       }
     } catch (error) {
       // Convert generic errors to TokenManagerError for better error handling
@@ -245,8 +257,22 @@ export class SharedTokenManager {
 
   /**
    * Check if the credentials file was updated by another process and reload if so
+   * Uses promise-based locking to prevent concurrent file checks
    */
-  private async checkAndReloadIfNeeded(): Promise<void> {
+  private async checkAndReloadIfNeeded(
+    qwenClient?: IQwenOAuth2Client,
+  ): Promise<void> {
+    // If there's already an ongoing check, wait for it to complete
+    if (this.checkPromise) {
+      await this.checkPromise;
+      return;
+    }
+
+    // If there's an ongoing refresh, skip the file check as refresh will handle it
+    if (this.refreshPromise) {
+      return;
+    }
+
     const now = Date.now();
 
     // Limit check frequency to avoid excessive disk I/O
@@ -254,16 +280,71 @@ export class SharedTokenManager {
       return;
     }
 
-    this.memoryCache.lastCheck = now;
+    // Start the check operation and store the promise
+    this.checkPromise = this.performFileCheck(qwenClient, now);
+
+    try {
+      await this.checkPromise;
+    } finally {
+      this.checkPromise = null;
+    }
+  }
+
+  /**
+   * Utility method to add timeout to any promise operation
+   * Properly cleans up the timeout when the promise completes
+   */
+  private withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    operationType = 'Operation',
+  ): Promise<T> {
+    let timeoutId: NodeJS.Timeout;
+
+    return Promise.race([
+      promise.finally(() => {
+        // Clear timeout when main promise completes (success or failure)
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+      }),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(
+              new Error(`${operationType} timed out after ${timeoutMs}ms`),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  }
+
+  /**
+   * Perform the actual file check and reload operation
+   * This is separated to enable proper promise-based synchronization
+   */
+  private async performFileCheck(
+    qwenClient: IQwenOAuth2Client | undefined,
+    checkTime: number,
+  ): Promise<void> {
+    // Update lastCheck atomically at the start to prevent other calls from proceeding
+    this.memoryCache.lastCheck = checkTime;
 
     try {
       const filePath = this.getCredentialFilePath();
-      const stats = await fs.stat(filePath);
+
+      const stats = await this.withTimeout(
+        fs.stat(filePath),
+        3000,
+        'File operation',
+      );
       const fileModTime = stats.mtimeMs;
 
       // Reload credentials if file has been modified since last cache
       if (fileModTime > this.memoryCache.fileModTime) {
-        await this.reloadCredentialsFromFile();
+        await this.reloadCredentialsFromFile(qwenClient);
+        // Update fileModTime only after successful reload
         this.memoryCache.fileModTime = fileModTime;
       }
     } catch (error) {
@@ -273,9 +354,8 @@ export class SharedTokenManager {
         'code' in error &&
         error.code !== 'ENOENT'
       ) {
-        // Clear cache for non-missing file errors
-        this.memoryCache.credentials = null;
-        this.memoryCache.fileModTime = 0;
+        // Clear cache atomically for non-missing file errors
+        this.updateCacheState(null, 0, checkTime);
 
         throw new TokenManagerError(
           TokenError.FILE_ACCESS_ERROR,
@@ -291,15 +371,71 @@ export class SharedTokenManager {
   }
 
   /**
-   * Load credentials from the file system into memory cache
+   * Force a file check without time-based throttling (used during refresh operations)
    */
-  private async reloadCredentialsFromFile(): Promise<void> {
+  private async forceFileCheck(qwenClient?: IQwenOAuth2Client): Promise<void> {
+    try {
+      const filePath = this.getCredentialFilePath();
+      const stats = await fs.stat(filePath);
+      const fileModTime = stats.mtimeMs;
+
+      // Reload credentials if file has been modified since last cache
+      if (fileModTime > this.memoryCache.fileModTime) {
+        await this.reloadCredentialsFromFile(qwenClient);
+        // Update cache state atomically
+        this.memoryCache.fileModTime = fileModTime;
+        this.memoryCache.lastCheck = Date.now();
+      }
+    } catch (error) {
+      // Handle file access errors
+      if (
+        error instanceof Error &&
+        'code' in error &&
+        error.code !== 'ENOENT'
+      ) {
+        // Clear cache atomically for non-missing file errors
+        this.updateCacheState(null, 0);
+
+        throw new TokenManagerError(
+          TokenError.FILE_ACCESS_ERROR,
+          `Failed to access credentials file during refresh: ${error.message}`,
+          error,
+        );
+      }
+
+      // For missing files (ENOENT), just reset file modification time
+      this.memoryCache.fileModTime = 0;
+    }
+  }
+
+  /**
+   * Load credentials from the file system into memory cache and sync with qwenClient
+   */
+  private async reloadCredentialsFromFile(
+    qwenClient?: IQwenOAuth2Client,
+  ): Promise<void> {
     try {
       const filePath = this.getCredentialFilePath();
       const content = await fs.readFile(filePath, 'utf-8');
       const parsedData = JSON.parse(content);
       const credentials = validateCredentials(parsedData);
+
+      // Store previous state for rollback
+      const previousCredentials = this.memoryCache.credentials;
+
+      // Update memory cache first
       this.memoryCache.credentials = credentials;
+
+      // Sync with qwenClient atomically - rollback on failure
+      try {
+        if (qwenClient) {
+          qwenClient.setCredentials(credentials);
+        }
+      } catch (clientError) {
+        // Rollback memory cache on client sync failure
+        this.memoryCache.credentials = previousCredentials;
+        throw clientError;
+      }
     } catch (error) {
       // Log validation errors for debugging but don't throw
       if (
@@ -308,6 +444,7 @@ export class SharedTokenManager {
       ) {
         console.warn(`Failed to validate credentials file: ${error.message}`);
       }
+      // Clear credentials but preserve other cache state
       this.memoryCache.credentials = null;
     }
   }
@@ -324,12 +461,14 @@ export class SharedTokenManager {
     qwenClient: IQwenOAuth2Client,
     forceRefresh = false,
   ): Promise<QwenCredentials> {
+    const startTime = Date.now();
     const lockPath = this.getLockFilePath();
 
     try {
       // Check if we have a refresh token before attempting refresh
       const currentCredentials = qwenClient.getCredentials();
       if (!currentCredentials.refresh_token) {
+        // console.debug('create a NO_REFRESH_TOKEN error');
         throw new TokenManagerError(
           TokenError.NO_REFRESH_TOKEN,
           'No refresh token available for token refresh',
@@ -339,8 +478,18 @@ export class SharedTokenManager {
       // Acquire distributed file lock
       await this.acquireLock(lockPath);
 
+      // Check if the operation is taking too long
+      const lockAcquisitionTime = Date.now() - startTime;
+      if (lockAcquisitionTime > 5000) {
+        // 5 seconds warning threshold
+        console.warn(
+          `Token refresh lock acquisition took ${lockAcquisitionTime}ms`,
+        );
+      }
+
       // Double-check if another process already refreshed the token (unless force refresh is requested)
-      await this.checkAndReloadIfNeeded();
+      // Skip the time-based throttling since we're already in a locked refresh operation
+      await this.forceFileCheck(qwenClient);
 
       // Use refreshed credentials if they're now valid (unless force refresh is requested)
       if (
@@ -348,12 +497,19 @@ export class SharedTokenManager {
         this.memoryCache.credentials &&
         this.isTokenValid(this.memoryCache.credentials)
       ) {
-        qwenClient.setCredentials(this.memoryCache.credentials);
+        // No need to call qwenClient.setCredentials here as checkAndReloadIfNeeded already did it
         return this.memoryCache.credentials;
       }
 
       // Perform the actual token refresh
       const response = await qwenClient.refreshAccessToken();
+
+      // Check if the token refresh is taking too long
+      const totalOperationTime = Date.now() - startTime;
+      if (totalOperationTime > 10000) {
+        // 10 seconds warning threshold
+        console.warn(`Token refresh operation took ${totalOperationTime}ms`);
+      }
 
       if (!response || isErrorResponse(response)) {
         const errorData = response as ErrorData;
@@ -382,7 +538,7 @@ export class SharedTokenManager {
         expiry_date: Date.now() + tokenData.expires_in * 1000,
       };
 
-      // Update memory cache and client credentials
+      // Update memory cache and client credentials atomically
       this.memoryCache.credentials = credentials;
       qwenClient.setCredentials(credentials);
 
@@ -391,6 +547,24 @@ export class SharedTokenManager {
 
       return credentials;
     } catch (error) {
+      // Handle credentials clear required error (400 status from refresh)
+      if (error instanceof CredentialsClearRequiredError) {
+        console.debug(
+          'SharedTokenManager: Clearing memory cache due to credentials clear requirement',
+        );
+        // Clear memory cache when credentials need to be cleared
+        this.memoryCache.credentials = null;
+        this.memoryCache.fileModTime = 0;
+        // Reset any ongoing refresh promise as the credentials are no longer valid
+        this.refreshPromise = null;
+
+        throw new TokenManagerError(
+          TokenError.REFRESH_FAILED,
+          error.message,
+          error,
+        );
+      }
+
       if (error instanceof TokenManagerError) {
         throw error;
       }
@@ -430,10 +604,15 @@ export class SharedTokenManager {
   ): Promise<void> {
     const filePath = this.getCredentialFilePath();
     const dirPath = path.dirname(filePath);
+    const tempPath = `${filePath}.tmp.${randomUUID()}`;
 
     // Create directory with restricted permissions
     try {
-      await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+      await this.withTimeout(
+        fs.mkdir(dirPath, { recursive: true, mode: 0o700 }),
+        5000,
+        'File operation',
+      );
     } catch (error) {
       throw new TokenManagerError(
         TokenError.FILE_ACCESS_ERROR,
@@ -445,24 +624,39 @@ export class SharedTokenManager {
     const credString = JSON.stringify(credentials, null, 2);
 
     try {
-      // Write file with restricted permissions (owner read/write only)
-      await fs.writeFile(filePath, credString, { mode: 0o600 });
+      // Write to temporary file first with restricted permissions
+      await this.withTimeout(
+        fs.writeFile(tempPath, credString, { mode: 0o600 }),
+        5000,
+        'File operation',
+      );
+
+      // Atomic move to final location
+      await this.withTimeout(
+        fs.rename(tempPath, filePath),
+        5000,
+        'File operation',
+      );
+
+      // Update cached file modification time atomically after successful write
+      const stats = await this.withTimeout(
+        fs.stat(filePath),
+        5000,
+        'File operation',
+      );
+      this.memoryCache.fileModTime = stats.mtimeMs;
     } catch (error) {
+      // Clean up temp file if it exists
+      try {
+        await this.withTimeout(fs.unlink(tempPath), 1000, 'File operation');
+      } catch (_cleanupError) {
+        // Ignore cleanup errors - temp file might not exist
+      }
+
       throw new TokenManagerError(
         TokenError.FILE_ACCESS_ERROR,
         `Failed to write credentials file: ${error instanceof Error ? error.message : String(error)}`,
         error,
-      );
-    }
-
-    // Update cached file modification time to avoid unnecessary reloads
-    try {
-      const stats = await fs.stat(filePath);
-      this.memoryCache.fileModTime = stats.mtimeMs;
-    } catch (error) {
-      // Non-fatal error, just log it
-      console.warn(
-        `Failed to update file modification time: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -505,8 +699,10 @@ export class SharedTokenManager {
    * @throws TokenManagerError if lock cannot be acquired within timeout period
    */
   private async acquireLock(lockPath: string): Promise<void> {
-    const { maxAttempts, attemptInterval } = this.lockConfig;
+    const { maxAttempts, attemptInterval, maxInterval } = this.lockConfig;
     const lockId = randomUUID(); // Use random UUID instead of PID for security
+
+    let currentInterval = attemptInterval;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
@@ -522,18 +718,23 @@ export class SharedTokenManager {
 
             // Remove stale locks that exceed timeout
             if (lockAge > LOCK_TIMEOUT_MS) {
+              // Use atomic rename operation to avoid race condition
+              const tempPath = `${lockPath}.stale.${randomUUID()}`;
               try {
-                await fs.unlink(lockPath);
+                // Atomic move to temporary location
+                await fs.rename(lockPath, tempPath);
+                // Clean up the temporary file
+                await fs.unlink(tempPath);
                 console.warn(
                   `Removed stale lock file: ${lockPath} (age: ${lockAge}ms)`,
                 );
-                continue; // Retry lock acquisition
-              } catch (unlinkError) {
-                // Log the error but continue trying - another process might have removed it
+                continue; // Retry lock acquisition immediately
+              } catch (renameError) {
+                // Lock might have been removed by another process, continue trying
                 console.warn(
-                  `Failed to remove stale lock file ${lockPath}: ${unlinkError instanceof Error ? unlinkError.message : String(unlinkError)}`,
+                  `Failed to remove stale lock file ${lockPath}: ${renameError instanceof Error ? renameError.message : String(renameError)}`,
                 );
-                // Still continue - the lock might have been removed by another process
+                // Continue - the lock might have been removed by another process
               }
             }
           } catch (statError) {
@@ -543,8 +744,10 @@ export class SharedTokenManager {
             );
           }
 
-          // Wait before retrying
-          await new Promise((resolve) => setTimeout(resolve, attemptInterval));
+          // Wait before retrying with exponential backoff
+          await new Promise((resolve) => setTimeout(resolve, currentInterval));
+          // Increase interval for next attempt (exponential backoff), but cap at maxInterval
+          currentInterval = Math.min(currentInterval * 1.5, maxInterval);
         } else {
           throw new TokenManagerError(
             TokenError.FILE_ACCESS_ERROR,
@@ -581,15 +784,30 @@ export class SharedTokenManager {
   }
 
   /**
+   * Atomically update cache state to prevent inconsistent intermediate states
+   * @param credentials - New credentials to cache
+   * @param fileModTime - File modification time
+   * @param lastCheck - Last check timestamp (optional, defaults to current time)
+   */
+  private updateCacheState(
+    credentials: QwenCredentials | null,
+    fileModTime: number,
+    lastCheck?: number,
+  ): void {
+    this.memoryCache = {
+      credentials,
+      fileModTime,
+      lastCheck: lastCheck ?? Date.now(),
+    };
+  }
+
+  /**
    * Clear all cached data and reset the manager to initial state
    */
   clearCache(): void {
-    this.memoryCache = {
-      credentials: null,
-      fileModTime: 0,
-      lastCheck: 0,
-    };
+    this.updateCacheState(null, 0, 0);
     this.refreshPromise = null;
+    this.checkPromise = null;
   }
 
   /**

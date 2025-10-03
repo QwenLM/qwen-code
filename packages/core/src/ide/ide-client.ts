@@ -5,18 +5,23 @@
  */
 
 import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { detectIde, DetectedIde, getIdeInfo } from '../ide/detect-ide.js';
+import { isSubpath } from '../utils/paths.js';
+import { detectIde, type DetectedIde, getIdeInfo } from '../ide/detect-ide.js';
+import type { DiffUpdateResult } from '../ide/ideContext.js';
 import {
   ideContext,
   IdeContextNotificationSchema,
   IdeDiffAcceptedNotificationSchema,
   IdeDiffClosedNotificationSchema,
   CloseDiffResponseSchema,
-  DiffUpdateResult,
 } from '../ide/ideContext.js';
+import { getIdeProcessInfo } from './process-utils.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { EnvHttpProxyAgent } from 'undici';
 
 const logger = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -35,6 +40,16 @@ export enum IDEConnectionStatus {
   Disconnected = 'disconnected',
   Connecting = 'connecting',
 }
+
+type StdioConfig = {
+  command: string;
+  args: string[];
+};
+
+type ConnectionConfig = {
+  port?: string;
+  stdio?: StdioConfig;
+};
 
 function getRealPath(path: string): string {
   try {
@@ -57,33 +72,42 @@ export class IdeClient {
     details:
       'IDE integration is currently disabled. To enable it, run /ide enable.',
   };
-  private readonly currentIde: DetectedIde | undefined;
-  private readonly currentIdeDisplayName: string | undefined;
+  private currentIde: DetectedIde | undefined;
+  private currentIdeDisplayName: string | undefined;
+  private ideProcessInfo: { pid: number; command: string } | undefined;
   private diffResponses = new Map<string, (result: DiffUpdateResult) => void>();
+  private statusListeners = new Set<(state: IDEConnectionState) => void>();
 
-  private constructor() {
-    this.currentIde = detectIde();
-    if (this.currentIde) {
-      this.currentIdeDisplayName = getIdeInfo(this.currentIde).displayName;
-    }
-  }
+  private constructor() {}
 
-  static getInstance(): IdeClient {
+  static async getInstance(): Promise<IdeClient> {
     if (!IdeClient.instance) {
-      IdeClient.instance = new IdeClient();
+      const client = new IdeClient();
+      client.ideProcessInfo = await getIdeProcessInfo();
+      client.currentIde = detectIde(client.ideProcessInfo);
+      if (client.currentIde) {
+        client.currentIdeDisplayName = getIdeInfo(
+          client.currentIde,
+        ).displayName;
+      }
+      IdeClient.instance = client;
     }
     return IdeClient.instance;
+  }
+
+  addStatusChangeListener(listener: (state: IDEConnectionState) => void) {
+    this.statusListeners.add(listener);
+  }
+
+  removeStatusChangeListener(listener: (state: IDEConnectionState) => void) {
+    this.statusListeners.delete(listener);
   }
 
   async connect(): Promise<void> {
     if (!this.currentIde || !this.currentIdeDisplayName) {
       this.setState(
         IDEConnectionStatus.Disconnected,
-        `IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: ${Object.values(
-          DetectedIde,
-        )
-          .map((ide) => getIdeInfo(ide).displayName)
-          .join(', ')}`,
+        `IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks`,
         false,
       );
       return;
@@ -91,16 +115,62 @@ export class IdeClient {
 
     this.setState(IDEConnectionStatus.Connecting);
 
-    if (!this.validateWorkspacePath()) {
+    const configFromFile = await this.getConnectionConfigFromFile();
+    const workspacePath =
+      configFromFile?.workspacePath ??
+      process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+
+    const { isValid, error } = IdeClient.validateWorkspacePath(
+      workspacePath,
+      this.currentIdeDisplayName,
+      process.cwd(),
+    );
+
+    if (!isValid) {
+      this.setState(IDEConnectionStatus.Disconnected, error, true);
       return;
     }
 
-    const port = this.getPortFromEnv();
-    if (!port) {
-      return;
+    if (configFromFile) {
+      if (configFromFile.port) {
+        const connected = await this.establishHttpConnection(
+          configFromFile.port,
+        );
+        if (connected) {
+          return;
+        }
+      }
+      if (configFromFile.stdio) {
+        const connected = await this.establishStdioConnection(
+          configFromFile.stdio,
+        );
+        if (connected) {
+          return;
+        }
+      }
     }
 
-    await this.establishConnection(port);
+    const portFromEnv = this.getPortFromEnv();
+    if (portFromEnv) {
+      const connected = await this.establishHttpConnection(portFromEnv);
+      if (connected) {
+        return;
+      }
+    }
+
+    const stdioConfigFromEnv = this.getStdioConfigFromEnv();
+    if (stdioConfigFromEnv) {
+      const connected = await this.establishStdioConnection(stdioConfigFromEnv);
+      if (connected) {
+        return;
+      }
+    }
+
+    this.setState(
+      IDEConnectionStatus.Disconnected,
+      `Failed to connect to IDE companion extension in ${this.currentIdeDisplayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
+      true,
+    );
   }
 
   /**
@@ -212,6 +282,9 @@ export class IdeClient {
     // disconnected, so that the first detail message is preserved.
     if (!isAlreadyDisconnected) {
       this.state = { status, details };
+      for (const listener of this.statusListeners) {
+        listener(this.state);
+      }
       if (details) {
         if (logToConsole) {
           logger.error(details);
@@ -228,50 +301,122 @@ export class IdeClient {
     }
   }
 
-  private validateWorkspacePath(): boolean {
-    const ideWorkspacePath = process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+  static validateWorkspacePath(
+    ideWorkspacePath: string | undefined,
+    currentIdeDisplayName: string | undefined,
+    cwd: string,
+  ): { isValid: boolean; error?: string } {
     if (ideWorkspacePath === undefined) {
-      this.setState(
-        IDEConnectionStatus.Disconnected,
-        `Failed to connect to IDE companion extension for ${this.currentIdeDisplayName}. Please ensure the extension is running and try refreshing your terminal. To install the extension, run /ide install.`,
-        true,
-      );
-      return false;
-    }
-    if (ideWorkspacePath === '') {
-      this.setState(
-        IDEConnectionStatus.Disconnected,
-        `To use this feature, please open a single workspace folder in ${this.currentIdeDisplayName} and try again.`,
-        true,
-      );
-      return false;
+      return {
+        isValid: false,
+        error: `Failed to connect to IDE companion extension in ${currentIdeDisplayName}. Please ensure the extension is running. To install the extension, run /ide install.`,
+      };
     }
 
-    const idePath = getRealPath(ideWorkspacePath).toLocaleLowerCase();
-    const cwd = getRealPath(process.cwd()).toLocaleLowerCase();
-    const rel = path.relative(idePath, cwd);
-    if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      this.setState(
-        IDEConnectionStatus.Disconnected,
-        `Directory mismatch. Qwen Code is running in a different location than the open workspace in ${this.currentIdeDisplayName}. Please run the CLI from the same directory as your project's root folder.`,
-        true,
-      );
-      return false;
+    if (ideWorkspacePath === '') {
+      return {
+        isValid: false,
+        error: `To use this feature, please open a workspace folder in ${currentIdeDisplayName} and try again.`,
+      };
     }
-    return true;
+
+    const ideWorkspacePaths = ideWorkspacePath.split(path.delimiter);
+    const realCwd = getRealPath(cwd);
+    const isWithinWorkspace = ideWorkspacePaths.some((workspacePath) => {
+      const idePath = getRealPath(workspacePath);
+      return isSubpath(idePath, realCwd);
+    });
+
+    if (!isWithinWorkspace) {
+      return {
+        isValid: false,
+        error: `Directory mismatch. Qwen Code is running in a different location than the open workspace in ${currentIdeDisplayName}. Please run the CLI from one of the following directories: ${ideWorkspacePaths.join(
+          ', ',
+        )}`,
+      };
+    }
+    return { isValid: true };
   }
 
   private getPortFromEnv(): string | undefined {
     const port = process.env['QWEN_CODE_IDE_SERVER_PORT'];
     if (!port) {
-      this.setState(
-        IDEConnectionStatus.Disconnected,
-        `Failed to connect to IDE companion extension for ${this.currentIdeDisplayName}. Please ensure the extension is running and try restarting your terminal. To install the extension, run /ide install.`,
-        true,
-      );
       return undefined;
     }
     return port;
+  }
+
+  private getStdioConfigFromEnv(): StdioConfig | undefined {
+    const command = process.env['QWEN_CODE_IDE_SERVER_STDIO_COMMAND'];
+    if (!command) {
+      return undefined;
+    }
+
+    const argsStr = process.env['QWEN_CODE_IDE_SERVER_STDIO_ARGS'];
+    let args: string[] = [];
+    if (argsStr) {
+      try {
+        const parsedArgs = JSON.parse(argsStr);
+        if (Array.isArray(parsedArgs)) {
+          args = parsedArgs;
+        } else {
+          logger.error(
+            'QWEN_CODE_IDE_SERVER_STDIO_ARGS must be a JSON array string.',
+          );
+        }
+      } catch (e) {
+        logger.error('Failed to parse QWEN_CODE_IDE_SERVER_STDIO_ARGS:', e);
+      }
+    }
+
+    return { command, args };
+  }
+
+  private async getConnectionConfigFromFile(): Promise<
+    (ConnectionConfig & { workspacePath?: string }) | undefined
+  > {
+    if (!this.ideProcessInfo) {
+      return {};
+    }
+    try {
+      const portFile = path.join(
+        os.tmpdir(),
+        `qwen-code-ide-server-${this.ideProcessInfo.pid}.json`,
+      );
+      const portFileContents = await fs.promises.readFile(portFile, 'utf8');
+      return JSON.parse(portFileContents);
+    } catch (_) {
+      return undefined;
+    }
+  }
+
+  private createProxyAwareFetch() {
+    // ignore proxy for 'localhost' by deafult to allow connecting to the ide mcp server
+    const existingNoProxy = process.env['NO_PROXY'] || '';
+    const agent = new EnvHttpProxyAgent({
+      noProxy: [existingNoProxy, 'localhost'].filter(Boolean).join(','),
+    });
+    const undiciPromise = import('undici');
+    return async (url: string | URL, init?: RequestInit): Promise<Response> => {
+      const { fetch: fetchFn } = await undiciPromise;
+      const fetchOptions: RequestInit & { dispatcher?: unknown } = {
+        ...init,
+        dispatcher: agent,
+      };
+      const options = fetchOptions as unknown as import('undici').RequestInit;
+      const response = await fetchFn(url, options);
+      // Convert undici Headers to standard Headers for compatibility
+      const standardHeaders = new Headers();
+      for (const [key, value] of response.headers.entries()) {
+        standardHeaders.set(key, value);
+      }
+
+      return new Response(response.body as ReadableStream<unknown> | null, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: standardHeaders,
+      });
+    };
   }
 
   private registerClientHandlers() {
@@ -328,9 +473,10 @@ export class IdeClient {
     );
   }
 
-  private async establishConnection(port: string) {
+  private async establishHttpConnection(port: string): Promise<boolean> {
     let transport: StreamableHTTPClientTransport | undefined;
     try {
+      logger.debug('Attempting to connect to IDE via HTTP SSE');
       this.client = new Client({
         name: 'streamable-http-client',
         // TODO(#3487): use the CLI version here.
@@ -339,6 +485,9 @@ export class IdeClient {
 
       transport = new StreamableHTTPClientTransport(
         new URL(`http://${getIdeServerHost()}:${port}/mcp`),
+        {
+          fetch: this.createProxyAwareFetch(),
+        },
       );
 
       this.registerClientHandlers();
@@ -346,12 +495,8 @@ export class IdeClient {
       await this.client.connect(transport);
       this.registerClientHandlers();
       this.setState(IDEConnectionStatus.Connected);
+      return true;
     } catch (_error) {
-      this.setState(
-        IDEConnectionStatus.Disconnected,
-        `Failed to connect to IDE companion extension for ${this.currentIdeDisplayName}. Please ensure the extension is running and try restarting your terminal. To install the extension, run /ide install.`,
-        true,
-      );
       if (transport) {
         try {
           await transport.close();
@@ -359,41 +504,41 @@ export class IdeClient {
           logger.debug('Failed to close transport:', closeError);
         }
       }
+      return false;
     }
   }
 
-  async init(): Promise<void> {
-    if (this.state.status === IDEConnectionStatus.Connected) {
-      return;
+  private async establishStdioConnection({
+    command,
+    args,
+  }: StdioConfig): Promise<boolean> {
+    let transport: StdioClientTransport | undefined;
+    try {
+      logger.debug('Attempting to connect to IDE via stdio');
+      this.client = new Client({
+        name: 'stdio-client',
+        // TODO(#3487): use the CLI version here.
+        version: '1.0.0',
+      });
+
+      transport = new StdioClientTransport({
+        command,
+        args,
+      });
+      await this.client.connect(transport);
+      this.registerClientHandlers();
+      this.setState(IDEConnectionStatus.Connected);
+      return true;
+    } catch (_error) {
+      if (transport) {
+        try {
+          await transport.close();
+        } catch (closeError) {
+          logger.debug('Failed to close transport:', closeError);
+        }
+      }
+      return false;
     }
-    if (!this.currentIde) {
-      this.setState(
-        IDEConnectionStatus.Disconnected,
-        'Not running in a supported IDE, skipping connection.',
-      );
-      return;
-    }
-
-    this.setState(IDEConnectionStatus.Connecting);
-
-    if (!this.validateWorkspacePath()) {
-      return;
-    }
-
-    const port = this.getPortFromEnv();
-    if (!port) {
-      return;
-    }
-
-    await this.establishConnection(port);
-  }
-
-  dispose() {
-    this.client?.close();
-  }
-
-  setDisconnected() {
-    this.setState(IDEConnectionStatus.Disconnected);
   }
 }
 
