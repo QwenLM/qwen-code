@@ -129,7 +129,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
         .join('\n');
     }
 
-    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. 
+    const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. This is especially important for breaking down large tasks that might fill your context window, allowing you to manage complex work more effectively. 
 
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
@@ -148,7 +148,7 @@ Usage notes:
 3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
 4. The agent's outputs should generally be trusted
 5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+6. You should PROACTIVELY use this tool for large, complex tasks to break them down into manageable chunks and prevent context overflow. If a task seems like it might involve multiple complex steps or large amounts of data processing, consider delegating to a specialized agent first. Use your judgement.
 
 Example usage:
 <example_agent_descriptions>
