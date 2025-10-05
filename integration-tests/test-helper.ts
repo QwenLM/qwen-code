@@ -289,7 +289,7 @@ export class TestRig {
               }
             }
 
-            result = filteredLines.join('\n');
+            result = filteredLines.join(EOL);
           }
           // If we have stderr output, include that also
           if (stderr) {
@@ -530,9 +530,9 @@ export class TestRig {
         if (!inObject && line.trim() === '{') {
           inObject = true;
           braceDepth = 1;
-          currentObject = line + '\n';
+          currentObject = line + EOL;
         } else if (inObject) {
-          currentObject += line + '\n';
+          currentObject += line + EOL;
 
           // Count braces
           for (const char of line) {
