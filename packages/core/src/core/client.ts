@@ -115,10 +115,7 @@ export class GeminiClient {
   private chat?: GeminiChat;
   private contentGenerator?: ContentGenerator;
   private readonly embeddingModel: string;
-  private readonly generateContentConfig: GenerateContentConfig = {
-    temperature: 0,
-    topP: 1,
-  };
+  private readonly generateContentConfig: GenerateContentConfig = {};
   private sessionTurnCount = 0;
 
   private readonly loopDetector: LoopDetectionService;

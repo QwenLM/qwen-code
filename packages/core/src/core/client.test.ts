@@ -434,8 +434,6 @@ describe('Gemini Client (client.ts)', () => {
           config: {
             abortSignal,
             systemInstruction: getCoreSystemPrompt(''),
-            temperature: 0,
-            topP: 1,
             tools: [
               {
                 functionDeclarations: [
@@ -486,7 +484,6 @@ describe('Gemini Client (client.ts)', () => {
             abortSignal,
             systemInstruction: getCoreSystemPrompt(''),
             temperature: 0.9,
-            topP: 1, // from default
             topK: 20,
             tools: [
               {
@@ -2461,7 +2458,6 @@ ${JSON.stringify(
             abortSignal,
             systemInstruction: getCoreSystemPrompt(''),
             temperature: 0.5,
-            topP: 1,
           },
           contents,
         },

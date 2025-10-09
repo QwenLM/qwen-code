@@ -302,9 +302,9 @@ export class ContentGenerationPipeline {
     };
 
     const params = {
-      // Parameters with request fallback and defaults
-      temperature: getParameterValue('temperature', 'temperature', 0.0),
-      top_p: getParameterValue('top_p', 'topP', 1.0),
+      // Parameters with request fallback but no defaults
+      ...addParameterIfDefined('temperature', 'temperature', 'temperature'),
+      ...addParameterIfDefined('top_p', 'top_p', 'topP'),
 
       // Max tokens (special case: different property names)
       ...addParameterIfDefined('max_tokens', 'max_tokens', 'maxOutputTokens'),
