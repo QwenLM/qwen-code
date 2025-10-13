@@ -14,6 +14,7 @@ import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
+  BedrockOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -26,6 +27,7 @@ export {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
+  BedrockOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -54,6 +56,14 @@ export function determineProvider(
 ): OpenAICompatibleProvider {
   const config =
     contentGeneratorConfig || cliConfig.getContentGeneratorConfig();
+
+  // Check for Bedrock provider
+  if (BedrockOpenAICompatibleProvider.isBedrockProvider(config)) {
+    return new BedrockOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
 
   // Check for DashScope provider
   if (DashScopeOpenAICompatibleProvider.isDashScopeProvider(config)) {
