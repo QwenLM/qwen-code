@@ -48,12 +48,9 @@ export function AuthDialog({
   );
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
   const items = [
-    {
-      key: AuthType.QWEN_OAUTH,
-      label: 'Qwen OAuth',
-      value: AuthType.QWEN_OAUTH,
-    },
-    { key: AuthType.USE_OPENAI, label: 'OpenAI', value: AuthType.USE_OPENAI },
+    { label: 'Qwen OAuth', value: AuthType.QWEN_OAUTH },
+    { label: 'OpenAI', value: AuthType.USE_OPENAI },
+    { label: 'Amazon Bedrock', value: AuthType.USE_BEDROCK },
   ];
 
   const initialAuthIndex = Math.max(

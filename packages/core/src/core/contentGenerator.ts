@@ -49,6 +49,7 @@ export enum AuthType {
   CLOUD_SHELL = 'cloud-shell',
   USE_OPENAI = 'openai',
   QWEN_OAUTH = 'qwen-oauth',
+  USE_BEDROCK = 'bedrock',
 }
 
 export type ContentGeneratorConfig = {
@@ -124,6 +125,18 @@ export function createContentGeneratorConfig(
     // Set a special marker to indicate this is Qwen OAuth
     newContentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
     newContentGeneratorConfig.model = DEFAULT_QWEN_MODEL;
+
+    return newContentGeneratorConfig;
+  }
+
+  if (authType === AuthType.USE_BEDROCK) {
+    // For Bedrock, we use AWS credentials (no API key needed)
+    // Model priority: 1) config.getModel() 2) BEDROCK_MODEL env 3) QWEN_MODEL env 4) default
+    newContentGeneratorConfig.model =
+      config.getModel() ||
+      process.env['BEDROCK_MODEL'] ||
+      process.env['QWEN_MODEL'] ||
+      'qwen-coder'; // Will be mapped to qwen.qwen3-coder-30b-a3b-v1:0
 
     return newContentGeneratorConfig;
   }
@@ -215,6 +228,17 @@ export async function createContentGenerator(
         `Failed to initialize Qwen: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  if (config.authType === AuthType.USE_BEDROCK) {
+    // Import OpenAIContentGenerator dynamically
+    const { createOpenAIContentGenerator } = await import(
+      './openaiContentGenerator/index.js'
+    );
+
+    // Use OpenAI content generator with Bedrock provider
+    // The Bedrock provider will be selected automatically by determineProvider()
+    return createOpenAIContentGenerator(config, gcConfig);
   }
 
   throw new Error(
