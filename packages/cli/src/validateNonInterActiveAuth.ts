@@ -20,7 +20,13 @@ function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env['QWEN_OAUTH']) {
     return AuthType.QWEN_OAUTH;
   }
-
+  // Check for AWS credentials (Bedrock)
+  if (
+    process.env['AWS_PROFILE'] ||
+    (process.env['AWS_ACCESS_KEY_ID'] && process.env['AWS_SECRET_ACCESS_KEY'])
+  ) {
+    return AuthType.USE_BEDROCK;
+  }
   return undefined;
 }
 
@@ -44,7 +50,7 @@ export async function validateNonInteractiveAuth(
       enforcedType || getAuthTypeFromEnv() || configuredAuthType;
 
     if (!effectiveAuthType) {
-      const message = `Please set an Auth method in your ${USER_SETTINGS_PATH} or specify one of the following environment variables before running: QWEN_OAUTH, OPENAI_API_KEY`;
+      const message = `Please set an Auth method in your ${USER_SETTINGS_PATH} or specify one of the following environment variables before running: QWEN_OAUTH, OPENAI_API_KEY, GEMINI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA, AWS_PROFILE (for Bedrock)`;
       throw new Error(message);
     }
 
