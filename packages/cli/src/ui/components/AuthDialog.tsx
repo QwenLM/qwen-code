@@ -50,6 +50,7 @@ export function AuthDialog({
   const items = [
     { label: 'Qwen OAuth', value: AuthType.QWEN_OAUTH },
     { label: 'OpenAI', value: AuthType.USE_OPENAI },
+    { label: 'Amazon Bedrock', value: AuthType.USE_BEDROCK },
   ];
 
   const initialAuthIndex = Math.max(

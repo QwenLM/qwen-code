@@ -20,6 +20,8 @@
     "dist"
   ],
   "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.709.0",
+    "@aws-sdk/credential-providers": "^3.709.0",
     "@google/genai": "1.13.0",
     "@lvce-editor/ripgrep": "^1.6.0",
     "@modelcontextprotocol/sdk": "^1.11.0",

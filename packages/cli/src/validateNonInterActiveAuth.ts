@@ -21,6 +21,13 @@ function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env['OPENAI_API_KEY']) {
     return AuthType.USE_OPENAI;
   }
+  // Check for AWS credentials (Bedrock)
+  if (
+    process.env['AWS_PROFILE'] ||
+    (process.env['AWS_ACCESS_KEY_ID'] && process.env['AWS_SECRET_ACCESS_KEY'])
+  ) {
+    return AuthType.USE_BEDROCK;
+  }
   return undefined;
 }
 
@@ -33,7 +40,7 @@ export async function validateNonInteractiveAuth(
 
   if (!effectiveAuthType) {
     console.error(
-      `Please set an Auth method in your ${USER_SETTINGS_PATH} or specify one of the following environment variables before running: GEMINI_API_KEY, OPENAI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA`,
+      `Please set an Auth method in your ${USER_SETTINGS_PATH} or specify one of the following environment variables before running: GEMINI_API_KEY, OPENAI_API_KEY, GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_GCA, AWS_PROFILE (for Bedrock)`,
     );
     process.exit(1);
   }
