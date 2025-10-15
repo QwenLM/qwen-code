@@ -160,9 +160,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
-  [/^deepseek$/, LIMITS['128k']],
-  [/^deepseek-r1(?:-.*)?$/, LIMITS['128k']],
-  [/^deepseek-v3(?:\.\d+)?(?:-.*)?$/, LIMITS['128k']],
+  [/^deepseek(?:-.*)?$/, LIMITS['128k']],
 
   // -------------------
   // GPT-OSS / Kimi / Llama & Mistral examples
