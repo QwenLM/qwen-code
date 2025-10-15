@@ -139,11 +139,13 @@ export class GeminiClient {
 
   /**
    * Sets up proxy configuration with NO_PROXY support for LLM requests.
-   * Uses EnvHttpProxyAgent which automatically reads from standard proxy environment
-   * variables (HTTP_PROXY, HTTPS_PROXY, etc.) and respects NO_PROXY, unlike the basic ProxyAgent.
+   * Supports both --proxy parameter and standard proxy environment variables.
+   * Uses EnvHttpProxyAgent which respects NO_PROXY, unlike the basic ProxyAgent.
    */
   private setupProxyConfiguration(): void {
-    // Check if any proxy environment variables are set
+    const configProxy = this.config.getProxy(); // This includes --proxy parameter handling
+    
+    // Check if any proxy environment variables are already set
     const hasProxyEnvVars = !!(
       process.env['HTTP_PROXY'] ||
       process.env['http_proxy'] ||
@@ -151,9 +153,17 @@ export class GeminiClient {
       process.env['https_proxy']
     );
 
-    if (!hasProxyEnvVars) {
-      // No proxy environment variables set, nothing to do
+    // If no proxy is configured via --proxy or environment variables, nothing to do
+    if (!configProxy && !hasProxyEnvVars) {
       return;
+    }
+
+    // If --proxy was specified but no environment variables are set,
+    // temporarily set environment variables for EnvHttpProxyAgent to use
+    if (configProxy && !hasProxyEnvVars) {
+      // Set both HTTP and HTTPS proxy environment variables
+      process.env['HTTPS_PROXY'] = configProxy;
+      process.env['HTTP_PROXY'] = configProxy;
     }
 
     // Build NO_PROXY list including localhost and any existing NO_PROXY values
