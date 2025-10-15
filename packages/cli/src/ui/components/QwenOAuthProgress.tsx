@@ -12,6 +12,7 @@ import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
 import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 
 interface QwenOAuthProgressProps {
   onTimeout: () => void;
@@ -123,7 +124,15 @@ export function QwenOAuthProgress({
   authStatus,
   authMessage,
 }: QwenOAuthProgressProps): React.JSX.Element {
-  const defaultTimeout = deviceAuth?.expires_in || 300; // Default 5 minutes
+  const settings = useSettings();
+  
+  // Use configured timeout if available, otherwise fall back to deviceAuth.expires_in or 300
+  const configuredTimeout = settings.merged.security?.auth?.oauthTimeout;
+  const defaultTimeout = 
+    (typeof configuredTimeout === 'number' && configuredTimeout > 0
+      ? configuredTimeout
+      : deviceAuth?.expires_in) || 300;
+  
   const [timeRemaining, setTimeRemaining] = useState<number>(defaultTimeout);
   const [dots, setDots] = useState<string>('');
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);

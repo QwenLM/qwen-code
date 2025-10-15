@@ -9,6 +9,8 @@ import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 // Mock qrcode-terminal module
 vi.mock('qrcode-terminal', () => ({
@@ -44,6 +46,16 @@ describe('QwenOAuthProgress', () => {
 
   const mockDeviceAuth = createMockDeviceAuth();
 
+  const createMockSettings = (oauthTimeout?: number): LoadedSettings => ({
+    merged: {
+      security: {
+        auth: {
+          oauthTimeout,
+        },
+      },
+    },
+  } as LoadedSettings);
+
   const renderComponent = (
     props: Partial<{
       deviceAuth: DeviceAuthorizationInfo;
@@ -56,14 +68,46 @@ describe('QwenOAuthProgress', () => {
         | 'rate_limit';
       authMessage: string | null;
     }> = {},
-  ) =>
-    render(
-      <QwenOAuthProgress
-        onTimeout={mockOnTimeout}
-        onCancel={mockOnCancel}
-        {...props}
-      />,
+    oauthTimeout?: number,
+  ) => {
+    const mockSettings = createMockSettings(oauthTimeout);
+    return render(
+      <SettingsContext.Provider value={mockSettings}>
+        <QwenOAuthProgress
+          onTimeout={mockOnTimeout}
+          onCancel={mockOnCancel}
+          {...props}
+        />
+      </SettingsContext.Provider>,
     );
+  };
+
+  // Helper function to wrap any render call with SettingsContext
+  const renderWithSettings = (
+    component: React.ReactElement,
+    oauthTimeout?: number,
+  ) => {
+    const mockSettings = createMockSettings(oauthTimeout);
+    return render(
+      <SettingsContext.Provider value={mockSettings}>
+        {component}
+      </SettingsContext.Provider>,
+    );
+  };
+
+  // Helper function to wrap rerender calls with SettingsContext
+  const rerenderWithSettings = (
+    rerender: (component: React.ReactElement) => void,
+    component: React.ReactElement,
+    oauthTimeout?: number,
+  ) => {
+    const mockSettings = createMockSettings(oauthTimeout);
+    rerender(
+      <SettingsContext.Provider value={mockSettings}>
+        {component}
+      </SettingsContext.Provider>,
+    );
+  };
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -131,7 +175,8 @@ describe('QwenOAuthProgress', () => {
         qrCallback('Mock QR Code Data');
       }
 
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -148,7 +193,7 @@ describe('QwenOAuthProgress', () => {
         expires_in: 125, // 2 minutes and 5 seconds
       };
 
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -166,7 +211,7 @@ describe('QwenOAuthProgress', () => {
         expires_in: 67, // 1 minute and 7 seconds
       };
 
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -186,7 +231,7 @@ describe('QwenOAuthProgress', () => {
         expires_in: 2, // 2 seconds
       };
 
-      const { rerender } = render(
+      const { rerender } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -196,7 +241,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance timer by 1 second
       vi.advanceTimersByTime(1000);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -206,7 +252,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance timer by another second to trigger timeout
       vi.advanceTimersByTime(1000);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -218,7 +265,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should update time remaining display', async () => {
-      const { lastFrame, rerender } = render(
+      const { lastFrame, rerender } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -231,7 +278,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance by 1 second
       vi.advanceTimersByTime(1000);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -244,7 +292,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should use default 300 second timeout when deviceAuth is null', () => {
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithSettings(
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
@@ -258,7 +306,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('Animated dots', () => {
     it('should cycle through animated dots', async () => {
-      const { lastFrame, rerender } = render(
+      const { lastFrame, rerender } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -271,7 +319,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance by 500ms to add first dot
       vi.advanceTimersByTime(500);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -282,7 +331,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance by another 500ms to add second dot
       vi.advanceTimersByTime(500);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -293,7 +343,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance by another 500ms to add third dot
       vi.advanceTimersByTime(500);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -304,7 +355,8 @@ describe('QwenOAuthProgress', () => {
 
       // Advance by another 500ms to reset dots
       vi.advanceTimersByTime(500);
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -324,7 +376,7 @@ describe('QwenOAuthProgress', () => {
         callback!('Mock QR Code Data');
       });
 
-      render(
+      renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -349,7 +401,7 @@ describe('QwenOAuthProgress', () => {
         qrCallback = callback;
       });
 
-      const { lastFrame, rerender } = render(
+      const { lastFrame, rerender } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -362,7 +414,8 @@ describe('QwenOAuthProgress', () => {
         qrCallback('Mock QR Code Data');
       }
 
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -386,7 +439,7 @@ describe('QwenOAuthProgress', () => {
         throw new Error('QR Code generation failed');
       });
 
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -409,7 +462,7 @@ describe('QwenOAuthProgress', () => {
       const qrcode = await import('qrcode-terminal');
       const mockGenerate = vi.mocked(qrcode.default.generate);
 
-      render(
+      renderWithSettings(
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
@@ -419,7 +472,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('User interactions', () => {
     it('should call onCancel when ESC key is pressed', () => {
-      const { stdin } = render(
+      const { stdin } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -434,7 +487,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should call onCancel when ESC is pressed in loading state', () => {
-      const { stdin } = render(
+      const { stdin } = renderWithSettings(
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
@@ -445,7 +498,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should not call onCancel for other key presses', () => {
-      const { stdin } = render(
+      const { stdin } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -469,7 +522,7 @@ describe('QwenOAuthProgress', () => {
         expires_in: 600, // 10 minutes
       };
 
-      const { lastFrame } = render(
+      const { lastFrame } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -481,7 +534,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should reset to loading state when deviceAuth becomes null', () => {
-      const { rerender, lastFrame } = render(
+      const { rerender, lastFrame } = renderWithSettings(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -492,7 +545,8 @@ describe('QwenOAuthProgress', () => {
       // Initially shows waiting for authorization
       expect(lastFrame()).toContain('Waiting for authorization');
 
-      rerender(
+      rerenderWithSettings(
+        rerender,
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
