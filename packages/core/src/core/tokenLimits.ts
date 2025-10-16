@@ -197,6 +197,12 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // Qwen3-VL-Plus: 32K max output tokens
   [/^qwen3-vl-plus$/, LIMITS['32k']],
+
+  // Deepseek-chat: 8k max tokens
+  [/^deepseek-chat$/, LIMITS['8k']],
+  
+  // Deepseek-reasoner: 64k max tokens
+  [/^deepseek-reasoner$/, LIMITS['64k']]
 ];
 
 /**
