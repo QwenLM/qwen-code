@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { renderHook, act } from '@testing-library/react';
-import { useKeypress, Key } from './useKeypress.js';
+import React from 'react';
+import { renderHook, act, waitFor } from '@testing-library/react';
+import type { Key } from './useKeypress.js';
+import { useKeypress } from './useKeypress.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { useStdin } from 'ink';
-import { EventEmitter } from 'events';
-import { PassThrough } from 'stream';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 // Mock the 'ink' module to control stdin
 vi.mock('ink', async (importOriginal) => {
@@ -52,8 +55,8 @@ vi.mock('readline', () => {
 class MockStdin extends EventEmitter {
   isTTY = true;
   setRawMode = vi.fn();
-  on = this.addListener;
-  removeListener = this.removeListener;
+  override on = this.addListener;
+  override removeListener = super.removeListener;
   write = vi.fn();
   resume = vi.fn();
 
@@ -102,16 +105,40 @@ describe('useKeypress', () => {
   const onKeypress = vi.fn();
   let originalNodeVersion: string;
 
+  const wrapper = ({ children }: { children: React.ReactNode }) =>
+    React.createElement(
+      KeypressProvider,
+      {
+        kittyProtocolEnabled: false,
+        pasteWoraround: false,
+      },
+      children,
+    );
+
+  const wrapperWithWindowsWorkaround = ({
+    children,
+  }: {
+    children: React.ReactNode;
+  }) =>
+    React.createElement(
+      KeypressProvider,
+      {
+        kittyProtocolEnabled: false,
+        pasteWoraround: true,
+      },
+      children,
+    );
+
   beforeEach(() => {
     vi.clearAllMocks();
     stdin = new MockStdin();
-    (useStdin as vi.Mock).mockReturnValue({
+    (useStdin as ReturnType<typeof vi.fn>).mockReturnValue({
       stdin,
       setRawMode: mockSetRawMode,
     });
 
     originalNodeVersion = process.versions.node;
-    delete process.env['PASTE_WORKAROUND'];
+    vi.unstubAllEnvs();
   });
 
   afterEach(() => {
@@ -129,21 +156,29 @@ describe('useKeypress', () => {
   };
 
   it('should not listen if isActive is false', () => {
-    renderHook(() => useKeypress(onKeypress, { isActive: false }));
+    renderHook(() => useKeypress(onKeypress, { isActive: false }), {
+      wrapper,
+    });
     act(() => stdin.pressKey({ name: 'a' }));
     expect(onKeypress).not.toHaveBeenCalled();
   });
 
-  it('should listen for keypress when active', () => {
-    renderHook(() => useKeypress(onKeypress, { isActive: true }));
-    const key = { name: 'a', sequence: 'a' };
+  it.each([
+    { key: { name: 'a', sequence: 'a' } },
+    { key: { name: 'left', sequence: '\x1b[D' } },
+    { key: { name: 'right', sequence: '\x1b[C' } },
+    { key: { name: 'up', sequence: '\x1b[A' } },
+    { key: { name: 'down', sequence: '\x1b[B' } },
+  ])('should listen for keypress when active for key $key.name', ({ key }) => {
+    renderHook(() => useKeypress(onKeypress, { isActive: true }), { wrapper });
     act(() => stdin.pressKey(key));
     expect(onKeypress).toHaveBeenCalledWith(expect.objectContaining(key));
   });
 
   it('should set and release raw mode', () => {
-    const { unmount } = renderHook(() =>
-      useKeypress(onKeypress, { isActive: true }),
+    const { unmount } = renderHook(
+      () => useKeypress(onKeypress, { isActive: true }),
+      { wrapper },
     );
     expect(mockSetRawMode).toHaveBeenCalledWith(true);
     unmount();
@@ -151,8 +186,9 @@ describe('useKeypress', () => {
   });
 
   it('should stop listening after being unmounted', () => {
-    const { unmount } = renderHook(() =>
-      useKeypress(onKeypress, { isActive: true }),
+    const { unmount } = renderHook(
+      () => useKeypress(onKeypress, { isActive: true }),
+      { wrapper },
     );
     unmount();
     act(() => stdin.pressKey({ name: 'a' }));
@@ -160,7 +196,7 @@ describe('useKeypress', () => {
   });
 
   it('should correctly identify alt+enter (meta key)', () => {
-    renderHook(() => useKeypress(onKeypress, { isActive: true }));
+    renderHook(() => useKeypress(onKeypress, { isActive: true }), { wrapper });
     const key = { name: 'return', sequence: '\x1B\r' };
     act(() => stdin.pressKey(key));
     expect(onKeypress).toHaveBeenCalledWith(
@@ -173,32 +209,33 @@ describe('useKeypress', () => {
       description: 'Modern Node (>= v20)',
       setup: () => setNodeVersion('20.0.0'),
       isLegacy: false,
+      pasteWoraround: false,
     },
     {
-      description: 'Legacy Node (< v20)',
-      setup: () => setNodeVersion('18.0.0'),
-      isLegacy: true,
-    },
-    {
-      description: 'Workaround Env Var',
+      description: 'PasteWorkaround Environment Variable',
       setup: () => {
         setNodeVersion('20.0.0');
-        process.env['PASTE_WORKAROUND'] = 'true';
       },
-      isLegacy: true,
+      isLegacy: false,
+      pasteWoraround: true,
     },
-  ])('Paste Handling in $description', ({ setup, isLegacy }) => {
+  ])('in $description', ({ setup, isLegacy, pasteWoraround }) => {
     beforeEach(() => {
       setup();
       stdin.setLegacy(isLegacy);
     });
 
-    it('should process a paste as a single event', () => {
-      renderHook(() => useKeypress(onKeypress, { isActive: true }));
+    it('should process a paste as a single event', async () => {
+      renderHook(() => useKeypress(onKeypress, { isActive: true }), {
+        wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+      });
       const pasteText = 'hello world';
       act(() => stdin.paste(pasteText));
 
-      expect(onKeypress).toHaveBeenCalledTimes(1);
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledTimes(1);
+      });
+
       expect(onKeypress).toHaveBeenCalledWith({
         name: '',
         ctrl: false,
@@ -209,44 +246,59 @@ describe('useKeypress', () => {
       });
     });
 
-    it('should handle keypress interspersed with pastes', () => {
-      renderHook(() => useKeypress(onKeypress, { isActive: true }));
+    it('should handle keypress interspersed with pastes', async () => {
+      renderHook(() => useKeypress(onKeypress, { isActive: true }), {
+        wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+      });
 
       const keyA = { name: 'a', sequence: 'a' };
       act(() => stdin.pressKey(keyA));
-      expect(onKeypress).toHaveBeenCalledWith(
-        expect.objectContaining({ ...keyA, paste: false }),
-      );
+
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledWith(
+          expect.objectContaining({ ...keyA, paste: false }),
+        );
+      });
 
       const pasteText = 'pasted';
       act(() => stdin.paste(pasteText));
-      expect(onKeypress).toHaveBeenCalledWith(
-        expect.objectContaining({ paste: true, sequence: pasteText }),
-      );
+
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledWith(
+          expect.objectContaining({ paste: true, sequence: pasteText }),
+        );
+      });
 
       const keyB = { name: 'b', sequence: 'b' };
       act(() => stdin.pressKey(keyB));
-      expect(onKeypress).toHaveBeenCalledWith(
-        expect.objectContaining({ ...keyB, paste: false }),
-      );
+
+      await waitFor(() => {
+        expect(onKeypress).toHaveBeenCalledWith(
+          expect.objectContaining({ ...keyB, paste: false }),
+        );
+      });
 
       expect(onKeypress).toHaveBeenCalledTimes(3);
     });
 
-    it('should emit partial paste content if unmounted mid-paste', () => {
-      const { unmount } = renderHook(() =>
-        useKeypress(onKeypress, { isActive: true }),
+    it('should emit partial paste content if unmounted mid-paste', async () => {
+      const { unmount } = renderHook(
+        () => useKeypress(onKeypress, { isActive: true }),
+        {
+          wrapper: pasteWoraround ? wrapperWithWindowsWorkaround : wrapper,
+        },
       );
       const pasteText = 'incomplete paste';
 
       act(() => stdin.startPaste(pasteText));
 
-      // No event should be fired yet.
+      // No event should be fired yet for incomplete paste
       expect(onKeypress).not.toHaveBeenCalled();
 
-      // Unmounting should trigger the flush.
+      // Unmounting should trigger the flush
       unmount();
 
+      // Both legacy and modern modes now flush partial paste content on unmount
       expect(onKeypress).toHaveBeenCalledTimes(1);
       expect(onKeypress).toHaveBeenCalledWith({
         name: '',

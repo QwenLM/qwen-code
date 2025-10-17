@@ -1,69 +1,69 @@
 # .aoneci/workflows/ci.yml
 
-name: Qwen Code CI
+name: 'Qwen Code CI'
 
 triggers:
   push:
-    branches: [main, dev, integration]
+    branches: ['main', 'dev', 'integration']
   merge_request:
 
 jobs:
   build:
-    name: Build and Lint
+    name: 'Build and Lint'
     steps:
-      - uses: checkout
-      - uses: setup-env
+      - uses: 'checkout'
+      - uses: 'setup-env'
         inputs:
           node-version: '20'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: 'Install dependencies'
+        run: 'npm ci'
 
-      - name: Run formatter check
+      - name: 'Run formatter check'
         run: |
           npm run format
           git diff --exit-code
 
-      - name: Run linter
-        run: npm run lint:ci
+      - name: 'Run linter'
+        run: 'npm run lint:ci'
 
-      - name: Build project
-        run: npm run build
+      - name: 'Build project'
+        run: 'npm run build'
 
-      - name: Run type check
-        run: npm run typecheck
+      - name: 'Run type check'
+        run: 'npm run typecheck'
 
-      - name: Upload build artifacts
-        uses: upload-artifact
+      - name: 'Upload build artifacts'
+        uses: 'upload-artifact'
         inputs:
-          name: build-artifacts-20
+          name: 'build-artifacts-20'
           path: |
             packages/*/dist/**/*
             package-lock.json
 
   test:
-    name: Test
-    needs: build # This job depends on the 'build' job
+    name: 'Test'
+    needs: 'build' # This job depends on the 'build' job
     steps:
-      - uses: checkout
+      - uses: 'checkout'
 
-      - uses: setup-env
+      - uses: 'setup-env'
         inputs:
           node-version: '20'
 
-      - uses: download-artifact
+      - uses: 'download-artifact'
         inputs:
-          name: build-artifacts-20
-          path: .
+          name: 'build-artifacts-20'
+          path: '.'
 
-      - name: Install dependencies for testing
-        run: npm ci
+      - name: 'Install dependencies for testing'
+        run: 'npm ci'
 
-      - name: Run tests and generate reports
-        run: NO_COLOR=true npm run test:ci
+      - name: 'Run tests and generate reports'
+        run: 'NO_COLOR=true npm run test:ci'
 
-      - name: Upload coverage reports
-        uses: upload-artifact
+      - name: 'Upload coverage reports'
+        uses: 'upload-artifact'
         inputs:
-          name: coverage-reports-20
-          path: packages/*/coverage
+          name: 'coverage-reports-20'
+          path: 'packages/*/coverage'

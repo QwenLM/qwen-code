@@ -6,9 +6,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { GitIgnoreParser } from './gitIgnoreParser.js';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
 
 describe('GitIgnoreParser', () => {
   let parser: GitIgnoreParser;
@@ -82,16 +82,16 @@ node_modules/
 
     it('should handle custom patterns file name', async () => {
       // No .git directory for this test
-      await createTestFile('.geminiignore', 'temp/\n*.tmp');
+      await createTestFile('.qwenignore', 'temp/\n*.tmp');
 
-      parser.loadPatterns('.geminiignore');
+      parser.loadPatterns('.qwenignore');
       expect(parser.getPatterns()).toEqual(['temp/', '*.tmp']);
       expect(parser.isIgnored(path.join('temp', 'file.txt'))).toBe(true);
       expect(parser.isIgnored(path.join('src', 'file.tmp'))).toBe(true);
     });
 
-    it('should initialize without errors when no .geminiignore exists', () => {
-      expect(() => parser.loadPatterns('.geminiignore')).not.toThrow();
+    it('should initialize without errors when no .qwenignore exists', () => {
+      expect(() => parser.loadPatterns('.qwenignore')).not.toThrow();
     });
   });
 

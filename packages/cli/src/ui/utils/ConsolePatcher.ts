@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import util from 'util';
-import { ConsoleMessageItem } from '../types.js';
+import util from 'node:util';
+import type { ConsoleMessageItem } from '../types.js';
 
 interface ConsolePatcherParams {
   onNewMessage?: (message: Omit<ConsoleMessageItem, 'id'>) => void;
@@ -18,6 +18,7 @@ export class ConsolePatcher {
   private originalConsoleWarn = console.warn;
   private originalConsoleError = console.error;
   private originalConsoleDebug = console.debug;
+  private originalConsoleInfo = console.info;
 
   private params: ConsolePatcherParams;
 
@@ -30,6 +31,7 @@ export class ConsolePatcher {
     console.warn = this.patchConsoleMethod('warn', this.originalConsoleWarn);
     console.error = this.patchConsoleMethod('error', this.originalConsoleError);
     console.debug = this.patchConsoleMethod('debug', this.originalConsoleDebug);
+    console.info = this.patchConsoleMethod('info', this.originalConsoleInfo);
   }
 
   cleanup = () => {
@@ -37,13 +39,14 @@ export class ConsolePatcher {
     console.warn = this.originalConsoleWarn;
     console.error = this.originalConsoleError;
     console.debug = this.originalConsoleDebug;
+    console.info = this.originalConsoleInfo;
   };
 
   private formatArgs = (args: unknown[]): string => util.format(...args);
 
   private patchConsoleMethod =
     (
-      type: 'log' | 'warn' | 'error' | 'debug',
+      type: 'log' | 'warn' | 'error' | 'debug' | 'info',
       originalMethod: (...args: unknown[]) => void,
     ) =>
     (...args: unknown[]) => {

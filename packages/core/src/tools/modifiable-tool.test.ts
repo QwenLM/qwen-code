@@ -5,17 +5,19 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import type {
+  ModifyContext,
+  ModifiableDeclarativeTool,
+} from './modifiable-tool.js';
 import {
   modifyWithEditor,
-  ModifyContext,
-  ModifiableTool,
-  isModifiableTool,
+  isModifiableDeclarativeTool,
 } from './modifiable-tool.js';
-import { EditorType } from '../utils/editor.js';
-import fs from 'fs';
-import fsp from 'fs/promises';
-import os from 'os';
-import * as path from 'path';
+import type { EditorType } from '../utils/editor.js';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import * as path from 'node:path';
 
 // Mock dependencies
 const mockOpenDiff = vi.hoisted(() => vi.fn());
@@ -338,16 +340,16 @@ describe('isModifiableTool', () => {
     const mockTool = {
       name: 'test-tool',
       getModifyContext: vi.fn(),
-    } as unknown as ModifiableTool<TestParams>;
+    } as unknown as ModifiableDeclarativeTool<TestParams>;
 
-    expect(isModifiableTool(mockTool)).toBe(true);
+    expect(isModifiableDeclarativeTool(mockTool)).toBe(true);
   });
 
   it('should return false for objects without getModifyContext method', () => {
     const mockTool = {
       name: 'test-tool',
-    } as unknown as ModifiableTool<TestParams>;
+    } as unknown as ModifiableDeclarativeTool<TestParams>;
 
-    expect(isModifiableTool(mockTool)).toBe(false);
+    expect(isModifiableDeclarativeTool(mockTool)).toBe(false);
   });
 });

@@ -5,7 +5,7 @@
  */
 
 import { useState, useCallback, useEffect } from 'react';
-import { LoadedSettings } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import {
   AuthType,
   qwenOAuth2Events,
@@ -43,7 +43,8 @@ export const useQwenAuth = (
     authMessage: null,
   });
 
-  const isQwenAuth = settings.merged.selectedAuthType === AuthType.QWEN_OAUTH;
+  const isQwenAuth =
+    settings.merged.security?.auth?.selectedType === AuthType.QWEN_OAUTH;
 
   // Set up event listeners when authentication starts
   useEffect(() => {

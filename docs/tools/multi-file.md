@@ -1,6 +1,6 @@
 # Multi File Read Tool (`read_many_files`)
 
-This document describes the `read_many_files` tool for the Gemini CLI.
+This document describes the `read_many_files` tool for Qwen Code.
 
 ## Description
 
@@ -24,11 +24,12 @@ Use `read_many_files` to read content from multiple files specified by paths or 
 - `useDefaultExcludes` (boolean, optional): Whether to apply a list of default exclusion patterns (e.g., `node_modules`, `.git`, non image/pdf binary files). Defaults to `true`.
 - `respect_git_ignore` (boolean, optional): Whether to respect .gitignore patterns when finding files. Defaults to true.
 
-## How to use `read_many_files` with the Gemini CLI
+## How to use `read_many_files` with Qwen Code
 
 `read_many_files` searches for files matching the provided `paths` and `include` patterns, while respecting `exclude` patterns and default excludes (if enabled).
 
 - For text files: it reads the content of each matched file (attempting to skip binary files not explicitly requested as image/PDF) and concatenates it into a single string, with a separator `--- {filePath} ---` between the content of each file. Uses UTF-8 encoding by default.
+- The tool inserts a `--- End of content ---` after the last file.
 - For image and PDF files: if explicitly requested by name or extension (e.g., `paths: ["logo.png"]` or `include: ["*.pdf"]`), the tool reads the file and returns its content as a base64 encoded string.
 - The tool attempts to detect and skip other binary files (those not matching common image/PDF types or not explicitly requested) by checking for null bytes in their initial content.
 

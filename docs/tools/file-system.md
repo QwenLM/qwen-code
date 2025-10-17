@@ -1,6 +1,6 @@
-# Gemini CLI file system tools
+# Qwen Code file system tools
 
-The Gemini CLI provides a comprehensive suite of tools for interacting with the local file system. These tools allow the Gemini model to read from, write to, list, search, and modify files and directories, all under your control and typically with confirmation for sensitive operations.
+Qwen Code provides a comprehensive suite of tools for interacting with the local file system. These tools allow the model to read from, write to, list, search, and modify files and directories, all under your control and typically with confirmation for sensitive operations.
 
 **Note:** All file system tools operate within a `rootDirectory` (usually the current working directory where you launched the CLI) for security. Paths that you provide to these tools are generally expected to be absolute or are resolved relative to this root directory.
 
@@ -89,10 +89,13 @@ The Gemini CLI provides a comprehensive suite of tools for interacting with the 
   - `pattern` (string, required): The regular expression (regex) to search for (e.g., `"function\s+myFunction"`).
   - `path` (string, optional): The absolute path to the directory to search within. Defaults to the current working directory.
   - `include` (string, optional): A glob pattern to filter which files are searched (e.g., `"*.js"`, `"src/**/*.{ts,tsx}"`). If omitted, searches most files (respecting common ignores).
+  - `maxResults` (number, optional): Maximum number of matches to return to prevent context overflow (default: 20, max: 100). Use lower values for broad searches, higher for specific searches.
 - **Behavior:**
   - Uses `git grep` if available in a Git repository for speed; otherwise, falls back to system `grep` or a JavaScript-based search.
   - Returns a list of matching lines, each prefixed with its file path (relative to the search directory) and line number.
+  - Limits results to a maximum of 20 matches by default to prevent context overflow. When results are truncated, shows a clear warning with guidance on refining searches.
 - **Output (`llmContent`):** A formatted string of matches, e.g.:
+
   ```
   Found 3 matches for pattern "myFunction" in path "." (filter: "*.ts"):
   ---
@@ -103,14 +106,41 @@ The Gemini CLI provides a comprehensive suite of tools for interacting with the 
   File: src/index.ts
   L5: import { myFunction } from './utils';
   ---
+
+  WARNING: Results truncated to prevent context overflow. To see more results:
+  - Use a more specific pattern to reduce matches
+  - Add file filters with the 'include' parameter (e.g., "*.js", "src/**")
+  - Specify a narrower 'path' to search in a subdirectory
+  - Increase 'maxResults' parameter if you need more matches (current: 20)
   ```
+
 - **Confirmation:** No.
 
-## 6. `replace` (Edit)
+### `search_file_content` examples
 
-`replace` replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when `expected_replacements` is specified. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
+Search for a pattern with default result limiting:
 
-- **Tool name:** `replace`
+```
+search_file_content(pattern="function\s+myFunction", path="src")
+```
+
+Search for a pattern with custom result limiting:
+
+```
+search_file_content(pattern="function", path="src", maxResults=50)
+```
+
+Search for a pattern with file filtering and custom result limiting:
+
+```
+search_file_content(pattern="function", include="*.js", maxResults=10)
+```
+
+## 6. `edit` (Edit)
+
+`edit` replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when `expected_replacements` is specified. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
+
+- **Tool name:** `edit`
 - **Display name:** Edit
 - **File:** `edit.ts`
 - **Parameters:**
@@ -127,8 +157,8 @@ The Gemini CLI provides a comprehensive suite of tools for interacting with the 
   - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence of `old_string`.
   - If one occurrence is found, it replaces it with `new_string`.
   - **Enhanced Reliability (Multi-Stage Edit Correction):** To significantly improve the success rate of edits, especially when the model-provided `old_string` might not be perfectly precise, the tool incorporates a multi-stage edit correction mechanism.
-    - If the initial `old_string` isn't found or matches multiple locations, the tool can leverage the Gemini model to iteratively refine `old_string` (and potentially `new_string`).
-    - This self-correction process attempts to identify the unique segment the model intended to modify, making the `replace` operation more robust even with slightly imperfect initial context.
+    - If the initial `old_string` isn't found or matches multiple locations, the tool can leverage the Qwen model to iteratively refine `old_string` (and potentially `new_string`).
+    - This self-correction process attempts to identify the unique segment the model intended to modify, making the `edit` operation more robust even with slightly imperfect initial context.
 - **Failure conditions:** Despite the correction mechanism, the tool will fail if:
   - `file_path` is not absolute or is outside the root directory.
   - `old_string` is not empty, but the `file_path` does not exist.
@@ -140,4 +170,4 @@ The Gemini CLI provides a comprehensive suite of tools for interacting with the 
   - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit, expected 1 occurrences but found 2...`).
 - **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
 
-These file system tools provide a foundation for the Gemini CLI to understand and interact with your local project context.
+These file system tools provide a foundation for Qwen Code to understand and interact with your local project context.

@@ -6,9 +6,9 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { getInstallationInfo, PackageManager } from './installationInfo.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as childProcess from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as childProcess from 'node:child_process';
 import { isGitRepository } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -140,7 +140,7 @@ describe('getInstallationInfo', () => {
     const info = getInstallationInfo(projectRoot, false);
 
     expect(mockedExecSync).toHaveBeenCalledWith(
-      'brew list -1 | grep -q "^gemini-cli$"',
+      'brew list -1 | grep -q "^qwen-code$"',
       { stdio: 'ignore' },
     );
     expect(info.packageManager).toBe(PackageManager.HOMEBREW);
@@ -162,7 +162,7 @@ describe('getInstallationInfo', () => {
     const info = getInstallationInfo(projectRoot, false);
 
     expect(mockedExecSync).toHaveBeenCalledWith(
-      'brew list -1 | grep -q "^gemini-cli$"',
+      'brew list -1 | grep -q "^qwen-code$"',
       { stdio: 'ignore' },
     );
     // Should fall back to default global npm

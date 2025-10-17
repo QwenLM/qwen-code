@@ -1,19 +1,19 @@
-# Gemini CLI Keyboard Shortcuts
+# Qwen Code Keyboard Shortcuts
 
-This document lists the available keyboard shortcuts in the Gemini CLI.
+This document lists the available keyboard shortcuts in Qwen Code.
 
 ## General
 
-| Shortcut | Description                                                                                                           |
-| -------- | --------------------------------------------------------------------------------------------------------------------- |
-| `Esc`    | Close dialogs and suggestions.                                                                                        |
-| `Ctrl+C` | Exit the application. Press twice to confirm.                                                                         |
-| `Ctrl+D` | Exit the application if the input is empty. Press twice to confirm.                                                   |
-| `Ctrl+L` | Clear the screen.                                                                                                     |
-| `Ctrl+O` | Toggle the display of the debug console.                                                                              |
-| `Ctrl+S` | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output. |
-| `Ctrl+T` | Toggle the display of tool descriptions.                                                                              |
-| `Ctrl+Y` | Toggle auto-approval (YOLO mode) for all tool calls.                                                                  |
+| Shortcut    | Description                                                                                                           |
+| ----------- | --------------------------------------------------------------------------------------------------------------------- |
+| `Esc`       | Close dialogs and suggestions.                                                                                        |
+| `Ctrl+C`    | Cancel the ongoing request and clear the input. Press twice to exit the application.                                  |
+| `Ctrl+D`    | Exit the application if the input is empty. Press twice to confirm.                                                   |
+| `Ctrl+L`    | Clear the screen.                                                                                                     |
+| `Ctrl+O`    | Toggle the display of the debug console.                                                                              |
+| `Ctrl+S`    | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output. |
+| `Ctrl+T`    | Toggle the display of tool descriptions.                                                                              |
+| `Shift+Tab` | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`).                                                     |
 
 ## Input Prompt
 
@@ -29,6 +29,7 @@ This document lists the available keyboard shortcuts in the Gemini CLI.
 | `Ctrl+A` / `Home`                                  | Move the cursor to the beginning of the line.                                                                                       |
 | `Ctrl+B` / `Left Arrow`                            | Move the cursor one character to the left.                                                                                          |
 | `Ctrl+C`                                           | Clear the input prompt                                                                                                              |
+| `Esc` (double press)                               | Clear the input prompt.                                                                                                             |
 | `Ctrl+D` / `Delete`                                | Delete the character to the right of the cursor.                                                                                    |
 | `Ctrl+E` / `End`                                   | Move the cursor to the end of the line.                                                                                             |
 | `Ctrl+F` / `Right Arrow`                           | Move the cursor one character to the right.                                                                                         |
@@ -60,3 +61,9 @@ This document lists the available keyboard shortcuts in the Gemini CLI.
 | `Up Arrow` / `k`   | Move selection up.                                                                                            |
 | `1-9`              | Select an item by its number.                                                                                 |
 | (multi-digit)      | For items with numbers greater than 9, press the digits in quick succession to select the corresponding item. |
+
+## IDE Integration
+
+| Shortcut | Description                       |
+| -------- | --------------------------------- |
+| `Ctrl+G` | See context CLI received from IDE |

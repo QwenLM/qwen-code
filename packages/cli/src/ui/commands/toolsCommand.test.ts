@@ -4,11 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { toolsCommand } from './toolsCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
-import { Tool } from '@qwen-code/qwen-code-core';
+import type { Tool } from '@qwen-code/qwen-code-core';
 
 // Mock tools for testing
 const mockTools = [
@@ -31,7 +31,7 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () => Promise.resolve(undefined),
+          getToolRegistry: () => undefined,
         },
       },
     });
@@ -52,8 +52,7 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () =>
-            Promise.resolve({ getAllTools: () => [] as Tool[] }),
+          getToolRegistry: () => ({ getAllTools: () => [] as Tool[] }),
         },
       },
     });
@@ -73,8 +72,7 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () =>
-            Promise.resolve({ getAllTools: () => mockTools }),
+          getToolRegistry: () => ({ getAllTools: () => mockTools }),
         },
       },
     });
@@ -92,8 +90,7 @@ describe('toolsCommand', () => {
     const mockContext = createMockCommandContext({
       services: {
         config: {
-          getToolRegistry: () =>
-            Promise.resolve({ getAllTools: () => mockTools }),
+          getToolRegistry: () => ({ getAllTools: () => mockTools }),
         },
       },
     });

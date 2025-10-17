@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, afterEach, Mock } from 'vitest';
+import type { Mock } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   MemoryTool,
   setGeminiMdFilename,
@@ -12,13 +13,26 @@ import {
   getAllGeminiMdFilenames,
   DEFAULT_CONTEXT_FILENAME,
 } from './memoryTool.js';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { ToolConfirmationOutcome } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 
 // Mock dependencies
-vi.mock('fs/promises');
+vi.mock(import('node:fs/promises'), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    mkdir: vi.fn(),
+    readFile: vi.fn(),
+  };
+});
+
+vi.mock('fs', () => ({
+  mkdirSync: vi.fn(),
+}));
+
 vi.mock('os');
 
 const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
@@ -193,18 +207,20 @@ describe('MemoryTool', () => {
 
     it('should have correct name, displayName, description, and schema', () => {
       expect(memoryTool.name).toBe('save_memory');
-      expect(memoryTool.displayName).toBe('Save Memory');
+      expect(memoryTool.displayName).toBe('SaveMemory');
       expect(memoryTool.description).toContain(
         'Saves a specific piece of information',
       );
       expect(memoryTool.schema).toBeDefined();
       expect(memoryTool.schema.name).toBe('save_memory');
-      expect(memoryTool.schema.parameters?.properties?.fact).toBeDefined();
+      expect(memoryTool.schema.parametersJsonSchema).toBeDefined();
     });
 
-    it('should call performAddMemoryEntry with correct parameters and return success', async () => {
-      const params = { fact: 'The sky is blue' };
-      const result = await memoryTool.execute(params, mockAbortSignal);
+    it('should call performAddMemoryEntry with correct parameters and return success for global scope', async () => {
+      const params = { fact: 'The sky is blue', scope: 'global' as const };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
       // Use getCurrentGeminiMdFilename for the default expectation before any setGeminiMdFilename calls in a test
       const expectedFilePath = path.join(
         os.homedir(),
@@ -224,7 +240,37 @@ describe('MemoryTool', () => {
         expectedFilePath,
         expectedFsArgument,
       );
-      const successMessage = `Okay, I've remembered that: "${params.fact}"`;
+      const successMessage = `Okay, I've remembered that in global memory: "${params.fact}"`;
+      expect(result.llmContent).toBe(
+        JSON.stringify({ success: true, message: successMessage }),
+      );
+      expect(result.returnDisplay).toBe(successMessage);
+    });
+
+    it('should call performAddMemoryEntry with correct parameters and return success for project scope', async () => {
+      const params = { fact: 'The sky is blue', scope: 'project' as const };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      // For project scope, expect the file to be in current working directory
+      const expectedFilePath = path.join(
+        process.cwd(),
+        getCurrentGeminiMdFilename(),
+      );
+
+      // For this test, we expect the actual fs methods to be passed
+      const expectedFsArgument = {
+        readFile: fs.readFile,
+        writeFile: fs.writeFile,
+        mkdir: fs.mkdir,
+      };
+
+      expect(performAddMemoryEntrySpy).toHaveBeenCalledWith(
+        params.fact,
+        expectedFilePath,
+        expectedFsArgument,
+      );
+      const successMessage = `Okay, I've remembered that in project memory: "${params.fact}"`;
       expect(result.llmContent).toBe(
         JSON.stringify({ success: true, message: successMessage }),
       );
@@ -233,24 +279,23 @@ describe('MemoryTool', () => {
 
     it('should return an error if fact is empty', async () => {
       const params = { fact: ' ' }; // Empty fact
-      const result = await memoryTool.execute(params, mockAbortSignal);
-      const errorMessage = 'Parameter "fact" must be a non-empty string.';
-
-      expect(performAddMemoryEntrySpy).not.toHaveBeenCalled();
-      expect(result.llmContent).toBe(
-        JSON.stringify({ success: false, error: errorMessage }),
+      expect(memoryTool.validateToolParams(params)).toBe(
+        'Parameter "fact" must be a non-empty string.',
       );
-      expect(result.returnDisplay).toBe(`Error: ${errorMessage}`);
+      expect(() => memoryTool.build(params)).toThrow(
+        'Parameter "fact" must be a non-empty string.',
+      );
     });
 
     it('should handle errors from performAddMemoryEntry', async () => {
-      const params = { fact: 'This will fail' };
+      const params = { fact: 'This will fail', scope: 'global' as const };
       const underlyingError = new Error(
         '[MemoryTool] Failed to add memory entry: Disk full',
       );
       performAddMemoryEntrySpy.mockRejectedValue(underlyingError);
 
-      const result = await memoryTool.execute(params, mockAbortSignal);
+      const invocation = memoryTool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
 
       expect(result.llmContent).toBe(
         JSON.stringify({
@@ -261,6 +306,21 @@ describe('MemoryTool', () => {
       expect(result.returnDisplay).toBe(
         `Error saving memory: ${underlyingError.message}`,
       );
+      expect(result.error?.type).toBe(
+        ToolErrorType.MEMORY_TOOL_EXECUTION_ERROR,
+      );
+    });
+
+    it('should return error when executing without scope parameter', async () => {
+      const params = { fact: 'Test fact' };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Please specify where to save this memory',
+      );
+      expect(result.returnDisplay).toContain('Global:');
+      expect(result.returnDisplay).toContain('Project:');
     });
   });
 
@@ -269,25 +329,28 @@ describe('MemoryTool', () => {
 
     beforeEach(() => {
       memoryTool = new MemoryTool();
-      // Clear the allowlist before each test
-      (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.clear();
       // Mock fs.readFile to return empty string (file doesn't exist)
       vi.mocked(fs.readFile).mockResolvedValue('');
+
+      // Clear allowlist before each test to ensure clean state
+      const invocation = memoryTool.build({ fact: 'test', scope: 'global' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (invocation.constructor as any).allowlist.clear();
     });
 
-    it('should return confirmation details when memory file is not allowlisted', async () => {
-      const params = { fact: 'Test fact' };
-      const result = await memoryTool.shouldConfirmExecute(
-        params,
-        mockAbortSignal,
-      );
+    it('should return confirmation details when memory file is not allowlisted for global scope', async () => {
+      const params = { fact: 'Test fact', scope: 'global' as const };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
       expect(result).toBeDefined();
       expect(result).not.toBe(false);
 
       if (result && result.type === 'edit') {
         const expectedPath = path.join('~', '.qwen', 'QWEN.md');
-        expect(result.title).toBe(`Confirm Memory Save: ${expectedPath}`);
+        expect(result.title).toBe(
+          `Confirm Memory Save: ${expectedPath} (global)`,
+        );
         expect(result.fileName).toContain(path.join('mock', 'home', '.qwen'));
         expect(result.fileName).toContain('QWEN.md');
         expect(result.fileDiff).toContain('Index: QWEN.md');
@@ -299,39 +362,76 @@ describe('MemoryTool', () => {
       }
     });
 
-    it('should return false when memory file is already allowlisted', async () => {
-      const params = { fact: 'Test fact' };
+    it('should return confirmation details when memory file is not allowlisted for project scope', async () => {
+      const params = { fact: 'Test fact', scope: 'project' as const };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
+
+      expect(result).toBeDefined();
+      expect(result).not.toBe(false);
+
+      if (result && result.type === 'edit') {
+        const expectedPath = path.join(process.cwd(), 'QWEN.md');
+        expect(result.title).toBe(
+          `Confirm Memory Save: ${expectedPath} (project)`,
+        );
+        expect(result.fileName).toBe(expectedPath);
+        expect(result.fileDiff).toContain('Index: QWEN.md');
+        expect(result.fileDiff).toContain('+## Qwen Added Memories');
+        expect(result.fileDiff).toContain('+- Test fact');
+        expect(result.originalContent).toBe('');
+        expect(result.newContent).toContain('## Qwen Added Memories');
+        expect(result.newContent).toContain('- Test fact');
+      }
+    });
+
+    it('should return false when memory file is already allowlisted for global scope', async () => {
+      const params = { fact: 'Test fact', scope: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
         getCurrentGeminiMdFilename(),
       );
 
-      // Add the memory file to the allowlist
-      (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.add(
-        memoryFilePath,
-      );
+      const invocation = memoryTool.build(params);
+      // Add the memory file to the allowlist with the scope-specific key format
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (invocation.constructor as any).allowlist.add(`${memoryFilePath}_global`);
 
-      const result = await memoryTool.shouldConfirmExecute(
-        params,
-        mockAbortSignal,
-      );
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
       expect(result).toBe(false);
     });
 
-    it('should add memory file to allowlist when ProceedAlways is confirmed', async () => {
-      const params = { fact: 'Test fact' };
+    it('should return false when memory file is already allowlisted for project scope', async () => {
+      const params = { fact: 'Test fact', scope: 'project' as const };
+      const memoryFilePath = path.join(
+        process.cwd(),
+        getCurrentGeminiMdFilename(),
+      );
+
+      const invocation = memoryTool.build(params);
+      // Add the memory file to the allowlist with the scope-specific key format
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (invocation.constructor as any).allowlist.add(
+        `${memoryFilePath}_project`,
+      );
+
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
+
+      expect(result).toBe(false);
+    });
+
+    it('should add memory file to allowlist when ProceedAlways is confirmed for global scope', async () => {
+      const params = { fact: 'Test fact', scope: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
         getCurrentGeminiMdFilename(),
       );
 
-      const result = await memoryTool.shouldConfirmExecute(
-        params,
-        mockAbortSignal,
-      );
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
       expect(result).toBeDefined();
       expect(result).not.toBe(false);
@@ -340,27 +440,53 @@ describe('MemoryTool', () => {
         // Simulate the onConfirm callback
         await result.onConfirm(ToolConfirmationOutcome.ProceedAlways);
 
-        // Check that the memory file was added to the allowlist
+        // Check that the memory file was added to the allowlist with the scope-specific key format
         expect(
-          (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.has(
-            memoryFilePath,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (invocation.constructor as any).allowlist.has(
+            `${memoryFilePath}_global`,
+          ),
+        ).toBe(true);
+      }
+    });
+
+    it('should add memory file to allowlist when ProceedAlways is confirmed for project scope', async () => {
+      const params = { fact: 'Test fact', scope: 'project' as const };
+      const memoryFilePath = path.join(
+        process.cwd(),
+        getCurrentGeminiMdFilename(),
+      );
+
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
+
+      expect(result).toBeDefined();
+      expect(result).not.toBe(false);
+
+      if (result && result.type === 'edit') {
+        // Simulate the onConfirm callback
+        await result.onConfirm(ToolConfirmationOutcome.ProceedAlways);
+
+        // Check that the memory file was added to the allowlist with the scope-specific key format
+        expect(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (invocation.constructor as any).allowlist.has(
+            `${memoryFilePath}_project`,
           ),
         ).toBe(true);
       }
     });
 
     it('should not add memory file to allowlist when other outcomes are confirmed', async () => {
-      const params = { fact: 'Test fact' };
+      const params = { fact: 'Test fact', scope: 'global' as const };
       const memoryFilePath = path.join(
         os.homedir(),
         '.qwen',
         getCurrentGeminiMdFilename(),
       );
 
-      const result = await memoryTool.shouldConfirmExecute(
-        params,
-        mockAbortSignal,
-      );
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
       expect(result).toBeDefined();
       expect(result).not.toBe(false);
@@ -368,46 +494,119 @@ describe('MemoryTool', () => {
       if (result && result.type === 'edit') {
         // Simulate the onConfirm callback with different outcomes
         await result.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-        expect(
-          (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.has(
-            memoryFilePath,
-          ),
-        ).toBe(false);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const allowlist = (invocation.constructor as any).allowlist;
+        expect(allowlist.has(`${memoryFilePath}_global`)).toBe(false);
 
         await result.onConfirm(ToolConfirmationOutcome.Cancel);
-        expect(
-          (MemoryTool as unknown as { allowlist: Set<string> }).allowlist.has(
-            memoryFilePath,
-          ),
-        ).toBe(false);
+        expect(allowlist.has(`${memoryFilePath}_global`)).toBe(false);
       }
     });
 
-    it('should handle existing memory file with content', async () => {
-      const params = { fact: 'New fact' };
+    it('should handle existing memory file with content for global scope', async () => {
+      const params = { fact: 'New fact', scope: 'global' as const };
       const existingContent =
         'Some existing content.\n\n## Qwen Added Memories\n- Old fact\n';
 
       // Mock fs.readFile to return existing content
       vi.mocked(fs.readFile).mockResolvedValue(existingContent);
 
-      const result = await memoryTool.shouldConfirmExecute(
-        params,
-        mockAbortSignal,
-      );
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
 
       expect(result).toBeDefined();
       expect(result).not.toBe(false);
 
       if (result && result.type === 'edit') {
         const expectedPath = path.join('~', '.qwen', 'QWEN.md');
-        expect(result.title).toBe(`Confirm Memory Save: ${expectedPath}`);
+        expect(result.title).toBe(
+          `Confirm Memory Save: ${expectedPath} (global)`,
+        );
         expect(result.fileDiff).toContain('Index: QWEN.md');
         expect(result.fileDiff).toContain('+- New fact');
         expect(result.originalContent).toBe(existingContent);
         expect(result.newContent).toContain('- Old fact');
         expect(result.newContent).toContain('- New fact');
       }
+    });
+
+    it('should prompt for scope selection when scope is not specified', async () => {
+      const params = { fact: 'Test fact' };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
+
+      expect(result).toBeDefined();
+      expect(result).not.toBe(false);
+
+      if (result && result.type === 'edit') {
+        expect(result.title).toContain('Choose Memory Location');
+        expect(result.title).toContain('GLOBAL');
+        expect(result.title).toContain('PROJECT');
+        expect(result.fileName).toBe('QWEN.md');
+        expect(result.fileDiff).toContain('Test fact');
+        expect(result.fileDiff).toContain('--- QWEN.md');
+        expect(result.fileDiff).toContain('+++ QWEN.md');
+        expect(result.fileDiff).toContain('+- Test fact');
+        expect(result.originalContent).toContain('scope: global');
+        expect(result.originalContent).toContain('INSTRUCTIONS:');
+      }
+    });
+
+    it('should show correct file paths in scope selection prompt', async () => {
+      const params = { fact: 'Test fact' };
+      const invocation = memoryTool.build(params);
+      const result = await invocation.shouldConfirmExecute(mockAbortSignal);
+
+      expect(result).toBeDefined();
+      expect(result).not.toBe(false);
+
+      if (result && result.type === 'edit') {
+        const globalPath = path.join('~', '.qwen', 'QWEN.md');
+        const projectPath = path.join(process.cwd(), 'QWEN.md');
+
+        expect(result.fileDiff).toContain(`Global: ${globalPath}`);
+        expect(result.fileDiff).toContain(`Project: ${projectPath}`);
+        expect(result.fileDiff).toContain('(shared across all projects)');
+        expect(result.fileDiff).toContain('(current project only)');
+      }
+    });
+  });
+
+  describe('getDescription', () => {
+    let memoryTool: MemoryTool;
+
+    beforeEach(() => {
+      memoryTool = new MemoryTool();
+    });
+
+    it('should return correct description for global scope', () => {
+      const params = { fact: 'Test fact', scope: 'global' as const };
+      const invocation = memoryTool.build(params);
+      const description = invocation.getDescription();
+
+      const expectedPath = path.join('~', '.qwen', 'QWEN.md');
+      expect(description).toBe(`${expectedPath} (global)`);
+    });
+
+    it('should return correct description for project scope', () => {
+      const params = { fact: 'Test fact', scope: 'project' as const };
+      const invocation = memoryTool.build(params);
+      const description = invocation.getDescription();
+
+      const expectedPath = path.join(process.cwd(), 'QWEN.md');
+      expect(description).toBe(`${expectedPath} (project)`);
+    });
+
+    it('should show choice prompt when scope is not specified', () => {
+      const params = { fact: 'Test fact' };
+      const invocation = memoryTool.build(params);
+      const description = invocation.getDescription();
+
+      const globalPath = path.join('~', '.qwen', 'QWEN.md');
+      const projectPath = path.join(process.cwd(), 'QWEN.md');
+      expect(description).toBe(
+        `CHOOSE: ${globalPath} (global) OR ${projectPath} (project)`,
+      );
     });
   });
 });

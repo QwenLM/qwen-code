@@ -13,34 +13,48 @@ export enum TelemetryTarget {
 const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.LOCAL;
 const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
-export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
-export {
-  initializeTelemetry,
-  shutdownTelemetry,
-  isTelemetrySdkInitialized,
-} from './sdk.js';
-export {
-  logCliConfiguration,
-  logUserPrompt,
-  logToolCall,
-  logApiRequest,
-  logApiError,
-  logApiResponse,
-  logFlashFallback,
-  logSlashCommand,
-} from './loggers.js';
-export {
-  StartSessionEvent,
-  EndSessionEvent,
-  UserPromptEvent,
-  ToolCallEvent,
-  ApiRequestEvent,
-  ApiErrorEvent,
-  ApiResponseEvent,
-  TelemetryEvent,
-  FlashFallbackEvent,
-  SlashCommandEvent,
-} from './types.js';
 export { SpanStatusCode, ValueType } from '@opentelemetry/api';
 export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
+export {
+  logApiError,
+  logApiCancel,
+  logApiRequest,
+  logApiResponse,
+  logChatCompression,
+  logCliConfiguration,
+  logConversationFinishedEvent,
+  logFlashFallback,
+  logKittySequenceOverflow,
+  logSlashCommand,
+  logToolCall,
+  logUserPrompt,
+} from './loggers.js';
+export {
+  initializeTelemetry,
+  isTelemetrySdkInitialized,
+  shutdownTelemetry,
+} from './sdk.js';
+export {
+  ApiErrorEvent,
+  ApiCancelEvent,
+  ApiRequestEvent,
+  ApiResponseEvent,
+  ConversationFinishedEvent,
+  EndSessionEvent,
+  FlashFallbackEvent,
+  KittySequenceOverflowEvent,
+  makeChatCompressionEvent,
+  makeSlashCommandEvent,
+  SlashCommandStatus,
+  StartSessionEvent,
+  ToolCallEvent,
+  UserPromptEvent,
+} from './types.js';
+export type {
+  ChatCompressionEvent,
+  SlashCommandEvent,
+  TelemetryEvent,
+} from './types.js';
 export * from './uiTelemetry.js';
+export { QwenLogger } from './qwen-logger/qwen-logger.js';
+export { DEFAULT_OTLP_ENDPOINT, DEFAULT_TELEMETRY_TARGET };

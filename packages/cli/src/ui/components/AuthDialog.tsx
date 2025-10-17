@@ -4,19 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { Box, Text, useInput } from 'ink';
-import { Colors } from '../colors.js';
-import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
-import { LoadedSettings, SettingScope } from '../../config/settings.js';
+import type React from 'react';
+import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
+import { Box, Text } from 'ink';
 import {
-  validateAuthMethod,
   setOpenAIApiKey,
   setOpenAIBaseUrl,
   setOpenAIModel,
+  validateAuthMethod,
 } from '../../config/auth.js';
+import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { Colors } from '../colors.js';
+import { useKeypress } from '../hooks/useKeypress.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
+import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 
 interface AuthDialogProps {
   onSelect: (authMethod: AuthType | undefined, scope: SettingScope) => void;
@@ -59,23 +61,19 @@ export function AuthDialog({
   const initialAuthIndex = Math.max(
     0,
     items.findIndex((item) => {
-      if (settings.merged.selectedAuthType) {
-        return item.value === settings.merged.selectedAuthType;
+      if (settings.merged.security?.auth?.selectedType) {
+        return item.value === settings.merged.security?.auth?.selectedType;
       }
 
       const defaultAuthType = parseDefaultAuthType(
-        process.env.GEMINI_DEFAULT_AUTH_TYPE,
+        process.env['QWEN_DEFAULT_AUTH_TYPE'],
       );
       if (defaultAuthType) {
         return item.value === defaultAuthType;
       }
 
-      if (process.env.GEMINI_API_KEY) {
+      if (process.env['GEMINI_API_KEY']) {
         return item.value === AuthType.USE_GEMINI;
-      }
-
-      if (process.env.QWEN_OAUTH_TOKEN) {
-        return item.value === AuthType.QWEN_OAUTH;
       }
 
       return item.value === AuthType.LOGIN_WITH_GOOGLE;
@@ -155,27 +153,30 @@ export function AuthDialog({
     setErrorMessage('OpenAI API key is required to use OpenAI authentication.');
   };
 
-  useInput((_input, key) => {
-    if (showOpenAIKeyPrompt) {
-      return;
-    }
+  useKeypress(
+    (key) => {
+      if (showOpenAIKeyPrompt) {
+        return;
+      }
 
-    if (key.escape) {
-      // Prevent exit if there is an error message.
-      // This means they user is not authenticated yet.
-      if (errorMessage) {
-        return;
+      if (key.name === 'escape') {
+        // Prevent exit if there is an error message.
+        // This means they user is not authenticated yet.
+        if (errorMessage) {
+          return;
+        }
+        if (settings.merged.security?.auth?.selectedType === undefined) {
+          // Prevent exiting if no auth method is set
+          setErrorMessage(
+            'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+          );
+          return;
+        }
+        onSelect(undefined, SettingScope.User);
       }
-      if (settings.merged.selectedAuthType === undefined) {
-        // Prevent exiting if no auth method is set
-        setErrorMessage(
-          'You must select an auth method to proceed. Press Ctrl+C twice to exit.',
-        );
-        return;
-      }
-      onSelect(undefined, SettingScope.User);
-    }
-  });
+    },
+    { isActive: true },
+  );
 
   if (showOpenAIKeyPrompt) {
     return (
@@ -204,7 +205,6 @@ export function AuthDialog({
           items={items}
           initialIndex={initialAuthIndex}
           onSelect={handleAuthSelect}
-          isFocused={true}
         />
       </Box>
       {errorMessage && (

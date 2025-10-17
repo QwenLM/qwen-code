@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
   Config,
   ToolCallRequestInfo,
   ExecutingToolCall,
@@ -13,22 +13,21 @@ import {
   WaitingToolCall,
   CompletedToolCall,
   CancelledToolCall,
-  CoreToolScheduler,
   OutputUpdateHandler,
   AllToolCallsCompleteHandler,
   ToolCallsUpdateHandler,
-  Tool,
   ToolCall,
   Status as CoreStatus,
   EditorType,
 } from '@qwen-code/qwen-code-core';
+import { CoreToolScheduler } from '@qwen-code/qwen-code-core';
 import { useCallback, useState, useMemo } from 'react';
-import {
+import type {
   HistoryItemToolGroup,
   IndividualToolCallDisplay,
-  ToolCallStatus,
   HistoryItemWithoutId,
 } from '../types.js';
+import { ToolCallStatus } from '../types.js';
 
 export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
@@ -64,7 +63,7 @@ export type TrackedToolCall =
   | TrackedCancelledToolCall;
 
 export function useReactToolScheduler(
-  onComplete: (tools: CompletedToolCall[]) => void,
+  onComplete: (tools: CompletedToolCall[]) => Promise<void>,
   config: Config,
   setPendingHistoryItem: React.Dispatch<
     React.SetStateAction<HistoryItemWithoutId | null>
@@ -107,8 +106,8 @@ export function useReactToolScheduler(
   );
 
   const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
-    (completedToolCalls) => {
-      onComplete(completedToolCalls);
+    async (completedToolCalls) => {
+      await onComplete(completedToolCalls);
     },
     [onComplete],
   );
@@ -135,7 +134,6 @@ export function useReactToolScheduler(
   const scheduler = useMemo(
     () =>
       new CoreToolScheduler({
-        toolRegistry: config.getToolRegistry(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
@@ -158,7 +156,7 @@ export function useReactToolScheduler(
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
     ) => {
-      scheduler.schedule(request, signal);
+      void scheduler.schedule(request, signal);
     },
     [scheduler],
   );
@@ -216,23 +214,20 @@ export function mapToDisplay(
 
   const toolDisplays = toolCalls.map(
     (trackedCall): IndividualToolCallDisplay => {
-      let displayName = trackedCall.request.name;
-      let description = '';
+      let displayName: string;
+      let description: string;
       let renderOutputAsMarkdown = false;
 
-      const currentToolInstance =
-        'tool' in trackedCall && trackedCall.tool
-          ? (trackedCall as { tool: Tool }).tool
-          : undefined;
-
-      if (currentToolInstance) {
-        displayName = currentToolInstance.displayName;
-        description = currentToolInstance.getDescription(
-          trackedCall.request.args,
-        );
-        renderOutputAsMarkdown = currentToolInstance.isOutputMarkdown;
-      } else if ('request' in trackedCall && 'args' in trackedCall.request) {
+      if (trackedCall.status === 'error') {
+        displayName =
+          trackedCall.tool === undefined
+            ? trackedCall.request.name
+            : trackedCall.tool.displayName;
         description = JSON.stringify(trackedCall.request.args);
+      } else {
+        displayName = trackedCall.tool.displayName;
+        description = trackedCall.invocation.getDescription();
+        renderOutputAsMarkdown = trackedCall.tool.isOutputMarkdown;
       }
 
       const baseDisplayProperties: Omit<
@@ -256,7 +251,6 @@ export function mapToDisplay(
         case 'error':
           return {
             ...baseDisplayProperties,
-            name: currentToolInstance?.displayName ?? trackedCall.request.name,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: trackedCall.response.resultDisplay,
             confirmationDetails: undefined,

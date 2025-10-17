@@ -8,7 +8,7 @@
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
-import { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
 
 // Mock qrcode-terminal module
 vi.mock('qrcode-terminal', () => ({
@@ -81,7 +81,7 @@ describe('QwenOAuthProgress', () => {
       const output = lastFrame();
       expect(output).toContain('MockSpinner(dots)');
       expect(output).toContain('Waiting for Qwen OAuth authentication...');
-      expect(output).toContain('(Press ESC to cancel)');
+      expect(output).toContain('(Press ESC or CTRL+C to cancel)');
     });
 
     it('should render loading state with gray border', () => {
@@ -105,7 +105,7 @@ describe('QwenOAuthProgress', () => {
       expect(output).toContain('MockSpinner(dots)');
       expect(output).toContain('Waiting for authorization');
       expect(output).toContain('Time remaining: 5:00');
-      expect(output).toContain('(Press ESC to cancel)');
+      expect(output).toContain('(Press ESC or CTRL+C to cancel)');
     });
 
     it('should display correct URL in Static component when QR code is generated', async () => {

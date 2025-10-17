@@ -35,7 +35,7 @@ describe('docsCommand', () => {
       throw new Error('docsCommand must have an action.');
     }
 
-    const docsUrl = 'https://github.com/QwenLM/qwen-code';
+    const docsUrl = 'https://qwenlm.github.io/qwen-code-docs/en';
 
     await docsCommand.action(mockContext, '');
 
@@ -56,8 +56,8 @@ describe('docsCommand', () => {
     }
 
     // Simulate a sandbox environment
-    process.env.SANDBOX = 'gemini-sandbox';
-    const docsUrl = 'https://github.com/QwenLM/qwen-code';
+    vi.stubEnv('SANDBOX', 'gemini-sandbox');
+    const docsUrl = 'https://qwenlm.github.io/qwen-code-docs/en';
 
     await docsCommand.action(mockContext, '');
 
@@ -79,8 +79,8 @@ describe('docsCommand', () => {
     }
 
     // Simulate the specific 'sandbox-exec' environment
-    process.env.SANDBOX = 'sandbox-exec';
-    const docsUrl = 'https://github.com/QwenLM/qwen-code';
+    vi.stubEnv('SANDBOX', 'sandbox-exec');
+    const docsUrl = 'https://qwenlm.github.io/qwen-code-docs/en';
 
     await docsCommand.action(mockContext, '');
 

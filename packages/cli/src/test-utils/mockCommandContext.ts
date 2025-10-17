@@ -5,10 +5,10 @@
  */
 
 import { vi } from 'vitest';
-import { CommandContext } from '../ui/commands/types.js';
-import { LoadedSettings } from '../config/settings.js';
-import { GitService } from '@qwen-code/qwen-code-core';
-import { SessionStatsState } from '../ui/contexts/SessionContext.js';
+import type { CommandContext } from '../ui/commands/types.js';
+import type { LoadedSettings } from '../config/settings.js';
+import type { GitService } from '@qwen-code/qwen-code-core';
+import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
 
 // A utility type to make all properties of an object, and its nested objects, partial.
 type DeepPartial<T> = T extends object
@@ -35,7 +35,10 @@ export const createMockCommandContext = (
     },
     services: {
       config: null,
-      settings: { merged: {} } as LoadedSettings,
+      settings: {
+        merged: {},
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings,
       git: undefined as GitService | undefined,
       logger: {
         log: vi.fn(),
@@ -54,7 +57,8 @@ export const createMockCommandContext = (
       loadHistory: vi.fn(),
       toggleCorgiMode: vi.fn(),
       toggleVimEnabled: vi.fn(),
-    },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any,
     session: {
       sessionShellAllowlist: new Set<string>(),
       stats: {
@@ -73,7 +77,6 @@ export const createMockCommandContext = (
         },
         promptCount: 0,
       } as SessionStatsState,
-      resetSession: vi.fn(),
     },
   };
 

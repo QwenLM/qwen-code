@@ -5,10 +5,11 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  Config,
   CodeAssistServer,
   UserTierId,
+  LoggingContentGenerator,
 } from '@qwen-code/qwen-code-core';
 
 export interface PrivacyState {
@@ -84,7 +85,13 @@ export const usePrivacySettings = (config: Config) => {
 };
 
 function getCodeAssistServer(config: Config): CodeAssistServer {
-  const server = config.getGeminiClient().getContentGenerator();
+  let server = config.getGeminiClient().getContentGenerator();
+
+  // Unwrap LoggingContentGenerator if present
+  if (server instanceof LoggingContentGenerator) {
+    server = server.getWrapped();
+  }
+
   // Neither of these cases should ever happen.
   if (!(server instanceof CodeAssistServer)) {
     throw new Error('Oauth not being used');

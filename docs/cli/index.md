@@ -10,6 +10,7 @@ Within Qwen Code, `packages/cli` is the frontend for users to send and receive p
 - **[Token Caching](./token-caching.md):** Optimize API costs through token caching.
 - **[Themes](./themes.md)**: A guide to customizing the CLI's appearance with different themes.
 - **[Tutorials](tutorials.md)**: A tutorial showing how to use Qwen Code to automate a development task.
+- **[Welcome Back](./welcome-back.md)**: Learn about the Welcome Back feature that helps you resume work seamlessly across sessions.
 
 ## Non-interactive mode
 

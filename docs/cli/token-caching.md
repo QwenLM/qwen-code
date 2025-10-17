@@ -1,10 +1,10 @@
 # Token Caching and Cost Optimization
 
-Gemini CLI automatically optimizes API costs through token caching when using API key authentication (Gemini API key or Vertex AI). This feature reuses previous system instructions and context to reduce the number of tokens processed in subsequent requests.
+Qwen Code automatically optimizes API costs through token caching when using API key authentication (e.g., OpenAI-compatible providers). This feature reuses previous system instructions and context to reduce the number of tokens processed in subsequent requests.
 
 **Token caching is available for:**
 
-- API key users (Gemini API key)
+- API key users (Qwen API key)
 - Vertex AI users (with project and location setup)
 
 **Token caching is not available for:**

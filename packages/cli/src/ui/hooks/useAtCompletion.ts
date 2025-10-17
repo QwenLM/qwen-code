@@ -5,11 +5,10 @@
  */
 
 import { useEffect, useReducer, useRef } from 'react';
-import { Config, FileSearch, escapePath } from '@qwen-code/qwen-code-core';
-import {
-  Suggestion,
-  MAX_SUGGESTIONS_TO_SHOW,
-} from '../components/SuggestionsDisplay.js';
+import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
+import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
+import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 
 export enum AtCompletionStatus {
   IDLE = 'idle',
@@ -156,7 +155,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
   useEffect(() => {
     const initialize = async () => {
       try {
-        const searcher = new FileSearch({
+        const searcher = FileSearchFactory.create({
           projectRoot: cwd,
           ignoreDirs: [],
           useGitignore:
@@ -165,6 +164,10 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
             config?.getFileFilteringOptions()?.respectGeminiIgnore ?? true,
           cache: true,
           cacheTtl: 30, // 30 seconds
+          enableRecursiveFileSearch:
+            config?.getEnableRecursiveFileSearch() ?? true,
+          disableFuzzySearch:
+            config?.getFileFilteringDisableFuzzySearch() ?? false,
         });
         await searcher.initialize();
         fileSearch.current = searcher;
@@ -191,7 +194,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
 
       slowSearchTimer.current = setTimeout(() => {
         dispatch({ type: 'SET_LOADING', payload: true });
-      }, 100);
+      }, 200);
 
       try {
         const results = await fileSearch.current.search(state.pattern, {

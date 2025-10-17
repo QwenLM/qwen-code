@@ -1,16 +1,16 @@
 # Package Overview
 
-This monorepo contains two main packages: `@google/gemini-cli` and `@google/gemini-cli-core`.
+This monorepo contains two main packages: `@qwen-code/qwen-code` and `@qwen-code/qwen-code-core`.
 
-## `@google/gemini-cli`
+## `@qwen-code/qwen-code`
 
-This is the main package for the Gemini CLI. It is responsible for the user interface, command parsing, and all other user-facing functionality.
+This is the main package for Qwen Code. It is responsible for the user interface, command parsing, and all other user-facing functionality.
 
-When this package is published, it is bundled into a single executable file. This bundle includes all of the package's dependencies, including `@google/gemini-cli-core`. This means that whether a user installs the package with `npm install -g @google/gemini-cli` or runs it directly with `npx @google/gemini-cli`, they are using this single, self-contained executable.
+When this package is published, it is bundled into a single executable file. This bundle includes all of the package's dependencies, including `@qwen-code/qwen-code-core`. This means that whether a user installs the package with `npm install -g @qwen-code/qwen-code` or runs it directly with `npx @qwen-code/qwen-code`, they are using this single, self-contained executable.
 
-## `@google/gemini-cli-core`
+## `@qwen-code/qwen-code-core`
 
-This package contains the core logic for interacting with the Gemini API. It is responsible for making API requests, handling authentication, and managing the local cache.
+This package contains the core logic for the CLI. It is responsible for making API requests to configured providers, handling authentication, and managing the local cache.
 
 This package is not bundled. When it is published, it is published as a standard Node.js package with its own dependencies. This allows it to be used as a standalone package in other projects, if needed. All transpiled js code in the `dist` folder is included in the package.
 
@@ -20,7 +20,7 @@ This project follows a structured release process to ensure that all packages ar
 
 ## How To Release
 
-Releases are managed through the [release.yml](https://github.com/google-gemini/gemini-cli/actions/workflows/release.yml) GitHub Actions workflow. To perform a manual release for a patch or hotfix:
+Releases are managed through the [release.yml](https://github.com/QwenLM/qwen-code/actions/workflows/release.yml) GitHub Actions workflow. To perform a manual release for a patch or hotfix:
 
 1.  Navigate to the **Actions** tab of the repository.
 2.  Select the **Release** workflow from the list.
@@ -37,7 +37,7 @@ In addition to manual releases, this project has an automated nightly release pr
 
 ### Process
 
-Every night at midnight UTC, the [Release workflow](https://github.com/google-gemini/gemini-cli/actions/workflows/release.yml) runs automatically on a schedule. It performs the following steps:
+Every night at midnight UTC, the [Release workflow](https://github.com/QwenLM/qwen-code/actions/workflows/release.yml) runs automatically on a schedule. It performs the following steps:
 
 1.  Checks out the latest code from the `main` branch.
 2.  Installs all dependencies.
@@ -55,16 +55,16 @@ If any step in the nightly workflow fails, it will automatically create a new is
 To install the latest nightly build, use the `@nightly` tag:
 
 ```bash
-npm install -g @google/gemini-cli@nightly
+npm install -g @qwen-code/qwen-code@nightly
 ```
 
-We also run a Google cloud build called [release-docker.yml](../.gcp/release-docker.yaml). Which publishes the sandbox docker to match your release. This will also be moved to GH and combined with the main release file once service account permissions are sorted out.
+We also run a Google cloud build called [release-docker.yml](../.gcp/release-docker.yml). Which publishes the sandbox docker to match your release. This will also be moved to GH and combined with the main release file once service account permissions are sorted out.
 
 ### After the Release
 
-After the workflow has successfully completed, you can monitor its progress in the [GitHub Actions tab](https://github.com/google-gemini/gemini-cli/actions/workflows/release.yml). Once complete, you should:
+After the workflow has successfully completed, you can monitor its progress in the [GitHub Actions tab](https://github.com/QwenLM/qwen-code/actions/workflows/release.yml). Once complete, you should:
 
-1.  Go to the [pull requests page](https://github.com/google-gemini/gemini-cli/pulls) of the repository.
+1.  Go to the [pull requests page](https://github.com/QwenLM/qwen-code/pulls) of the repository.
 2.  Create a new pull request from the `release/vX.Y.Z` branch to `main`.
 3.  Review the pull request (it should only contain version updates in `package.json` files) and merge it. This keeps the version in `main` up-to-date.
 
@@ -72,9 +72,9 @@ After the workflow has successfully completed, you can monitor its progress in t
 
 After pushing a new release smoke testing should be performed to ensure that the packages are working as expected. This can be done by installing the packages locally and running a set of tests to ensure that they are functioning correctly.
 
-- `npx -y @google/gemini-cli@latest --version` to validate the push worked as expected if you were not doing a rc or dev tag
-- `npx -y @google/gemini-cli@<release tag> --version` to validate the tag pushed appropriately
-- _This is destructive locally_ `npm uninstall @google/gemini-cli && npm uninstall -g @google/gemini-cli && npm cache clean --force &&  npm install @google/gemini-cli@<version>`
+- `npx -y @qwen-code/qwen-code@latest --version` to validate the push worked as expected if you were not doing a rc or dev tag
+- `npx -y @qwen-code/qwen-code@<release tag> --version` to validate the tag pushed appropriately
+- _This is destructive locally_ `npm uninstall @qwen-code/qwen-code && npm uninstall -g @qwen-code/qwen-code && npm cache clean --force &&  npm install @qwen-code/qwen-code@<version>`
 - Smoke testing a basic run through of exercising a few llm commands and tools is recommended to ensure that the packages are working as expected. We'll codify this more in the future.
 
 ## When to merge the version change, or not?
@@ -126,7 +126,7 @@ You typically do not merge release branches for pre-releases back into `main`.
 
 If you need to test the release process without actually publishing to NPM or creating a public GitHub release, you can trigger the workflow manually from the GitHub UI.
 
-1.  Go to the [Actions tab](https://github.com/google-gemini/gemini-cli/actions/workflows/release.yml) of the repository.
+1.  Go to the [Actions tab](https://github.com/QwenLM/qwen-code/actions/workflows/release.yml) of the repository.
 2.  Click on the "Run workflow" dropdown.
 3.  Leave the `dry_run` option checked (`true`).
 4.  Click the "Run workflow" button.
@@ -148,7 +148,7 @@ This command will do the following:
 3.  Create the package tarballs that would be published to npm.
 4.  Print a summary of the packages that would be published.
 
-You can then inspect the generated tarballs to ensure that they contain the correct files and that the `package.json` files have been updated correctly. The tarballs will be created in the root of each package's directory (e.g., `packages/cli/google-gemini-cli-0.1.6.tgz`).
+You can then inspect the generated tarballs to ensure that they contain the correct files and that the `package.json` files have been updated correctly. The tarballs will be created in the root of each package's directory (e.g., `packages/cli/qwen-code-0.1.6.tgz`).
 
 By performing a dry run, you can be confident that your changes to the packaging process are correct and that the packages will be published successfully.
 
@@ -187,7 +187,7 @@ This is the most critical stage where files are moved and transformed into their
     - File movement: packages/cli/package.json -> (in-memory transformation) -> `bundle`/package.json
     - Why: The final package.json must be different from the one used in development. Key changes include:
       - Removing devDependencies.
-      - Removing workspace-specific "dependencies": { "@gemini-cli/core": "workspace:\*" } and ensuring the core code is
+      - Removing workspace-specific "dependencies": { "@qwen-code/core": "workspace:\*" } and ensuring the core code is
         bundled directly into the final JavaScript file.
       - Ensuring the bin, main, and files fields point to the correct locations within the final package structure.
 
@@ -277,4 +277,4 @@ This tells NPM that any folder inside the `packages` directory is a separate pac
 
 - **Simplified Dependency Management**: Running `npm install` from the root of the project will install all dependencies for all packages in the workspace and link them together. This means you don't need to run `npm install` in each package's directory.
 - **Automatic Linking**: Packages within the workspace can depend on each other. When you run `npm install`, NPM will automatically create symlinks between the packages. This means that when you make changes to one package, the changes are immediately available to other packages that depend on it.
-- **Simplified Script Execution**: You can run scripts in any package from the root of the project using the `--workspace` flag. For example, to run the `build` script in the `cli` package, you can run `npm run build --workspace @google/gemini-cli`.
+- **Simplified Script Execution**: You can run scripts in any package from the root of the project using the `--workspace` flag. For example, to run the `build` script in the `cli` package, you can run `npm run build --workspace @qwen-code/qwen-code`.

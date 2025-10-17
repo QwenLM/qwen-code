@@ -7,25 +7,36 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   Box,
-  DOMElement,
+  type DOMElement,
   measureElement,
   Static,
   Text,
   useStdin,
   useStdout,
-  useInput,
-  type Key as InkKeyType,
 } from 'ink';
-import { StreamingState, type HistoryItem, MessageType } from './types.js';
+import {
+  StreamingState,
+  type HistoryItem,
+  MessageType,
+  ToolCallStatus,
+  type HistoryItemWithoutId,
+} from './types.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useAuthCommand } from './hooks/useAuthCommand.js';
 import { useQwenAuth } from './hooks/useQwenAuth.js';
+import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
+import { useQuitConfirmation } from './hooks/useQuitConfirmation.js';
+import { useWelcomeBack } from './hooks/useWelcomeBack.js';
+import { useDialogClose } from './hooks/useDialogClose.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
+import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
+import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
 import { Header } from './components/Header.js';
 import { LoadingIndicator } from './components/LoadingIndicator.js';
@@ -38,32 +49,53 @@ import { AuthDialog } from './components/AuthDialog.js';
 import { AuthInProgress } from './components/AuthInProgress.js';
 import { QwenOAuthProgress } from './components/QwenOAuthProgress.js';
 import { EditorSettingsDialog } from './components/EditorSettingsDialog.js';
+import { FolderTrustDialog } from './components/FolderTrustDialog.js';
 import { ShellConfirmationDialog } from './components/ShellConfirmationDialog.js';
+import { QuitConfirmationDialog } from './components/QuitConfirmationDialog.js';
+import { RadioButtonSelect } from './components/shared/RadioButtonSelect.js';
+import { ModelSelectionDialog } from './components/ModelSelectionDialog.js';
+import {
+  ModelSwitchDialog,
+  type VisionSwitchOutcome,
+} from './components/ModelSwitchDialog.js';
+import {
+  getOpenAIAvailableModelFromEnv,
+  getFilteredQwenModels,
+  type AvailableModel,
+} from './models/availableModels.js';
+import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
+import {
+  AgentCreationWizard,
+  AgentsManagerDialog,
+} from './components/subagents/index.js';
 import { Colors } from './colors.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
-import { LoadedSettings } from '../config/settings.js';
+import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope } from '../config/settings.js';
 import { Tips } from './components/Tips.js';
 import { ConsolePatcher } from './utils/ConsolePatcher.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { DetailedMessagesDisplay } from './components/DetailedMessagesDisplay.js';
 import { HistoryItemDisplay } from './components/HistoryItemDisplay.js';
 import { ContextSummaryDisplay } from './components/ContextSummaryDisplay.js';
-import { IDEContextDetailDisplay } from './components/IDEContextDetailDisplay.js';
 import { useHistory } from './hooks/useHistoryManager.js';
 import process from 'node:process';
+import type { EditorType, Config, IdeContext } from '@qwen-code/qwen-code-core';
 import {
-  getErrorMessage,
-  type Config,
-  getAllGeminiMdFilenames,
   ApprovalMode,
+  getAllGeminiMdFilenames,
   isEditorAvailable,
-  EditorType,
-  FlashFallbackEvent,
-  logFlashFallback,
+  getErrorMessage,
   AuthType,
-  type IdeContext,
+  logFlashFallback,
+  FlashFallbackEvent,
   ideContext,
+  isProQuotaExceededError,
+  isGenericQuotaExceededError,
+  UserTierId,
 } from '@qwen-code/qwen-code-core';
+import type { IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
+import { IdeIntegrationNudge } from './IdeIntegrationNudge.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { useLogger } from './hooks/useLogger.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
@@ -77,22 +109,29 @@ import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useVimMode, VimModeProvider } from './contexts/VimModeContext.js';
 import { useVim } from './hooks/vim.js';
-import * as fs from 'fs';
+import type { Key } from './hooks/useKeypress.js';
+import { useKeypress } from './hooks/useKeypress.js';
+import { KeypressProvider } from './contexts/KeypressContext.js';
+import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
+import { keyMatchers, Command } from './keyMatchers.js';
+import * as fs from 'node:fs';
 import { UpdateNotification } from './components/UpdateNotification.js';
-import {
-  isProQuotaExceededError,
-  isGenericQuotaExceededError,
-  UserTierId,
-} from '@qwen-code/qwen-code-core';
-import { UpdateObject } from './utils/updateCheck.js';
+import type { UpdateObject } from './utils/updateCheck.js';
 import ansiEscapes from 'ansi-escapes';
 import { OverflowProvider } from './contexts/OverflowContext.js';
 import { ShowMoreLines } from './components/ShowMoreLines.js';
 import { PrivacyNotice } from './privacy/PrivacyNotice.js';
+import { useSettingsCommand } from './hooks/useSettingsCommand.js';
+import { SettingsDialog } from './components/SettingsDialog.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
 import { appEvents, AppEvent } from '../utils/events.js';
+import { isNarrowWidth } from './utils/isNarrowWidth.js';
+import { useWorkspaceMigration } from './hooks/useWorkspaceMigration.js';
+import { WorkspaceMigrationDialog } from './components/WorkspaceMigrationDialog.js';
+import { WelcomeBackDialog } from './components/WelcomeBackDialog.js';
 
-const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+// Maximum number of queued messages to display in UI to prevent performance issues
+const MAX_DISPLAYED_QUEUED_MESSAGES = 3;
 
 interface AppProps {
   config: Config;
@@ -101,13 +140,37 @@ interface AppProps {
   version: string;
 }
 
-export const AppWrapper = (props: AppProps) => (
-  <SessionStatsProvider>
-    <VimModeProvider settings={props.settings}>
-      <App {...props} />
-    </VimModeProvider>
-  </SessionStatsProvider>
-);
+function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
+  return pendingHistoryItems.some((item) => {
+    if (item && item.type === 'tool_group') {
+      return item.tools.some(
+        (tool) => ToolCallStatus.Executing === tool.status,
+      );
+    }
+    return false;
+  });
+}
+
+export const AppWrapper = (props: AppProps) => {
+  const kittyProtocolStatus = useKittyKeyboardProtocol();
+  const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
+  return (
+    <KeypressProvider
+      kittyProtocolEnabled={kittyProtocolStatus.enabled}
+      pasteWorkaround={process.platform === 'win32' || nodeMajorVersion < 20}
+      config={props.config}
+      debugKeystrokeLogging={
+        props.settings.merged.general?.debugKeystrokeLogging
+      }
+    >
+      <SessionStatsProvider>
+        <VimModeProvider settings={props.settings}>
+          <App {...props} />
+        </VimModeProvider>
+      </SessionStatsProvider>
+    </KeypressProvider>
+  );
+};
 
 const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const isFocused = useFocus();
@@ -116,6 +179,17 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const { stdout } = useStdout();
   const nightly = version.includes('nightly');
   const { history, addItem, clearItems, loadHistory } = useHistory();
+
+  const [idePromptAnswered, setIdePromptAnswered] = useState(false);
+  const currentIDE = config.getIdeClient().getCurrentIde();
+  useEffect(() => {
+    registerCleanup(() => config.getIdeClient().disconnect());
+  }, [config]);
+  const shouldShowIdePrompt =
+    currentIDE &&
+    !config.getIdeMode() &&
+    !settings.merged.ide?.hasSeenNudge &&
+    !idePromptAnswered;
 
   useEffect(() => {
     const cleanup = setUpdateHandler(addItem, setUpdateInfo);
@@ -152,13 +226,15 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const [editorError, setEditorError] = useState<string | null>(null);
   const [footerHeight, setFooterHeight] = useState<number>(0);
   const [corgiMode, setCorgiMode] = useState(false);
+  const [isTrustedFolderState, setIsTrustedFolder] = useState(
+    config.isTrustedFolder(),
+  );
   const [currentModel, setCurrentModel] = useState(config.getModel());
   const [shellModeActive, setShellModeActive] = useState(false);
   const [showErrorDetails, setShowErrorDetails] = useState<boolean>(false);
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
-  const [showIDEContextDetail, setShowIDEContextDetail] =
-    useState<boolean>(false);
+
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const [quittingMessages, setQuittingMessages] = useState<
     HistoryItem[] | null
@@ -174,7 +250,28 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
   >();
+  const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const {
+    showWorkspaceMigrationDialog,
+    workspaceExtensions,
+    onWorkspaceMigrationDialogOpen,
+    onWorkspaceMigrationDialogClose,
+  } = useWorkspaceMigration(settings);
+
+  // Model selection dialog states
+  const [isModelSelectionDialogOpen, setIsModelSelectionDialogOpen] =
+    useState(false);
+  const [isVisionSwitchDialogOpen, setIsVisionSwitchDialogOpen] =
+    useState(false);
+  const [visionSwitchResolver, setVisionSwitchResolver] = useState<{
+    resolve: (result: {
+      modelOverride?: string;
+      persistSessionModel?: string;
+      showGuidance?: boolean;
+    }) => void;
+    reject: () => void;
+  } | null>(null);
 
   useEffect(() => {
     const unsubscribe = ideContext.subscribeToIdeContext(setIdeContextState);
@@ -208,6 +305,11 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const openPrivacyNotice = useCallback(() => {
     setShowPrivacyNotice(true);
   }, []);
+
+  const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
+    setShowEscapePrompt(showPrompt);
+  }, []);
+
   const initialPromptSubmitted = useRef(false);
 
   const errorCount = useMemo(
@@ -224,6 +326,27 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     handleThemeSelect,
     handleThemeHighlight,
   } = useThemeCommand(settings, setThemeError, addItem);
+
+  const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
+    useSettingsCommand();
+
+  const {
+    isSubagentCreateDialogOpen,
+    openSubagentCreateDialog,
+    closeSubagentCreateDialog,
+  } = useSubagentCreateDialog();
+
+  const {
+    isAgentsManagerDialogOpen,
+    openAgentsManagerDialog,
+    closeAgentsManagerDialog,
+  } = useAgentsManagerDialog();
+
+  const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
+    useFolderTrust(settings, setIsTrustedFolder);
+
+  const { showQuitConfirmation, handleQuitConfirmationSelect } =
+    useQuitConfirmation();
 
   const {
     isAuthDialogOpen,
@@ -243,16 +366,21 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   } = useQwenAuth(settings, isAuthenticating);
 
   useEffect(() => {
-    if (settings.merged.selectedAuthType && !settings.merged.useExternalAuth) {
-      const error = validateAuthMethod(settings.merged.selectedAuthType);
+    if (
+      settings.merged.security?.auth?.selectedType &&
+      !settings.merged.security?.auth?.useExternal
+    ) {
+      const error = validateAuthMethod(
+        settings.merged.security.auth.selectedType,
+      );
       if (error) {
         setAuthError(error);
         openAuthDialog();
       }
     }
   }, [
-    settings.merged.selectedAuthType,
-    settings.merged.useExternalAuth,
+    settings.merged.security?.auth?.selectedType,
+    settings.merged.security?.auth?.useExternal,
     openAuthDialog,
     setAuthError,
   ]);
@@ -308,14 +436,14 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     try {
       const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
         process.cwd(),
-        settings.merged.loadMemoryFromIncludeDirectories
+        settings.merged.context?.loadMemoryFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()
           : [],
         config.getDebugMode(),
         config.getFileService(),
         settings.merged,
         config.getExtensionContextFilePaths(),
-        settings.merged.memoryImportFormat || 'tree', // Use setting or default to 'tree'
+        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
         config.getFileFilteringOptions(),
       );
 
@@ -438,7 +566,9 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       }
 
       // Switch model for future use but return false to stop current retry
-      config.setModel(fallbackModel);
+      config.setModel(fallbackModel).catch((error) => {
+        console.error('Failed to switch to fallback model:', error);
+      });
       config.setFallbackMode(true);
       logFlashFallback(
         config,
@@ -452,6 +582,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
 
   // Terminal and UI setup
   const { rows: terminalHeight, columns: terminalWidth } = useTerminalSize();
+  const isNarrow = isNarrowWidth(terminalWidth);
   const { stdin, setRawMode } = useStdin();
   const isInitialMount = useRef(true);
 
@@ -460,7 +591,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     20,
     Math.floor(terminalWidth * widthFraction) - 3,
   );
-  const suggestionsWidth = Math.max(60, Math.floor(terminalWidth * 0.8));
+  const suggestionsWidth = Math.max(20, Math.floor(terminalWidth * 0.8));
 
   // Utility callbacks
   const isValidPath = useCallback((filePath: string): boolean => {
@@ -472,7 +603,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   }, []);
 
   const getPreferredEditor = useCallback(() => {
-    const editorType = settings.merged.preferredEditor;
+    const editorType = settings.merged.general?.preferredEditor;
     const isValidEditor = isEditorAvailable(editorType);
     if (!isValidEditor) {
       openEditorDialog();
@@ -485,6 +616,86 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     setAuthError('reauth required');
     openAuthDialog();
   }, [openAuthDialog, setAuthError]);
+
+  // Vision switch handler for auto-switch functionality
+  const handleVisionSwitchRequired = useCallback(
+    async (_query: unknown) =>
+      new Promise<{
+        modelOverride?: string;
+        persistSessionModel?: string;
+        showGuidance?: boolean;
+      }>((resolve, reject) => {
+        setVisionSwitchResolver({ resolve, reject });
+        setIsVisionSwitchDialogOpen(true);
+      }),
+    [],
+  );
+
+  const handleVisionSwitchSelect = useCallback(
+    (outcome: VisionSwitchOutcome) => {
+      setIsVisionSwitchDialogOpen(false);
+      if (visionSwitchResolver) {
+        const result = processVisionSwitchOutcome(outcome);
+        visionSwitchResolver.resolve(result);
+        setVisionSwitchResolver(null);
+      }
+    },
+    [visionSwitchResolver],
+  );
+
+  const handleModelSelectionOpen = useCallback(() => {
+    setIsModelSelectionDialogOpen(true);
+  }, []);
+
+  const handleModelSelectionClose = useCallback(() => {
+    setIsModelSelectionDialogOpen(false);
+  }, []);
+
+  const handleModelSelect = useCallback(
+    async (modelId: string) => {
+      try {
+        await config.setModel(modelId);
+        setCurrentModel(modelId);
+        setIsModelSelectionDialogOpen(false);
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: `Switched model to \`${modelId}\` for this session.`,
+          },
+          Date.now(),
+        );
+      } catch (error) {
+        console.error('Failed to switch model:', error);
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: `Failed to switch to model \`${modelId}\`. Please try again.`,
+          },
+          Date.now(),
+        );
+      }
+    },
+    [config, setCurrentModel, addItem],
+  );
+
+  const getAvailableModelsForCurrentAuth = useCallback((): AvailableModel[] => {
+    const contentGeneratorConfig = config.getContentGeneratorConfig();
+    if (!contentGeneratorConfig) return [];
+
+    const visionModelPreviewEnabled =
+      settings.merged.experimental?.visionModelPreview ?? true;
+
+    switch (contentGeneratorConfig.authType) {
+      case AuthType.QWEN_OAUTH:
+        return getFilteredQwenModels(visionModelPreviewEnabled);
+      case AuthType.USE_OPENAI: {
+        const openAIModel = getOpenAIAvailableModelFromEnv();
+        return openAIModel ? [openAIModel] : [];
+      }
+      default:
+        return [];
+    }
+  }, [config, settings.merged.experimental?.visionModelPreview]);
 
   // Core hooks and processors
   const {
@@ -499,6 +710,8 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     pendingHistoryItems: pendingSlashCommandHistoryItems,
     commandContext,
     shellConfirmationRequest,
+    confirmationRequest,
+    quitConfirmationRequest,
   } = useSlashCommandProcessor(
     config,
     settings,
@@ -513,10 +726,29 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     toggleCorgiMode,
     setQuittingMessages,
     openPrivacyNotice,
+    openSettingsDialog,
+    handleModelSelectionOpen,
+    openSubagentCreateDialog,
+    openAgentsManagerDialog,
     toggleVimEnabled,
     setIsProcessing,
     setGeminiMdFileCount,
+    showQuitConfirmation,
   );
+
+  const buffer = useTextBuffer({
+    initialText: '',
+    viewport: { height: 10, width: inputWidth },
+    stdin,
+    setRawMode,
+    isValidPath,
+    shellModeActive,
+  });
+
+  const [userMessages, setUserMessages] = useState<string[]>([]);
+
+  // Stable reference for cancel handler to avoid circular dependency
+  const cancelHandlerRef = useRef<() => void>(() => {});
 
   const {
     streamingState,
@@ -524,6 +756,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     initError,
     pendingHistoryItems: pendingGeminiHistoryItems,
     thought,
+    cancelOngoingRequest,
   } = useGeminiStream(
     config.getGeminiClient(),
     history,
@@ -538,98 +771,265 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     modelSwitchedFromQuotaError,
     setModelSwitchedFromQuotaError,
     refreshStatic,
+    () => cancelHandlerRef.current(),
+    settings.merged.experimental?.visionModelPreview ?? true,
+    handleVisionSwitchRequired,
   );
 
-  // Input handling
-  const handleFinalSubmit = useCallback(
-    (submittedValue: string) => {
-      const trimmedValue = submittedValue.trim();
-      if (trimmedValue.length > 0) {
-        submitQuery(trimmedValue);
-      }
-    },
-    [submitQuery],
+  const pendingHistoryItems = useMemo(
+    () =>
+      [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems].map(
+        (item, index) => ({
+          ...item,
+          id: index,
+        }),
+      ),
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 
-  const buffer = useTextBuffer({
-    initialText: '',
-    viewport: { height: 10, width: inputWidth },
-    stdin,
-    setRawMode,
-    isValidPath,
-    shellModeActive,
+  // Welcome back functionality
+  const {
+    welcomeBackInfo,
+    showWelcomeBackDialog,
+    welcomeBackChoice,
+    handleWelcomeBackSelection,
+    handleWelcomeBackClose,
+  } = useWelcomeBack(config, submitQuery, buffer, settings.merged);
+
+  // Dialog close functionality
+  const { closeAnyOpenDialog } = useDialogClose({
+    isThemeDialogOpen,
+    handleThemeSelect,
+    isAuthDialogOpen,
+    handleAuthSelect,
+    selectedAuthType: settings.merged.security?.auth?.selectedType,
+    isEditorDialogOpen,
+    exitEditorDialog,
+    isSettingsDialogOpen,
+    closeSettingsDialog,
+    isFolderTrustDialogOpen,
+    showPrivacyNotice,
+    setShowPrivacyNotice,
+    showWelcomeBackDialog,
+    handleWelcomeBackClose,
+    quitConfirmationRequest,
   });
 
+  // Message queue for handling input during streaming
+  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
+    useMessageQueue({
+      streamingState,
+      submitQuery,
+    });
+
+  // Update the cancel handler with message queue support
+  cancelHandlerRef.current = useCallback(() => {
+    if (isToolExecuting(pendingHistoryItems)) {
+      buffer.setText(''); // Just clear the prompt
+      return;
+    }
+
+    const lastUserMessage = userMessages.at(-1);
+    let textToSet = lastUserMessage || '';
+
+    // Append queued messages if any exist
+    const queuedText = getQueuedMessagesText();
+    if (queuedText) {
+      textToSet = textToSet ? `${textToSet}\n\n${queuedText}` : queuedText;
+      clearQueue();
+    }
+
+    if (textToSet) {
+      buffer.setText(textToSet);
+    }
+  }, [
+    buffer,
+    userMessages,
+    getQueuedMessagesText,
+    clearQueue,
+    pendingHistoryItems,
+  ]);
+
+  // Input handling - queue messages for processing
+  const handleFinalSubmit = useCallback(
+    (submittedValue: string) => {
+      addMessage(submittedValue);
+    },
+    [addMessage],
+  );
+
+  const handleIdePromptComplete = useCallback(
+    (result: IdeIntegrationNudgeResult) => {
+      if (result.userSelection === 'yes') {
+        if (result.isExtensionPreInstalled) {
+          handleSlashCommand('/ide enable');
+        } else {
+          handleSlashCommand('/ide install');
+        }
+        settings.setValue(
+          SettingScope.User,
+          'hasSeenIdeIntegrationNudge',
+          true,
+        );
+      } else if (result.userSelection === 'dismiss') {
+        settings.setValue(
+          SettingScope.User,
+          'hasSeenIdeIntegrationNudge',
+          true,
+        );
+      }
+      setIdePromptAnswered(true);
+    },
+    [handleSlashCommand, settings],
+  );
+
   const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
-  const pendingHistoryItems = [...pendingSlashCommandHistoryItems];
-  pendingHistoryItems.push(...pendingGeminiHistoryItems);
 
   const { elapsedTime, currentLoadingPhrase } =
     useLoadingIndicator(streamingState);
-  const showAutoAcceptIndicator = useAutoAcceptIndicator({ config });
+  const showAutoAcceptIndicator = useAutoAcceptIndicator({ config, addItem });
 
   const handleExit = useCallback(
     (
       pressedOnce: boolean,
       setPressedOnce: (value: boolean) => void,
-      timerRef: React.MutableRefObject<NodeJS.Timeout | null>,
+      timerRef: ReturnType<typeof useRef<NodeJS.Timeout | null>>,
     ) => {
+      // Fast double-press: Direct quit (preserve user habit)
       if (pressedOnce) {
         if (timerRef.current) {
           clearTimeout(timerRef.current);
         }
-        // Directly invoke the central command handler.
+        // Exit directly without showing confirmation dialog
         handleSlashCommand('/quit');
-      } else {
+        return;
+      }
+
+      // First press: Prioritize cleanup tasks
+
+      // Special case: If quit-confirm dialog is open, Ctrl+C means "quit immediately"
+      if (quitConfirmationRequest) {
+        handleSlashCommand('/quit');
+        return;
+      }
+
+      /**
+       * For AuthDialog it is required to complete the authentication process,
+       * otherwise user cannot proceed to the next step.
+       * So a quit on AuthDialog should go with normal two press quit
+       * and without quit-confirm dialog.
+       */
+      if (isAuthDialogOpen) {
         setPressedOnce(true);
         timerRef.current = setTimeout(() => {
           setPressedOnce(false);
-          timerRef.current = null;
-        }, CTRL_EXIT_PROMPT_DURATION_MS);
-      }
-    },
-    [handleSlashCommand],
-  );
-
-  useInput((input: string, key: InkKeyType) => {
-    let enteringConstrainHeightMode = false;
-    if (!constrainHeight) {
-      // Automatically re-enter constrain height mode if the user types
-      // anything. When constrainHeight==false, the user will experience
-      // significant flickering so it is best to disable it immediately when
-      // the user starts interacting with the app.
-      enteringConstrainHeightMode = true;
-      setConstrainHeight(true);
-    }
-
-    if (key.ctrl && input === 'o') {
-      setShowErrorDetails((prev) => !prev);
-    } else if (key.ctrl && input === 't') {
-      const newValue = !showToolDescriptions;
-      setShowToolDescriptions(newValue);
-
-      const mcpServers = config.getMcpServers();
-      if (Object.keys(mcpServers || {}).length > 0) {
-        handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
-      }
-    } else if (
-      key.ctrl &&
-      input === 'e' &&
-      config.getIdeMode() &&
-      ideContextState
-    ) {
-      setShowIDEContextDetail((prev) => !prev);
-    } else if (key.ctrl && (input === 'c' || input === 'C')) {
-      handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
-    } else if (key.ctrl && (input === 'd' || input === 'D')) {
-      if (buffer.text.length > 0) {
-        // Do nothing if there is text in the input.
+        }, 500);
         return;
       }
-      handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
-    } else if (key.ctrl && input === 's' && !enteringConstrainHeightMode) {
-      setConstrainHeight(false);
-    }
+
+      //1. Close other dialogs (highest priority)
+      if (closeAnyOpenDialog()) {
+        return; // Dialog closed, end processing
+      }
+
+      // 2. Cancel ongoing requests
+      if (streamingState === StreamingState.Responding) {
+        cancelOngoingRequest?.();
+        return; // Request cancelled, end processing
+      }
+
+      // 3. Clear input buffer (if has content)
+      if (buffer.text.length > 0) {
+        buffer.setText('');
+        return; // Input cleared, end processing
+      }
+
+      // All cleanup tasks completed, show quit confirmation dialog
+      handleSlashCommand('/quit-confirm');
+    },
+    [
+      isAuthDialogOpen,
+      handleSlashCommand,
+      quitConfirmationRequest,
+      closeAnyOpenDialog,
+      streamingState,
+      cancelOngoingRequest,
+      buffer,
+    ],
+  );
+
+  const handleGlobalKeypress = useCallback(
+    (key: Key) => {
+      // Debug log keystrokes if enabled
+      if (settings.merged.general?.debugKeystrokeLogging) {
+        console.log('[DEBUG] Keystroke:', JSON.stringify(key));
+      }
+
+      let enteringConstrainHeightMode = false;
+      if (!constrainHeight) {
+        enteringConstrainHeightMode = true;
+        setConstrainHeight(true);
+      }
+
+      if (keyMatchers[Command.SHOW_ERROR_DETAILS](key)) {
+        setShowErrorDetails((prev) => !prev);
+      } else if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {
+        const newValue = !showToolDescriptions;
+        setShowToolDescriptions(newValue);
+
+        const mcpServers = config.getMcpServers();
+        if (Object.keys(mcpServers || {}).length > 0) {
+          handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
+        }
+      } else if (
+        keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key) &&
+        config.getIdeMode() &&
+        ideContextState
+      ) {
+        // Show IDE status when in IDE mode and context is available.
+        handleSlashCommand('/ide status');
+      } else if (keyMatchers[Command.QUIT](key)) {
+        // When authenticating, let AuthInProgress component handle Ctrl+C.
+        if (isAuthenticating) {
+          return;
+        }
+        handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
+      } else if (keyMatchers[Command.EXIT](key)) {
+        if (buffer.text.length > 0) {
+          return;
+        }
+        handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
+      } else if (
+        keyMatchers[Command.SHOW_MORE_LINES](key) &&
+        !enteringConstrainHeightMode
+      ) {
+        setConstrainHeight(false);
+      }
+    },
+    [
+      constrainHeight,
+      setConstrainHeight,
+      setShowErrorDetails,
+      showToolDescriptions,
+      setShowToolDescriptions,
+      config,
+      ideContextState,
+      handleExit,
+      ctrlCPressedOnce,
+      setCtrlCPressedOnce,
+      ctrlCTimerRef,
+      buffer.text.length,
+      ctrlDPressedOnce,
+      setCtrlDPressedOnce,
+      ctrlDTimerRef,
+      handleSlashCommand,
+      isAuthenticating,
+      settings.merged.general?.debugKeystrokeLogging,
+    ],
+  );
+
+  useKeypress(handleGlobalKeypress, {
+    isActive: true,
   });
 
   useEffect(() => {
@@ -638,8 +1038,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     }
   }, [config, config.getGeminiMdFileCount]);
 
-  const logger = useLogger();
-  const [userMessages, setUserMessages] = useState<string[]>([]);
+  const logger = useLogger(config.storage);
 
   useEffect(() => {
     const fetchUserMessages = async () => {
@@ -678,7 +1077,11 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   }, [history, logger]);
 
   const isInputActive =
-    streamingState === StreamingState.Idle && !initError && !isProcessing;
+    (streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.Responding) &&
+    !initError &&
+    !isProcessing &&
+    !showWelcomeBackDialog;
 
   const handleClearScreen = useCallback(() => {
     clearItems();
@@ -738,12 +1141,12 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
   const branchName = useGitBranchName(config.getTargetDir());
 
   const contextFileNames = useMemo(() => {
-    const fromSettings = settings.merged.contextFileName;
+    const fromSettings = settings.merged.context?.fileName;
     if (fromSettings) {
       return Array.isArray(fromSettings) ? fromSettings : [fromSettings];
     }
     return getAllGeminiMdFilenames();
-  }, [settings.merged.contextFileName]);
+  }, [settings.merged.context?.fileName]);
 
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const geminiClient = config.getGeminiClient();
@@ -756,7 +1159,12 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       !isAuthDialogOpen &&
       !isThemeDialogOpen &&
       !isEditorDialogOpen &&
+      !isModelSelectionDialogOpen &&
+      !isVisionSwitchDialogOpen &&
+      !isSubagentCreateDialogOpen &&
       !showPrivacyNotice &&
+      !showWelcomeBackDialog &&
+      welcomeBackChoice !== 'restart' &&
       geminiClient?.isInitialized?.()
     ) {
       submitQuery(initialPrompt);
@@ -769,8 +1177,13 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
     isAuthDialogOpen,
     isThemeDialogOpen,
     isEditorDialogOpen,
+    isSubagentCreateDialogOpen,
     showPrivacyNotice,
+    showWelcomeBackDialog,
+    welcomeBackChoice,
     geminiClient,
+    isModelSelectionDialogOpen,
+    isVisionSwitchDialogOpen,
   ]);
 
   if (quittingMessages) {
@@ -791,6 +1204,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       </Box>
     );
   }
+
   const mainAreaWidth = Math.floor(terminalWidth * 0.9);
   const debugConsoleMaxHeight = Math.floor(Math.max(terminalHeight * 0.2, 5));
   // Arbitrary threshold to ensure that items in the static area are large
@@ -818,14 +1232,12 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
           key={staticKey}
           items={[
             <Box flexDirection="column" key="header">
-              {!settings.merged.hideBanner && (
-                <Header
-                  terminalWidth={terminalWidth}
-                  version={version}
-                  nightly={nightly}
-                />
+              {!(
+                settings.merged.ui?.hideBanner || config.getScreenReader()
+              ) && <Header version={version} nightly={nightly} />}
+              {!(settings.merged.ui?.hideTips || config.getScreenReader()) && (
+                <Tips config={config} />
               )}
-              {!settings.merged.hideTips && <Tips config={config} />}
             </Box>,
             ...history.map((h) => (
               <HistoryItemDisplay
@@ -844,16 +1256,14 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
         </Static>
         <OverflowProvider>
           <Box ref={pendingHistoryItemRef} flexDirection="column">
-            {pendingHistoryItems.map((item, i) => (
+            {pendingHistoryItems.map((item) => (
               <HistoryItemDisplay
-                key={i}
+                key={item.id}
                 availableTerminalHeight={
                   constrainHeight ? availableTerminalHeight : undefined
                 }
                 terminalWidth={mainAreaWidth}
-                // TODO(taehykim): It seems like references to ids aren't necessary in
-                // HistoryItemDisplay. Refactor later. Use a fake id for now.
-                item={{ ...item, id: 0 }}
+                item={item}
                 isPending={true}
                 config={config}
                 isFocused={!isEditorDialogOpen}
@@ -881,9 +1291,58 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
               ))}
             </Box>
           )}
-
-          {shellConfirmationRequest ? (
+          {showWelcomeBackDialog && welcomeBackInfo?.hasHistory && (
+            <WelcomeBackDialog
+              welcomeBackInfo={welcomeBackInfo}
+              onSelect={handleWelcomeBackSelection}
+              onClose={handleWelcomeBackClose}
+            />
+          )}
+          {showWorkspaceMigrationDialog ? (
+            <WorkspaceMigrationDialog
+              workspaceExtensions={workspaceExtensions}
+              onOpen={onWorkspaceMigrationDialogOpen}
+              onClose={onWorkspaceMigrationDialogClose}
+            />
+          ) : shouldShowIdePrompt && currentIDE ? (
+            <IdeIntegrationNudge
+              ide={currentIDE}
+              onComplete={handleIdePromptComplete}
+            />
+          ) : isFolderTrustDialogOpen ? (
+            <FolderTrustDialog
+              onSelect={handleFolderTrustSelect}
+              isRestarting={isRestarting}
+            />
+          ) : quitConfirmationRequest ? (
+            <QuitConfirmationDialog
+              onSelect={(choice) => {
+                const result = handleQuitConfirmationSelect(choice);
+                if (result?.shouldQuit) {
+                  quitConfirmationRequest.onConfirm(true, result.action);
+                } else {
+                  quitConfirmationRequest.onConfirm(false);
+                }
+              }}
+            />
+          ) : shellConfirmationRequest ? (
             <ShellConfirmationDialog request={shellConfirmationRequest} />
+          ) : confirmationRequest ? (
+            <Box flexDirection="column">
+              {confirmationRequest.prompt}
+              <Box paddingY={1}>
+                <RadioButtonSelect
+                  isFocused={!!confirmationRequest}
+                  items={[
+                    { label: 'Yes', value: true },
+                    { label: 'No', value: false },
+                  ]}
+                  onSelect={(value: boolean) => {
+                    confirmationRequest.onConfirm(value);
+                  }}
+                />
+              </Box>
+            </Box>
           ) : isThemeDialogOpen ? (
             <Box flexDirection="column">
               {themeError && (
@@ -901,6 +1360,28 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                     : undefined
                 }
                 terminalWidth={mainAreaWidth}
+              />
+            </Box>
+          ) : isSettingsDialogOpen ? (
+            <Box flexDirection="column">
+              <SettingsDialog
+                settings={settings}
+                onSelect={() => closeSettingsDialog()}
+                onRestartRequest={() => process.exit(0)}
+              />
+            </Box>
+          ) : isSubagentCreateDialogOpen ? (
+            <Box flexDirection="column">
+              <AgentCreationWizard
+                onClose={closeSubagentCreateDialog}
+                config={config}
+              />
+            </Box>
+          ) : isAgentsManagerDialogOpen ? (
+            <Box flexDirection="column">
+              <AgentsManagerDialog
+                onClose={closeAgentsManagerDialog}
+                config={config}
               />
             </Box>
           ) : isAuthenticating ? (
@@ -970,6 +1451,15 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                 onExit={exitEditorDialog}
               />
             </Box>
+          ) : isModelSelectionDialogOpen ? (
+            <ModelSelectionDialog
+              availableModels={getAvailableModelsForCurrentAuth()}
+              currentModel={currentModel}
+              onSelect={handleModelSelect}
+              onCancel={handleModelSelectionClose}
+            />
+          ) : isVisionSwitchDialogOpen ? (
+            <ModelSwitchDialog onSelect={handleVisionSwitchSelect} />
           ) : showPrivacyNotice ? (
             <PrivacyNotice
               onExit={() => setShowPrivacyNotice(false)}
@@ -980,36 +1470,73 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
               <LoadingIndicator
                 thought={
                   streamingState === StreamingState.WaitingForConfirmation ||
-                  config.getAccessibility()?.disableLoadingPhrases
+                  config.getAccessibility()?.disableLoadingPhrases ||
+                  config.getScreenReader()
                     ? undefined
                     : thought
                 }
                 currentLoadingPhrase={
-                  config.getAccessibility()?.disableLoadingPhrases
+                  config.getAccessibility()?.disableLoadingPhrases ||
+                  config.getScreenReader()
                     ? undefined
                     : currentLoadingPhrase
                 }
                 elapsedTime={elapsedTime}
               />
 
+              {/* Display queued messages below loading indicator */}
+              {messageQueue.length > 0 && (
+                <Box flexDirection="column" marginTop={1}>
+                  {messageQueue
+                    .slice(0, MAX_DISPLAYED_QUEUED_MESSAGES)
+                    .map((message, index) => {
+                      // Ensure multi-line messages are collapsed for the preview.
+                      // Replace all whitespace (including newlines) with a single space.
+                      const preview = message.replace(/\s+/g, ' ');
+
+                      return (
+                        // Ensure the Box takes full width so truncation calculates correctly
+                        <Box key={index} paddingLeft={2} width="100%">
+                          {/* Use wrap="truncate" to ensure it fits the terminal width and doesn't wrap */}
+                          <Text dimColor wrap="truncate">
+                            {preview}
+                          </Text>
+                        </Box>
+                      );
+                    })}
+                  {messageQueue.length > MAX_DISPLAYED_QUEUED_MESSAGES && (
+                    <Box paddingLeft={2}>
+                      <Text dimColor>
+                        ... (+
+                        {messageQueue.length - MAX_DISPLAYED_QUEUED_MESSAGES}
+                        more)
+                      </Text>
+                    </Box>
+                  )}
+                </Box>
+              )}
+
               <Box
                 marginTop={1}
-                display="flex"
                 justifyContent="space-between"
                 width="100%"
+                flexDirection={isNarrow ? 'column' : 'row'}
+                alignItems={isNarrow ? 'flex-start' : 'center'}
               >
                 <Box>
-                  {process.env.GEMINI_SYSTEM_MD && (
+                  {process.env['GEMINI_SYSTEM_MD'] && (
                     <Text color={Colors.AccentRed}>|⌐■_■| </Text>
                   )}
                   {ctrlCPressedOnce ? (
                     <Text color={Colors.AccentYellow}>
-                      Press Ctrl+C again to exit.
+                      Press Ctrl+C again to confirm exit.
                     </Text>
                   ) : ctrlDPressedOnce ? (
                     <Text color={Colors.AccentYellow}>
                       Press Ctrl+D again to exit.
                     </Text>
+                  ) : showEscapePrompt ? (
+                    <Text color={Colors.Gray}>Press Esc again to clear.</Text>
                   ) : (
                     <ContextSummaryDisplay
                       ideContext={ideContextState}
@@ -1021,7 +1548,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                     />
                   )}
                 </Box>
-                <Box>
+                <Box paddingTop={isNarrow ? 1 : 0}>
                   {showAutoAcceptIndicator !== ApprovalMode.DEFAULT &&
                     !shellModeActive && (
                       <AutoAcceptIndicator
@@ -1031,14 +1558,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                   {shellModeActive && <ShellModeIndicator />}
                 </Box>
               </Box>
-              {showIDEContextDetail && (
-                <IDEContextDetailDisplay
-                  ideContext={ideContextState}
-                  detectedIdeDisplay={config
-                    .getIdeClient()
-                    .getDetectedIdeDisplayName()}
-                />
-              )}
+
               {showErrorDetails && (
                 <OverflowProvider>
                   <Box flexDirection="column">
@@ -1067,6 +1587,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
                   commandContext={commandContext}
                   shellModeActive={shellModeActive}
                   setShellModeActive={setShellModeActive}
+                  onEscapePromptChange={handleEscapePromptChange}
                   focus={isFocused}
                   vimHandleInput={vimHandleInput}
                   placeholder={placeholder}
@@ -1107,22 +1628,27 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
               )}
             </Box>
           )}
-          <Footer
-            model={currentModel}
-            targetDir={config.getTargetDir()}
-            debugMode={config.getDebugMode()}
-            branchName={branchName}
-            debugMessage={debugMessage}
-            corgiMode={corgiMode}
-            errorCount={errorCount}
-            showErrorDetails={showErrorDetails}
-            showMemoryUsage={
-              config.getDebugMode() || config.getShowMemoryUsage()
-            }
-            promptTokenCount={sessionStats.lastPromptTokenCount}
-            nightly={nightly}
-            vimMode={vimModeEnabled ? vimMode : undefined}
-          />
+          {!settings.merged.ui?.hideFooter && (
+            <Footer
+              model={currentModel}
+              targetDir={config.getTargetDir()}
+              debugMode={config.getDebugMode()}
+              branchName={branchName}
+              debugMessage={debugMessage}
+              corgiMode={corgiMode}
+              errorCount={errorCount}
+              showErrorDetails={showErrorDetails}
+              showMemoryUsage={
+                config.getDebugMode() ||
+                settings.merged.ui?.showMemoryUsage ||
+                false
+              }
+              promptTokenCount={sessionStats.lastPromptTokenCount}
+              nightly={nightly}
+              vimMode={vimModeEnabled ? vimMode : undefined}
+              isTrustedFolder={isTrustedFolderState}
+            />
+          )}
         </Box>
       </Box>
     </StreamingContext.Provider>

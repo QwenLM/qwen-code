@@ -18,8 +18,8 @@ Slash commands provide meta-level control over the CLI itself.
       - **Description:** Saves the current conversation history. You must add a `<tag>` for identifying the conversation state.
       - **Usage:** `/chat save <tag>`
       - **Details on Checkpoint Location:** The default locations for saved chat checkpoints are:
-        - Linux/macOS: `~/.config/google-generative-ai/checkpoints/`
-        - Windows: `C:\Users\<YourUsername>\AppData\Roaming\google-generative-ai\checkpoints\`
+        - Linux/macOS: `~/.qwen/tmp/<project_hash>/`
+        - Windows: `C:\Users\<YourUsername>\.qwen\tmp\<project_hash>\`
         - When you run `/chat list`, the CLI only scans these specific directories to find available checkpoints.
         - **Note:** These checkpoints are for manually saving and resuming conversation states. For automatic checkpoints created before file modifications, see the [Checkpointing documentation](../checkpointing.md).
     - **`resume`**
@@ -34,6 +34,17 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/clear`**
   - **Description:** Clear the terminal screen, including the visible session history and scrollback within the CLI. The underlying session data (for history recall) might be preserved depending on the exact implementation, but the visual display is cleared.
   - **Keyboard shortcut:** Press **Ctrl+L** at any time to perform a clear action.
+
+- **`/summary`**
+  - **Description:** Generate a comprehensive project summary from the current conversation history and save it to `.qwen/PROJECT_SUMMARY.md`. This summary includes the overall goal, key knowledge, recent actions, and current plan, making it perfect for resuming work in future sessions.
+  - **Usage:** `/summary`
+  - **Features:**
+    - Analyzes the entire conversation history to extract important context
+    - Creates a structured markdown summary with sections for goals, knowledge, actions, and plans
+    - Automatically saves to `.qwen/PROJECT_SUMMARY.md` in your project root
+    - Shows progress indicators during generation and saving
+    - Integrates with the Welcome Back feature for seamless session resumption
+  - **Note:** This command requires an active conversation with at least 2 messages to generate a meaningful summary.
 
 - **`/compress`**
   - **Description:** Replace the entire chat context with a summary. This saves on tokens used for future tasks while retaining a high level summary of what has happened.
@@ -99,6 +110,11 @@ Slash commands provide meta-level control over the CLI itself.
   - **Usage:** `/restore [tool_call_id]`
   - **Note:** Only available if the CLI is invoked with the `--checkpointing` option or configured via [settings](./configuration.md). See [Checkpointing documentation](../checkpointing.md) for more details.
 
+- **`/settings`**
+  - **Description:** Open the settings editor to view and modify Qwen Code settings.
+  - **Details:** This command provides a user-friendly interface for changing settings that control the behavior and appearance of Qwen Code. It is equivalent to manually editing the `.qwen/settings.json` file, but with validation and guidance to prevent errors.
+  - **Usage:** Simply run `/settings` and the editor will open. You can then browse or search for specific settings, view their current values, and modify them as desired. Changes to some settings are applied immediately, while others require a restart.
+
 - **`/stats`**
   - **Description:** Display detailed statistics for the current Qwen Code session, including token usage, cached token savings (when available), and session duration. Note: Cached token information is only displayed when cached tokens are being used, which occurs with API key authentication but not with OAuth authentication at this time.
 
@@ -108,11 +124,38 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/auth`**
   - **Description:** Open a dialog that lets you change the authentication method.
 
+- **`/approval-mode`**
+  - **Description:** Change the approval mode for tool usage.
+  - **Usage:** `/approval-mode [mode] [--session|--project|--user]`
+  - **Available Modes:**
+    - **`plan`**: Analyze only; do not modify files or execute commands
+    - **`default`**: Require approval for file edits or shell commands
+    - **`auto-edit`**: Automatically approve file edits
+    - **`yolo`**: Automatically approve all tools
+  - **Examples:**
+    - `/approval-mode plan --project` (persist plan mode for this project)
+    - `/approval-mode yolo --user` (persist YOLO mode for this user across projects)
+
 - **`/about`**
   - **Description:** Show version info. Please share this information when filing issues.
 
+- **`/agents`**
+  - **Description:** Manage specialized AI subagents for focused tasks. Subagents are independent AI assistants configured with specific expertise and tool access.
+  - **Sub-commands:**
+    - **`create`**:
+      - **Description:** Launch an interactive wizard to create a new subagent. The wizard guides you through location selection, AI-powered prompt generation, tool selection, and visual customization.
+      - **Usage:** `/agents create`
+    - **`manage`**:
+      - **Description:** Open an interactive management dialog to view, edit, and delete existing subagents. Shows both project-level and user-level agents.
+      - **Usage:** `/agents manage`
+  - **Storage Locations:**
+    - **Project-level:** `.qwen/agents/` (shared with team, takes precedence)
+    - **User-level:** `~/.qwen/agents/` (personal agents, available across projects)
+  - **Note:** For detailed information on creating and managing subagents, see the [Subagents documentation](../subagents.md).
+
 - [**`/tools`**](../tools/index.md)
   - **Description:** Display a list of tools that are currently available within Qwen Code.
+  - **Usage:** `/tools [desc]`
   - **Sub-commands:**
     - **`desc`** or **`descriptions`**:
       - **Description:** Show detailed descriptions of each tool, including each tool's name with its full description as provided to the model.
@@ -122,8 +165,18 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/privacy`**
   - **Description:** Display the Privacy Notice and allow users to select whether they consent to the collection of their data for service improvement purposes.
 
+- **`/quit-confirm`**
+  - **Description:** Show a confirmation dialog before exiting Qwen Code, allowing you to choose how to handle your current session.
+  - **Usage:** `/quit-confirm`
+  - **Features:**
+    - **Quit immediately:** Exit without saving anything (equivalent to `/quit`)
+    - **Generate summary and quit:** Create a project summary using `/summary` before exiting
+    - **Save conversation and quit:** Save the current conversation with an auto-generated tag before exiting
+  - **Keyboard shortcut:** Press **Ctrl+C** twice to trigger the quit confirmation dialog
+  - **Note:** This command is automatically triggered when you press Ctrl+C once, providing a safety mechanism to prevent accidental exits.
+
 - **`/quit`** (or **`/exit`**)
-  - **Description:** Exit Qwen Code.
+  - **Description:** Exit Qwen Code immediately without any confirmation dialog.
 
 - **`/vim`**
   - **Description:** Toggle vim mode on or off. When vim mode is enabled, the input area supports vim-style navigation and editing commands in both NORMAL and INSERT modes.
@@ -133,7 +186,7 @@ Slash commands provide meta-level control over the CLI itself.
     - **Editing commands:** Delete with `x`, change with `c`, insert with `i`, `a`, `o`, `O`; complex operations like `dd`, `cc`, `dw`, `cw`
     - **Count support:** Prefix commands with numbers (e.g., `3h`, `5w`, `10G`)
     - **Repeat last command:** Use `.` to repeat the last editing operation
-    - **Persistent setting:** Vim mode preference is saved to `~/.gemini/settings.json` and restored between sessions
+    - **Persistent setting:** Vim mode preference is saved to `~/.qwen/settings.json` and restored between sessions
   - **Status indicator:** When enabled, shows `[NORMAL]` or `[INSERT]` in the footer
 
 - **`/init`**
@@ -143,14 +196,14 @@ Slash commands provide meta-level control over the CLI itself.
 
 For a quick start, see the [example](#example-a-pure-function-refactoring-command) below.
 
-Custom commands allow you to save and reuse your favorite or most frequently used prompts as personal shortcuts within Gemini CLI. You can create commands that are specific to a single project or commands that are available globally across all your projects, streamlining your workflow and ensuring consistency.
+Custom commands allow you to save and reuse your favorite or most frequently used prompts as personal shortcuts within Qwen Code. You can create commands that are specific to a single project or commands that are available globally across all your projects, streamlining your workflow and ensuring consistency.
 
 #### File Locations & Precedence
 
-Gemini CLI discovers commands from two locations, loaded in a specific order:
+Qwen Code discovers commands from two locations, loaded in a specific order:
 
-1.  **User Commands (Global):** Located in `~/.gemini/commands/`. These commands are available in any project you are working on.
-2.  **Project Commands (Local):** Located in `<your-project-root>/.gemini/commands/`. These commands are specific to the current project and can be checked into version control to be shared with your team.
+1.  **User Commands (Global):** Located in `~/.qwen/commands/`. These commands are available in any project you are working on.
+2.  **Project Commands (Local):** Located in `<your-project-root>/.qwen/commands/`. These commands are specific to the current project and can be checked into version control to be shared with your team.
 
 If a command in the project directory has the same name as a command in the user directory, the **project command will always be used.** This allows projects to override global commands with project-specific versions.
 
@@ -158,8 +211,8 @@ If a command in the project directory has the same name as a command in the user
 
 The name of a command is determined by its file path relative to its `commands` directory. Subdirectories are used to create namespaced commands, with the path separator (`/` or `\`) being converted to a colon (`:`).
 
-- A file at `~/.gemini/commands/test.toml` becomes the command `/test`.
-- A file at `<project>/.gemini/commands/git/commit.toml` becomes the namespaced command `/git:commit`.
+- A file at `~/.qwen/commands/test.toml` becomes the command `/test`.
+- A file at `<project>/.qwen/commands/git/commit.toml` becomes the namespaced command `/git:commit`.
 
 #### TOML File Format (v1)
 
@@ -167,7 +220,7 @@ Your command definition files must be written in the TOML format and use the `.t
 
 ##### Required Fields
 
-- `prompt` (String): The prompt that will be sent to the Gemini model when the command is executed. This can be a single-line or multi-line string.
+- `prompt` (String): The prompt that will be sent to the model when the command is executed. This can be a single-line or multi-line string.
 
 ##### Optional Fields
 
@@ -175,23 +228,52 @@ Your command definition files must be written in the TOML format and use the `.t
 
 #### Handling Arguments
 
-Custom commands support two powerful, low-friction methods for handling arguments. The CLI automatically chooses the correct method based on the content of your command's `prompt`.
+Custom commands support two powerful methods for handling arguments. The CLI automatically chooses the correct method based on the content of your command's `prompt`.
 
-##### 1. Shorthand Injection with `{{args}}`
+##### 1. Context-Aware Injection with `{{args}}`
 
-If your `prompt` contains the special placeholder `{{args}}`, the CLI will replace that exact placeholder with all the text the user typed after the command name. This is perfect for simple, deterministic commands where you need to inject user input into a specific place in a larger prompt template.
+If your `prompt` contains the special placeholder `{{args}}`, the CLI will replace that placeholder with the text the user typed after the command name.
+
+The behavior of this injection depends on where it is used:
+
+**A. Raw Injection (Outside Shell Commands)**
+
+When used in the main body of the prompt, the arguments are injected exactly as the user typed them.
 
 **Example (`git/fix.toml`):**
 
 ```toml
-# In: ~/.gemini/commands/git/fix.toml
-# Invoked via: /git:fix "Button is misaligned on mobile"
+# Invoked via: /git:fix "Button is misaligned"
 
-description = "Generates a fix for a given GitHub issue."
-prompt = "Please analyze the staged git changes and provide a code fix for the issue described here: {{args}}."
+description = "Generates a fix for a given issue."
+prompt = "Please provide a code fix for the issue described here: {{args}}."
 ```
 
-The model will receive the final prompt: `Please analyze the staged git changes and provide a code fix for the issue described here: "Button is misaligned on mobile".`
+The model receives: `Please provide a code fix for the issue described here: "Button is misaligned".`
+
+**B. Using Arguments in Shell Commands (Inside `!{...}` Blocks)**
+
+When you use `{{args}}` inside a shell injection block (`!{...}`), the arguments are automatically **shell-escaped** before replacement. This allows you to safely pass arguments to shell commands, ensuring the resulting command is syntactically correct and secure while preventing command injection vulnerabilities.
+
+**Example (`/grep-code.toml`):**
+
+```toml
+prompt = """
+Please summarize the findings for the pattern `{{args}}`.
+
+Search Results:
+!{grep -r {{args}} .}
+"""
+```
+
+When you run `/grep-code It's complicated`:
+
+1. The CLI sees `{{args}}` used both outside and inside `!{...}`.
+2. Outside: The first `{{args}}` is replaced raw with `It's complicated`.
+3. Inside: The second `{{args}}` is replaced with the escaped version (e.g., on Linux: `"It's complicated"`).
+4. The command executed is `grep -r "It's complicated" .`.
+5. The CLI prompts you to confirm this exact, secure command before execution.
+6. The final prompt is sent.
 
 ##### 2. Default Argument Handling
 
@@ -206,7 +288,7 @@ If you do **not** provide any arguments (e.g., `/mycommand`), the prompt is sent
 This example shows how to create a robust command by defining a role for the model, explaining where to find the user's input, and specifying the expected format and behavior.
 
 ```toml
-# In: <project>/.gemini/commands/changelog.toml
+# In: <project>/.qwen/commands/changelog.toml
 # Invoked via: /changelog 1.2.0 added "Support for default argument parsing."
 
 description = "Adds a new entry to the project's CHANGELOG.md file."
@@ -238,25 +320,22 @@ When you run `/changelog 1.2.0 added "New feature"`, the final text sent to the 
 
 You can make your commands dynamic by executing shell commands directly within your `prompt` and injecting their output. This is ideal for gathering context from your local environment, like reading file content or checking the status of Git.
 
-When a custom command attempts to execute a shell command, Gemini CLI will now prompt you for confirmation before proceeding. This is a security measure to ensure that only intended commands can be run.
+When a custom command attempts to execute a shell command, Qwen Code will now prompt you for confirmation before proceeding. This is a security measure to ensure that only intended commands can be run.
 
 **How It Works:**
 
-1.  **Inject Commands:** Use the `!{...}` syntax in your `prompt` to specify where the command should be run and its output injected.
-2.  **Confirm Execution:** When you run the command, a dialog will appear listing the shell commands the prompt wants to execute.
-3.  **Grant Permission:** You can choose to:
-    - **Allow once:** The command(s) will run this one time.
-    - **Allow always for this session:** The command(s) will be added to a temporary allowlist for the current CLI session and will not require confirmation again.
-    - **No:** Cancel the execution of the shell command(s).
-
-The CLI still respects the global `excludeTools` and `coreTools` settings. A command will be blocked without a confirmation prompt if it is explicitly disallowed in your configuration.
+1.  **Inject Commands:** Use the `!{...}` syntax.
+2.  **Argument Substitution:** If `{{args}}` is present inside the block, it is automatically shell-escaped (see [Context-Aware Injection](#1-context-aware-injection-with-args) above).
+3.  **Robust Parsing:** The parser correctly handles complex shell commands that include nested braces, such as JSON payloads. **Note:** The content inside `!{...}` must have balanced braces (`{` and `}`). If you need to execute a command containing unbalanced braces, consider wrapping it in an external script file and calling the script within the `!{...}` block.
+4.  **Security Check and Confirmation:** The CLI performs a security check on the final, resolved command (after arguments are escaped and substituted). A dialog will appear showing the exact command(s) to be executed.
+5.  **Execution and Error Reporting:** The command is executed. If the command fails, the output injected into the prompt will include the error messages (stderr) followed by a status line, e.g., `[Shell command exited with code 1]`. This helps the model understand the context of the failure.
 
 **Example (`git/commit.toml`):**
 
 This command gets the staged git diff and uses it to ask the model to write a commit message.
 
 ````toml
-# In: <project>/.gemini/commands/git/commit.toml
+# In: <project>/.qwen/commands/git/commit.toml
 # Invoked via: /git:commit
 
 description = "Generates a Git commit message based on staged changes."
@@ -275,6 +354,41 @@ Please generate a Conventional Commit message based on the following git diff:
 
 When you run `/git:commit`, the CLI first executes `git diff --staged`, then replaces `!{git diff --staged}` with the output of that command before sending the final, complete prompt to the model.
 
+##### 4. Injecting File Content with `@{...}`
+
+You can directly embed the content of a file or a directory listing into your prompt using the `@{...}` syntax. This is useful for creating commands that operate on specific files.
+
+**How It Works:**
+
+- **File Injection**: `@{path/to/file.txt}` is replaced by the content of `file.txt`.
+- **Multimodal Support**: If the path points to a supported image (e.g., PNG, JPEG), PDF, audio, or video file, it will be correctly encoded and injected as multimodal input. Other binary files are handled gracefully and skipped.
+- **Directory Listing**: `@{path/to/dir}` is traversed and each file present within the directory and all subdirectories are inserted into the prompt. This respects `.gitignore` and `.qwenignore` if enabled.
+- **Workspace-Aware**: The command searches for the path in the current directory and any other workspace directories. Absolute paths are allowed if they are within the workspace.
+- **Processing Order**: File content injection with `@{...}` is processed _before_ shell commands (`!{...}`) and argument substitution (`{{args}}`).
+- **Parsing**: The parser requires the content inside `@{...}` (the path) to have balanced braces (`{` and `}`).
+
+**Example (`review.toml`):**
+
+This command injects the content of a _fixed_ best practices file (`docs/best-practices.md`) and uses the user's arguments to provide context for the review.
+
+```toml
+# In: <project>/.qwen/commands/review.toml
+# Invoked via: /review FileCommandLoader.ts
+
+description = "Reviews the provided context using a best practice guide."
+prompt = """
+You are an expert code reviewer.
+
+Your task is to review {{args}}.
+
+Use the following best practices when providing your review:
+
+@{docs/best-practices.md}
+"""
+```
+
+When you run `/review FileCommandLoader.ts`, the `@{docs/best-practices.md}` placeholder is replaced by the content of that file, and `{{args}}` is replaced by the text you provided, before the final prompt is sent to the model.
+
 ---
 
 #### Example: A "Pure Function" Refactoring Command
@@ -286,16 +400,16 @@ Let's create a global command that asks the model to refactor a piece of code.
 First, ensure the user commands directory exists, then create a `refactor` subdirectory for organization and the final TOML file.
 
 ```bash
-mkdir -p ~/.gemini/commands/refactor
-touch ~/.gemini/commands/refactor/pure.toml
+mkdir -p ~/.qwen/commands/refactor
+touch ~/.qwen/commands/refactor/pure.toml
 ```
 
 **2. Add the content to the file:**
 
-Open `~/.gemini/commands/refactor/pure.toml` in your editor and add the following content. We are including the optional `description` for best practice.
+Open `~/.qwen/commands/refactor/pure.toml` in your editor and add the following content. We are including the optional `description` for best practice.
 
 ```toml
-# In: ~/.gemini/commands/refactor/pure.toml
+# In: ~/.qwen/commands/refactor/pure.toml
 # This command will be invoked via: /refactor:pure
 
 description = "Asks the model to refactor the current context into a pure function."
@@ -319,11 +433,11 @@ That's it! You can now run your command in the CLI. First, you might add a file 
 > /refactor:pure
 ```
 
-Gemini CLI will then execute the multi-line prompt defined in your TOML file.
+Qwen Code will then execute the multi-line prompt defined in your TOML file.
 
 ## At commands (`@`)
 
-At commands are used to include the content of files or directories as part of your prompt to Gemini. These commands include git-aware filtering.
+At commands are used to include the content of files or directories as part of your prompt to the model. These commands include git-aware filtering.
 
 - **`@<path_to_file_or_directory>`**
   - **Description:** Inject the content of the specified file or files into your current prompt. This is useful for asking questions about specific code, text, or collections of files.
@@ -335,28 +449,28 @@ At commands are used to include the content of files or directories as part of y
     - If a path to a single file is provided, the content of that file is read.
     - If a path to a directory is provided, the command attempts to read the content of files within that directory and any subdirectories.
     - Spaces in paths should be escaped with a backslash (e.g., `@My\ Documents/file.txt`).
-    - The command uses the `read_many_files` tool internally. The content is fetched and then inserted into your query before being sent to the Gemini model.
+    - The command uses the `read_many_files` tool internally. The content is fetched and then inserted into your query before being sent to the model.
     - **Git-aware filtering:** By default, git-ignored files (like `node_modules/`, `dist/`, `.env`, `.git/`) are excluded. This behavior can be changed via the `fileFiltering` settings.
     - **File types:** The command is intended for text-based files. While it might attempt to read any file, binary files or very large files might be skipped or truncated by the underlying `read_many_files` tool to ensure performance and relevance. The tool indicates if files were skipped.
   - **Output:** The CLI will show a tool call message indicating that `read_many_files` was used, along with a message detailing the status and the path(s) that were processed.
 
 - **`@` (Lone at symbol)**
-  - **Description:** If you type a lone `@` symbol without a path, the query is passed as-is to the Gemini model. This might be useful if you are specifically talking _about_ the `@` symbol in your prompt.
+  - **Description:** If you type a lone `@` symbol without a path, the query is passed as-is to the model. This might be useful if you are specifically talking _about_ the `@` symbol in your prompt.
 
 ### Error handling for `@` commands
 
-- If the path specified after `@` is not found or is invalid, an error message will be displayed, and the query might not be sent to the Gemini model, or it will be sent without the file content.
+- If the path specified after `@` is not found or is invalid, an error message will be displayed, and the query might not be sent to the model, or it will be sent without the file content.
 - If the `read_many_files` tool encounters an error (e.g., permission issues), this will also be reported.
 
 ## Shell mode & passthrough commands (`!`)
 
-The `!` prefix lets you interact with your system's shell directly from within Gemini CLI.
+The `!` prefix lets you interact with your system's shell directly from within Qwen Code.
 
 - **`!<shell_command>`**
   - **Description:** Execute the given `<shell_command>` using `bash` on Linux/macOS or `cmd.exe` on Windows. Any output or errors from the command are displayed in the terminal.
   - **Examples:**
-    - `!ls -la` (executes `ls -la` and returns to Gemini CLI)
-    - `!git status` (executes `git status` and returns to Gemini CLI)
+    - `!ls -la` (executes `ls -la` and returns to Qwen Code)
+    - `!git status` (executes `git status` and returns to Qwen Code)
 
 - **`!` (Toggle shell mode)**
   - **Description:** Typing `!` on its own toggles shell mode.
@@ -364,8 +478,8 @@ The `!` prefix lets you interact with your system's shell directly from within G
       - When active, shell mode uses a different coloring and a "Shell Mode Indicator".
       - While in shell mode, text you type is interpreted directly as a shell command.
     - **Exiting shell mode:**
-      - When exited, the UI reverts to its standard appearance and normal Gemini CLI behavior resumes.
+      - When exited, the UI reverts to its standard appearance and normal Qwen Code behavior resumes.
 
 - **Caution for all `!` usage:** Commands you execute in shell mode have the same permissions and impact as if you ran them directly in your terminal.
 
-- **Environment Variable:** When a command is executed via `!` or in shell mode, the `GEMINI_CLI=1` environment variable is set in the subprocess's environment. This allows scripts or tools to detect if they are being run from within the Gemini CLI.
+- **Environment Variable:** When a command is executed via `!` or in shell mode, the `QWEN_CODE=1` environment variable is set in the subprocess's environment. This allows scripts or tools to detect if they are being run from within the CLI.

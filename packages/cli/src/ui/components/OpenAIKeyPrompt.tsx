@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import type React from 'react';
+import { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { Colors } from '../colors.js';
 
@@ -368,7 +369,6 @@ export function OpenAIKeyPrompt({
           </Box>
         </>
       )}
-
       <Box marginTop={1}>
         <Text color={Colors.Gray}>
           Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel

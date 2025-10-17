@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Content } from '@google/genai';
-import { HistoryItemWithoutId } from '../types.js';
-import { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
-import { LoadedSettings } from '../../config/settings.js';
-import { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
-import type { HistoryItem } from '../types.js';
-import { SessionStatsState } from '../contexts/SessionContext.js';
+import { type ReactNode } from 'react';
+import type { Content, PartListUnion } from '@google/genai';
+import type { HistoryItemWithoutId, HistoryItem } from '../types.js';
+import type { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
+import type { SessionStatsState } from '../contexts/SessionContext.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -60,14 +60,16 @@ export interface CommandContext {
     toggleCorgiMode: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
+    reloadCommands: () => void;
   };
   // Session-specific data
   session: {
     stats: SessionStatsState;
-    resetSession: () => void;
     /** A transient list of shell commands the user has approved for this session. */
     sessionShellAllowlist: Set<string>;
   };
+  // Flag to indicate if an overwrite has been confirmed
+  overwriteConfirmed?: boolean;
 }
 
 /**
@@ -82,6 +84,12 @@ export interface ToolActionReturn {
 /** The return type for a command action that results in the app quitting. */
 export interface QuitActionReturn {
   type: 'quit';
+  messages: HistoryItem[];
+}
+
+/** The return type for a command action that requests quit confirmation. */
+export interface QuitConfirmationActionReturn {
+  type: 'quit_confirmation';
   messages: HistoryItem[];
 }
 
@@ -100,7 +108,17 @@ export interface MessageActionReturn {
  */
 export interface OpenDialogActionReturn {
   type: 'dialog';
-  dialog: 'auth' | 'theme' | 'editor' | 'privacy';
+
+  dialog:
+    | 'help'
+    | 'auth'
+    | 'theme'
+    | 'editor'
+    | 'privacy'
+    | 'settings'
+    | 'model'
+    | 'subagent_create'
+    | 'subagent_list';
 }
 
 /**
@@ -119,7 +137,7 @@ export interface LoadHistoryActionReturn {
  */
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
-  content: string;
+  content: PartListUnion;
 }
 
 /**
@@ -136,14 +154,26 @@ export interface ConfirmShellCommandsActionReturn {
   };
 }
 
+export interface ConfirmActionReturn {
+  type: 'confirm_action';
+  /** The React node to display as the confirmation prompt. */
+  prompt: ReactNode;
+  /** The original invocation context to be re-run after confirmation. */
+  originalInvocation: {
+    raw: string;
+  };
+}
+
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
   | QuitActionReturn
+  | QuitConfirmationActionReturn
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
-  | ConfirmShellCommandsActionReturn;
+  | ConfirmShellCommandsActionReturn
+  | ConfirmActionReturn;
 
 export enum CommandKind {
   BUILT_IN = 'built-in',

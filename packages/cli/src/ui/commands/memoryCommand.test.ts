@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, Mock } from 'vitest';
+import type { Mock } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { memoryCommand } from './memoryCommand.js';
-import { type CommandContext, SlashCommand } from './types.js';
+import type { SlashCommand, type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { MessageType } from '../types.js';
-import { LoadedSettings } from '../../config/settings.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import {
   getErrorMessage,
   loadServerHierarchicalMemory,
@@ -117,7 +118,7 @@ describe('memoryCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Usage: /memory add <text to remember>',
+        content: 'Usage: /memory add [--global|--project] <text to remember>',
       });
 
       expect(mockContext.ui.addItem).not.toHaveBeenCalled();
@@ -132,7 +133,7 @@ describe('memoryCommand', () => {
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: MessageType.INFO,
-          text: `Attempting to save to memory: "${fact}"`,
+          text: `Attempting to save to memory : "${fact}"`,
         },
         expect.any(Number),
       );
@@ -142,6 +143,61 @@ describe('memoryCommand', () => {
         toolName: 'save_memory',
         toolArgs: { fact },
       });
+    });
+
+    it('should handle --global flag and add scope to tool args', () => {
+      if (!addCommand.action) throw new Error('Command has no action');
+
+      const fact = 'remember this globally';
+      const result = addCommand.action(mockContext, `--global ${fact}`);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: `Attempting to save to memory (global): "${fact}"`,
+        },
+        expect.any(Number),
+      );
+
+      expect(result).toEqual({
+        type: 'tool',
+        toolName: 'save_memory',
+        toolArgs: { fact, scope: 'global' },
+      });
+    });
+
+    it('should handle --project flag and add scope to tool args', () => {
+      if (!addCommand.action) throw new Error('Command has no action');
+
+      const fact = 'remember this for project';
+      const result = addCommand.action(mockContext, `--project ${fact}`);
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: `Attempting to save to memory (project): "${fact}"`,
+        },
+        expect.any(Number),
+      );
+
+      expect(result).toEqual({
+        type: 'tool',
+        toolName: 'save_memory',
+        toolArgs: { fact, scope: 'project' },
+      });
+    });
+
+    it('should return error if flag is provided but no fact follows', () => {
+      if (!addCommand.action) throw new Error('Command has no action');
+
+      const result = addCommand.action(mockContext, '--global   ');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Usage: /memory add [--global|--project] <text to remember>',
+      });
+
+      expect(mockContext.ui.addItem).not.toHaveBeenCalled();
     });
   });
 
@@ -173,7 +229,7 @@ describe('memoryCommand', () => {
 
       mockContext = createMockCommandContext({
         services: {
-          config: Promise.resolve(mockConfig),
+          config: mockConfig,
           settings: {
             merged: {
               memoryDiscoveryMaxDirs: 1000,

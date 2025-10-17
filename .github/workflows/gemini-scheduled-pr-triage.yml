@@ -1,29 +1,30 @@
-name: Qwen Scheduled PR Triage 🚀
+name: 'Qwen Scheduled PR Triage 🚀'
 
 on:
   schedule:
     - cron: '*/15 * * * *' # Runs every 15 minutes
-  workflow_dispatch: {}
+  workflow_dispatch:
 
 jobs:
   audit-prs:
     timeout-minutes: 15
-    if: ${{ github.repository == 'QwenLM/qwen-code' }}
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
-      contents: read
-      id-token: write
-      issues: write
-      pull-requests: write
-    runs-on: ubuntu-latest
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    runs-on: 'ubuntu-latest'
     outputs:
-      prs_needing_comment: ${{ steps.run_triage.outputs.prs_needing_comment }}
+      prs_needing_comment: '${{ steps.run_triage.outputs.prs_needing_comment }}'
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
 
-      - name: Run PR Triage Script
-        id: run_triage
+      - name: 'Run PR Triage Script'
+        id: 'run_triage'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-        run: ./.github/scripts/pr-triage.sh
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_REPOSITORY: '${{ github.repository }}'
+        run: './.github/scripts/pr-triage.sh'
