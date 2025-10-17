@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { homedir } from 'node:os';
+import process from 'node:process';
+import { hideBin } from 'yargs/helpers';
+import yargs from 'yargs/yargs';
+import { extensionsCommand } from '../commands/extensions.js';
+import { mcpCommand } from '../commands/mcp.js';
+import { sessionCommand } from '../commands/sessionCommand.js';
 import type {
   ConfigParameters,
   FileFilteringOptions,
@@ -24,14 +33,6 @@ import {
   ShellTool,
   WriteFileTool,
 } from '@qwen-code/qwen-code-core';
-import * as fs from 'node:fs';
-import { homedir } from 'node:os';
-import * as path from 'node:path';
-import process from 'node:process';
-import { hideBin } from 'yargs/helpers';
-import yargs from 'yargs/yargs';
-import { extensionsCommand } from '../commands/extensions.js';
-import { mcpCommand } from '../commands/mcp.js';
 import type { Settings } from './settings.js';
 
 import { resolvePath } from '../utils/resolvePath.js';
@@ -114,6 +115,9 @@ export interface CliArgs {
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   tavilyApiKey: string | undefined;
+  session: string | undefined;
+  verbose: boolean | undefined;
+  verboseToStdout: boolean | undefined;
   screenReader: boolean | undefined;
   vlmSwitchMode: string | undefined;
 }
@@ -278,6 +282,21 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'string',
           description: 'Tavily API key for web search functionality',
         })
+        .option('session', {
+          type: 'string',
+          description: 'Session ID for maintaining conversation context across multiple interactions',
+        })
+        .option('verbose', {
+          type: 'boolean',
+          description: 'Show detailed output including function calls and responses in non-interactive mode',
+          default: false,
+        })
+        .option('verbose-to-stdout', {
+          type: 'boolean',
+          description: 'Output verbose information to stdout instead of stderr (requires --verbose)',
+          default: false,
+        })
+
         .option('screen-reader', {
           type: 'boolean',
           description: 'Enable screen reader mode for accessibility.',
@@ -301,11 +320,19 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
               'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
             );
           }
+
+          if (argv['verboseToStdout'] && !argv.verbose) {
+            throw new Error(
+              'Cannot use --verbose-to-stdout without --verbose flag.',
+            );
+          }
           return true;
         }),
     )
     // Register MCP subcommands
-    .command(mcpCommand);
+    .command(mcpCommand)
+    // Register session management subcommands
+    .command(sessionCommand);
 
   if (settings?.experimental?.extensionManagement ?? false) {
     yargsInstance.command(extensionsCommand);
@@ -322,13 +349,10 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
   yargsInstance.wrap(yargsInstance.terminalWidth());
   const result = await yargsInstance.parse();
 
-  // Handle case where MCP subcommands are executed - they should exit the process
+  // Handle case where MCP or session subcommands are executed - they should exit the process
   // and not return to main CLI logic
-  if (
-    result._.length > 0 &&
-    (result._[0] === 'mcp' || result._[0] === 'extensions')
-  ) {
-    // MCP commands handle their own execution and process exit
+  if (result._.length > 0 && (result._[0] === 'mcp' || result._[0] === 'session'))  {
+    // MCP and session commands handle their own execution and process exit
     process.exit(0);
   }
 
