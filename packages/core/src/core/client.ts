@@ -14,7 +14,7 @@ import type {
   Schema,
   Tool,
 } from '@google/genai';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import type { UserTierId } from '../code_assist/types.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -130,13 +130,55 @@ export class GeminiClient {
   private hasFailedCompressionAttempt = false;
 
   constructor(private readonly config: Config) {
-    if (config.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(config.getProxy() as string));
-    }
+    this.setupProxyConfiguration();
 
     this.embeddingModel = config.getEmbeddingModel();
     this.loopDetector = new LoopDetectionService(config);
     this.lastPromptId = this.config.getSessionId();
+  }
+
+  /**
+   * Sets up proxy configuration with NO_PROXY support for LLM requests.
+   * Supports both --proxy parameter and standard proxy environment variables.
+   * Uses EnvHttpProxyAgent which respects NO_PROXY, unlike the basic ProxyAgent.
+   */
+  private setupProxyConfiguration(): void {
+    const configProxy = this.config.getProxy(); // This includes --proxy parameter handling
+    
+    // Check if any proxy environment variables are already set
+    const hasProxyEnvVars = !!(
+      process.env['HTTP_PROXY'] ||
+      process.env['http_proxy'] ||
+      process.env['HTTPS_PROXY'] ||
+      process.env['https_proxy']
+    );
+
+    // If no proxy is configured via --proxy or environment variables, nothing to do
+    if (!configProxy && !hasProxyEnvVars) {
+      return;
+    }
+
+    // If --proxy was specified but no environment variables are set,
+    // temporarily set environment variables for EnvHttpProxyAgent to use
+    if (configProxy && !hasProxyEnvVars) {
+      // Set both HTTP and HTTPS proxy environment variables
+      process.env['HTTPS_PROXY'] = configProxy;
+      process.env['HTTP_PROXY'] = configProxy;
+    }
+
+    // Build NO_PROXY list including localhost and any existing NO_PROXY values
+    const existingNoProxy = process.env['NO_PROXY'] || process.env['no_proxy'] || '';
+    const noProxyList = [existingNoProxy, 'localhost', '127.0.0.1', '::1']
+      .filter(Boolean)
+      .join(',');
+
+    // Create EnvHttpProxyAgent that respects NO_PROXY and reads proxy URLs from environment
+    const proxyAgent = new EnvHttpProxyAgent({
+      // Respect NO_PROXY environment variable
+      noProxy: noProxyList,
+    });
+
+    setGlobalDispatcher(proxyAgent);
   }
 
   async initialize(

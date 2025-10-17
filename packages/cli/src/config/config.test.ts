@@ -438,6 +438,40 @@ describe('loadCliConfig', () => {
       const config = await loadCliConfig(settings, [], 'test-session', argv);
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
+
+    it('should disable proxy when --proxy="" is explicitly provided', async () => {
+      // Set environment variable that would normally be used
+      vi.stubEnv('HTTPS_PROXY', 'http://localhost:7891');
+      process.argv = ['node', 'script.js', '--proxy', ''];
+      const argv = await parseArguments({} as Settings);
+      const settings: Settings = {};
+      const config = await loadCliConfig(settings, [], 'test-session', argv);
+      // Empty string should disable proxy (return undefined)
+      expect(config.getProxy()).toBeUndefined();
+    });
+
+    it('should fall back to environment variables when --proxy is not provided', async () => {
+      vi.stubEnv('HTTPS_PROXY', 'http://env-proxy:8080');
+      process.argv = ['node', 'script.js']; // No --proxy argument
+      const argv = await parseArguments({} as Settings);
+      const settings: Settings = {};
+      const config = await loadCliConfig(settings, [], 'test-session', argv);
+      expect(config.getProxy()).toBe('http://env-proxy:8080');
+    });
+
+    it('should respect proxy precedence: HTTPS_PROXY > https_proxy > HTTP_PROXY > http_proxy', async () => {
+      // Test HTTPS_PROXY takes precedence
+      vi.stubEnv('HTTPS_PROXY', 'http://https-upper:8080');
+      vi.stubEnv('https_proxy', 'http://https-lower:8080');
+      vi.stubEnv('HTTP_PROXY', 'http://http-upper:8080');
+      vi.stubEnv('http_proxy', 'http://http-lower:8080');
+      
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments({} as Settings);
+      const settings: Settings = {};
+      const config = await loadCliConfig(settings, [], 'test-session', argv);
+      expect(config.getProxy()).toBe('http://https-upper:8080');
+    });
   });
 });
 

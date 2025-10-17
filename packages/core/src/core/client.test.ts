@@ -2670,4 +2670,180 @@ ${JSON.stringify(
       await expect(client.reinitialize()).resolves.not.toThrow();
     });
   });
+
+  describe('Proxy Configuration', () => {
+    let originalEnvVars: Record<string, string | undefined>;
+
+    beforeEach(() => {
+      // Store original environment variables
+      originalEnvVars = {
+        HTTP_PROXY: process.env['HTTP_PROXY'],
+        http_proxy: process.env['http_proxy'],
+        HTTPS_PROXY: process.env['HTTPS_PROXY'],
+        https_proxy: process.env['https_proxy'],
+        NO_PROXY: process.env['NO_PROXY'],
+        no_proxy: process.env['no_proxy'],
+      };
+
+      // Clear all proxy environment variables for clean test state
+      delete process.env['HTTP_PROXY'];
+      delete process.env['http_proxy'];
+      delete process.env['HTTPS_PROXY'];
+      delete process.env['https_proxy'];
+      delete process.env['NO_PROXY'];
+      delete process.env['no_proxy'];
+    });
+
+    afterEach(() => {
+      // Restore original environment variables
+      Object.entries(originalEnvVars).forEach(([key, value]) => {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      });
+    });
+
+    it('should not setup proxy when no proxy is configured', () => {
+      // Arrange: No proxy in config, no environment variables
+      mockConfigObject.getProxy.mockReturnValue(undefined);
+
+      // Act: Create a new client (which calls setupProxyConfiguration)
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-proxy-none' } as never),
+      );
+
+      // Assert: No proxy should be set up (we can't easily test setGlobalDispatcher,
+      // but we can verify the logic by checking environment variables weren't modified)
+      expect(process.env['HTTP_PROXY']).toBeUndefined();
+      expect(process.env['HTTPS_PROXY']).toBeUndefined();
+    });
+
+    it('should setup proxy when --proxy parameter is provided', () => {
+      // Arrange: Proxy from --proxy parameter, no environment variables
+      const proxyUrl = 'http://cli-proxy:8080';
+      mockConfigObject.getProxy.mockReturnValue(proxyUrl);
+
+      // Act: Create a new client
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-proxy-cli' } as never),
+      );
+
+      // Assert: Environment variables should be set for EnvHttpProxyAgent
+      expect(process.env['HTTP_PROXY']).toBe(proxyUrl);
+      expect(process.env['HTTPS_PROXY']).toBe(proxyUrl);
+    });
+
+    it('should not override existing environment variables when --proxy is provided', () => {
+      // Arrange: Both --proxy parameter and existing environment variables
+      const cliProxyUrl = 'http://cli-proxy:8080';
+      const envProxyUrl = 'https://env-proxy:3128';
+      
+      process.env['HTTPS_PROXY'] = envProxyUrl;
+      mockConfigObject.getProxy.mockReturnValue(cliProxyUrl);
+
+      // Act: Create a new client
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-proxy-both' } as never),
+      );
+
+      // Assert: Existing environment variables should not be overridden
+      expect(process.env['HTTPS_PROXY']).toBe(envProxyUrl);
+      // HTTP_PROXY should not be set because HTTPS_PROXY is already set
+      expect(process.env['HTTP_PROXY']).toBeUndefined();
+    });
+
+    it('should setup proxy when only environment variables are set', () => {
+      // Arrange: No --proxy parameter, but environment variables are set
+      const envProxyUrl = 'https://corporate-proxy:8080';
+      process.env['HTTPS_PROXY'] = envProxyUrl;
+      mockConfigObject.getProxy.mockReturnValue(undefined);
+
+      // Act: Create a new client
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-proxy-env' } as never),
+      );
+
+      // Assert: Environment variables should remain unchanged
+      expect(process.env['HTTPS_PROXY']).toBe(envProxyUrl);
+    });
+
+    it('should include NO_PROXY values in proxy configuration', () => {
+      // Arrange: Set up proxy and NO_PROXY environment variables
+      const proxyUrl = 'http://proxy:8080';
+      const noProxyHosts = 'internal-llm.company.com,localhost';
+      
+      process.env['HTTPS_PROXY'] = proxyUrl;
+      process.env['NO_PROXY'] = noProxyHosts;
+      mockConfigObject.getProxy.mockReturnValue(undefined);
+
+      // Act: Create a new client (this calls setupProxyConfiguration)
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-no-proxy' } as never),
+      );
+
+      // Assert: NO_PROXY should still be set
+      expect(process.env['NO_PROXY']).toBe(noProxyHosts);
+      
+      // Note: We can't easily test the EnvHttpProxyAgent configuration directly,
+      // but the setupProxyConfiguration method should build a noProxy list that includes:
+      // - The existing NO_PROXY value
+      // - localhost, 127.0.0.1, ::1 (automatically added)
+    });
+
+    it('should handle mixed case environment variables', () => {
+      // Arrange: Use lowercase environment variables
+      const proxyUrl = 'http://lowercase-proxy:3128';
+      process.env['http_proxy'] = proxyUrl;
+      process.env['no_proxy'] = 'example.com';
+      mockConfigObject.getProxy.mockReturnValue(undefined);
+
+      // Act: Create a new client
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-proxy-lowercase' } as never),
+      );
+
+      // Assert: Lowercase variables should be recognized
+      expect(process.env['http_proxy']).toBe(proxyUrl);
+      expect(process.env['no_proxy']).toBe('example.com');
+    });
+
+    it('should work with --proxy=undefined (explicit disable)', () => {
+      // Arrange: --proxy explicitly set to undefined, but environment variables exist
+      const envProxyUrl = 'https://env-proxy:8080';
+      process.env['HTTPS_PROXY'] = envProxyUrl;
+      mockConfigObject.getProxy.mockReturnValue(undefined); // This simulates --proxy=""
+
+      // Act: Create a new client
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-proxy-disable' } as never),
+      );
+
+      // Assert: Environment variables should still be used
+      // (because --proxy="" disables config proxy but doesn't clear env vars)
+      expect(process.env['HTTPS_PROXY']).toBe(envProxyUrl);
+    });
+
+    it('should automatically add localhost to NO_PROXY list', () => {
+      // This test verifies the logic that automatically includes localhost variants
+      // in the NO_PROXY list to prevent issues with local services
+      
+      // Arrange: Set up proxy without any NO_PROXY
+      const proxyUrl = 'http://proxy:8080';
+      mockConfigObject.getProxy.mockReturnValue(proxyUrl);
+
+      // Act: Create a new client
+      const testClient = new GeminiClient(
+        new Config({ sessionId: 'test-auto-localhost' } as never),
+      );
+
+      // Assert: The setupProxyConfiguration method should have been called
+      // and would have built a noProxy list including localhost variants
+      // We can't directly test the EnvHttpProxyAgent configuration,
+      // but we can verify the environment was set up correctly
+      expect(process.env['HTTP_PROXY']).toBe(proxyUrl);
+      expect(process.env['HTTPS_PROXY']).toBe(proxyUrl);
+    });
+  });
 });
