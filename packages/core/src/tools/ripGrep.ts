@@ -8,21 +8,42 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
+import { downloadRipGrep } from '@joshua.litt/get-ripgrep';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
+import { fileExists } from '../utils/fileUtils.js';
+import { Storage } from '../config/storage.js';
 
 const DEFAULT_TOTAL_MAX_MATCHES = 20000;
 
+function getRgPath(): string {
+  return path.join(Storage.getGlobalBinDir(), 'rg');
+}
+
 /**
- * Lazy loads the ripgrep binary path to avoid loading the library until needed
+ * Checks if `rg` exists, if not then attempt to download it.
  */
-async function getRipgrepPath(): Promise<string> {
-  const { rgPath } = await import('@lvce-editor/ripgrep');
-  return rgPath;
+export async function canUseRipgrep(): Promise<boolean> {
+  if (await fileExists(getRgPath())) {
+    return true;
+  }
+
+  await downloadRipGrep(Storage.getGlobalBinDir());
+  return await fileExists(getRgPath());
+}
+
+/**
+ * Ensures `rg` is downloaded, or throws.
+ */
+export async function ensureRgPath(): Promise<string> {
+  if (await canUseRipgrep()) {
+    return getRgPath();
+  }
+  throw new Error('Cannot use ripgrep.');
 }
 
 /**
@@ -299,9 +320,9 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push(absolutePath);
 
     try {
-      const ripgrepPath = await getRipgrepPath();
+      const rgPath = await ensureRgPath();
       const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(ripgrepPath, rgArgs, {
+        const child = spawn(rgPath, rgArgs, {
           windowsHide: true,
         });
 

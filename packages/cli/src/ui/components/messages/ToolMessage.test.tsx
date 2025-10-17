@@ -11,7 +11,35 @@ import { ToolMessage } from './ToolMessage.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  AnsiOutput,
+  AnsiOutputDisplay,
+  Config,
+} from '@qwen-code/qwen-code-core';
+
+vi.mock('../TerminalOutput.js', () => ({
+  TerminalOutput: function MockTerminalOutput({
+    cursor,
+  }: {
+    cursor: { x: number; y: number } | null;
+  }) {
+    return (
+      <Text>
+        MockCursor:({cursor?.x},{cursor?.y})
+      </Text>
+    );
+  },
+}));
+
+vi.mock('../AnsiOutput.js', () => ({
+  AnsiOutputText: function MockAnsiOutputText({ data }: { data: AnsiOutput }) {
+    // Simple serialization for snapshot stability
+    const serialized = data
+      .map((line) => line.map((token) => token.text || '').join(''))
+      .join('\n');
+    return <Text>MockAnsiOutput:{serialized}</Text>;
+  },
+}));
 
 // Mock child components or utilities if they are complex or have side effects
 vi.mock('../GeminiRespondingSpinner.js', () => ({
@@ -228,5 +256,28 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('🤖'); // Subagent execution display should show
     expect(output).toContain('file-search'); // Actual subagent name
     expect(output).toContain('Search for files matching pattern'); // Actual task description
+  });
+
+  it('renders AnsiOutputText for AnsiOutput results', () => {
+    const ansiResult: AnsiOutput = [
+      [
+        {
+          text: 'hello',
+          fg: '#ffffff',
+          bg: '#000000',
+          bold: false,
+          italic: false,
+          underline: false,
+          dim: false,
+          inverse: false,
+        },
+      ],
+    ];
+    const ansiOutputDisplay: AnsiOutputDisplay = { ansiOutput: ansiResult };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} resultDisplay={ansiOutputDisplay} />,
+      StreamingState.Idle,
+    );
+    expect(lastFrame()).toContain('MockAnsiOutput:hello');
   });
 });

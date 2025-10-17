@@ -184,6 +184,7 @@ export function ToolSelector({
       <Box flexDirection="column">
         <RadioButtonSelect
           items={toolOptions.map((option) => ({
+            key: option.value,
             label: option.label,
             value: option.value,
           }))}

@@ -9,20 +9,27 @@ import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
-import { Colors } from '../../colors.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { AnsiOutputText } from '../AnsiOutput.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
-import { TOOL_STATUS } from '../../constants.js';
 import type {
   TodoResultDisplay,
   TaskResultDisplay,
   PlanResultDisplay,
+  AnsiOutput,
   Config,
 } from '@qwen-code/qwen-code-core';
 import { AgentExecutionDisplay } from '../subagents/index.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
+import { ShellInputPrompt } from '../ShellInputPrompt.js';
+import {
+  SHELL_COMMAND_NAME,
+  SHELL_NAME,
+  TOOL_STATUS,
+} from '../../constants.js';
+import { theme } from '../../semantic-colors.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -40,7 +47,8 @@ type DisplayRendererResult =
   | { type: 'plan'; data: PlanResultDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
-  | { type: 'task'; data: TaskResultDisplay };
+  | { type: 'task'; data: TaskResultDisplay }
+  | { type: 'ansi'; data: AnsiOutput };
 
 /**
  * Custom hook to determine the type of result display and return appropriate rendering info
@@ -101,6 +109,15 @@ const useResultDisplayRenderer = (
         type: 'diff',
         data: resultDisplay as { fileDiff: string; fileName: string },
       };
+    }
+
+    // Check for AnsiOutput
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'ansiOutput' in resultDisplay
+    ) {
+      return { type: 'ansi', data: resultDisplay.ansiOutput as AnsiOutput };
     }
 
     // Default to string
@@ -178,7 +195,9 @@ const StringResultRenderer: React.FC<{
   return (
     <MaxSizedBox maxHeight={availableHeight} maxWidth={childWidth}>
       <Box>
-        <Text wrap="wrap">{displayData}</Text>
+        <Text wrap="wrap" color={theme.text.primary}>
+          {displayData}
+        </Text>
       </Box>
     </MaxSizedBox>
   );
@@ -205,7 +224,9 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   terminalWidth: number;
   emphasis?: TextEmphasis;
   renderOutputAsMarkdown?: boolean;
-  config: Config;
+  activeShellPtyId?: number | null;
+  embeddedShellFocused?: boolean;
+  config?: Config;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -217,8 +238,53 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   terminalWidth,
   emphasis = 'medium',
   renderOutputAsMarkdown = true,
+  activeShellPtyId,
+  embeddedShellFocused,
+  ptyId,
   config,
 }) => {
+  const isThisShellFocused =
+    (name === SHELL_COMMAND_NAME || name === 'Shell') &&
+    status === ToolCallStatus.Executing &&
+    ptyId === activeShellPtyId &&
+    embeddedShellFocused;
+
+  const [lastUpdateTime, setLastUpdateTime] = React.useState<Date | null>(null);
+  const [userHasFocused, setUserHasFocused] = React.useState(false);
+  const [showFocusHint, setShowFocusHint] = React.useState(false);
+
+  React.useEffect(() => {
+    if (resultDisplay) {
+      setLastUpdateTime(new Date());
+    }
+  }, [resultDisplay]);
+
+  React.useEffect(() => {
+    if (!lastUpdateTime) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setShowFocusHint(true);
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [lastUpdateTime]);
+
+  React.useEffect(() => {
+    if (isThisShellFocused) {
+      setUserHasFocused(true);
+    }
+  }, [isThisShellFocused]);
+
+  const isThisShellFocusable =
+    (name === SHELL_COMMAND_NAME || name === 'Shell') &&
+    status === ToolCallStatus.Executing &&
+    config?.getShouldUseNodePtyShell();
+
+  const shouldShowFocusHint =
+    isThisShellFocusable && (showFocusHint || userHasFocused);
+
   const availableHeight = availableTerminalHeight
     ? Math.max(
         availableTerminalHeight - STATIC_HEIGHT - RESERVED_LINE_COUNT,
@@ -241,13 +307,20 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
       <Box minHeight={1}>
-        <ToolStatusIndicator status={status} />
+        <ToolStatusIndicator status={status} name={name} />
         <ToolInfo
           name={name}
           status={status}
           description={description}
           emphasis={emphasis}
         />
+        {shouldShowFocusHint && (
+          <Box marginLeft={1} flexShrink={0}>
+            <Text color={theme.text.accent}>
+              {isThisShellFocused ? '(Focused)' : '(ctrl+f to focus)'}
+            </Text>
+          </Box>
+        )}
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
       {displayRenderer.type !== 'none' && (
@@ -263,12 +336,25 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={childWidth}
               />
             )}
-            {displayRenderer.type === 'task' && (
+            {displayRenderer.type === 'task' && config && (
               <SubagentExecutionRenderer
                 data={displayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={childWidth}
                 config={config}
+              />
+            )}
+            {displayRenderer.type === 'diff' && (
+              <DiffResultRenderer
+                data={displayRenderer.data}
+                availableHeight={availableHeight}
+                childWidth={childWidth}
+              />
+            )}
+            {displayRenderer.type === 'ansi' && (
+              <AnsiOutputText
+                data={displayRenderer.data}
+                availableTerminalHeight={availableHeight}
               />
             )}
             {displayRenderer.type === 'string' && (
@@ -279,14 +365,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={childWidth}
               />
             )}
-            {displayRenderer.type === 'diff' && (
-              <DiffResultRenderer
-                data={displayRenderer.data}
-                availableHeight={availableHeight}
-                childWidth={childWidth}
-              />
-            )}
           </Box>
+        </Box>
+      )}
+      {isThisShellFocused && config && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} marginTop={1}>
+          <ShellInputPrompt
+            activeShellPtyId={activeShellPtyId ?? null}
+            focus={embeddedShellFocused}
+          />
         </Box>
       )}
     </Box>
@@ -295,43 +382,50 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
 type ToolStatusIndicatorProps = {
   status: ToolCallStatus;
+  name: string;
 };
 
 const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
   status,
-}) => (
-  <Box minWidth={STATUS_INDICATOR_WIDTH}>
-    {status === ToolCallStatus.Pending && (
-      <Text color={Colors.AccentGreen}>{TOOL_STATUS.PENDING}</Text>
-    )}
-    {status === ToolCallStatus.Executing && (
-      <GeminiRespondingSpinner
-        spinnerType="toggle"
-        nonRespondingDisplay={TOOL_STATUS.EXECUTING}
-      />
-    )}
-    {status === ToolCallStatus.Success && (
-      <Text color={Colors.AccentGreen} aria-label={'Success:'}>
-        {TOOL_STATUS.SUCCESS}
-      </Text>
-    )}
-    {status === ToolCallStatus.Confirming && (
-      <Text color={Colors.AccentYellow} aria-label={'Confirming:'}>
-        {TOOL_STATUS.CONFIRMING}
-      </Text>
-    )}
-    {status === ToolCallStatus.Canceled && (
-      <Text color={Colors.AccentYellow} aria-label={'Canceled:'} bold>
-        {TOOL_STATUS.CANCELED}
-      </Text>
-    )}
-    {status === ToolCallStatus.Error && (
-      <Text color={Colors.AccentRed} aria-label={'Error:'} bold>
-        {TOOL_STATUS.ERROR}
-      </Text>
-    )}
-  </Box>
-);
+  name,
+}) => {
+  const isShell = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
+  const statusColor = isShell ? theme.ui.symbol : theme.status.warning;
+
+  return (
+    <Box minWidth={STATUS_INDICATOR_WIDTH}>
+      {status === ToolCallStatus.Pending && (
+        <Text color={theme.status.success}>{TOOL_STATUS.PENDING}</Text>
+      )}
+      {status === ToolCallStatus.Executing && (
+        <GeminiRespondingSpinner
+          spinnerType="toggle"
+          nonRespondingDisplay={TOOL_STATUS.EXECUTING}
+        />
+      )}
+      {status === ToolCallStatus.Success && (
+        <Text color={theme.status.success} aria-label={'Success:'}>
+          {TOOL_STATUS.SUCCESS}
+        </Text>
+      )}
+      {status === ToolCallStatus.Confirming && (
+        <Text color={statusColor} aria-label={'Confirming:'}>
+          {TOOL_STATUS.CONFIRMING}
+        </Text>
+      )}
+      {status === ToolCallStatus.Canceled && (
+        <Text color={statusColor} aria-label={'Canceled:'} bold>
+          {TOOL_STATUS.CANCELED}
+        </Text>
+      )}
+      {status === ToolCallStatus.Error && (
+        <Text color={theme.status.error} aria-label={'Error:'} bold>
+          {TOOL_STATUS.ERROR}
+        </Text>
+      )}
+    </Box>
+  );
+};
 
 type ToolInfo = {
   name: string;
@@ -348,11 +442,11 @@ const ToolInfo: React.FC<ToolInfo> = ({
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
       case 'high':
-        return Colors.Foreground;
+        return theme.text.primary;
       case 'medium':
-        return Colors.Foreground;
+        return theme.text.primary;
       case 'low':
-        return Colors.Gray;
+        return theme.text.secondary;
       default: {
         const exhaustiveCheck: never = emphasis;
         return exhaustiveCheck;
@@ -367,16 +461,15 @@ const ToolInfo: React.FC<ToolInfo> = ({
       >
         <Text color={nameColor} bold>
           {name}
-        </Text>
-        <Text> </Text>
-        <Text color={Colors.Gray}>{description}</Text>
+        </Text>{' '}
+        <Text color={theme.text.secondary}>{description}</Text>
       </Text>
     </Box>
   );
 };
 
 const TrailingIndicator: React.FC = () => (
-  <Text color={Colors.Foreground} wrap="truncate">
+  <Text color={theme.text.primary} wrap="truncate">
     {' '}
     ←
   </Text>

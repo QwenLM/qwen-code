@@ -9,7 +9,7 @@ Slash commands provide meta-level control over the CLI itself.
 ### Built-in Commands
 
 - **`/bug`**
-  - **Description:** File an issue about Qwen Code. By default, the issue is filed within the GitHub repository for Qwen Code. The string you enter after `/bug` will become the headline for the bug being filed. The default `/bug` behavior can be modified using the `bugCommand` setting in your `.qwen/settings.json` files.
+  - **Description:** File an issue about Qwen Code. By default, the issue is filed within the GitHub repository for Qwen Code. The string you enter after `/bug` will become the headline for the bug being filed. The default `/bug` behavior can be modified using the `advanced.bugCommand` setting in your `.qwen/settings.json` files.
 
 - **`/chat`**
   - **Description:** Save and resume conversation history for branching conversation state interactively, or resuming a previous state from a later session.
@@ -30,6 +30,9 @@ Slash commands provide meta-level control over the CLI itself.
     - **`delete`**
       - **Description:** Deletes a saved conversation checkpoint.
       - **Usage:** `/chat delete <tag>`
+    - **`share`**
+      - **Description** Writes the current conversation to a provided Markdown or JSON file.
+      - **Usage** `/chat share file.md` or `/chat share file.json`. If no filename is provided, then the CLI will generate one.
 
 - **`/clear`**
   - **Description:** Clear the terminal screen, including the visible session history and scrollback within the CLI. The underlying session data (for history recall) might be preserved depending on the exact implementation, but the visual display is cleared.
@@ -435,6 +438,16 @@ That's it! You can now run your command in the CLI. First, you might add a file 
 
 Qwen Code will then execute the multi-line prompt defined in your TOML file.
 
+## Input Prompt Shortcuts
+
+These shortcuts apply directly to the input prompt for text manipulation.
+
+- **Undo:**
+  - **Keyboard shortcut:** Press **Ctrl+z** to undo the last action in the input prompt.
+
+- **Redo:**
+  - **Keyboard shortcut:** Press **Ctrl+Shift+Z** to redo the last undone action in the input prompt.
+
 ## At commands (`@`)
 
 At commands are used to include the content of files or directories as part of your prompt to the model. These commands include git-aware filtering.
@@ -450,7 +463,7 @@ At commands are used to include the content of files or directories as part of y
     - If a path to a directory is provided, the command attempts to read the content of files within that directory and any subdirectories.
     - Spaces in paths should be escaped with a backslash (e.g., `@My\ Documents/file.txt`).
     - The command uses the `read_many_files` tool internally. The content is fetched and then inserted into your query before being sent to the model.
-    - **Git-aware filtering:** By default, git-ignored files (like `node_modules/`, `dist/`, `.env`, `.git/`) are excluded. This behavior can be changed via the `fileFiltering` settings.
+    - **Git-aware filtering:** By default, git-ignored files (like `node_modules/`, `dist/`, `.env`, `.git/`) are excluded. This behavior can be changed via the `context.fileFiltering` settings.
     - **File types:** The command is intended for text-based files. While it might attempt to read any file, binary files or very large files might be skipped or truncated by the underlying `read_many_files` tool to ensure performance and relevance. The tool indicates if files were skipped.
   - **Output:** The CLI will show a tool call message indicating that `read_many_files` was used, along with a message detailing the status and the path(s) that were processed.
 

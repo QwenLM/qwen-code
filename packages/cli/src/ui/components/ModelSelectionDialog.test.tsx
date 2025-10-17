@@ -154,14 +154,17 @@ describe('ModelSelectionDialog', () => {
 
     const expectedItems = [
       {
+        key: 'qwen3-coder-plus',
         label: 'qwen3-coder-plus (current)',
         value: 'qwen3-coder-plus',
       },
       {
+        key: 'qwen-vl-max-latest',
         label: 'qwen-vl-max [Vision]',
         value: 'qwen-vl-max-latest',
       },
       {
+        key: 'gpt-4',
         label: 'GPT-4',
         value: 'gpt-4',
       },

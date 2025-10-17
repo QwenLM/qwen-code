@@ -61,6 +61,7 @@ export function ColorSelector({
       <Box flexDirection="column">
         <RadioButtonSelect
           items={colorOptions.map((option) => ({
+            key: option.id,
             label: option.name,
             value: option.id,
           }))}

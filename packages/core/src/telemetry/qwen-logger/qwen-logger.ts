@@ -30,6 +30,12 @@ import type {
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
+  ExtensionInstallEvent,
+  ExtensionUninstallEvent,
+  ToolOutputTruncatedEvent,
+  ExtensionEnableEvent,
+  ModelSlashCommandEvent,
+  ExtensionDisableEvent,
 } from '../types.js';
 import { EndSessionEvent } from '../types.js';
 import type {
@@ -324,7 +330,7 @@ export class QwenLogger {
       await retryWithBackoff(flushFn, {
         maxAttempts: 3,
         initialDelayMs: 200,
-        shouldRetry: (err: unknown) => {
+        shouldRetryOnError: (err: unknown) => {
           if (!(err instanceof Error)) return false;
           const status = (err as HttpError).status as number | undefined;
           // If status is not available, it's likely a network error
@@ -447,17 +453,14 @@ export class QwenLogger {
       'file_operation',
       `file_operation#${event.tool_name}`,
       {
-        properties: {
+        snapshots: JSON.stringify({
           tool_name: event.tool_name,
           operation: event.operation,
           lines: event.lines,
           mimetype: event.mimetype,
           extension: event.extension,
           programming_language: event.programming_language,
-        },
-        snapshots: event.diff_stat
-          ? JSON.stringify({ diff_stat: event.diff_stat })
-          : undefined,
+        }),
       },
     );
 
@@ -482,7 +485,6 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 1,
-      message: event.error,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
@@ -534,6 +536,13 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logRipgrepFallbackEvent(): void {
+    const rumEvent = this.createActionEvent('fallback', 'ripgrep_fallback', {});
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logLoopDetectedEvent(event: LoopDetectedEvent): void {
     const rumEvent = this.createExceptionEvent('error', 'loop_detected', {
       subtype: 'loop_detected',
@@ -544,6 +553,17 @@ export class QwenLogger {
         loop_type: event.loop_type,
       }),
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logLoopDetectionDisabledEvent(): void {
+    const rumEvent = this.createActionEvent(
+      'loop',
+      'loop_detection_disabled',
+      {},
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
@@ -688,6 +708,75 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logExtensionInstallEvent(event: ExtensionInstallEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_install', {
+      snapshots: JSON.stringify({
+        extension_name: event.extension_name,
+        extension_version: event.extension_version,
+        extension_source: event.extension_source,
+        status: event.status,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logExtensionUninstallEvent(event: ExtensionUninstallEvent): void {
+    const rumEvent = this.createActionEvent(
+      'extension',
+      'extension_uninstall',
+      {
+        snapshots: JSON.stringify({
+          extension_name: event.extension_name,
+          status: event.status,
+        }),
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logExtensionEnableEvent(event: ExtensionEnableEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_enable', {
+      snapshots: JSON.stringify({
+        extension_name: event.extension_name,
+        setting_scope: event.setting_scope,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logExtensionDisableEvent(event: ExtensionDisableEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_disable', {
+      snapshots: JSON.stringify({
+        extension_name: event.extension_name,
+        setting_scope: event.setting_scope,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolOutputTruncatedEvent(event: ToolOutputTruncatedEvent): void {
+    const rumEvent = this.createActionEvent('tool', 'tool_output_truncated', {
+      snapshots: JSON.stringify({
+        tool_name: event.tool_name,
+        original_content_length: event.original_content_length,
+        truncated_content_length: event.truncated_content_length,
+        threshold: event.threshold,
+        lines: event.lines,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logSubagentExecutionEvent(event: SubagentExecutionEvent): void {
     const rumEvent = this.createActionEvent('subagent', 'subagent_execution', {
       snapshots: JSON.stringify({
@@ -695,6 +784,17 @@ export class QwenLogger {
         status: event.status,
         terminate_reason: event.terminate_reason,
         execution_summary: event.execution_summary,
+      }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logModelSlashCommandEvent(event: ModelSlashCommandEvent): void {
+    const rumEvent = this.createActionEvent('command', 'model_slash_command', {
+      snapshots: JSON.stringify({
+        model_name: event.model_name,
       }),
     });
 

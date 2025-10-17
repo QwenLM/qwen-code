@@ -38,6 +38,7 @@ export function LocationSelector({ state, dispatch, onNext }: WizardStepProps) {
     <Box flexDirection="column">
       <RadioButtonSelect
         items={locationOptions.map((option) => ({
+          key: option.value,
           label: option.label,
           value: option.value,
         }))}

@@ -11,7 +11,7 @@
      * tough-cookie@4.x while jsdom requires tough-cookie@5.x. This causes a
      * type checking error in ../../node_modules/@types/request/index.d.ts.
      */
-    "skipLibCheck": true,
+    // "skipLibCheck": true,
     "strict": true /* enable all strict type-checking options */
     /* Additional Checks */
     // "noImplicitReturns": true, /* Report error when not all code paths in function return a value. */

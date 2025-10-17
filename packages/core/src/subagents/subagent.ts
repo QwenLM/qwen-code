@@ -16,7 +16,6 @@ import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
 } from '../tools/tools.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
 import { getEnvironmentContext } from '../utils/environmentContext.js';
 import type {
   Content,
@@ -55,6 +54,7 @@ import type { SubagentHooks } from './subagent-hooks.js';
 import { logSubagentExecution } from '../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../telemetry/types.js';
 import { TaskTool } from '../tools/task.js';
+import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 
 /**
  * @fileoverview Defines the configuration interfaces for a subagent.
@@ -367,6 +367,7 @@ export class SubAgentScope {
         };
 
         const responseStream = await chat.sendMessageStream(
+          this.modelConfig.model ?? DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
         );
@@ -828,19 +829,12 @@ export class SubAgentScope {
         generationConfig.systemInstruction = systemInstruction;
       }
 
-      const contentGenerator = await createContentGenerator(
-        this.runtimeContext.getContentGeneratorConfig(),
-        this.runtimeContext,
-        this.runtimeContext.getSessionId(),
-      );
-
       if (this.modelConfig.model) {
         await this.runtimeContext.setModel(this.modelConfig.model);
       }
 
       return new GeminiChat(
         this.runtimeContext,
-        contentGenerator,
         generationConfig,
         start_history,
       );

@@ -13,7 +13,6 @@ import type {
   ToolInvocation,
   ToolLocation,
   ToolResult,
-  ToolResultDisplay,
 } from './tools.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
@@ -24,16 +23,17 @@ import { ApprovalMode } from '../config/config.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames } from './tool-names.js';
+import { logFileOperation } from '../telemetry/loggers.js';
+import { FileOperationEvent } from '../telemetry/types.js';
+import { FileOperation } from '../telemetry/metrics.js';
+import { getSpecificMimeType } from '../utils/fileUtils.js';
+import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IDEConnectionStatus } from '../ide/ide-client.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { logFileOperation } from '../telemetry/loggers.js';
-import { FileOperationEvent } from '../telemetry/types.js';
-import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
+import { IdeClient } from '../ide/ide-client.js';
+import { safeLiteralReplace } from '../utils/textUtils.js';
 
 export function applyReplacement(
   currentContent: string | null,
@@ -52,7 +52,9 @@ export function applyReplacement(
   if (oldString === '' && !isNewFile) {
     return currentContent;
   }
-  return currentContent.replaceAll(oldString, newString);
+
+  // Use intelligent replacement that handles $ sequences safely
+  return safeLiteralReplace(currentContent, oldString, newString);
 }
 
 /**
@@ -86,9 +88,9 @@ export interface EditToolParams {
   modified_by_user?: boolean;
 
   /**
-   * Initially proposed string.
+   * Initially proposed content.
    */
-  ai_proposed_string?: string;
+  ai_proposed_content?: string;
 }
 
 interface CalculatedEdit {
@@ -240,7 +242,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * It needs to calculate the diff to show the user.
    */
   async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
+    abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails | false> {
     if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
       return false;
@@ -250,6 +252,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     try {
       editData = await this.calculateEdit(this.params);
     } catch (error) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.log(`Error preparing edit: ${errorMsg}`);
       return false;
@@ -269,10 +274,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
     );
-    const ideClient = this.config.getIdeClient();
+    const ideClient = await IdeClient.getInstance();
     const ideConfirmation =
-      this.config.getIdeMode() &&
-      ideClient?.getConnectionStatus().status === IDEConnectionStatus.Connected
+      this.config.getIdeMode() && ideClient.isDiffingEnabled()
         ? ideClient.openDiff(this.params.file_path, editData.newContent)
         : undefined;
 
@@ -331,11 +335,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
    * @param params Parameters for the edit operation
    * @returns Result of the edit operation
    */
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     let editData: CalculatedEdit;
     try {
       editData = await this.calculateEdit(this.params);
     } catch (error) {
+      if (signal.aborted) {
+        throw error;
+      }
       const errorMsg = error instanceof Error ? error.message : String(error);
       return {
         llmContent: `Error preparing edit: ${errorMsg}`,
@@ -364,38 +371,53 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         .getFileSystemService()
         .writeTextFile(this.params.file_path, editData.newContent);
 
-      let displayResult: ToolResultDisplay;
       const fileName = path.basename(this.params.file_path);
       const originallyProposedContent =
-        this.params.ai_proposed_string || this.params.new_string;
+        this.params.ai_proposed_content || editData.newContent;
       const diffStat = getDiffStat(
         fileName,
         editData.currentContent ?? '',
         originallyProposedContent,
-        this.params.new_string,
+        editData.newContent,
       );
 
-      if (editData.isNewFile) {
-        displayResult = `Created ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`;
-      } else {
-        // Generate diff for display, even though core logic doesn't technically need it
-        // The CLI wrapper will use this part of the ToolResult
-        const fileDiff = Diff.createPatch(
-          fileName,
-          editData.currentContent ?? '', // Should not be null here if not isNewFile
-          editData.newContent,
-          'Current',
-          'Proposed',
-          DEFAULT_DIFF_OPTIONS,
-        );
-        displayResult = {
-          fileDiff,
-          fileName,
-          originalContent: editData.currentContent,
-          newContent: editData.newContent,
-          diffStat,
-        };
-      }
+      const fileDiff = Diff.createPatch(
+        fileName,
+        editData.currentContent ?? '', // Should not be null here if not isNewFile
+        editData.newContent,
+        'Current',
+        'Proposed',
+        DEFAULT_DIFF_OPTIONS,
+      );
+      const displayResult = {
+        fileDiff,
+        fileName,
+        originalContent: editData.currentContent,
+        newContent: editData.newContent,
+        diffStat,
+      };
+
+      // Log file operation for telemetry (without diff_stat to avoid double-counting)
+      const mimetype = getSpecificMimeType(this.params.file_path);
+      const programmingLanguage = getLanguageFromFilePath(
+        this.params.file_path,
+      );
+      const extension = path.extname(this.params.file_path);
+      const operation = editData.isNewFile
+        ? FileOperation.CREATE
+        : FileOperation.UPDATE;
+
+      logFileOperation(
+        this.config,
+        new FileOperationEvent(
+          EditTool.Name,
+          operation,
+          editData.newContent.split('\n').length,
+          mimetype,
+          extension,
+          programmingLanguage,
+        ),
+      );
 
       const llmSuccessMessageParts = [
         editData.isNewFile
@@ -407,26 +429,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           `User modified the \`new_string\` content to be: ${this.params.new_string}.`,
         );
       }
-
-      const lines = editData.newContent.split('\n').length;
-      const mimetype = getSpecificMimeType(this.params.file_path);
-      const extension = path.extname(this.params.file_path);
-      const programming_language = getProgrammingLanguage({
-        file_path: this.params.file_path,
-      });
-
-      logFileOperation(
-        this.config,
-        new FileOperationEvent(
-          EditTool.Name,
-          editData.isNewFile ? FileOperation.CREATE : FileOperation.UPDATE,
-          lines,
-          mimetype,
-          extension,
-          diffStat,
-          programming_language,
-        ),
-      );
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),
@@ -574,16 +576,13 @@ Expectation for required parameters:
         oldContent: string,
         modifiedProposedContent: string,
         originalParams: EditToolParams,
-      ): EditToolParams => {
-        const content = originalParams.new_string;
-        return {
-          ...originalParams,
-          ai_proposed_string: content,
-          old_string: oldContent,
-          new_string: modifiedProposedContent,
-          modified_by_user: true,
-        };
-      },
+      ): EditToolParams => ({
+        ...originalParams,
+        ai_proposed_content: oldContent,
+        old_string: oldContent,
+        new_string: modifiedProposedContent,
+        modified_by_user: true,
+      }),
     };
   }
 }

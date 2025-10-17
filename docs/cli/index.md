@@ -7,6 +7,7 @@ Within Qwen Code, `packages/cli` is the frontend for users to send and receive p
 - **[Authentication](./authentication.md):** A guide to setting up authentication with Qwen OAuth and OpenAI-compatible providers.
 - **[Commands](./commands.md):** A reference for Qwen Code CLI commands (e.g., `/help`, `/tools`, `/theme`).
 - **[Configuration](./configuration.md):** A guide to tailoring Qwen Code CLI behavior using configuration files.
+- **[Headless Mode](../headless.md):** A comprehensive guide to using Qwen Code programmatically for scripting and automation.
 - **[Token Caching](./token-caching.md):** Optimize API costs through token caching.
 - **[Themes](./themes.md)**: A guide to customizing the CLI's appearance with different themes.
 - **[Tutorials](tutorials.md)**: A tutorial showing how to use Qwen Code to automate a development task.
@@ -22,8 +23,10 @@ The following example pipes a command to Qwen Code from your terminal:
 echo "What is fine tuning?" | qwen
 ```
 
-Qwen Code executes the command and prints the output to your terminal. Note that you can achieve the same behavior by using the `--prompt` or `-p` flag. For example:
+You can also use the `--prompt` or `-p` flag:
 
 ```bash
 qwen -p "What is fine tuning?"
 ```
+
+For comprehensive documentation on headless usage, scripting, automation, and advanced examples, see the **[Headless Mode](../headless.md)** guide.

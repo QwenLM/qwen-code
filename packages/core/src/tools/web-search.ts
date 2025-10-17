@@ -86,8 +86,7 @@ class WebSearchToolInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<WebSearchToolResult> {
-    const apiKey =
-      this.config.getTavilyApiKey() || process.env['TAVILY_API_KEY'];
+    const apiKey = this.config.getTavilyApiKey();
     if (!apiKey) {
       return {
         llmContent:

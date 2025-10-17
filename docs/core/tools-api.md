@@ -23,8 +23,8 @@ The Qwen Code core (`packages/core`) features a robust system for defining, regi
 - **Tool Registry (`tool-registry.ts`):** A class (`ToolRegistry`) responsible for:
   - **Registering Tools:** Holding a collection of all available built-in tools (e.g., `ReadFileTool`, `ShellTool`).
   - **Discovering Tools:** It can also discover tools dynamically:
-    - **Command-based Discovery:** If `toolDiscoveryCommand` is configured in settings, this command is executed. It's expected to output JSON describing custom tools, which are then registered as `DiscoveredTool` instances.
-    - **MCP-based Discovery:** If `mcpServerCommand` is configured, the registry can connect to a Model Context Protocol (MCP) server to list and register tools (`DiscoveredMCPTool`).
+    - **Command-based Discovery:** If `tools.toolDiscoveryCommand` is configured in settings, this command is executed. It's expected to output JSON describing custom tools, which are then registered as `DiscoveredTool` instances.
+    - **MCP-based Discovery:** If `mcp.mcpServerCommand` is configured, the registry can connect to a Model Context Protocol (MCP) server to list and register tools (`DiscoveredMCPTool`).
   - **Providing Schemas:** Exposing the `FunctionDeclaration` schemas of all registered tools to the model, so it knows what tools are available and how to use them.
   - **Retrieving Tools:** Allowing the core to get a specific tool by name for execution.
 
@@ -69,7 +69,7 @@ Each of these tools extends `BaseTool` and implements the required methods for i
 
 While direct programmatic registration of new tools by users isn't explicitly detailed as a primary workflow in the provided files for typical end-users, the architecture supports extension through:
 
-- **Command-based Discovery:** Advanced users or project administrators can define a `toolDiscoveryCommand` in `settings.json`. This command, when run by the core, should output a JSON array of `FunctionDeclaration` objects. The core will then make these available as `DiscoveredTool` instances. The corresponding `toolCallCommand` would then be responsible for actually executing these custom tools.
+- **Command-based Discovery:** Advanced users or project administrators can define a `tools.toolDiscoveryCommand` in `settings.json`. This command, when run by the core, should output a JSON array of `FunctionDeclaration` objects. The core will then make these available as `DiscoveredTool` instances. The corresponding `tools.toolCallCommand` would then be responsible for actually executing these custom tools.
 - **MCP Server(s):** For more complex scenarios, one or more MCP servers can be set up and configured via the `mcpServers` setting in `settings.json`. The core can then discover and use tools exposed by these servers. As mentioned, if you have multiple MCP servers, the tool names will be prefixed with the server name from your configuration (e.g., `serverAlias__actualToolName`).
 
 This tool system provides a flexible and powerful way to augment the model's capabilities, making Qwen Code a versatile assistant for a wide range of tasks.

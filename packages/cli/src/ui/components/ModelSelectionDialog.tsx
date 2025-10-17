@@ -41,6 +41,7 @@ export const ModelSelectionDialog: React.FC<ModelSelectionDialogProps> = ({
       const visionIndicator = model.isVision ? ' [Vision]' : '';
       const currentIndicator = model.id === currentModel ? ' (current)' : '';
       return {
+        key: model.id,
         label: `${model.label}${visionIndicator}${currentIndicator}`,
         value: model.id,
       };

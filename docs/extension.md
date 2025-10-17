@@ -1,19 +1,88 @@
 # Qwen Code Extensions
 
-Qwen Code supports extensions that can be used to configure and extend its functionality.
+Qwen Code extensions package prompts, MCP servers, and custom commands into a familiar and user-friendly format. With extensions, you can expand the capabilities of Qwen Code and share those capabilities with others. They are designed to be easily installable and shareable.
+
+## Extension management
+
+We offer a suite of extension management tools using `qwen extensions` commands.
+
+Note that these commands are not supported from within the CLI, although you can list installed extensions using the `/extensions list` subcommand.
+
+Note that all of these commands will only be reflected in active CLI sessions on restart.
+
+### Installing an extension
+
+You can install an extension using `qwen extensions install` with either a GitHub URL or a local path`.
+
+Note that we create a copy of the installed extension, so you will need to run `qwen extensions update` to pull in changes from both locally-defined extensions and those on GitHub.
+
+```
+qwen extensions install https://github.com/qwen-cli-extensions/security
+```
+
+This will install the Qwen Code Security extension, which offers support for a `/security:analyze` command.
+
+### Uninstalling an extension
+
+To uninstall, run `qwen extensions uninstall extension-name`, so, in the case of the install example:
+
+```
+qwen extensions uninstall qwen-cli-security
+```
+
+### Disabling an extension
+
+Extensions are, by default, enabled across all workspaces. You can disable an extension entirely or for specific workspace.
+
+For example, `qwen extensions disable extension-name` will disable the extension at the user level, so it will be disabled everywhere. `qwen extensions disable extension-name --scope=workspace` will only disable the extension in the current workspace.
+
+### Enabling an extension
+
+You can enable extensions using `qwen extensions enable extension-name`. You can also enable an extension for a specific workspace using `qwen extensions enable extension-name --scope=workspace` from within that workspace.
+
+This is useful if you have an extension disabled at the top-level and only enabled in specific places.
+
+### Updating an extension
+
+For extensions installed from a local path or a git repository, you can explicitly update to the latest version (as reflected in the `qwen-extension.json` `version` field) with `qwen extensions update extension-name`.
+
+You can update all extensions with:
+
+```
+qwen extensions update --all
+```
+
+## Extension creation
+
+We offer commands to make extension development easier.
+
+### Create a boilerplate extension
+
+We offer several example extensions `context`, `custom-commands`, `exclude-tools` and `mcp-server`. You can view these examples [here](https://github.com/QwenLM/qwen-code/tree/main/packages/cli/src/commands/extensions/examples).
+
+To copy one of these examples into a development directory using the type of your choosing, run:
+
+```
+qwen extensions new path/to/directory custom-commands
+```
+
+### Link a local extension
+
+The `qwen extensions link` command will create a symbolic link from the extension installation directory to the development path.
+
+This is useful so you don't have to run `qwen extensions update` every time you make changes you'd like to test.
+
+```
+qwen extensions link path/to/directory
+```
 
 ## How it works
 
-On startup, Qwen Code looks for extensions in two locations:
+On startup, Qwen Code looks for extensions in `<home>/.qwen/extensions`
 
-1.  `<workspace>/.qwen/extensions`
-2.  `<home>/.qwen/extensions`
+Extensions exist as a directory that contains a `qwen-extension.json` file. For example:
 
-Qwen Code loads all extensions from both locations. If an extension with the same name exists in both locations, the extension in the workspace directory takes precedence.
-
-Within each location, individual extensions exist as a directory that contains a `qwen-extension.json` file. For example:
-
-`<workspace>/.qwen/extensions/my-extension/qwen-extension.json`
+`<home>/.qwen/extensions/my-extension/qwen-extension.json`
 
 ### `qwen-extension.json`
 
@@ -33,19 +102,20 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 }
 ```
 
-- `name`: The name of the extension. This is used to uniquely identify the extension and for conflict resolution when extension commands have the same name as user or project commands.
+- `name`: The name of the extension. This is used to uniquely identify the extension and for conflict resolution when extension commands have the same name as user or project commands. The name should be lowercase or numbers and use dashes instead of underscores or spaces. This is how users will refer to your extension in the CLI. Note that we expect this name to match the extension directory name.
 - `version`: The version of the extension.
 - `mcpServers`: A map of MCP servers to configure. The key is the name of the server, and the value is the server configuration. These servers will be loaded on startup just like MCP servers configured in a [`settings.json` file](./cli/configuration.md). If both an extension and a `settings.json` file configure an MCP server with the same name, the server defined in the `settings.json` file takes precedence.
-- `contextFileName`: The name of the file that contains the context for the extension. This will be used to load the context from the workspace. If this property is not used but a `QWEN.md` file is present in your extension directory, then that file will be loaded.
-- `excludeTools`: An array of tool names to exclude from the model. You can also specify command-specific restrictions for tools that support it, like the `run_shell_command` tool. For example, `"excludeTools": ["run_shell_command(rm -rf)"]` will block the `rm -rf` command.
+  - Note that all MCP server configuration options are supported except for `trust`.
+- `contextFileName`: The name of the file that contains the context for the extension. This will be used to load the context from the extension directory. If this property is not used but a `QWEN.md` file is present in your extension directory, then that file will be loaded.
+- `excludeTools`: An array of tool names to exclude from the model. You can also specify command-specific restrictions for tools that support it, like the `run_shell_command` tool. For example, `"excludeTools": ["run_shell_command(rm -rf)"]` will block the `rm -rf` command. Note that this differs from the MCP server `excludeTools` functionality, which can be listed in the MCP server config.
 
 When Qwen Code starts, it loads all the extensions and merges their configurations. If there are any conflicts, the workspace configuration takes precedence.
 
-## Extension Commands
+### Custom commands
 
 Extensions can provide [custom commands](./cli/commands.md#custom-commands) by placing TOML files in a `commands/` subdirectory within the extension directory. These commands follow the same format as user and project custom commands and use standard naming conventions.
 
-### Example
+**Example**
 
 An extension named `gcp` with the following structure:
 
@@ -63,7 +133,7 @@ Would provide these commands:
 - `/deploy` - Shows as `[gcp] Custom command from deploy.toml` in help
 - `/gcs:sync` - Shows as `[gcp] Custom command from sync.toml` in help
 
-### Conflict Resolution
+### Conflict resolution
 
 Extension commands have the lowest precedence. When a conflict occurs with user or project commands:
 
@@ -75,20 +145,7 @@ For example, if both a user and the `gcp` extension define a `deploy` command:
 - `/deploy` - Executes the user's deploy command
 - `/gcp.deploy` - Executes the extension's deploy command (marked with `[gcp]` tag)
 
-## Installing Extensions
-
-You can install extensions using the `install` command. This command allows you to install extensions from a Git repository or a local path.
-
-### Usage
-
-`qwen extensions install <source> | [options]`
-
-### Options
-
-- `source <url> positional argument`: The URL of a Git repository to install the extension from. The repository must contain a `qwen-extension.json` file in its root.
-- `--path <path>`: The path to a local directory to install as an extension. The directory must contain a `qwen-extension.json` file.
-
-# Variables
+## Variables
 
 Qwen Code extensions allow variable substitution in `qwen-extension.json`. This can be useful if e.g., you need the current directory to run an MCP server using `"cwd": "${extensionPath}${/}run.ts"`.
 
@@ -97,4 +154,5 @@ Qwen Code extensions allow variable substitution in `qwen-extension.json`. This 
 | variable                   | description                                                                                                                                                   |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `${extensionPath}`         | The fully-qualified path of the extension in the user's filesystem e.g., '/Users/username/.qwen/extensions/example-extension'. This will not unwrap symlinks. |
+| `${workspacePath}`         | The fully-qualified path of the current workspace.                                                                                                            |
 | `${/} or ${pathSeparator}` | The path separator (differs per OS).                                                                                                                          |

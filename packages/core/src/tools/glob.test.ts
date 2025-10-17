@@ -28,6 +28,10 @@ describe('GlobTool', () => {
   const mockConfig = {
     getFileService: () => new FileDiscoveryService(tempRootDir),
     getFileFilteringRespectGitIgnore: () => true,
+    getFileFilteringOptions: () => ({
+      respectGitIgnore: true,
+      respectQwenIgnore: true,
+    }),
     getTargetDir: () => tempRootDir,
     getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
     getFileExclusions: () => ({
@@ -38,6 +42,7 @@ describe('GlobTool', () => {
   beforeEach(async () => {
     // Create a unique root directory for each test run
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-tool-root-'));
+    await fs.writeFile(path.join(tempRootDir, '.git'), ''); // Fake git repo
     globTool = new GlobTool(mockConfig);
 
     // Create some test files and directories within this root
@@ -282,20 +287,24 @@ describe('GlobTool', () => {
       );
     });
 
-    it('should pass if path is provided but is not a string (type coercion)', () => {
+    it('should return error if path is provided but is not a string', () => {
       const params = {
         pattern: '*.ts',
         path: 123,
       } as unknown as GlobToolParams; // Force incorrect type
-      expect(globTool.validateToolParams(params)).toBeNull();
+      expect(globTool.validateToolParams(params)).toBe(
+        'params/path must be string',
+      );
     });
 
-    it('should pass if case_sensitive is provided but is not a boolean (type coercion)', () => {
+    it('should return error if case_sensitive is provided but is not a boolean', () => {
       const params = {
         pattern: '*.ts',
         case_sensitive: 'true',
       } as unknown as GlobToolParams; // Force incorrect type
-      expect(globTool.validateToolParams(params)).toBeNull();
+      expect(globTool.validateToolParams(params)).toBe(
+        'params/case_sensitive must be boolean',
+      );
     });
 
     it("should return error if search path resolves outside the tool's root directory", () => {
@@ -361,6 +370,94 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('Found 2 file(s)');
       expect(result.llmContent).toContain('fileC.md');
       expect(result.llmContent).toContain('FileD.MD');
+    });
+  });
+
+  describe('ignore file handling', () => {
+    it('should respect .gitignore files by default', async () => {
+      await fs.writeFile(path.join(tempRootDir, '.gitignore'), '*.ignored.txt');
+      await fs.writeFile(
+        path.join(tempRootDir, 'a.ignored.txt'),
+        'ignored content',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'b.notignored.txt'),
+        'not ignored content',
+      );
+
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 3 file(s)'); // fileA.txt, FileB.TXT, b.notignored.txt
+      expect(result.llmContent).not.toContain('a.ignored.txt');
+    });
+
+    it('should respect .qwenignore files by default', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.qwenignore'),
+        '*.qwenignored.txt',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'a.qwenignored.txt'),
+        'ignored content',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'b.notignored.txt'),
+        'not ignored content',
+      );
+
+      // Recreate the tool to pick up the new .qwenignore file
+      globTool = new GlobTool(mockConfig);
+
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 3 file(s)'); // fileA.txt, FileB.TXT, b.notignored.txt
+      expect(result.llmContent).not.toContain('a.qwenignored.txt');
+    });
+
+    it('should not respect .gitignore when respect_git_ignore is false', async () => {
+      await fs.writeFile(path.join(tempRootDir, '.gitignore'), '*.ignored.txt');
+      await fs.writeFile(
+        path.join(tempRootDir, 'a.ignored.txt'),
+        'ignored content',
+      );
+
+      const params: GlobToolParams = {
+        pattern: '*.txt',
+        respect_git_ignore: false,
+      };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 3 file(s)'); // fileA.txt, FileB.TXT, a.ignored.txt
+      expect(result.llmContent).toContain('a.ignored.txt');
+    });
+
+    it('should not respect .qwenignore when respect_qwen_ignore is false', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.qwenignore'),
+        '*.qwenignored.txt',
+      );
+      await fs.writeFile(
+        path.join(tempRootDir, 'a.qwenignored.txt'),
+        'ignored content',
+      );
+
+      // Recreate the tool to pick up the new .qwenignore file
+      globTool = new GlobTool(mockConfig);
+
+      const params: GlobToolParams = {
+        pattern: '*.txt',
+        respect_qwen_ignore: false,
+      };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 3 file(s)'); // fileA.txt, FileB.TXT, a.qwenignored.txt
+      expect(result.llmContent).toContain('a.qwenignored.txt');
     });
   });
 });

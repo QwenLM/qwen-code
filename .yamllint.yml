@@ -86,3 +86,5 @@ ignore:
   - 'thirdparty/'
   - 'third_party/'
   - 'vendor/'
+  - 'node_modules/'
+  - 'integration-tests/terminal-bench/'

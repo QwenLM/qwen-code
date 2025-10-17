@@ -130,14 +130,14 @@ describe('bfsFileSearch', () => {
         fileService,
         fileFilteringOptions: {
           respectGitIgnore: true,
-          respectGeminiIgnore: true,
+          respectQwenIgnore: true,
         },
       });
 
       expect(result).toEqual([targetFilePath]);
     });
 
-    it('should ignore geminiignored files', async () => {
+    it('should ignore qwenignored files', async () => {
       await createTestFile('node_modules/', 'project', '.qwenignore');
       await createTestFile('content', 'project', 'node_modules', 'target.txt');
       const targetFilePath = await createTestFile(
@@ -153,7 +153,7 @@ describe('bfsFileSearch', () => {
         fileService,
         fileFilteringOptions: {
           respectGitIgnore: false,
-          respectGeminiIgnore: true,
+          respectQwenIgnore: true,
         },
       });
 
@@ -182,7 +182,7 @@ describe('bfsFileSearch', () => {
         fileService,
         fileFilteringOptions: {
           respectGitIgnore: false,
-          respectGeminiIgnore: false,
+          respectQwenIgnore: false,
         },
       });
 

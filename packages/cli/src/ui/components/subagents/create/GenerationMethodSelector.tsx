@@ -43,6 +43,7 @@ export function GenerationMethodSelector({
     <Box flexDirection="column">
       <RadioButtonSelect
         items={generationOptions.map((option) => ({
+          key: option.value,
           label: option.label,
           value: option.value,
         }))}

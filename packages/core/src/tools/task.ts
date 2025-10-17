@@ -109,7 +109,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     } finally {
       // Update the client with the new tools
       const geminiClient = this.config.getGeminiClient();
-      if (geminiClient) {
+      if (geminiClient && geminiClient.isInitialized()) {
         await geminiClient.setTools();
       }
     }

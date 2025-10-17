@@ -16,8 +16,8 @@ import {
 import { renderHook, act } from '@testing-library/react';
 import { useAutoAcceptIndicator } from './useAutoAcceptIndicator.js';
 
-import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import { Config, ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
@@ -399,5 +399,81 @@ describe('useAutoAcceptIndicator', () => {
       expect(mockConfigInstance.getApprovalMode()).toBe(ApprovalMode.PLAN);
       expect(mockAddItem).not.toHaveBeenCalled();
     });
+  });
+
+  it('should call onApprovalModeChange when switching to AUTO_EDIT mode', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+
+    const mockOnApprovalModeChange = vi.fn();
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        onApprovalModeChange: mockOnApprovalModeChange,
+      }),
+    );
+
+    act(() => {
+      capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+    });
+
+    expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(mockOnApprovalModeChange).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+  });
+
+  it('should not call onApprovalModeChange when callback is not provided', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+      }),
+    );
+
+    act(() => {
+      capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+    });
+
+    expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+    // Should not throw an error when callback is not provided
+  });
+
+  it('should handle multiple mode changes correctly', () => {
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+
+    const mockOnApprovalModeChange = vi.fn();
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        onApprovalModeChange: mockOnApprovalModeChange,
+      }),
+    );
+
+    // Switch to AUTO_EDIT
+    act(() => {
+      capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+    });
+
+    // Switch to YOLO
+    act(() => {
+      capturedUseKeypressHandler({ name: 'tab', shift: true } as Key);
+    });
+
+    expect(mockOnApprovalModeChange).toHaveBeenCalledTimes(2);
+    expect(mockOnApprovalModeChange).toHaveBeenNthCalledWith(
+      1,
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(mockOnApprovalModeChange).toHaveBeenNthCalledWith(
+      2,
+      ApprovalMode.YOLO,
+    );
   });
 });

@@ -15,7 +15,7 @@ import type {
 import { GoogleGenAI } from '@google/genai';
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
 import type { Config } from '../config/config.js';
-import { DEFAULT_GEMINI_MODEL, DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 
 import type { UserTierId } from '../code_assist/types.js';
 import { InstallationManager } from '../utils/installationManager.js';
@@ -80,29 +80,22 @@ export type ContentGeneratorConfig = {
 export function createContentGeneratorConfig(
   config: Config,
   authType: AuthType | undefined,
+  contentGeneratorConfig?: ContentGeneratorConfig,
 ): ContentGeneratorConfig {
   const geminiApiKey = process.env['GEMINI_API_KEY'] || undefined;
   const googleApiKey = process.env['GOOGLE_API_KEY'] || undefined;
   const googleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'] || undefined;
   const googleCloudLocation = process.env['GOOGLE_CLOUD_LOCATION'] || undefined;
 
-  // openai auth
-  const openaiApiKey = process.env['OPENAI_API_KEY'] || undefined;
-  const openaiBaseUrl = process.env['OPENAI_BASE_URL'] || undefined;
-  const openaiModel = process.env['OPENAI_MODEL'] || undefined;
-
-  // Use runtime model from config if available; otherwise, fall back to parameter or default
-  const effectiveModel = config.getModel() || DEFAULT_GEMINI_MODEL;
-
-  const contentGeneratorConfig: ContentGeneratorConfig = {
-    model: effectiveModel,
+  const newContentGeneratorConfig: ContentGeneratorConfig = {
+    ...(contentGeneratorConfig || {}),
+    model:
+      contentGeneratorConfig?.model ||
+      process.env['OPENAI_MODEL'] ||
+      process.env['QWEN_MODEL'] ||
+      DEFAULT_QWEN_MODEL,
     authType,
     proxy: config?.getProxy(),
-    enableOpenAILogging: config.getEnableOpenAILogging(),
-    timeout: config.getContentGeneratorTimeout(),
-    maxRetries: config.getContentGeneratorMaxRetries(),
-    disableCacheControl: config.getContentGeneratorDisableCacheControl(),
-    samplingParams: config.getContentGeneratorSamplingParams(),
   };
 
   // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
@@ -110,47 +103,35 @@ export function createContentGeneratorConfig(
     authType === AuthType.LOGIN_WITH_GOOGLE ||
     authType === AuthType.CLOUD_SHELL
   ) {
-    return contentGeneratorConfig;
+    return newContentGeneratorConfig;
   }
 
   if (authType === AuthType.USE_GEMINI && geminiApiKey) {
-    contentGeneratorConfig.apiKey = geminiApiKey;
-    contentGeneratorConfig.vertexai = false;
+    newContentGeneratorConfig.apiKey = geminiApiKey;
+    newContentGeneratorConfig.vertexai = false;
 
-    return contentGeneratorConfig;
+    return newContentGeneratorConfig;
   }
 
   if (
     authType === AuthType.USE_VERTEX_AI &&
     (googleApiKey || (googleCloudProject && googleCloudLocation))
   ) {
-    contentGeneratorConfig.apiKey = googleApiKey;
-    contentGeneratorConfig.vertexai = true;
+    newContentGeneratorConfig.apiKey = googleApiKey;
+    newContentGeneratorConfig.vertexai = true;
 
-    return contentGeneratorConfig;
-  }
-
-  if (authType === AuthType.USE_OPENAI && openaiApiKey) {
-    contentGeneratorConfig.apiKey = openaiApiKey;
-    contentGeneratorConfig.baseUrl = openaiBaseUrl;
-    contentGeneratorConfig.model = openaiModel || DEFAULT_QWEN_MODEL;
-
-    return contentGeneratorConfig;
+    return newContentGeneratorConfig;
   }
 
   if (authType === AuthType.QWEN_OAUTH) {
     // For Qwen OAuth, we'll handle the API key dynamically in createContentGenerator
     // Set a special marker to indicate this is Qwen OAuth
-    contentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
+    newContentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
 
-    // Prefer to use qwen3-coder-plus as the default Qwen model if QWEN_MODEL is not set.
-    contentGeneratorConfig.model =
-      process.env['QWEN_MODEL'] || DEFAULT_QWEN_MODEL;
-
-    return contentGeneratorConfig;
+    return newContentGeneratorConfig;
   }
 
-  return contentGeneratorConfig;
+  return newContentGeneratorConfig;
 }
 
 export async function createContentGenerator(

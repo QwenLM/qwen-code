@@ -9,8 +9,8 @@ import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { getErrorMessage, isNodeError } from './errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import type { FileFilteringOptions } from '../config/config.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/config.js';
+import type { FileFilteringOptions } from '../config/constants.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 
 const MAX_ITEMS = 20;
 const TRUNCATION_INDICATOR = '...';
@@ -132,8 +132,8 @@ async function readFullStructure(
           const shouldIgnore =
             (options.fileFilteringOptions.respectGitIgnore &&
               options.fileService.shouldGitIgnoreFile(filePath)) ||
-            (options.fileFilteringOptions.respectGeminiIgnore &&
-              options.fileService.shouldGeminiIgnoreFile(filePath));
+            (options.fileFilteringOptions.respectQwenIgnore &&
+              options.fileService.shouldQwenIgnoreFile(filePath));
           if (shouldIgnore) {
             continue;
           }
@@ -172,8 +172,8 @@ async function readFullStructure(
           isIgnored =
             (options.fileFilteringOptions.respectGitIgnore &&
               options.fileService.shouldGitIgnoreFile(subFolderPath)) ||
-            (options.fileFilteringOptions.respectGeminiIgnore &&
-              options.fileService.shouldGeminiIgnoreFile(subFolderPath));
+            (options.fileFilteringOptions.respectQwenIgnore &&
+              options.fileService.shouldQwenIgnoreFile(subFolderPath));
         }
 
         if (options.ignoredFolders.has(subFolderName) || isIgnored) {

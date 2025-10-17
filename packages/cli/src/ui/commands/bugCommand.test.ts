@@ -16,7 +16,19 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 vi.mock('open');
 vi.mock('../../utils/version.js');
 vi.mock('../utils/formatters.js');
-vi.mock('@qwen-code/qwen-code-core');
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    IdeClient: {
+      getInstance: () => ({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue('VSCode'),
+      }),
+    },
+    sessionId: 'test-session-id',
+  };
+});
 vi.mock('node:process', () => ({
   default: {
     platform: 'test-platform',
@@ -31,9 +43,6 @@ describe('bugCommand', () => {
   beforeEach(() => {
     vi.mocked(getCliVersion).mockResolvedValue('0.1.0');
     vi.mocked(formatMemoryUsage).mockReturnValue('100 MB');
-    vi.mock('@qwen-code/qwen-code-core', () => ({
-      sessionId: 'test-session-id',
-    }));
     vi.stubEnv('SANDBOX', 'qwen-test');
   });
 
@@ -48,9 +57,6 @@ describe('bugCommand', () => {
         config: {
           getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => undefined,
-          getIdeClient: () => ({
-            getDetectedIdeDisplayName: () => 'VSCode',
-          }),
           getIdeMode: () => true,
         },
       },
@@ -84,9 +90,6 @@ describe('bugCommand', () => {
         config: {
           getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => ({ urlTemplate: customTemplate }),
-          getIdeClient: () => ({
-            getDetectedIdeDisplayName: () => 'VSCode',
-          }),
           getIdeMode: () => true,
         },
       },

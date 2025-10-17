@@ -1,0 +1,38 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`ThemeDialog Snapshots > should render correctly in scope selector mode 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Apply To                                                                                       │
+│ ● 1. User Settings                                                                               │
+│   2. Workspace Settings                                                                          │
+│   3. System Settings                                                                             │
+│                                                                                                  │
+│ (Use Enter to apply scope, Tab to select theme)                                                  │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;
+
+exports[`ThemeDialog Snapshots > should render correctly in theme selection mode 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                                                                                  │
+│ > Select Theme                               Preview                                             │
+│ ▲                                            ┌─────────────────────────────────────────────────┐ │
+│    1. Qwen Light Light                       │                                                 │ │
+│ ●  2. Qwen Dark Dark                         │ 1 # function                                    │ │
+│    3. ANSI Dark                              │ 2 def fibonacci(n):                             │ │
+│    4. Atom One Dark                          │ 3     a, b = 0, 1                               │ │
+│    5. Ayu Dark                               │ 4     for _ in range(n):                        │ │
+│    6. Default Dark                           │ 5         a, b = b, a + b                       │ │
+│    7. Dracula Dark                           │ 6     return a                                  │ │
+│    8. GitHub Dark                            │                                                 │ │
+│    9. Shades Of Purple Dark                  │ 1 - print("Hello, " + name)                     │ │
+│   10. ANSI Light Light                       │ 1 + print(f"Hello, {name}!")                    │ │
+│   11. Ayu Light Light                        │                                                 │ │
+│   12. Default Light Light                    └─────────────────────────────────────────────────┘ │
+│ ▼                                                                                                │
+│                                                                                                  │
+│ (Use Enter to select, Tab to configure scope)                                                    │
+│                                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+`;

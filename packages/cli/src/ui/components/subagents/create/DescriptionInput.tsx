@@ -52,7 +52,7 @@ export function DescriptionInput({
       try {
         const generated = await subagentGenerator(
           userDescription,
-          config.getGeminiClient(),
+          config.getBaseLlmClient(),
           abortController.signal,
         );
 

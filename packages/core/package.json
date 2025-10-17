@@ -13,15 +13,15 @@
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:ci": "vitest run --coverage",
+    "test:ci": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "files": [
     "dist"
   ],
   "dependencies": {
-    "@google/genai": "1.13.0",
-    "@lvce-editor/ripgrep": "^1.6.0",
+    "@google/genai": "1.16.0",
+    "@joshua.litt/get-ripgrep": "^0.0.2",
     "@modelcontextprotocol/sdk": "^1.11.0",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
@@ -31,8 +31,8 @@
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.203.0",
     "@opentelemetry/instrumentation-http": "^0.203.0",
+    "@opentelemetry/resource-detector-gcp": "^0.40.0",
     "@opentelemetry/sdk-node": "^0.203.0",
-    "@types/glob": "^8.1.0",
     "@types/html-to-text": "^9.0.4",
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
@@ -51,6 +51,7 @@
     "ignore": "^7.0.0",
     "jsonrepair": "^3.13.0",
     "marked": "^15.0.12",
+    "mime": "4.0.7",
     "mnemonist": "^0.40.3",
     "open": "^10.1.2",
     "openai": "5.11.0",
@@ -80,6 +81,7 @@
     "@types/minimatch": "^5.1.2",
     "@types/picomatch": "^4.0.1",
     "@types/ws": "^8.5.10",
+    "msw": "^2.3.4",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
   },

@@ -24,8 +24,8 @@ import * as glob from 'glob';
 
 vi.mock('glob', { spy: true });
 
-vi.mock('mime-types', () => {
-  const lookup = (filename: string) => {
+vi.mock('mime', () => {
+  const getType = (filename: string) => {
     if (filename.endsWith('.ts') || filename.endsWith('.js')) {
       return 'text/plain';
     }
@@ -45,9 +45,9 @@ vi.mock('mime-types', () => {
   };
   return {
     default: {
-      lookup,
+      getType,
     },
-    lookup,
+    getType,
   };
 });
 
@@ -76,7 +76,7 @@ describe('ReadManyFilesTool', () => {
 
       getFileFilteringOptions: () => ({
         respectGitIgnore: true,
-        respectGeminiIgnore: true,
+        respectQwenIgnore: true,
       }),
       getTargetDir: () => tempRootDir,
       getWorkspaceDirs: () => [tempRootDir],
@@ -489,7 +489,7 @@ describe('ReadManyFilesTool', () => {
         getFileSystemService: () => new StandardFileSystemService(),
         getFileFilteringOptions: () => ({
           respectGitIgnore: true,
-          respectGeminiIgnore: true,
+          respectQwenIgnore: true,
         }),
         getWorkspaceContext: () => new WorkspaceContext(tempDir1, [tempDir2]),
         getTargetDir: () => tempDir1,

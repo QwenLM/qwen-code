@@ -20,8 +20,10 @@ import {
   DEFAULT_MAX_LINES_TEXT_FILE,
 } from '../utils/fileUtils.js';
 import type { PartListUnion } from '@google/genai';
-import type { Config } from '../config/config.js';
-import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/config.js';
+import {
+  type Config,
+  DEFAULT_FILE_FILTERING_OPTIONS,
+} from '../config/config.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
@@ -71,7 +73,7 @@ export interface ReadManyFilesParams {
    */
   file_filtering_options?: {
     respect_git_ignore?: boolean;
-    respect_gemini_ignore?: boolean;
+    respect_qwen_ignore?: boolean;
   };
 }
 
@@ -128,17 +130,17 @@ ${this.config.getTargetDir()}
     // Determine the final list of exclusion patterns exactly as in execute method
     const paramExcludes = this.params.exclude || [];
     const paramUseDefaultExcludes = this.params.useDefaultExcludes !== false;
-    const geminiIgnorePatterns = this.config
+    const qwenIgnorePatterns = this.config
       .getFileService()
-      .getGeminiIgnorePatterns();
+      .getQwenIgnorePatterns();
     const finalExclusionPatternsForDescription: string[] =
       paramUseDefaultExcludes
         ? [
             ...getDefaultExcludes(this.config),
             ...paramExcludes,
-            ...geminiIgnorePatterns,
+            ...qwenIgnorePatterns,
           ]
-        : [...paramExcludes, ...geminiIgnorePatterns];
+        : [...paramExcludes, ...qwenIgnorePatterns];
 
     let excludeDesc = `Excluding: ${
       finalExclusionPatternsForDescription.length > 0
@@ -152,8 +154,8 @@ ${finalExclusionPatternsForDescription
     }`;
 
     // Add a note if .qwenignore patterns contributed to the final list of exclusions
-    if (geminiIgnorePatterns.length > 0) {
-      const geminiPatternsInEffect = geminiIgnorePatterns.filter((p) =>
+    if (qwenIgnorePatterns.length > 0) {
+      const geminiPatternsInEffect = qwenIgnorePatterns.filter((p) =>
         finalExclusionPatternsForDescription.includes(p),
       ).length;
       if (geminiPatternsInEffect > 0) {
@@ -174,20 +176,6 @@ ${finalExclusionPatternsForDescription
       exclude = [],
       useDefaultExcludes = true,
     } = this.params;
-
-    const defaultFileIgnores =
-      this.config.getFileFilteringOptions() ?? DEFAULT_FILE_FILTERING_OPTIONS;
-
-    const fileFilteringOptions = {
-      respectGitIgnore:
-        this.params.file_filtering_options?.respect_git_ignore ??
-        defaultFileIgnores.respectGitIgnore, // Use the property from the returned object
-      respectGeminiIgnore:
-        this.params.file_filtering_options?.respect_gemini_ignore ??
-        defaultFileIgnores.respectGeminiIgnore, // Use the property from the returned object
-    };
-    // Get centralized file discovery service
-    const fileDiscovery = this.config.getFileService();
 
     const filesToConsider = new Set<string>();
     const skippedFiles: Array<{ path: string; reason: string }> = [];
@@ -229,71 +217,37 @@ ${finalExclusionPatternsForDescription
           allEntries.add(entry);
         }
       }
-      const entries = Array.from(allEntries);
+      const relativeEntries = Array.from(allEntries).map((p) =>
+        path.relative(this.config.getTargetDir(), p),
+      );
 
-      const gitFilteredEntries = fileFilteringOptions.respectGitIgnore
-        ? fileDiscovery
-            .filterFiles(
-              entries.map((p) => path.relative(this.config.getTargetDir(), p)),
-              {
-                respectGitIgnore: true,
-                respectGeminiIgnore: false,
-              },
-            )
-            .map((p) => path.resolve(this.config.getTargetDir(), p))
-        : entries;
+      const fileDiscovery = this.config.getFileService();
+      const { filteredPaths, gitIgnoredCount, qwenIgnoredCount } =
+        fileDiscovery.filterFilesWithReport(relativeEntries, {
+          respectGitIgnore:
+            this.params.file_filtering_options?.respect_git_ignore ??
+            this.config.getFileFilteringOptions().respectGitIgnore ??
+            DEFAULT_FILE_FILTERING_OPTIONS.respectGitIgnore,
+          respectQwenIgnore:
+            this.params.file_filtering_options?.respect_qwen_ignore ??
+            this.config.getFileFilteringOptions().respectQwenIgnore ??
+            DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+        });
 
-      // Apply gemini ignore filtering if enabled
-      const finalFilteredEntries = fileFilteringOptions.respectGeminiIgnore
-        ? fileDiscovery
-            .filterFiles(
-              gitFilteredEntries.map((p) =>
-                path.relative(this.config.getTargetDir(), p),
-              ),
-              {
-                respectGitIgnore: false,
-                respectGeminiIgnore: true,
-              },
-            )
-            .map((p) => path.resolve(this.config.getTargetDir(), p))
-        : gitFilteredEntries;
-
-      let gitIgnoredCount = 0;
-      let geminiIgnoredCount = 0;
-
-      for (const absoluteFilePath of entries) {
+      for (const relativePath of filteredPaths) {
         // Security check: ensure the glob library didn't return something outside the workspace.
+
+        const fullPath = path.resolve(this.config.getTargetDir(), relativePath);
         if (
-          !this.config
-            .getWorkspaceContext()
-            .isPathWithinWorkspace(absoluteFilePath)
+          !this.config.getWorkspaceContext().isPathWithinWorkspace(fullPath)
         ) {
           skippedFiles.push({
-            path: absoluteFilePath,
-            reason: `Security: Glob library returned path outside workspace. Path: ${absoluteFilePath}`,
+            path: fullPath,
+            reason: `Security: Glob library returned path outside workspace. Path: ${fullPath}`,
           });
           continue;
         }
-
-        // Check if this file was filtered out by git ignore
-        if (
-          fileFilteringOptions.respectGitIgnore &&
-          !gitFilteredEntries.includes(absoluteFilePath)
-        ) {
-          gitIgnoredCount++;
-          continue;
-        }
-
-        // Check if this file was filtered out by gemini ignore
-        if (
-          fileFilteringOptions.respectGeminiIgnore &&
-          !finalFilteredEntries.includes(absoluteFilePath)
-        ) {
-          geminiIgnoredCount++;
-          continue;
-        }
-
-        filesToConsider.add(absoluteFilePath);
+        filesToConsider.add(fullPath);
       }
 
       // Add info about git-ignored files if any were filtered
@@ -304,10 +258,10 @@ ${finalExclusionPatternsForDescription
         });
       }
 
-      // Add info about gemini-ignored files if any were filtered
-      if (geminiIgnoredCount > 0) {
+      // Add info about qwen-ignored files if any were filtered
+      if (qwenIgnoredCount > 0) {
         skippedFiles.push({
-          path: `${geminiIgnoredCount} file(s)`,
+          path: `${qwenIgnoredCount} file(s)`,
           reason: 'gemini ignored',
         });
       }
@@ -449,7 +403,6 @@ ${finalExclusionPatternsForDescription
               lines,
               mimetype,
               path.extname(filePath),
-              undefined,
               programming_language,
             ),
           );
@@ -585,7 +538,7 @@ export class ReadManyFilesTool extends BaseDeclarativeTool<
                 'Optional: Whether to respect .gitignore patterns when listing files. Only available in git repositories. Defaults to true.',
               type: 'boolean',
             },
-            respect_gemini_ignore: {
+            respect_qwen_ignore: {
               description:
                 'Optional: Whether to respect .qwenignore patterns when listing files. Defaults to true.',
               type: 'boolean',

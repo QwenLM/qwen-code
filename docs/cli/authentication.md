@@ -131,13 +131,7 @@ OpenAI-compatible API method if configured:
 
 **Example for headless environments:**
 
-```bash
-export OPENAI_API_KEY="your-api-key"
-export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
-export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
+If none of these environment variables are set in a non-interactive session, the CLI will exit with an error.
 
-# Run Qwen Code
-qwen
-```
-
-If no API key is set in a non-interactive session, the CLI will exit with an error prompting you to configure authentication.
+For comprehensive guidance on using Qwen COde programmatically and in
+automation workflows, see the [Headless Mode Guide](../headless.md).

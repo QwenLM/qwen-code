@@ -11,7 +11,8 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
 import { shortenPath, makeRelative } from '../utils/paths.js';
-import type { Config } from '../config/config.js';
+import { type Config } from '../config/config.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 
 // Subset of 'Path' interface provided by 'glob' that we can implement for testing
@@ -73,6 +74,11 @@ export interface GlobToolParams {
    * Whether to respect .gitignore patterns (optional, defaults to true)
    */
   respect_git_ignore?: boolean;
+
+  /**
+   * Whether to respect .qwenignore patterns (optional, defaults to true)
+   */
+  respect_qwen_ignore?: boolean;
 }
 
 class GlobToolInvocation extends BaseToolInvocation<
@@ -129,14 +135,10 @@ class GlobToolInvocation extends BaseToolInvocation<
       }
 
       // Get centralized file discovery service
-      const respectGitIgnore =
-        this.params.respect_git_ignore ??
-        this.config.getFileFilteringRespectGitIgnore();
       const fileDiscovery = this.config.getFileService();
 
       // Collect entries from all search directories
-      let allEntries: GlobPath[] = [];
-
+      const allEntries: GlobPath[] = [];
       for (const searchDir of searchDirectories) {
         let pattern = this.params.pattern;
         const fullPath = path.join(searchDir, pattern);
@@ -156,33 +158,32 @@ class GlobToolInvocation extends BaseToolInvocation<
           signal,
         })) as GlobPath[];
 
-        allEntries = allEntries.concat(entries);
+        allEntries.push(...entries);
       }
 
-      const entries = allEntries;
+      const relativePaths = allEntries.map((p) =>
+        path.relative(this.config.getTargetDir(), p.fullpath()),
+      );
 
-      // Apply git-aware filtering if enabled and in git repository
-      let filteredEntries = entries;
-      let gitIgnoredCount = 0;
-
-      if (respectGitIgnore) {
-        const relativePaths = entries.map((p) =>
-          path.relative(this.config.getTargetDir(), p.fullpath()),
-        );
-        const filteredRelativePaths = fileDiscovery.filterFiles(relativePaths, {
-          respectGitIgnore,
+      const { filteredPaths, gitIgnoredCount, qwenIgnoredCount } =
+        fileDiscovery.filterFilesWithReport(relativePaths, {
+          respectGitIgnore:
+            this.params?.respect_git_ignore ??
+            this.config.getFileFilteringOptions().respectGitIgnore ??
+            DEFAULT_FILE_FILTERING_OPTIONS.respectGitIgnore,
+          respectQwenIgnore:
+            this.params?.respect_qwen_ignore ??
+            this.config.getFileFilteringOptions().respectQwenIgnore ??
+            DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
         });
-        const filteredAbsolutePaths = new Set(
-          filteredRelativePaths.map((p) =>
-            path.resolve(this.config.getTargetDir(), p),
-          ),
-        );
 
-        filteredEntries = entries.filter((entry) =>
-          filteredAbsolutePaths.has(entry.fullpath()),
-        );
-        gitIgnoredCount = entries.length - filteredEntries.length;
-      }
+      const filteredAbsolutePaths = new Set(
+        filteredPaths.map((p) => path.resolve(this.config.getTargetDir(), p)),
+      );
+
+      const filteredEntries = allEntries.filter((entry) =>
+        filteredAbsolutePaths.has(entry.fullpath()),
+      );
 
       if (!filteredEntries || filteredEntries.length === 0) {
         let message = `No files found matching pattern "${this.params.pattern}"`;
@@ -193,6 +194,9 @@ class GlobToolInvocation extends BaseToolInvocation<
         }
         if (gitIgnoredCount > 0) {
           message += ` (${gitIgnoredCount} files were git-ignored)`;
+        }
+        if (qwenIgnoredCount > 0) {
+          message += ` (${qwenIgnoredCount} files were qwen-ignored)`;
         }
         return {
           llmContent: message,
@@ -225,6 +229,9 @@ class GlobToolInvocation extends BaseToolInvocation<
       }
       if (gitIgnoredCount > 0) {
         resultMessage += ` (${gitIgnoredCount} additional files were git-ignored)`;
+      }
+      if (qwenIgnoredCount > 0) {
+        resultMessage += ` (${qwenIgnoredCount} additional files were qwen-ignored)`;
       }
       resultMessage += `, sorted by modification time (newest first):\n${fileListDescription}`;
 
@@ -281,6 +288,11 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
           respect_git_ignore: {
             description:
               'Optional: Whether to respect .gitignore patterns when finding files. Only available in git repositories. Defaults to true.',
+            type: 'boolean',
+          },
+          respect_qwen_ignore: {
+            description:
+              'Optional: Whether to respect .qwenignore patterns when finding files. Defaults to true.',
             type: 'boolean',
           },
         },
