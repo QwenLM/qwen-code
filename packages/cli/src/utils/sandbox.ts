@@ -215,6 +215,13 @@ export async function start_sandbox(
           `sandbox-macos-${profile}.sb`,
         );
       }
+      // if not found, look for file under user settings directory
+      if (!fs.existsSync(profileFile)) {
+        profileFile = path.join(
+          USER_SETTINGS_DIR,
+          `sandbox-macos-${profile}.sb`,
+        );
+      }
       if (!fs.existsSync(profileFile)) {
         throw new FatalSandboxError(
           `Missing macos seatbelt profile file '${profileFile}'`,
