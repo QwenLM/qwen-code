@@ -188,6 +188,91 @@ export class GeminiChat {
     validateHistory(history);
   }
 
+<<<<<<< HEAD
+  private _getRequestTextFromContents(contents: Content[]): string {
+    return JSON.stringify(contents);
+  }
+
+  private async _logApiRequest(
+    contents: Content[],
+    model: string,
+    prompt_id: string,
+  ): Promise<void> {
+    const requestText = this._getRequestTextFromContents(contents);
+    logApiRequest(
+      this.config,
+      new ApiRequestEvent(model, prompt_id, requestText),
+    );
+  }
+
+  private async _logApiResponse(
+    durationMs: number,
+    prompt_id: string,
+    usageMetadata?: GenerateContentResponseUsageMetadata,
+    responseText?: string,
+    responseId?: string,
+  ): Promise<void> {
+    const authType = this.config.getContentGeneratorConfig()?.authType;
+
+    // Don't log API responses for OpenAI-compatible providers
+    if (
+      authType === AuthType.QWEN_OAUTH ||
+      authType === AuthType.USE_OPENAI ||
+      authType === AuthType.AZURE_OPENAI
+    ) {
+      return;
+    }
+
+    logApiResponse(
+      this.config,
+      new ApiResponseEvent(
+        responseId || `gemini-${Date.now()}`,
+        this.config.getModel(),
+        durationMs,
+        prompt_id,
+        authType,
+        usageMetadata,
+        responseText,
+      ),
+    );
+  }
+
+  private _logApiError(
+    durationMs: number,
+    error: unknown,
+    prompt_id: string,
+    responseId?: string,
+  ): void {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorType = error instanceof Error ? error.name : 'unknown';
+
+    const authType = this.config.getContentGeneratorConfig()?.authType;
+
+    // Don't log API errors for OpenAI-compatible providers
+    if (
+      authType === AuthType.QWEN_OAUTH ||
+      authType === AuthType.USE_OPENAI ||
+      authType === AuthType.AZURE_OPENAI
+    ) {
+      return;
+    }
+
+    logApiError(
+      this.config,
+      new ApiErrorEvent(
+        responseId,
+        this.config.getModel(),
+        errorMessage,
+        durationMs,
+        prompt_id,
+        authType,
+        errorType,
+      ),
+    );
+  }
+
+=======
+>>>>>>> main
   /**
    * Handles falling back to Flash model when persistent 429 errors occur for OAuth users.
    * Uses a fallback handler if provided by the config; otherwise, returns null.

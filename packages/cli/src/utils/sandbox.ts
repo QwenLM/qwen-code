@@ -820,8 +820,308 @@ export async function start_sandbox(
             `Sandbox process exited with code: ${code}, signal: ${signal}`,
           );
         }
+<<<<<<< HEAD
+        // check that from path exists on host
+        if (!fs.existsSync(from)) {
+          console.error(
+            `ERROR: missing mount path '${from}' listed in SANDBOX_MOUNTS`,
+          );
+          process.exit(1);
+        }
+        console.error(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
+        args.push('--volume', mount);
+      }
+    }
+  }
+
+  // expose env-specified ports on the sandbox
+  ports().forEach((p) => args.push('--publish', `${p}:${p}`));
+
+  // if DEBUG is set, expose debugging port
+  if (process.env.DEBUG) {
+    const debugPort = process.env.DEBUG_PORT || '9229';
+    args.push(`--publish`, `${debugPort}:${debugPort}`);
+  }
+
+  // copy proxy environment variables, replacing localhost with SANDBOX_PROXY_NAME
+  // copy as both upper-case and lower-case as is required by some utilities
+  // GEMINI_SANDBOX_PROXY_COMMAND implies HTTPS_PROXY unless HTTP_PROXY is set
+  const proxyCommand = process.env.GEMINI_SANDBOX_PROXY_COMMAND;
+
+  if (proxyCommand) {
+    let proxy =
+      process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy ||
+      'http://localhost:8877';
+    proxy = proxy.replace('localhost', SANDBOX_PROXY_NAME);
+    if (proxy) {
+      args.push('--env', `HTTPS_PROXY=${proxy}`);
+      args.push('--env', `https_proxy=${proxy}`); // lower-case can be required, e.g. for curl
+      args.push('--env', `HTTP_PROXY=${proxy}`);
+      args.push('--env', `http_proxy=${proxy}`);
+    }
+    const noProxy = process.env.NO_PROXY || process.env.no_proxy;
+    if (noProxy) {
+      args.push('--env', `NO_PROXY=${noProxy}`);
+      args.push('--env', `no_proxy=${noProxy}`);
+    }
+
+    // if using proxy, switch to internal networking through proxy
+    if (proxy) {
+      execSync(
+        `${config.command} network inspect ${SANDBOX_NETWORK_NAME} || ${config.command} network create --internal ${SANDBOX_NETWORK_NAME}`,
+      );
+      args.push('--network', SANDBOX_NETWORK_NAME);
+      // if proxy command is set, create a separate network w/ host access (i.e. non-internal)
+      // we will run proxy in its own container connected to both host network and internal network
+      // this allows proxy to work even on rootless podman on macos with host<->vm<->container isolation
+      if (proxyCommand) {
+        execSync(
+          `${config.command} network inspect ${SANDBOX_PROXY_NAME} || ${config.command} network create ${SANDBOX_PROXY_NAME}`,
+        );
+      }
+    }
+  }
+
+  // name container after image, plus numeric suffix to avoid conflicts
+  const imageName = parseImageName(image);
+  let index = 0;
+  const containerNameCheck = execSync(
+    `${config.command} ps -a --format "{{.Names}}"`,
+  )
+    .toString()
+    .trim();
+  while (containerNameCheck.includes(`${imageName}-${index}`)) {
+    index++;
+  }
+  const containerName = `${imageName}-${index}`;
+  args.push('--name', containerName, '--hostname', containerName);
+
+  // copy GEMINI_API_KEY(s)
+  if (process.env.GEMINI_API_KEY) {
+    args.push('--env', `GEMINI_API_KEY=${process.env.GEMINI_API_KEY}`);
+  }
+  if (process.env.GOOGLE_API_KEY) {
+    args.push('--env', `GOOGLE_API_KEY=${process.env.GOOGLE_API_KEY}`);
+  }
+
+  // copy OPENAI_API_KEY and related env vars for Qwen
+  if (process.env.OPENAI_API_KEY) {
+    args.push('--env', `OPENAI_API_KEY=${process.env.OPENAI_API_KEY}`);
+  }
+  // copy TAVILY_API_KEY for web search tool
+  if (process.env.TAVILY_API_KEY) {
+    args.push('--env', `TAVILY_API_KEY=${process.env.TAVILY_API_KEY}`);
+  }
+  if (process.env.OPENAI_BASE_URL) {
+    args.push('--env', `OPENAI_BASE_URL=${process.env.OPENAI_BASE_URL}`);
+  }
+  if (process.env.OPENAI_MODEL) {
+    args.push('--env', `OPENAI_MODEL=${process.env.OPENAI_MODEL}`);
+  }
+
+  // Copy Azure OpenAI environment variables
+  if (process.env.AZURE_OPENAI_ENDPOINT) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_ENDPOINT=${process.env.AZURE_OPENAI_ENDPOINT}`,
+    );
+  }
+  if (process.env.AZURE_OPENAI_DEPLOYMENT) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_DEPLOYMENT=${process.env.AZURE_OPENAI_DEPLOYMENT}`,
+    );
+  }
+  if (process.env.AZURE_OPENAI_API_KEY) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_API_KEY=${process.env.AZURE_OPENAI_API_KEY}`,
+    );
+  }
+  if (process.env.AZURE_OPENAI_API_VERSION) {
+    args.push(
+      '--env',
+      `AZURE_OPENAI_API_VERSION=${process.env.AZURE_OPENAI_API_VERSION}`,
+    );
+  }
+
+  // copy GOOGLE_GENAI_USE_VERTEXAI
+  if (process.env.GOOGLE_GENAI_USE_VERTEXAI) {
+    args.push(
+      '--env',
+      `GOOGLE_GENAI_USE_VERTEXAI=${process.env.GOOGLE_GENAI_USE_VERTEXAI}`,
+    );
+  }
+
+  // copy GOOGLE_GENAI_USE_GCA
+  if (process.env.GOOGLE_GENAI_USE_GCA) {
+    args.push(
+      '--env',
+      `GOOGLE_GENAI_USE_GCA=${process.env.GOOGLE_GENAI_USE_GCA}`,
+    );
+  }
+
+  // copy GOOGLE_CLOUD_PROJECT
+  if (process.env.GOOGLE_CLOUD_PROJECT) {
+    args.push(
+      '--env',
+      `GOOGLE_CLOUD_PROJECT=${process.env.GOOGLE_CLOUD_PROJECT}`,
+    );
+  }
+
+  // copy GOOGLE_CLOUD_LOCATION
+  if (process.env.GOOGLE_CLOUD_LOCATION) {
+    args.push(
+      '--env',
+      `GOOGLE_CLOUD_LOCATION=${process.env.GOOGLE_CLOUD_LOCATION}`,
+    );
+  }
+
+  // copy GEMINI_MODEL
+  if (process.env.GEMINI_MODEL) {
+    args.push('--env', `GEMINI_MODEL=${process.env.GEMINI_MODEL}`);
+  }
+
+  // copy TERM and COLORTERM to try to maintain terminal setup
+  if (process.env.TERM) {
+    args.push('--env', `TERM=${process.env.TERM}`);
+  }
+  if (process.env.COLORTERM) {
+    args.push('--env', `COLORTERM=${process.env.COLORTERM}`);
+  }
+
+  // copy VIRTUAL_ENV if under working directory
+  // also mount-replace VIRTUAL_ENV directory with <project_settings>/sandbox.venv
+  // sandbox can then set up this new VIRTUAL_ENV directory using sandbox.bashrc (see below)
+  // directory will be empty if not set up, which is still preferable to having host binaries
+  if (
+    process.env.VIRTUAL_ENV?.toLowerCase().startsWith(workdir.toLowerCase())
+  ) {
+    const sandboxVenvPath = path.resolve(
+      SETTINGS_DIRECTORY_NAME,
+      'sandbox.venv',
+    );
+    if (!fs.existsSync(sandboxVenvPath)) {
+      fs.mkdirSync(sandboxVenvPath, { recursive: true });
+    }
+    args.push(
+      '--volume',
+      `${sandboxVenvPath}:${getContainerPath(process.env.VIRTUAL_ENV)}`,
+    );
+    args.push(
+      '--env',
+      `VIRTUAL_ENV=${getContainerPath(process.env.VIRTUAL_ENV)}`,
+    );
+  }
+
+  // copy additional environment variables from SANDBOX_ENV
+  if (process.env.SANDBOX_ENV) {
+    for (let env of process.env.SANDBOX_ENV.split(',')) {
+      if ((env = env.trim())) {
+        if (env.includes('=')) {
+          console.error(`SANDBOX_ENV: ${env}`);
+          args.push('--env', env);
+        } else {
+          console.error(
+            'ERROR: SANDBOX_ENV must be a comma-separated list of key=value pairs',
+          );
+          process.exit(1);
+        }
+      }
+    }
+  }
+
+  // copy NODE_OPTIONS
+  const existingNodeOptions = process.env.NODE_OPTIONS || '';
+  const allNodeOptions = [
+    ...(existingNodeOptions ? [existingNodeOptions] : []),
+    ...nodeArgs,
+  ].join(' ');
+
+  if (allNodeOptions.length > 0) {
+    args.push('--env', `NODE_OPTIONS="${allNodeOptions}"`);
+  }
+
+  // set SANDBOX as container name
+  args.push('--env', `SANDBOX=${containerName}`);
+
+  // for podman only, use empty --authfile to skip unnecessary auth refresh overhead
+  if (config.command === 'podman') {
+    const emptyAuthFilePath = path.join(os.tmpdir(), 'empty_auth.json');
+    fs.writeFileSync(emptyAuthFilePath, '{}', 'utf-8');
+    args.push('--authfile', emptyAuthFilePath);
+  }
+
+  // Determine if the current user's UID/GID should be passed to the sandbox.
+  // See shouldUseCurrentUserInSandbox for more details.
+  let userFlag = '';
+  const finalEntrypoint = entrypoint(workdir);
+
+  if (process.env.GEMINI_CLI_INTEGRATION_TEST === 'true') {
+    args.push('--user', 'root');
+    userFlag = '--user root';
+  } else if (await shouldUseCurrentUserInSandbox()) {
+    // For the user-creation logic to work, the container must start as root.
+    // The entrypoint script then handles dropping privileges to the correct user.
+    args.push('--user', 'root');
+
+    const uid = execSync('id -u').toString().trim();
+    const gid = execSync('id -g').toString().trim();
+
+    // Instead of passing --user to the main sandbox container, we let it
+    // start as root, then create a user with the host's UID/GID, and
+    // finally switch to that user to run the gemini process. This is
+    // necessary on Linux to ensure the user exists within the
+    // container's /etc/passwd file, which is required by os.userInfo().
+    const username = 'gemini';
+    const homeDir = getContainerPath(os.homedir());
+
+    const setupUserCommands = [
+      // Use -f with groupadd to avoid errors if the group already exists.
+      `groupadd -f -g ${gid} ${username}`,
+      // Create user only if it doesn't exist. Use -o for non-unique UID.
+      `id -u ${username} &>/dev/null || useradd -o -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
+    ].join(' && ');
+
+    const originalCommand = finalEntrypoint[2];
+    const escapedOriginalCommand = originalCommand.replace(/'/g, "'\\''");
+
+    // Use `su -p` to preserve the environment.
+    const suCommand = `su -p ${username} -c '${escapedOriginalCommand}'`;
+
+    // The entrypoint is always `['bash', '-c', '<command>']`, so we modify the command part.
+    finalEntrypoint[2] = `${setupUserCommands} && ${suCommand}`;
+
+    // We still need userFlag for the simpler proxy container, which does not have this issue.
+    userFlag = `--user ${uid}:${gid}`;
+    // When forcing a UID in the sandbox, $HOME can be reset to '/', so we copy $HOME as well.
+    args.push('--env', `HOME=${os.homedir()}`);
+  }
+
+  // push container image name
+  args.push(image);
+
+  // push container entrypoint (including args)
+  args.push(...finalEntrypoint);
+
+  // start and set up proxy if GEMINI_SANDBOX_PROXY_COMMAND is set
+  let proxyProcess: ChildProcess | undefined = undefined;
+  let sandboxProcess: ChildProcess | undefined = undefined;
+
+  if (proxyCommand) {
+    // run proxyCommand in its own container
+    const proxyContainerCommand = `${config.command} run --rm --init ${userFlag} --name ${SANDBOX_PROXY_NAME} --network ${SANDBOX_PROXY_NAME} -p 8877:8877 -v ${process.cwd()}:${workdir} --workdir ${workdir} ${image} ${proxyCommand}`;
+    proxyProcess = spawn(proxyContainerCommand, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      shell: true,
+      detached: true,
+=======
         resolve();
       });
+>>>>>>> main
     });
   } finally {
     patcher.cleanup();

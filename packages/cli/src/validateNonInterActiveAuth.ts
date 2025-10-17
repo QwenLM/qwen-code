@@ -18,6 +18,13 @@ function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env['GEMINI_API_KEY']) {
     return AuthType.USE_GEMINI;
   }
+  if (
+    process.env.AZURE_OPENAI_ENDPOINT &&
+    process.env.AZURE_OPENAI_DEPLOYMENT &&
+    (process.env.AZURE_OPENAI_API_KEY || process.env.AZURE_OPENAI_BEARER_TOKEN)
+  ) {
+    return AuthType.AZURE_OPENAI;
+  }
   if (process.env['OPENAI_API_KEY']) {
     return AuthType.USE_OPENAI;
   }
