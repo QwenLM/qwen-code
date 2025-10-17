@@ -133,9 +133,9 @@ export function createContentGeneratorConfig(
     const azureBearer = process.env.AZURE_OPENAI_BEARER_TOKEN;
     if (azureEndpoint && azureDeployment && (azureApiKey || azureBearer)) {
       contentGeneratorConfig.apiKey = azureApiKey ?? '';
-      // Use deployment name as model if not explicitly set
-      contentGeneratorConfig.model =
-        process.env.OPENAI_MODEL || azureDeployment;
+      // For Azure OpenAI, always use the deployment name as the model
+      // The Azure OpenAI API requires the deployment name, not a model name
+      contentGeneratorConfig.model = azureDeployment;
       return contentGeneratorConfig;
     }
   }

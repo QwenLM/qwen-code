@@ -85,16 +85,26 @@ export function AuthDialog({
   const handleAuthSelect = (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);
     if (error) {
-      // Decide which prompt variant is needed
+      // Decide which prompt variant is needed based on missing configuration
       if (authMethod === AuthType.USE_OPENAI) {
-        const missingOpenAI = !process.env.OPENAI_API_KEY;
-        if (missingOpenAI) {
+        // For OpenAI, check if we have a standard OpenAI API key
+        const hasOpenAIKey = !!process.env.OPENAI_API_KEY;
+        // Also check if user might be trying to use Azure config with OpenAI auth type
+        const hasAzureConfig = !!(
+          process.env.AZURE_OPENAI_ENDPOINT &&
+          process.env.AZURE_OPENAI_DEPLOYMENT &&
+          (process.env.AZURE_OPENAI_API_KEY ||
+            process.env.AZURE_OPENAI_BEARER_TOKEN)
+        );
+
+        if (!hasOpenAIKey && !hasAzureConfig) {
           setPromptVariant('openai');
           setShowOpenAIKeyPrompt(true);
           setErrorMessage(null);
           return;
         }
       } else if (authMethod === AuthType.AZURE_OPENAI) {
+        // For Azure OpenAI, specifically check for Azure configuration
         const missingAzure =
           !(
             process.env.AZURE_OPENAI_API_KEY ||
@@ -102,6 +112,7 @@ export function AuthDialog({
           ) ||
           !process.env.AZURE_OPENAI_ENDPOINT ||
           !process.env.AZURE_OPENAI_DEPLOYMENT;
+
         if (missingAzure) {
           setPromptVariant('azure');
           setShowOpenAIKeyPrompt(true);
@@ -122,22 +133,21 @@ export function AuthDialog({
     baseUrl: string,
     model: string,
   ) => {
-    setOpenAIApiKey(apiKey);
-    setOpenAIBaseUrl(baseUrl);
-    setOpenAIModel(model);
+    // Don't set OpenAI environment variables if we're in Azure mode
+    if (promptVariant === 'openai') {
+      setOpenAIApiKey(apiKey);
+      setOpenAIBaseUrl(baseUrl);
+      setOpenAIModel(model);
+    }
+    // Azure environment variables are already set in the prompt component
     setShowOpenAIKeyPrompt(false);
 
-    // Decide which auth type is appropriate based on envs set by prompt
-    const isAzure =
-      process.env.AZURE_OPENAI_ENDPOINT &&
-      process.env.AZURE_OPENAI_DEPLOYMENT &&
-      (process.env.AZURE_OPENAI_API_KEY ||
-        process.env.AZURE_OPENAI_BEARER_TOKEN);
+    // Decide which auth type is appropriate based on the prompt variant
+    // This ensures we don't accidentally detect Azure config when user intended OpenAI
+    const selectedAuthType =
+      promptVariant === 'azure' ? AuthType.AZURE_OPENAI : AuthType.USE_OPENAI;
 
-    onSelect(
-      isAzure ? AuthType.AZURE_OPENAI : AuthType.USE_OPENAI,
-      SettingScope.User,
-    );
+    onSelect(selectedAuthType, SettingScope.User);
   };
 
   const handleOpenAIKeyCancel = () => {

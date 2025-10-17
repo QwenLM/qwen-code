@@ -117,7 +117,8 @@ export function OpenAIKeyPrompt({
             if (azureApiVersion) {
               process.env.AZURE_OPENAI_API_VERSION = azureApiVersion;
             }
-            onSubmit('azure-api-key', '', azureDeployment);
+            // For Azure, use the deployment name as the model
+            onSubmit(azureApiKey, '', azureDeployment);
           } else {
             setCurrentField('azureEndpoint');
           }
