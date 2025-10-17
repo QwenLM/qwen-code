@@ -47,6 +47,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [mockLoader],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -64,6 +65,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [loader1, loader2],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -85,6 +87,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [loader1, loader2],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -114,6 +117,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [loader1, emptyLoader, loader3],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -134,6 +138,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [successfulLoader, failingLoader],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -149,6 +154,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [new MockCommandLoader([mockCommandA])],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -170,7 +176,7 @@ describe('CommandService', () => {
     const loader1 = new MockCommandLoader([mockCommandA]);
     const loader2 = new MockCommandLoader([mockCommandB]);
 
-    await CommandService.create([loader1, loader2], signal);
+    await CommandService.create([loader1, loader2], signal, undefined);
 
     expect(loader1.loadCommands).toHaveBeenCalledTimes(1);
     expect(loader1.loadCommands).toHaveBeenCalledWith(signal);
@@ -202,6 +208,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [mockLoader1, mockLoader2],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -252,6 +259,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [mockLoader1, mockLoader2],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -289,6 +297,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [mockLoader],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -337,6 +346,7 @@ describe('CommandService', () => {
     const service = await CommandService.create(
       [mockLoader],
       new AbortController().signal,
+      undefined,
     );
 
     const commands = service.getCommands();
@@ -348,5 +358,230 @@ describe('CommandService', () => {
     );
     expect(deployExtension).toBeDefined();
     expect(deployExtension?.description).toBe('[gcp] Deploy to Google Cloud');
+  });
+
+  it('should filter commands based on coreCommands setting', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+    const commandC = createMockCommand('command-c', CommandKind.FILE);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB, commandC]);
+
+    const settings = {
+      coreCommands: ['command-a', 'command-c'],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(2);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA, commandC]),
+    );
+    expect(commands).not.toContain(commandB);
+  });
+
+  it('should filter commands based on excludeCommands setting', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+    const commandC = createMockCommand('command-c', CommandKind.FILE);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB, commandC]);
+
+    const settings = {
+      excludeCommands: ['command-b'],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(2);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA, commandC]),
+    );
+    expect(commands).not.toContain(commandB);
+  });
+
+  it('should exclude commands that appear in both coreCommands and excludeCommands', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+    const commandC = createMockCommand('command-c', CommandKind.FILE);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB, commandC]);
+
+    const settings = {
+      coreCommands: ['command-a', 'command-b'],
+      excludeCommands: ['command-b', 'command-c'],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(1);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA]),
+    );
+    expect(commands).not.toContain(commandB);
+    expect(commands).not.toContain(commandC);
+  });
+
+  it('should handle empty coreCommands array', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB]);
+
+    const settings = {
+      coreCommands: [],
+      excludeCommands: ['command-b'],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(1);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA]),
+    );
+    expect(commands).not.toContain(commandB);
+  });
+
+  it('should handle empty excludeCommands array', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB]);
+
+    const settings = {
+      coreCommands: ['command-a'],
+      excludeCommands: [],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(1);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA]),
+    );
+    expect(commands).not.toContain(commandB);
+  });
+
+  it('should handle both arrays being empty', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB]);
+
+    const settings = {
+      coreCommands: [],
+      excludeCommands: [],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(2);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA, commandB]),
+    );
+  });
+
+  it('should handle empty coreCommands array', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB]);
+
+    const settings = {
+      coreCommands: [],
+      excludeCommands: ['command-b'],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(1);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA]),
+    );
+    expect(commands).not.toContain(commandB);
+  });
+
+  it('should handle empty excludeCommands array', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB]);
+
+    const settings = {
+      coreCommands: ['command-a'],
+      excludeCommands: [],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(1);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA]),
+    );
+    expect(commands).not.toContain(commandB);
+  });
+
+  it('should handle both arrays being empty', async () => {
+    const commandA = createMockCommand('command-a', CommandKind.BUILT_IN);
+    const commandB = createMockCommand('command-b', CommandKind.BUILT_IN);
+
+    const mockLoader = new MockCommandLoader([commandA, commandB]);
+
+    const settings = {
+      coreCommands: [],
+      excludeCommands: [],
+    };
+
+    const service = await CommandService.create(
+      [mockLoader],
+      new AbortController().signal,
+      settings,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(2);
+    expect(commands).toEqual(
+      expect.arrayContaining([commandA, commandB]),
+    );
   });
 });
