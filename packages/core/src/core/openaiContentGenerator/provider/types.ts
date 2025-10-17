@@ -1,15 +1,10 @@
 import type OpenAI from 'openai';
 
 // Extended types to support cache_control for DashScope
-export interface ChatCompletionContentPartTextWithCache
-  extends OpenAI.Chat.ChatCompletionContentPartText {
-  cache_control?: { type: 'ephemeral' };
-}
-
 export type ChatCompletionContentPartWithCache =
-  | ChatCompletionContentPartTextWithCache
-  | OpenAI.Chat.ChatCompletionContentPartImage
-  | OpenAI.Chat.ChatCompletionContentPartRefusal;
+  OpenAI.Chat.ChatCompletionContentPart & {
+    cache_control?: { type: 'ephemeral' };
+  };
 
 export type ChatCompletionToolWithCache = OpenAI.Chat.ChatCompletionTool & {
   cache_control?: { type: 'ephemeral' };

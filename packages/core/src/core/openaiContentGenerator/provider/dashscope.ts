@@ -7,7 +7,6 @@ import { tokenLimit } from '../../tokenLimits.js';
 import type {
   OpenAICompatibleProvider,
   DashScopeRequestMetadata,
-  ChatCompletionContentPartTextWithCache,
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
@@ -225,7 +224,7 @@ export class DashScopeOpenAICompatibleProvider
         {
           type: 'text',
           text: content,
-        } as ChatCompletionContentPartTextWithCache,
+        } as ChatCompletionContentPartWithCache,
       ];
     }
     return [...content] as ChatCompletionContentPartWithCache[];
@@ -241,28 +240,18 @@ export class DashScopeOpenAICompatibleProvider
       return [
         {
           type: 'text',
-          text: '',
+          text: ' ',
           cache_control: { type: 'ephemeral' },
-        } as ChatCompletionContentPartTextWithCache,
+        } as ChatCompletionContentPartWithCache,
       ];
     }
 
+    // Add cache_control to the last item regardless of its type (text, image, or refusal)
     const lastItem = contentArray[contentArray.length - 1];
-
-    if (lastItem.type === 'text') {
-      // Add cache_control to the last text item
-      contentArray[contentArray.length - 1] = {
-        ...lastItem,
-        cache_control: { type: 'ephemeral' },
-      } as ChatCompletionContentPartTextWithCache;
-    } else {
-      // If the last item is not text, add a new text item with cache_control
-      contentArray.push({
-        type: 'text',
-        text: '',
-        cache_control: { type: 'ephemeral' },
-      } as ChatCompletionContentPartTextWithCache);
-    }
+    contentArray[contentArray.length - 1] = {
+      ...lastItem,
+      cache_control: { type: 'ephemeral' },
+    } as ChatCompletionContentPartWithCache;
 
     return contentArray;
   }
