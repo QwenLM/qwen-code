@@ -27,3 +27,42 @@ Qwen Code executes the command and prints the output to your terminal. Note that
 ```bash
 qwen -p "What is fine tuning?"
 ```
+
+### Structured stream-json mode
+
+For programmatic integrations, Qwen Code supports structured JSON Lines input and output:
+
+- `--output-format stream-json` switches stdout to emit Claude-compatible envelopes (`user`, `assistant`, `result`, etc.).
+- `--input-format stream-json` lets you pipe newline-delimited JSON requests into stdin (e.g., control requests and user messages).
+- `--include-partial-messages` enables incremental `stream_event` deltas alongside the final assistant message.
+
+Example one-shot invocation:
+
+```bash
+echo '{"type":"user","message":{"content":"List supported flags"}}' \
+  | qwen --input-format stream-json --output-format stream-json
+```
+
+When run in this mode, every stdout line is a standalone JSON object you can parse reliably. Control responses (for example, acknowledging `control_request.initialize`) are also written using the same envelope schema.
+
+To keep a session open for multiple messages, omit `--prompt` and keep stdin open (for example, by running the CLI directly and typing JSON lines):
+
+```bash
+npm run stream-json-session
+```
+
+The process will remain active until EOF (`Ctrl+D`) or an explicit `control_request.interrupt`, making it suitable for SDK transports that maintain a persistent subprocess connection.
+
+The repository also provides a minimal Python client sample at
+`docs/examples/stream-json/simple_stream_json_client.py`. The script is adapted
+from `third-party/anthropics/claude-agent-sdk-python/examples/quick_start.py`
+and illustrates how to drive the session lifecycle with `control_request`, while
+showcasing a short multi-turn exchange (sending several `user` messages in a
+row):
+
+```bash
+python docs/examples/stream-json/simple_stream_json_client.py
+```
+
+Each log entry is separated with `------` and prefixed with `[client]` or `[cli]`
+to make debugging the JSON stream easier.

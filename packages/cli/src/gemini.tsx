@@ -8,6 +8,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   FatalConfigError,
+  FatalInputError,
   getOauthClient,
   IdeConnectionEvent,
   IdeConnectionType,
@@ -28,6 +29,7 @@ import { loadExtensions } from './config/extension.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import { loadSettings, SettingScope } from './config/settings.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
+import { runStreamJsonSession } from './streamJson/session.js';
 import { AppWrapper } from './ui/App.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
@@ -336,7 +338,7 @@ export async function main() {
     return runZedIntegration(config, settings, extensions, argv);
   }
 
-  let input = config.getQuestion();
+  let input = config.getQuestion() ?? '';
   const startupWarnings = [
     ...(await getStartupWarnings()),
     ...(await getUserStartupWarnings(workspaceRoot)),
@@ -347,15 +349,26 @@ export async function main() {
     await startInteractiveUI(config, settings, startupWarnings, workspaceRoot);
     return;
   }
-  // If not a TTY, read from stdin
-  // This is for cases where the user pipes input directly into the command
-  if (!process.stdin.isTTY) {
+  const inputFormat = config.getInputFormat();
+  if (inputFormat === 'stream-json') {
+    const trimmedInput = input.trim();
+    const nonInteractiveConfig = await validateNonInteractiveAuth(
+      settings.merged.security?.auth?.selectedType,
+      settings.merged.security?.auth?.useExternal,
+      config,
+    );
+    await runStreamJsonSession(
+      nonInteractiveConfig,
+      trimmedInput ? trimmedInput : undefined,
+    );
+    return;
+  } else if (!process.stdin.isTTY) {
     const stdinData = await readStdin();
     if (stdinData) {
-      input = `${stdinData}\n\n${input}`;
+      input = input ? `${stdinData}\n\n${input}` : stdinData;
     }
   }
-  if (!input) {
+  if (!input.trim()) {
     console.error(
       `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
     );

@@ -116,6 +116,9 @@ export interface CliArgs {
   tavilyApiKey: string | undefined;
   screenReader: boolean | undefined;
   vlmSwitchMode: string | undefined;
+  inputFormat: string | undefined;
+  outputFormat: string | undefined;
+  includePartialMessages: boolean | undefined;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -290,6 +293,24 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). Overrides settings files.',
           default: process.env['VLM_SWITCH_MODE'],
         })
+        .option('input-format', {
+          type: 'string',
+          choices: ['text', 'stream-json'],
+          description: 'Set the stdin consumption format',
+          default: 'text',
+        })
+        .option('output-format', {
+          type: 'string',
+          choices: ['text', 'stream-json'],
+          description: 'Set the stdout emission format',
+          default: 'text',
+        })
+        .option('include-partial-messages', {
+          type: 'boolean',
+          description:
+            'Include partial assistant deltas when output-format is stream-json',
+          default: false,
+        })
         .check((argv) => {
           if (argv.prompt && argv['promptInteractive']) {
             throw new Error(
@@ -299,6 +320,14 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           if (argv.yolo && argv['approvalMode']) {
             throw new Error(
               'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
+            );
+          }
+          if (
+            argv['includePartialMessages'] &&
+            argv['outputFormat'] !== 'stream-json'
+          ) {
+            throw new Error(
+              '--include-partial-messages requires --output-format stream-json',
             );
           }
           return true;
@@ -493,7 +522,10 @@ export async function loadCliConfig(
   }
 
   const interactive =
-    !!argv.promptInteractive || (process.stdin.isTTY && question.length === 0);
+    argv.inputFormat === 'stream-json'
+      ? false
+      : !!argv.promptInteractive ||
+        (process.stdin.isTTY && question.length === 0);
   // In non-interactive mode, exclude tools that require a prompt.
   const extraExcludes: string[] = [];
   if (!interactive && !argv.experimentalAcp) {
@@ -560,6 +592,11 @@ export async function loadCliConfig(
 
   const vlmSwitchMode =
     argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
+  const inputFormat =
+    (argv.inputFormat as 'text' | 'stream-json' | undefined) ?? 'text';
+  const outputFormat =
+    (argv.outputFormat as 'text' | 'stream-json' | undefined) ?? 'text';
+  const includePartialMessages = Boolean(argv.includePartialMessages);
   return new Config({
     sessionId,
     embeddingModel: DEFAULT_GEMINI_EMBEDDING_MODEL,
@@ -569,6 +606,9 @@ export async function loadCliConfig(
     loadMemoryFromIncludeDirectories:
       settings.context?.loadMemoryFromIncludeDirectories || false,
     debugMode,
+    inputFormat,
+    outputFormat,
+    includePartialMessages,
     question,
     fullContext: argv.allFiles || false,
     coreTools: settings.tools?.core || undefined,
