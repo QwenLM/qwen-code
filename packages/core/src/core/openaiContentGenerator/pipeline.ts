@@ -48,6 +48,9 @@ export class ContentGenerationPipeline {
       async (openaiRequest, context) => {
         const openaiResponse = (await this.client.chat.completions.create(
           openaiRequest,
+          {
+            signal: request.config?.abortSignal,
+          },
         )) as OpenAI.Chat.ChatCompletion;
 
         const geminiResponse =
@@ -78,6 +81,9 @@ export class ContentGenerationPipeline {
         // Stage 1: Create OpenAI stream
         const stream = (await this.client.chat.completions.create(
           openaiRequest,
+          {
+            signal: request.config?.abortSignal,
+          },
         )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
 
         // Stage 2: Process stream with conversion and logging
@@ -220,6 +226,12 @@ export class ContentGenerationPipeline {
       } else {
         mergedResponse.usageMetadata = lastResponse.usageMetadata;
       }
+
+      // Copy other essential properties from the current response
+      mergedResponse.responseId = response.responseId;
+      mergedResponse.createTime = response.createTime;
+      mergedResponse.modelVersion = response.modelVersion;
+      mergedResponse.promptFeedback = response.promptFeedback;
 
       // Update the collected responses with the merged response
       collectedGeminiResponses[collectedGeminiResponses.length - 1] =

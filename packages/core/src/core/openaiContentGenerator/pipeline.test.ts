@@ -161,6 +161,9 @@ describe('ContentGenerationPipeline', () => {
           top_p: 0.9,
           max_tokens: 1000,
         }),
+        expect.objectContaining({
+          signal: undefined,
+        }),
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
@@ -238,6 +241,9 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           tools: mockTools,
         }),
+        expect.objectContaining({
+          signal: undefined,
+        }),
       );
     });
 
@@ -272,6 +278,30 @@ describe('ContentGenerationPipeline', () => {
         testError,
         expect.any(Object),
         request,
+      );
+    });
+
+    it('should pass abort signal to OpenAI client when provided', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        choices: [{ message: { content: 'response' } }],
+      });
+
+      await pipeline.execute(request, 'test-id');
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ signal: abortController.signal }),
       );
     });
   });
@@ -337,6 +367,9 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           stream: true,
           stream_options: { include_usage: true },
+        }),
+        expect.objectContaining({
+          signal: undefined,
         }),
       );
       expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
@@ -467,6 +500,42 @@ describe('ContentGenerationPipeline', () => {
         testError,
         expect.any(Object),
         request,
+      );
+    });
+
+    it('should pass abort signal to OpenAI client for streaming requests', async () => {
+      const abortController = new AbortController();
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { abortSignal: abortController.signal },
+      };
+
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Hello' }, finish_reason: 'stop' }],
+          };
+        },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(request, 'test-id');
+      for await (const _result of resultGenerator) {
+        // Consume stream
+      }
+
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.objectContaining({ signal: abortController.signal }),
       );
     });
 
@@ -924,6 +993,9 @@ describe('ContentGenerationPipeline', () => {
           top_p: 0.9, // Config parameter used since request overrides are not being applied in current implementation
           max_tokens: 1000, // Config parameter used since request overrides are not being applied in current implementation
         }),
+        expect.objectContaining({
+          signal: undefined,
+        }),
       );
     });
 
@@ -959,6 +1031,9 @@ describe('ContentGenerationPipeline', () => {
           temperature: 0.7, // From config
           top_p: 0.9, // From config
           max_tokens: 1000, // From config
+        }),
+        expect.objectContaining({
+          signal: undefined,
         }),
       );
     });
@@ -1008,6 +1083,9 @@ describe('ContentGenerationPipeline', () => {
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           metadata: { promptId: userPromptId },
+        }),
+        expect.objectContaining({
+          signal: undefined,
         }),
       );
     });

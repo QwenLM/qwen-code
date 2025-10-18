@@ -54,7 +54,11 @@ const MockedGeminiClientClass = vi.hoisted(() =>
 const MockedUserPromptEvent = vi.hoisted(() =>
   vi.fn().mockImplementation(() => {}),
 );
+const MockedApiCancelEvent = vi.hoisted(() =>
+  vi.fn().mockImplementation(() => {}),
+);
 const mockParseAndFormatApiError = vi.hoisted(() => vi.fn());
+const mockLogApiCancel = vi.hoisted(() => vi.fn());
 
 // Vision auto-switch mocks (hoisted)
 const mockHandleVisionSwitch = vi.hoisted(() =>
@@ -71,7 +75,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     GitService: vi.fn(),
     GeminiClient: MockedGeminiClientClass,
     UserPromptEvent: MockedUserPromptEvent,
+    ApiCancelEvent: MockedApiCancelEvent,
     parseAndFormatApiError: mockParseAndFormatApiError,
+    logApiCancel: mockLogApiCancel,
   };
 });
 

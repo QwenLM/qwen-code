@@ -84,16 +84,16 @@ jobs:
             2. Use shell command `echo` to check environment variable for issues to triage: $ISSUES_TO_TRIAGE (JSON array of issues)
             3. Review the issue title, body and any comments provided in the environment variables.
             4. Ignore any existing priorities or tags on the issue.
-            5. Select the most relevant labels from the existing labels, focusing on kind/*, area/*, sub-area/* and priority/*.
+            5. Select the most relevant labels from the existing labels, focusing on type/*, category/*, scope/*, status/* and priority/*.
             6. Get the list of labels already on the issue using `gh issue view ISSUE_NUMBER --repo ${{ github.repository }} --json labels -t '{{range .labels}}{{.name}}{{"\n"}}{{end}}'
-            7. For area/* and kind/* limit yourself to only the single most applicable label in each case.
+            7. For category/* and type/* limit yourself to only the single most applicable label in each case.
             8. Give me a single short paragraph about why you are selecting each label in the process. use the format Issue ID: , Title, Label applied:, Label removed, ovearll explanation
             9. Parse the JSON array from step 2 and for EACH INDIVIDUAL issue, apply appropriate labels using separate commands:
               - `gh issue edit ISSUE_NUMBER --repo ${{ github.repository }} --add-label "label1"`
               - `gh issue edit ISSUE_NUMBER --repo ${{ github.repository }} --add-label "label2"`
               - Continue for each label separately
               - IMPORTANT: Label each issue individually, one command per issue, one label at a time if needed.
-              - Make sure after you apply labels there is only one area/* and one kind/* label per issue.
+              - Make sure after you apply labels there is only one category/* and one type/* label per issue.
               - To do this look for labels found in step 6 that no longer apply remove them one at a time using
               - `gh issue edit ISSUE_NUMBER --repo ${{ github.repository }} --remove-label "label-name1"`
               - `gh issue edit ISSUE_NUMBER --repo ${{ github.repository }} --remove-label "label-name2"`
@@ -113,9 +113,9 @@ jobs:
               - Do not add comments or modify the issue content.
               - Do not remove labels titled help wanted or good first issue.
               - Triage only the current issue.
-              - Identify only one area/ label
-              - Identify only one kind/ label (Do not apply kind/duplicate or kind/parent-issue)
-              - Identify all applicable sub-area/* and priority/* labels based on the issue content. It's ok to have multiple of these.
+              - Identify only one category/ label
+              - Identify only one type/ label (Do not apply type/duplicate or type/parent-issue)
+              - Identify all applicable scope/*, status/* and priority/* labels based on the issue content. It's ok to have multiple of these.
               - Once you categorize the issue if it needs information bump down the priority by 1 eg.. a p0 would become a p1 a p1 would become a p2. P2 and P3 can stay as is in this scenario.
             Categorization Guidelines:
             P0: Critical / Blocker
@@ -157,48 +157,52 @@ jobs:
               - If users are talking about issues where the model gets downgraded from pro to flash then i want you to categorize that as a performance issue
               - This product is designed to use different models eg.. using pro, downgrading to flash etc.
               - When users report that they dont expect the model to change those would be categorized as feature requests.
-            Definition of Areas
-            area/ux:
-              - Issues concerning user-facing elements like command usability, interactive features, help docs, and perceived performance.
-              - I am seeing my screen flicker when using Gemini CLI
-              - I am seeing the output malformed
-              - Theme changes aren't taking effect
-              - My keyboard inputs arent' being recognzied
-            area/platform:
-              - Issues related to installation, packaging, OS compatibility (Windows, macOS, Linux), and the underlying CLI framework.
-            area/background: Issues related to long-running background tasks, daemons, and autonomous or proactive agent features.
-            area/models:
-              - i am not getting a response that is reasonable or expected. this can include things like
-              - I am calling a tool and the tool is not performing as expected.
-              - i am expecting a tool to be called and it is not getting called ,
-              - Including experience when using
-              - built-in tools (e.g., web search, code interpreter, read file, writefile, etc..),
-              - Function calling issues should be under this area
-              - i am getting responses from the model that are malformed.
-              - Issues concerning Gemini quality of response and inference,
-              - Issues talking about unnecessary token consumption.
-              - Issues talking about Model getting stuck in a loop be watchful as this could be the root cause for issues that otherwise seem like model performance issues.
-              - Memory compression
-              - unexpected responses,
-              - poor quality of generated code
-            area/tools:
-              - These are primarily issues related to Model Context Protocol
-              - These are issues that mention MCP support
-              - feature requests asking for support for new tools.
-            area/core:
-              - Issues with fundamental components like command parsing, configuration management, session state, and the main API client logic. Introducing multi-modality
-            area/contribution:
-              - Issues related to improving the developer contribution experience, such as CI/CD pipelines, build scripts, and test automation infrastructure.
-            area/authentication:
-              -  Issues related to user identity, login flows, API key handling, credential storage, and access token management, unable to sign in selecting wrong authentication path etc..
-            area/security-privacy:
-              - Issues concerning vulnerability patching, dependency security, data sanitization, privacy controls, and preventing unauthorized data access.
-            area/extensibility:
-              - Issues related to the plugin system, extension APIs, or making the CLI's functionality available in other applications, github actions, ide support etc..
-            area/performance:
-              - Issues focused on model performance
-              - Issues with running out of capacity,
-              - 429 errors etc..
-              - could also pertain to latency,
-              - other general software performance like, memory usage, CPU consumption, and algorithmic efficiency.
-              - Switching models from one to the other unexpectedly.
+            Definition of Categories and Scopes
+
+            category/cli: Command line interface and interaction
+            - Issues with interactive CLI features, command parsing, keyboard shortcuts
+            - Related scopes: scope/commands, scope/interactive, scope/non-interactive, scope/keybindings
+
+            category/core: Core engine and logic
+            - Issues with fundamental components, content generation, session management
+            - Related scopes: scope/content-generation, scope/token-management, scope/session-management, scope/model-switching
+
+            category/ui: User interface and display
+            - Issues with themes, UI components, rendering, markdown display
+            - Related scopes: scope/themes, scope/components, scope/rendering, scope/markdown
+
+            category/authentication: Authentication and authorization
+            - Issues with login flows, API keys, OAuth, credential storage
+            - Related scopes: scope/oauth, scope/api-keys, scope/token-storage
+
+            category/tools: Tool integration and execution
+            - Issues with MCP, shell execution, file operations, web search, memory, git integration
+            - Related scopes: scope/mcp, scope/shell, scope/file-operations, scope/web-search, scope/memory, scope/git
+
+            category/configuration: Configuration management
+            - Issues with settings, extensions, trusted folders, sandbox configuration
+            - Related scopes: scope/settings, scope/extensions, scope/trusted-folders, scope/sandbox
+
+            category/integration: External integrations
+            - Issues with IDE integration, VSCode extension, Zed integration, GitHub Actions
+            - Related scopes: scope/ide, scope/vscode, scope/zed, scope/github-actions
+
+            category/platform: Platform compatibility
+            - Issues with installation, OS compatibility, packaging
+            - Related scopes: scope/installation, scope/macos, scope/windows, scope/linux, scope/packaging
+
+            category/performance: Performance and optimization
+            - Issues with latency, memory usage, model performance, caching
+            - Related scopes: scope/latency, scope/memory-usage, scope/model-performance, scope/caching
+
+            category/security: Security and privacy
+            - Issues with data privacy, credential security, vulnerabilities
+            - Related scopes: scope/data-privacy, scope/credential-security, scope/vulnerability
+
+            category/telemetry: Telemetry and analytics
+            - Issues with metrics collection, logging, analytics
+            - Related scopes: scope/metrics, scope/logging, scope/analytics
+
+            category/development: Development experience
+            - Issues with build system, testing, CI/CD, documentation
+            - Related scopes: scope/build-system, scope/testing, scope/ci-cd, scope/documentation

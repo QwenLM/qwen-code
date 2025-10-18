@@ -401,7 +401,7 @@ export class CoreToolScheduler {
             }
           }
 
-          return {
+          const cancelledCall = {
             request: currentCall.request,
             tool: toolInstance,
             invocation,
@@ -426,6 +426,8 @@ export class CoreToolScheduler {
             durationMs,
             outcome,
           } as CancelledToolCall;
+
+          return cancelledCall;
         }
         case 'validating':
           return {

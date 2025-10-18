@@ -127,11 +127,13 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   function_name: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
-  success: boolean;
+  status: 'success' | 'error' | 'cancelled';
+  success: boolean; // Keep for backward compatibility
   decision?: ToolCallDecision;
   error?: string;
   error_type?: string;
   prompt_id: string;
+  response_id?: string;
   tool_type: 'native' | 'mcp';
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
@@ -142,13 +144,15 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.function_name = call.request.name;
     this.function_args = call.request.args;
     this.duration_ms = call.durationMs ?? 0;
-    this.success = call.status === 'success';
+    this.status = call.status;
+    this.success = call.status === 'success'; // Keep for backward compatibility
     this.decision = call.outcome
       ? getDecisionFromOutcome(call.outcome)
       : undefined;
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
+    this.response_id = call.request.response_id;
     this.tool_type =
       typeof call.tool !== 'undefined' && call.tool instanceof DiscoveredMCPTool
         ? 'mcp'
@@ -219,6 +223,22 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     this.error_type = error_type;
     this.status_code = status_code;
     this.duration_ms = duration_ms;
+    this.prompt_id = prompt_id;
+    this.auth_type = auth_type;
+  }
+}
+
+export class ApiCancelEvent implements BaseTelemetryEvent {
+  'event.name': 'api_cancel';
+  'event.timestamp': string;
+  model: string;
+  prompt_id: string;
+  auth_type?: string;
+
+  constructor(model: string, prompt_id: string, auth_type?: string) {
+    this['event.name'] = 'api_cancel';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = model;
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
   }
@@ -542,6 +562,7 @@ export type TelemetryEvent =
   | ToolCallEvent
   | ApiRequestEvent
   | ApiErrorEvent
+  | ApiCancelEvent
   | ApiResponseEvent
   | FlashFallbackEvent
   | LoopDetectedEvent

@@ -913,7 +913,21 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
         return;
       }
 
-      // 1. Close other dialogs (highest priority)
+      /**
+       * For AuthDialog it is required to complete the authentication process,
+       * otherwise user cannot proceed to the next step.
+       * So a quit on AuthDialog should go with normal two press quit
+       * and without quit-confirm dialog.
+       */
+      if (isAuthDialogOpen) {
+        setPressedOnce(true);
+        timerRef.current = setTimeout(() => {
+          setPressedOnce(false);
+        }, 500);
+        return;
+      }
+
+      //1. Close other dialogs (highest priority)
       if (closeAnyOpenDialog()) {
         return; // Dialog closed, end processing
       }
@@ -934,6 +948,7 @@ const App = ({ config, settings, startupWarnings = [], version }: AppProps) => {
       handleSlashCommand('/quit-confirm');
     },
     [
+      isAuthDialogOpen,
       handleSlashCommand,
       quitConfirmationRequest,
       closeAnyOpenDialog,

@@ -15,6 +15,7 @@ import {
   EVENT_TOOL_CALL,
 } from './constants.js';
 import type {
+  CancelledToolCall,
   CompletedToolCall,
   ErroredToolCall,
   SuccessfulToolCall,
@@ -25,7 +26,7 @@ import { MockTool } from '../test-utils/tools.js';
 
 const createFakeCompletedToolCall = (
   name: string,
-  success: boolean,
+  success: boolean | 'cancelled',
   duration = 100,
   outcome?: ToolConfirmationOutcome,
   error?: Error,
@@ -39,7 +40,7 @@ const createFakeCompletedToolCall = (
   };
   const tool = new MockTool(name);
 
-  if (success) {
+  if (success === true) {
     return {
       status: 'success',
       request,
@@ -63,6 +64,30 @@ const createFakeCompletedToolCall = (
       durationMs: duration,
       outcome,
     } as SuccessfulToolCall;
+  } else if (success === 'cancelled') {
+    return {
+      status: 'cancelled',
+      request,
+      tool,
+      invocation: tool.build({ param: 'test' }),
+      response: {
+        callId: request.callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: request.callId,
+              name,
+              response: { error: 'Tool cancelled' },
+            },
+          },
+        ],
+        error: new Error('Tool cancelled'),
+        errorType: ToolErrorType.UNKNOWN,
+        resultDisplay: 'Cancelled!',
+      },
+      durationMs: duration,
+      outcome,
+    } as CancelledToolCall;
   } else {
     return {
       status: 'error',
@@ -411,6 +436,40 @@ describe('UiTelemetryService', () => {
       });
     });
 
+    it('should process a single cancelled ToolCallEvent', () => {
+      const toolCall = createFakeCompletedToolCall(
+        'test_tool',
+        'cancelled',
+        180,
+        ToolConfirmationOutcome.Cancel,
+      );
+      service.addEvent({
+        ...structuredClone(new ToolCallEvent(toolCall)),
+        'event.name': EVENT_TOOL_CALL,
+      } as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+
+      const metrics = service.getMetrics();
+      const { tools } = metrics;
+
+      expect(tools.totalCalls).toBe(1);
+      expect(tools.totalSuccess).toBe(0);
+      expect(tools.totalFail).toBe(1);
+      expect(tools.totalDurationMs).toBe(180);
+      expect(tools.totalDecisions[ToolCallDecision.REJECT]).toBe(1);
+      expect(tools.byName['test_tool']).toEqual({
+        count: 1,
+        success: 0,
+        fail: 1,
+        durationMs: 180,
+        decisions: {
+          [ToolCallDecision.ACCEPT]: 0,
+          [ToolCallDecision.REJECT]: 1,
+          [ToolCallDecision.MODIFY]: 0,
+          [ToolCallDecision.AUTO_ACCEPT]: 0,
+        },
+      });
+    });
+
     it('should process a ToolCallEvent with modify decision', () => {
       const toolCall = createFakeCompletedToolCall(
         'test_tool',
@@ -636,6 +695,34 @@ describe('UiTelemetryService', () => {
       service.resetLastPromptTokenCount();
       expect(service.getLastPromptTokenCount()).toBe(0);
       expect(spy).toHaveBeenCalledOnce();
+    });
+
+    it('should correctly set status field for success/error/cancelled calls', () => {
+      const successCall = createFakeCompletedToolCall(
+        'success_tool',
+        true,
+        100,
+      );
+      const errorCall = createFakeCompletedToolCall('error_tool', false, 150);
+      const cancelledCall = createFakeCompletedToolCall(
+        'cancelled_tool',
+        'cancelled',
+        200,
+      );
+
+      const successEvent = new ToolCallEvent(successCall);
+      const errorEvent = new ToolCallEvent(errorCall);
+      const cancelledEvent = new ToolCallEvent(cancelledCall);
+
+      // Verify status field is correctly set
+      expect(successEvent.status).toBe('success');
+      expect(errorEvent.status).toBe('error');
+      expect(cancelledEvent.status).toBe('cancelled');
+
+      // Verify backward compatibility with success field
+      expect(successEvent.success).toBe(true);
+      expect(errorEvent.success).toBe(false);
+      expect(cancelledEvent.success).toBe(false);
     });
   });
 

@@ -1,6 +1,6 @@
 name: 'Bug Report'
 description: 'Report a bug to help us improve Qwen Code'
-labels: ['kind/bug', 'status/need-triage']
+labels: ['type/bug', 'status/needs-triage']
 body:
   - type: 'markdown'
     attributes:

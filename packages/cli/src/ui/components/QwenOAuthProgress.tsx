@@ -110,7 +110,7 @@ function StatusDisplay({
         <Text color={Colors.Gray}>
           Time remaining: {formatTime(timeRemaining)}
         </Text>
-        <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
+        <Text color={Colors.AccentPurple}>(Press ESC or CTRL+C to cancel)</Text>
       </Box>
     </Box>
   );
@@ -132,7 +132,7 @@ export function QwenOAuthProgress({
     if (authStatus === 'timeout') {
       // Any key press in timeout state should trigger cancel to return to auth dialog
       onCancel();
-    } else if (key.escape) {
+    } else if (key.escape || (key.ctrl && input === 'c')) {
       onCancel();
     }
   });
@@ -250,7 +250,9 @@ export function QwenOAuthProgress({
             Time remaining: {Math.floor(timeRemaining / 60)}:
             {(timeRemaining % 60).toString().padStart(2, '0')}
           </Text>
-          <Text color={Colors.AccentPurple}>(Press ESC to cancel)</Text>
+          <Text color={Colors.AccentPurple}>
+            (Press ESC or CTRL+C to cancel)
+          </Text>
         </Box>
       </Box>
     );

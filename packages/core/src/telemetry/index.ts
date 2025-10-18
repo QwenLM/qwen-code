@@ -17,6 +17,7 @@ export { SpanStatusCode, ValueType } from '@opentelemetry/api';
 export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 export {
   logApiError,
+  logApiCancel,
   logApiRequest,
   logApiResponse,
   logChatCompression,
@@ -35,6 +36,7 @@ export {
 } from './sdk.js';
 export {
   ApiErrorEvent,
+  ApiCancelEvent,
   ApiRequestEvent,
   ApiResponseEvent,
   ConversationFinishedEvent,
@@ -54,4 +56,5 @@ export type {
   TelemetryEvent,
 } from './types.js';
 export * from './uiTelemetry.js';
+export { QwenLogger } from './qwen-logger/qwen-logger.js';
 export { DEFAULT_OTLP_ENDPOINT, DEFAULT_TELEMETRY_TARGET };

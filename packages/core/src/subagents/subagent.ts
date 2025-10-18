@@ -381,6 +381,7 @@ export class SubAgentScope {
         let roundText = '';
         let lastUsage: GenerateContentResponseUsageMetadata | undefined =
           undefined;
+        let currentResponseId: string | undefined = undefined;
         for await (const streamEvent of responseStream) {
           if (abortController.signal.aborted) {
             this.terminateMode = SubagentTerminateMode.CANCELLED;
@@ -395,6 +396,10 @@ export class SubAgentScope {
           // Handle chunk events
           if (streamEvent.type === 'chunk') {
             const resp = streamEvent.value;
+            // Track the response ID for tool call correlation
+            if (resp.responseId) {
+              currentResponseId = resp.responseId;
+            }
             if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
             const content = resp.candidates?.[0]?.content;
             const parts = content?.parts || [];
@@ -455,6 +460,7 @@ export class SubAgentScope {
             abortController,
             promptId,
             turnCounter,
+            currentResponseId,
           );
         } else {
           // No tool calls — treat this as the model's final answer.
@@ -543,6 +549,7 @@ export class SubAgentScope {
    * @param {FunctionCall[]} functionCalls - An array of `FunctionCall` objects to process.
    * @param {ToolRegistry} toolRegistry - The tool registry to look up and execute tools.
    * @param {AbortController} abortController - An `AbortController` to signal cancellation of tool executions.
+   * @param {string} responseId - Optional API response ID for correlation with tool calls.
    * @returns {Promise<Content[]>} A promise that resolves to an array of `Content` parts representing the tool responses,
    *          which are then used to update the chat history.
    */
@@ -551,6 +558,7 @@ export class SubAgentScope {
     abortController: AbortController,
     promptId: string,
     currentRound: number,
+    responseId?: string,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
 
@@ -704,6 +712,7 @@ export class SubAgentScope {
         args,
         isClientInitiated: true,
         prompt_id: promptId,
+        response_id: responseId,
       };
 
       const description = this.getToolDescription(toolName, args);

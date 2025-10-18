@@ -10,6 +10,7 @@ export const EVENT_USER_PROMPT = 'qwen-code.user_prompt';
 export const EVENT_TOOL_CALL = 'qwen-code.tool_call';
 export const EVENT_API_REQUEST = 'qwen-code.api_request';
 export const EVENT_API_ERROR = 'qwen-code.api_error';
+export const EVENT_API_CANCEL = 'qwen-code.api_cancel';
 export const EVENT_API_RESPONSE = 'qwen-code.api_response';
 export const EVENT_CLI_CONFIG = 'qwen-code.config';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
