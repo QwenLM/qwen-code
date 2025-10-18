@@ -48,4 +48,4 @@ logs/
 # GHA credentials
 gha-creds-*.json
 
-QWEN.md
+/QWEN.md

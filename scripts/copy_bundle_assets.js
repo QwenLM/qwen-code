@@ -17,7 +17,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, cpSync, rmSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
@@ -35,6 +35,24 @@ if (!existsSync(bundleDir)) {
 const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
 for (const file of sbFiles) {
   copyFileSync(join(root, file), join(bundleDir, basename(file)));
+}
+
+// Copy spec scaffolding assets for the add-spec command
+const specSourceDir = join(
+  root,
+  'packages',
+  'cli',
+  'src',
+  'ui',
+  'commands',
+  'spec',
+);
+const specTargetDir = join(bundleDir, 'spec');
+if (existsSync(specSourceDir)) {
+  if (existsSync(specTargetDir)) {
+    rmSync(specTargetDir, { recursive: true, force: true });
+  }
+  cpSync(specSourceDir, specTargetDir, { recursive: true });
 }
 
 console.log('Assets copied to bundle/');

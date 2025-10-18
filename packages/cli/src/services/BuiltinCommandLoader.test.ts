@@ -71,6 +71,7 @@ vi.mock('../ui/commands/modelCommand.js', () => ({
     kind: 'BUILT_IN',
   },
 }));
+vi.mock('../ui/commands/addSpecCommand.js', () => ({ addSpecCommand: {} }));
 
 describe('BuiltinCommandLoader', () => {
   let mockConfig: Config;
