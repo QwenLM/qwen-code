@@ -190,6 +190,7 @@ export async function main() {
     sessionId,
     argv,
   );
+  settings.applyConfiguredAuthType(config.getAuthType());
 
   const consolePatcher = new ConsolePatcher({
     stderr: true,

@@ -8,7 +8,7 @@ import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { USER_SETTINGS_PATH } from './config/settings.js';
 import { validateAuthMethod } from './config/auth.js';
 
-function getAuthTypeFromEnv(): AuthType | undefined {
+export function getAuthTypeFromEnv(): AuthType | undefined {
   if (process.env['GOOGLE_GENAI_USE_GCA'] === 'true') {
     return AuthType.LOGIN_WITH_GOOGLE;
   }
