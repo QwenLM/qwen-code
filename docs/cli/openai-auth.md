@@ -6,11 +6,20 @@ Qwen Code CLI supports OpenAI authentication for users who want to use OpenAI mo
 
 ### 1. Interactive Authentication (Recommended)
 
-When you first run the CLI and select OpenAI as your authentication method, you'll be prompted to enter:
+When you first run the CLI and select OpenAI as your authentication method, you'll be prompted to enter either:
+
+**Standard OpenAI:**
 
 - **API Key**: Your OpenAI API key from [https://platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - **Base URL**: The base URL for OpenAI API (defaults to `https://api.openai.com/v1`)
 - **Model**: The OpenAI model to use (defaults to `gpt-4o`)
+
+**OR Azure OpenAI:**
+
+- **Endpoint**: Your Azure OpenAI endpoint (e.g., `https://your-resource-name.openai.azure.com`)
+- **Deployment**: Your Azure OpenAI deployment name
+- **API Key**: Your Azure OpenAI API key
+- **API Version**: The Azure OpenAI API version (defaults to `2024-05-01-preview`)
 
 The CLI will guide you through each field:
 
@@ -33,16 +42,33 @@ qwen-code --openai-api-key "your-api-key-here" --openai-base-url "https://your-c
 
 # With custom model
 qwen-code --openai-api-key "your-api-key-here" --model "gpt-4-turbo"
+
+# Azure OpenAI usage
+qwen-code --azure-openai-endpoint "https://your-resource-name.openai.azure.com" \
+          --azure-openai-deployment "your-deployment-name" \
+          --azure-openai-api-key "your-azure-api-key" \
+          --azure-openai-api-version "2024-05-01-preview"
 ```
 
 ### 3. Environment Variables
 
 Set the following environment variables in your shell or `.env` file:
 
+**For Standard OpenAI:**
+
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
 export OPENAI_BASE_URL="https://api.openai.com/v1"  # Optional, defaults to this value
 export OPENAI_MODEL="gpt-4o"  # Optional, defaults to gpt-4o
+```
+
+**For Azure OpenAI:**
+
+```bash
+export AZURE_OPENAI_ENDPOINT="https://your-resource-name.openai.azure.com"
+export AZURE_OPENAI_DEPLOYMENT="your-deployment-name"
+export AZURE_OPENAI_API_KEY="your-azure-api-key"
+export AZURE_OPENAI_API_VERSION="2024-05-01-preview"  # Optional, defaults to 2024-05-01-preview
 ```
 
 ## Supported Models

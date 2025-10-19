@@ -39,9 +39,43 @@ export const validateAuthMethod = (authMethod: string): string | null => {
     return null;
   }
 
+  if (authMethod === AuthType.AZURE_OPENAI) {
+    const hasEndpoint = !!process.env.AZURE_OPENAI_ENDPOINT;
+    const hasDeployment = !!process.env.AZURE_OPENAI_DEPLOYMENT;
+    const hasApiKey = !!process.env.AZURE_OPENAI_API_KEY;
+    const hasBearerToken = !!process.env.AZURE_OPENAI_BEARER_TOKEN;
+    const hasCred = hasApiKey || hasBearerToken;
+
+    const missingVars = [];
+    if (!hasEndpoint) missingVars.push('AZURE_OPENAI_ENDPOINT');
+    if (!hasDeployment) missingVars.push('AZURE_OPENAI_DEPLOYMENT');
+    if (!hasCred)
+      missingVars.push('AZURE_OPENAI_API_KEY or AZURE_OPENAI_BEARER_TOKEN');
+
+    if (!hasEndpoint || !hasDeployment || !hasCred) {
+      return (
+        'Azure OpenAI configuration incomplete. Missing:\n' +
+        '• ' +
+        missingVars.join('\n• ') +
+        '\n' +
+        'You can enter these interactively or add them to your .env file.'
+      );
+    }
+    return null;
+  }
+
   if (authMethod === AuthType.USE_OPENAI) {
-    if (!process.env['OPENAI_API_KEY']) {
-      return 'OPENAI_API_KEY environment variable not found. You can enter it interactively or add it to your .env file.';
+    const isOpenAIKeySet = !!process.env.OPENAI_API_KEY;
+
+    // For USE_OPENAI auth type, only validate OpenAI API key
+    // Azure configuration should use AZURE_OPENAI auth type instead
+    if (!isOpenAIKeySet) {
+      return (
+        'OpenAI configuration not found. You must set:\n' +
+        '• OPENAI_API_KEY environment variable for standard OpenAI\n' +
+        'You can enter this interactively or add it to your .env file.\n' +
+        '\nNote: For Azure OpenAI, please select "Azure OpenAI" authentication instead.'
+      );
     }
     return null;
   }
@@ -57,6 +91,20 @@ export const validateAuthMethod = (authMethod: string): string | null => {
 
 export const setOpenAIApiKey = (apiKey: string): void => {
   process.env['OPENAI_API_KEY'] = apiKey;
+};
+
+export const setAzureOpenAIConfig = (
+  endpoint: string,
+  deployment: string,
+  apiKey: string,
+  apiVersion?: string,
+): void => {
+  process.env.AZURE_OPENAI_ENDPOINT = endpoint;
+  process.env.AZURE_OPENAI_DEPLOYMENT = deployment;
+  process.env.AZURE_OPENAI_API_KEY = apiKey;
+  if (apiVersion) {
+    process.env.AZURE_OPENAI_API_VERSION = apiVersion;
+  }
 };
 
 export const setOpenAIBaseUrl = (baseUrl: string): void => {
