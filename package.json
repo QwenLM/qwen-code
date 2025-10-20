@@ -57,7 +57,7 @@
   },
   "overrides": {
     "wrap-ansi": "9.0.2",
-    "ansi-regex": "5.0.1",
+    "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"
     }
