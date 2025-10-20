@@ -323,7 +323,6 @@ describe('Gemini Client (client.ts)', () => {
       getQuotaErrorOccurred: vi.fn().mockReturnValue(false),
       setQuotaErrorOccurred: vi.fn(),
       getNoBrowser: vi.fn().mockReturnValue(false),
-      getSystemPromptMappings: vi.fn().mockReturnValue(undefined),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getIdeModeFeature: vi.fn().mockReturnValue(false),

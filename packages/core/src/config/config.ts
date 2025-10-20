@@ -251,11 +251,6 @@ export interface ConfigParameters {
   folderTrust?: boolean;
   ideMode?: boolean;
   enableOpenAILogging?: boolean;
-  systemPromptMappings?: Array<{
-    baseUrls: string[];
-    modelNames: string[];
-    template: string;
-  }>;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
   cliVersion?: string;
@@ -335,11 +330,6 @@ export class Config {
   private ideMode: boolean;
 
   private inFallbackMode = false;
-  private readonly systemPromptMappings?: Array<{
-    baseUrls?: string[];
-    modelNames?: string[];
-    template?: string;
-  }>;
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -447,7 +437,6 @@ export class Config {
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
-    this.systemPromptMappings = params.systemPromptMappings;
     this._generationConfig = {
       model: params.model,
       apiKey: params.apiKey,
@@ -955,16 +944,6 @@ export class Config {
 
   getCliVersion(): string | undefined {
     return this.cliVersion;
-  }
-
-  getSystemPromptMappings():
-    | Array<{
-        baseUrls?: string[];
-        modelNames?: string[];
-        template?: string;
-      }>
-    | undefined {
-    return this.systemPromptMappings;
   }
 
   /**

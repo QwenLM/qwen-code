@@ -277,7 +277,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use XML format for qwen3-coder model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, undefined, 'qwen3-coder-7b');
+    const prompt = getCoreSystemPrompt(undefined, 'qwen3-coder-7b');
 
     // Should contain XML-style tool calls
     expect(prompt).toContain('<tool_call>');
@@ -297,7 +297,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use JSON format for qwen-vl model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, undefined, 'qwen-vl-max');
+    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-max');
 
     // Should contain JSON-style tool calls
     expect(prompt).toContain('<tool_call>');
@@ -317,7 +317,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use bracket format for generic models', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, undefined, 'gpt-4');
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
 
     // Should contain bracket-style tool calls
     expect(prompt).toContain('[tool_call: run_shell_command for');
@@ -351,11 +351,7 @@ describe('Model-specific tool call formats', () => {
   it('should preserve model-specific formats with user memory', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const userMemory = 'User prefers concise responses.';
-    const prompt = getCoreSystemPrompt(
-      userMemory,
-      undefined,
-      'qwen3-coder-14b',
-    );
+    const prompt = getCoreSystemPrompt(userMemory, 'qwen3-coder-14b');
 
     // Should contain XML-style tool calls
     expect(prompt).toContain('<tool_call>');
@@ -371,7 +367,7 @@ describe('Model-specific tool call formats', () => {
   it('should preserve model-specific formats with sandbox environment', () => {
     vi.stubEnv('SANDBOX', 'true');
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, undefined, 'qwen-vl-plus');
+    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-plus');
 
     // Should contain JSON-style tool calls
     expect(prompt).toContain('{"name": "run_shell_command"');

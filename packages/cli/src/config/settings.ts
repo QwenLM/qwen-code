@@ -129,7 +129,6 @@ const MIGRATION_MAP: Record<string, string> = {
   contentGenerator: 'model.generationConfig',
   skipLoopDetection: 'model.skipLoopDetection',
   enableOpenAILogging: 'model.enableOpenAILogging',
-  systemPromptMappings: 'model.systemPromptMappings',
   tavilyApiKey: 'advanced.tavilyApiKey',
   vlmSwitchMode: 'experimental.vlmSwitchMode',
   visionModelPreview: 'experimental.visionModelPreview',

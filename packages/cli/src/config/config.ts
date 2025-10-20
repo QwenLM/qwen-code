@@ -8,7 +8,6 @@ import type {
   FileFilteringOptions,
   MCPServerConfig,
   OutputFormat,
-  ConfigParameters,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
@@ -746,17 +745,6 @@ export async function loadCliConfig(
       (typeof argv.openaiLogging === 'undefined'
         ? settings.model?.enableOpenAILogging
         : argv.openaiLogging) ?? false,
-    systemPromptMappings: (settings.model?.systemPromptMappings ?? [
-      {
-        baseUrls: [
-          'https://dashscope.aliyuncs.com/compatible-mode/v1/',
-          'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/',
-        ],
-        modelNames: ['qwen3-coder-plus'],
-        template:
-          'SYSTEM_TEMPLATE:{"name":"qwen3_coder","params":{"is_git_repository":{RUNTIME_VARS_IS_GIT_REPO},"sandbox":"{RUNTIME_VARS_SANDBOX}"}}',
-      },
-    ]) as ConfigParameters['systemPromptMappings'],
     authType: settings.security?.auth?.selectedType,
     generationConfig: settings.model?.generationConfig,
     cliVersion: await getCliVersion(),

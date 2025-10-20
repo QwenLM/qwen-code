@@ -602,15 +602,6 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
-      systemPromptMappings: {
-        type: 'object',
-        label: 'System Prompt Mappings',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as Record<string, string> | undefined,
-        description: 'Mappings of system prompts to model names.',
-        showInDialog: false,
-      },
     },
   },
 
