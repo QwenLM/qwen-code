@@ -6,12 +6,13 @@
 
 import type React from 'react';
 import { useState, useEffect, useMemo } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import Spinner from 'ink-spinner';
 import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
 import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import { useKeypress } from '../hooks/useKeypress.js';
 
 interface QwenOAuthProgressProps {
   onTimeout: () => void;
@@ -128,14 +129,17 @@ export function QwenOAuthProgress({
   const [dots, setDots] = useState<string>('');
   const [qrCodeData, setQrCodeData] = useState<string | null>(null);
 
-  useInput((input, key) => {
-    if (authStatus === 'timeout') {
-      // Any key press in timeout state should trigger cancel to return to auth dialog
-      onCancel();
-    } else if (key.escape || (key.ctrl && input === 'c')) {
-      onCancel();
-    }
-  });
+  useKeypress(
+    (key) => {
+      if (authStatus === 'timeout') {
+        // Any key press in timeout state should trigger cancel to return to auth dialog
+        onCancel();
+      } else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        onCancel();
+      }
+    },
+    { isActive: true },
+  );
 
   // Generate QR code once when device auth is available
   useEffect(() => {

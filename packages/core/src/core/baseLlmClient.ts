@@ -9,16 +9,16 @@ import type {
   GenerateContentConfig,
   Part,
   EmbedContentParameters,
-  GenerateContentResponse,
+  FunctionDeclaration,
+  Tool,
+  Schema,
 } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from './contentGenerator.js';
-import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { logMalformedJsonResponse } from '../telemetry/loggers.js';
-import { MalformedJsonResponseEvent } from '../telemetry/types.js';
 import { retryWithBackoff } from '../utils/retry.js';
+import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 
 const DEFAULT_MAX_ATTEMPTS = 5;
 
@@ -93,68 +93,68 @@ export class BaseLlmClient {
       ...this.defaultUtilityConfig,
       ...options.config,
       ...(systemInstruction && { systemInstruction }),
-      responseJsonSchema: schema,
-      responseMimeType: 'application/json',
     };
+
+    // Convert schema to function declaration
+    const functionDeclaration: FunctionDeclaration = {
+      name: 'respond_in_schema',
+      description: 'Provide the response in provided schema',
+      parameters: schema as Schema,
+    };
+
+    const tools: Tool[] = [
+      {
+        functionDeclarations: [functionDeclaration],
+      },
+    ];
 
     try {
       const apiCall = () =>
         this.contentGenerator.generateContent(
           {
             model,
-            config: requestConfig,
+            config: {
+              ...requestConfig,
+              tools,
+            },
             contents,
           },
           promptId ?? '',
         );
 
-      const shouldRetryOnContent = (response: GenerateContentResponse) => {
-        const text = getResponseText(response)?.trim();
-        if (!text) {
-          return true; // Retry on empty response
-        }
-        try {
-          JSON.parse(this.cleanJsonResponse(text, model));
-          return false;
-        } catch (_e) {
-          return true;
-        }
-      };
-
       const result = await retryWithBackoff(apiCall, {
-        shouldRetryOnContent,
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
       });
 
-      // If we are here, the content is valid (not empty and parsable).
-      return JSON.parse(
-        this.cleanJsonResponse(getResponseText(result)!.trim(), model),
-      );
+      const functionCalls = getFunctionCalls(result);
+      if (functionCalls && functionCalls.length > 0) {
+        const functionCall = functionCalls.find(
+          (call) => call.name === 'respond_in_schema',
+        );
+        if (functionCall && functionCall.args) {
+          return functionCall.args as Record<string, unknown>;
+        }
+      }
+      return {};
     } catch (error) {
       if (abortSignal.aborted) {
         throw error;
       }
 
-      // Check if the error is from exhausting retries, and report accordingly.
+      // Avoid double reporting for the empty response case handled above
       if (
         error instanceof Error &&
-        error.message.includes('Retry attempts exhausted')
+        error.message === 'API returned an empty response for generateJson.'
       ) {
-        await reportError(
-          error,
-          'API returned invalid content (empty or unparsable JSON) after all retries.',
-          contents,
-          'generateJson-invalid-content',
-        );
-      } else {
-        await reportError(
-          error,
-          'Error generating JSON content via API.',
-          contents,
-          'generateJson-api',
-        );
+        throw error;
       }
 
+      await reportError(
+        error,
+        'Error generating JSON content via API.',
+        contents,
+        'generateJson-api',
+      );
       throw new Error(
         `Failed to generate JSON content: ${getErrorMessage(error)}`,
       );
@@ -194,18 +194,5 @@ export class BaseLlmClient {
       }
       return values;
     });
-  }
-
-  private cleanJsonResponse(text: string, model: string): string {
-    const prefix = '```json';
-    const suffix = '```';
-    if (text.startsWith(prefix) && text.endsWith(suffix)) {
-      logMalformedJsonResponse(
-        this.config,
-        new MalformedJsonResponseEvent(model),
-      );
-      return text.substring(prefix.length, text.length - suffix.length).trim();
-    }
-    return text;
   }
 }

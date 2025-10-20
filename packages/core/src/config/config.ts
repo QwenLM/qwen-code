@@ -257,7 +257,7 @@ export interface ConfigParameters {
     template: string;
   }>;
   authType?: AuthType;
-  contentGeneratorConfig?: Partial<ContentGeneratorConfig>;
+  generationConfig?: Partial<ContentGeneratorConfig>;
   cliVersion?: string;
   loadMemoryFromIncludeDirectories?: boolean;
   // Web search providers
@@ -291,6 +291,7 @@ export class Config {
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGenerator!: ContentGenerator;
+  private readonly _generationConfig: ContentGeneratorConfig;
   private readonly embeddingModel: string;
   private readonly sandbox: SandboxConfig | undefined;
   private readonly targetDir: string;
@@ -447,13 +448,14 @@ export class Config {
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
     this.systemPromptMappings = params.systemPromptMappings;
-    this.contentGeneratorConfig = {
+    this._generationConfig = {
       model: params.model,
       apiKey: params.apiKey,
       baseUrl: params.baseUrl,
       enableOpenAILogging: params.enableOpenAILogging ?? false,
-      ...(params.contentGeneratorConfig || {}),
+      ...(params.generationConfig || {}),
     };
+    this.contentGeneratorConfig = this._generationConfig;
     this.cliVersion = params.cliVersion;
 
     this.loadMemoryFromIncludeDirectories =
@@ -550,7 +552,7 @@ export class Config {
     const newContentGeneratorConfig = createContentGeneratorConfig(
       this,
       authMethod,
-      this.contentGeneratorConfig,
+      this._generationConfig,
     );
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,

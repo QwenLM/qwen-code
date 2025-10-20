@@ -186,6 +186,11 @@ describe('AppContainer State Management', () => {
       setAuthState: vi.fn(),
       authError: null,
       onAuthError: vi.fn(),
+      isAuthDialogOpen: false,
+      isAuthenticating: false,
+      handleAuthSelect: vi.fn(),
+      openAuthDialog: vi.fn(),
+      cancelAuthentication: vi.fn(),
     });
     mockedUseEditorSettings.mockReturnValue({
       isEditorDialogOpen: false,
@@ -1028,6 +1033,11 @@ describe('AppContainer State Management', () => {
         setAuthState: vi.fn(),
         authError: null,
         onAuthError: vi.fn(),
+        isAuthDialogOpen: false,
+        isAuthenticating: true,
+        handleAuthSelect: vi.fn(),
+        openAuthDialog: vi.fn(),
+        cancelAuthentication: vi.fn(),
       });
 
       const mockHandleSlashCommand = vi.fn();

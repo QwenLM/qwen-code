@@ -17,11 +17,7 @@ import * as availableModelsModule from '../models/availableModels.js';
 
 // Mock the availableModels module
 vi.mock('../models/availableModels.js', () => ({
-  AVAILABLE_MODELS_QWEN: [
-    { id: 'qwen3-coder-plus', label: 'qwen3-coder-plus' },
-    { id: 'qwen-vl-max-latest', label: 'qwen-vl-max', isVision: true },
-  ],
-  getOpenAIAvailableModelFromEnv: vi.fn(),
+  getAvailableModelsForAuthType: vi.fn(),
 }));
 
 // Helper function to create a mock config
@@ -35,8 +31,8 @@ function createMockConfig(
 
 describe('modelCommand', () => {
   let mockContext: CommandContext;
-  const mockGetOpenAIAvailableModelFromEnv = vi.mocked(
-    availableModelsModule.getOpenAIAvailableModelFromEnv,
+  const mockGetAvailableModelsForAuthType = vi.mocked(
+    availableModelsModule.getAvailableModelsForAuthType,
   );
 
   beforeEach(() => {
@@ -91,6 +87,10 @@ describe('modelCommand', () => {
   });
 
   it('should return dialog action for QWEN_OAUTH auth type', async () => {
+    mockGetAvailableModelsForAuthType.mockReturnValue([
+      { id: 'qwen3-coder-plus', label: 'qwen3-coder-plus' },
+    ]);
+
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: AuthType.QWEN_OAUTH,
@@ -106,10 +106,9 @@ describe('modelCommand', () => {
   });
 
   it('should return dialog action for USE_OPENAI auth type when model is available', async () => {
-    mockGetOpenAIAvailableModelFromEnv.mockReturnValue({
-      id: 'gpt-4',
-      label: 'gpt-4',
-    });
+    mockGetAvailableModelsForAuthType.mockReturnValue([
+      { id: 'gpt-4', label: 'gpt-4' },
+    ]);
 
     const mockConfig = createMockConfig({
       model: 'test-model',
@@ -126,7 +125,7 @@ describe('modelCommand', () => {
   });
 
   it('should return error for USE_OPENAI auth type when no model is available', async () => {
-    mockGetOpenAIAvailableModelFromEnv.mockReturnValue(null);
+    mockGetAvailableModelsForAuthType.mockReturnValue([]);
 
     const mockConfig = createMockConfig({
       model: 'test-model',
@@ -145,6 +144,8 @@ describe('modelCommand', () => {
   });
 
   it('should return error for unsupported auth types', async () => {
+    mockGetAvailableModelsForAuthType.mockReturnValue([]);
+
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: 'UNSUPPORTED_AUTH_TYPE' as AuthType,

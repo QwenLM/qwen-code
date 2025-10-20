@@ -20,13 +20,11 @@ import type { ContentGenerator } from './contentGenerator.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
-import { logMalformedJsonResponse } from '../telemetry/loggers.js';
 import { retryWithBackoff } from '../utils/retry.js';
-import { MalformedJsonResponseEvent } from '../telemetry/types.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 
 vi.mock('../utils/errorReporting.js');
-vi.mock('../telemetry/loggers.js');
 vi.mock('../utils/errors.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/errors.js')>();
   return {
@@ -35,30 +33,12 @@ vi.mock('../utils/errors.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../utils/generateContentResponseUtilities.js', () => ({
+  getFunctionCalls: vi.fn(),
+}));
+
 vi.mock('../utils/retry.js', () => ({
-  retryWithBackoff: vi.fn(async (fn, options) => {
-    // Default implementation - just call the function
-    const result = await fn();
-
-    // If shouldRetryOnContent is provided, test it but don't actually retry
-    // (unless we want to simulate retry exhaustion for testing)
-    if (options?.shouldRetryOnContent) {
-      const shouldRetry = options.shouldRetryOnContent(result);
-      if (shouldRetry) {
-        // Check if we need to simulate retry exhaustion (for error testing)
-        const responseText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (
-          !responseText ||
-          responseText.trim() === '' ||
-          responseText.includes('{"color": "blue"')
-        ) {
-          throw new Error('Retry attempts exhausted for invalid content');
-        }
-      }
-    }
-
-    return result;
-  }),
+  retryWithBackoff: vi.fn(async (fn) => await fn()),
 }));
 
 const mockGenerateContent = vi.fn();
@@ -77,10 +57,41 @@ const mockConfig = {
   getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
 } as unknown as Mocked<Config>;
 
-// Helper to create a mock GenerateContentResponse
-const createMockResponse = (text: string): GenerateContentResponse =>
+// Helper to create a mock GenerateContentResponse with function call
+const createMockResponseWithFunctionCall = (
+  args: Record<string, unknown>,
+): GenerateContentResponse =>
   ({
-    candidates: [{ content: { role: 'model', parts: [{ text }] }, index: 0 }],
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'respond_in_schema',
+                args,
+              },
+            },
+          ],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
+// Helper to create a mock response without function call (for error cases)
+const createMockResponseWithoutFunctionCall = (): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [{ text: 'some text' }],
+        },
+        index: 0,
+      },
+    ],
   }) as GenerateContentResponse;
 
 describe('BaseLlmClient', () => {
@@ -110,20 +121,25 @@ describe('BaseLlmClient', () => {
   });
 
   describe('generateJson - Success Scenarios', () => {
-    it('should call generateContent with correct parameters, defaults, and utilize retry mechanism', async () => {
-      const mockResponse = createMockResponse('{"color": "blue"}');
+    it('should call generateContent with correct parameters using function declarations', async () => {
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'blue',
+      });
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'blue' } },
+      ]);
 
       const result = await client.generateJson(defaultOptions);
 
       expect(result).toEqual({ color: 'blue' });
 
-      // Ensure the retry mechanism was engaged with shouldRetryOnContent
+      // Ensure the retry mechanism was engaged
       expect(retryWithBackoff).toHaveBeenCalledTimes(1);
       expect(retryWithBackoff).toHaveBeenCalledWith(
         expect.any(Function),
         expect.objectContaining({
-          shouldRetryOnContent: expect.any(Function),
+          maxAttempts: 5,
         }),
       );
 
@@ -137,8 +153,17 @@ describe('BaseLlmClient', () => {
             abortSignal: defaultOptions.abortSignal,
             temperature: 0,
             topP: 1,
-            responseJsonSchema: defaultOptions.schema,
-            responseMimeType: 'application/json',
+            tools: [
+              {
+                functionDeclarations: [
+                  {
+                    name: 'respond_in_schema',
+                    description: 'Provide the response in provided schema',
+                    parameters: defaultOptions.schema,
+                  },
+                ],
+              },
+            ],
             // Crucial: systemInstruction should NOT be in the config object if not provided
           },
         },
@@ -147,8 +172,11 @@ describe('BaseLlmClient', () => {
     });
 
     it('should respect configuration overrides', async () => {
-      const mockResponse = createMockResponse('{"color": "red"}');
+      const mockResponse = createMockResponseWithFunctionCall({ color: 'red' });
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'red' } },
+      ]);
 
       const options: GenerateJsonOptions = {
         ...defaultOptions,
@@ -163,6 +191,7 @@ describe('BaseLlmClient', () => {
             temperature: 0.8,
             topP: 1, // Default should remain if not overridden
             topK: 10,
+            tools: expect.any(Array),
           }),
         }),
         expect.any(String),
@@ -170,8 +199,13 @@ describe('BaseLlmClient', () => {
     });
 
     it('should include system instructions when provided', async () => {
-      const mockResponse = createMockResponse('{"color": "green"}');
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'green',
+      });
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'green' } },
+      ]);
       const systemInstruction = 'You are a helpful assistant.';
 
       const options: GenerateJsonOptions = {
@@ -192,8 +226,13 @@ describe('BaseLlmClient', () => {
     });
 
     it('should use the provided promptId', async () => {
-      const mockResponse = createMockResponse('{"color": "yellow"}');
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'yellow',
+      });
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'yellow' } },
+      ]);
       const customPromptId = 'custom-id-123';
 
       const options: GenerateJsonOptions = {
@@ -210,8 +249,13 @@ describe('BaseLlmClient', () => {
     });
 
     it('should pass maxAttempts to retryWithBackoff when provided', async () => {
-      const mockResponse = createMockResponse('{"color": "cyan"}');
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'cyan',
+      });
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'cyan' } },
+      ]);
       const customMaxAttempts = 3;
 
       const options: GenerateJsonOptions = {
@@ -230,9 +274,14 @@ describe('BaseLlmClient', () => {
       );
     });
 
-    it('should call retryWithBackoff without maxAttempts when not provided', async () => {
-      const mockResponse = createMockResponse('{"color": "indigo"}');
+    it('should call retryWithBackoff with default maxAttempts when not provided', async () => {
+      const mockResponse = createMockResponseWithFunctionCall({
+        color: 'indigo',
+      });
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { color: 'indigo' } },
+      ]);
 
       // No maxAttempts in defaultOptions
       await client.generateJson(defaultOptions);
@@ -244,109 +293,19 @@ describe('BaseLlmClient', () => {
         }),
       );
     });
-  });
 
-  describe('generateJson - Content Validation and Retries', () => {
-    it('should validate content using shouldRetryOnContent function', async () => {
-      const mockResponse = createMockResponse('{"color": "blue"}');
+    it('should return empty object when no function calls are returned', async () => {
+      const mockResponse = createMockResponseWithoutFunctionCall();
       mockGenerateContent.mockResolvedValue(mockResponse);
-
-      await client.generateJson(defaultOptions);
-
-      // Verify that retryWithBackoff was called with shouldRetryOnContent
-      expect(retryWithBackoff).toHaveBeenCalledWith(
-        expect.any(Function),
-        expect.objectContaining({
-          shouldRetryOnContent: expect.any(Function),
-        }),
-      );
-
-      // Test the shouldRetryOnContent function behavior
-      const retryCall = vi.mocked(retryWithBackoff).mock.calls[0];
-      const shouldRetryOnContent = retryCall[1]?.shouldRetryOnContent;
-
-      // Valid JSON should not trigger retry
-      expect(shouldRetryOnContent!(mockResponse)).toBe(false);
-
-      // Empty response should trigger retry
-      expect(shouldRetryOnContent!(createMockResponse(''))).toBe(true);
-
-      // Invalid JSON should trigger retry
-      expect(
-        shouldRetryOnContent!(createMockResponse('{"color": "blue"')),
-      ).toBe(true);
-    });
-  });
-
-  describe('generateJson - Response Cleaning', () => {
-    it('should clean JSON wrapped in markdown backticks and log telemetry', async () => {
-      const malformedResponse = '```json\n{"color": "purple"}\n```';
-      mockGenerateContent.mockResolvedValue(
-        createMockResponse(malformedResponse),
-      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
       const result = await client.generateJson(defaultOptions);
 
-      expect(result).toEqual({ color: 'purple' });
-      expect(logMalformedJsonResponse).toHaveBeenCalledWith(
-        mockConfig,
-        expect.any(MalformedJsonResponseEvent),
-      );
-      // Validate the telemetry event content - find the most recent call
-      const calls = vi.mocked(logMalformedJsonResponse).mock.calls;
-      const lastCall = calls[calls.length - 1];
-      const event = lastCall[1] as MalformedJsonResponseEvent;
-      expect(event.model).toBe('test-model');
-    });
-
-    it('should handle extra whitespace correctly without logging malformed telemetry', async () => {
-      const responseWithWhitespace = '  \n  {"color": "orange"}  \n';
-      mockGenerateContent.mockResolvedValue(
-        createMockResponse(responseWithWhitespace),
-      );
-
-      const result = await client.generateJson(defaultOptions);
-
-      expect(result).toEqual({ color: 'orange' });
-      expect(logMalformedJsonResponse).not.toHaveBeenCalled();
+      expect(result).toEqual({});
     });
   });
 
   describe('generateJson - Error Handling', () => {
-    it('should throw and report error for empty response after retry exhaustion', async () => {
-      mockGenerateContent.mockResolvedValue(createMockResponse(''));
-
-      await expect(client.generateJson(defaultOptions)).rejects.toThrow(
-        'Failed to generate JSON content: Retry attempts exhausted for invalid content',
-      );
-
-      // Verify error reporting details
-      expect(reportError).toHaveBeenCalledTimes(1);
-      expect(reportError).toHaveBeenCalledWith(
-        expect.any(Error),
-        'API returned invalid content (empty or unparsable JSON) after all retries.',
-        defaultOptions.contents,
-        'generateJson-invalid-content',
-      );
-    });
-
-    it('should throw and report error for invalid JSON syntax after retry exhaustion', async () => {
-      const invalidJson = '{"color": "blue"'; // missing closing brace
-      mockGenerateContent.mockResolvedValue(createMockResponse(invalidJson));
-
-      await expect(client.generateJson(defaultOptions)).rejects.toThrow(
-        'Failed to generate JSON content: Retry attempts exhausted for invalid content',
-      );
-
-      expect(reportError).toHaveBeenCalledTimes(1);
-      expect(reportError).toHaveBeenCalledWith(
-        expect.any(Error),
-        'API returned invalid content (empty or unparsable JSON) after all retries.',
-        defaultOptions.contents,
-        'generateJson-invalid-content',
-      );
-    });
-
     it('should throw and report generic API errors', async () => {
       const apiError = new Error('Service Unavailable (503)');
       // Simulate the generator failing
@@ -383,6 +342,20 @@ describe('BaseLlmClient', () => {
       await expect(client.generateJson(options)).rejects.toThrow(abortError);
 
       // Crucially, it should not report a cancellation as an application error
+      expect(reportError).not.toHaveBeenCalled();
+    });
+
+    it('should not throw for empty response message check', async () => {
+      const emptyResponseError = new Error(
+        'API returned an empty response for generateJson.',
+      );
+      mockGenerateContent.mockRejectedValue(emptyResponseError);
+
+      await expect(client.generateJson(defaultOptions)).rejects.toThrow(
+        'API returned an empty response for generateJson.',
+      );
+
+      // Should not double-report this specific error
       expect(reportError).not.toHaveBeenCalled();
     });
   });

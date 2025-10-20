@@ -8,10 +8,7 @@ import type React from 'react';
 import { useCallback, useContext, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import {
-  DEFAULT_GEMINI_FLASH_LITE_MODEL,
-  DEFAULT_GEMINI_FLASH_MODEL,
-  DEFAULT_GEMINI_MODEL,
-  DEFAULT_GEMINI_MODEL_AUTO,
+  AuthType,
   ModelSlashCommandEvent,
   logModelSlashCommand,
 } from '@qwen-code/qwen-code-core';
@@ -19,43 +16,40 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import {
+  getAvailableModelsForAuthType,
+  MAINLINE_CODER,
+} from '../models/availableModels.js';
 
 interface ModelDialogProps {
   onClose: () => void;
 }
 
-const MODEL_OPTIONS = [
-  {
-    value: DEFAULT_GEMINI_MODEL_AUTO,
-    title: 'Auto (recommended)',
-    description: 'Let the system choose the best model for your task',
-    key: DEFAULT_GEMINI_MODEL_AUTO,
-  },
-  {
-    value: DEFAULT_GEMINI_MODEL,
-    title: 'Pro',
-    description: 'For complex tasks that require deep reasoning and creativity',
-    key: DEFAULT_GEMINI_MODEL,
-  },
-  {
-    value: DEFAULT_GEMINI_FLASH_MODEL,
-    title: 'Flash',
-    description: 'For tasks that need a balance of speed and reasoning',
-    key: DEFAULT_GEMINI_FLASH_MODEL,
-  },
-  {
-    value: DEFAULT_GEMINI_FLASH_LITE_MODEL,
-    title: 'Flash-Lite',
-    description: 'For simple tasks that need to be done quickly',
-    key: DEFAULT_GEMINI_FLASH_LITE_MODEL,
-  },
-];
-
 export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
 
+  // Get auth type from config, default to QWEN_OAUTH if not available
+  const authType = config?.getAuthType() ?? AuthType.QWEN_OAUTH;
+
+  // Get available models based on auth type
+  const availableModels = useMemo(
+    () => getAvailableModelsForAuthType(authType),
+    [authType],
+  );
+
+  const MODEL_OPTIONS = useMemo(
+    () =>
+      availableModels.map((model) => ({
+        value: model.id,
+        title: model.label,
+        description: model.description || '',
+        key: model.id,
+      })),
+    [availableModels],
+  );
+
   // Determine the Preferred Model (read once when the dialog opens).
-  const preferredModel = config?.getModel() || DEFAULT_GEMINI_MODEL_AUTO;
+  const preferredModel = config?.getModel() || MAINLINE_CODER;
 
   useKeypress(
     (key) => {
@@ -69,7 +63,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   // Calculate the initial index based on the preferred model.
   const initialIndex = useMemo(
     () => MODEL_OPTIONS.findIndex((option) => option.value === preferredModel),
-    [preferredModel],
+    [MODEL_OPTIONS, preferredModel],
   );
 
   // Handle selection internally (Autonomous Dialog).
@@ -101,11 +95,6 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
           initialIndex={initialIndex}
           showNumbers={true}
         />
-      </Box>
-      <Box flexDirection="column">
-        <Text color={theme.text.secondary}>
-          {'> To use a specific Gemini model, use the --model flag.'}
-        </Text>
       </Box>
       <Box marginTop={1} flexDirection="column">
         <Text color={theme.text.secondary}>(Press Esc to close)</Text>

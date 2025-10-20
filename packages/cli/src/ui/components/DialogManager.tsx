@@ -13,9 +13,9 @@ import { ConsentPrompt } from './ConsentPrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { AuthInProgress } from '../auth/AuthInProgress.js';
+import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
-import { PrivacyNotice } from '../privacy/PrivacyNotice.js';
 import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
 import { ProQuotaDialog } from './ProQuotaDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
@@ -30,6 +30,12 @@ import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
 import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { ModelSwitchDialog } from './ModelSwitchDialog.js';
+import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
+import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import {
+  QuitConfirmationDialog,
+  QuitChoice,
+} from './QuitConfirmationDialog.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -107,6 +113,26 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.quitConfirmationRequest) {
+    return (
+      <QuitConfirmationDialog
+        onSelect={(choice: QuitChoice) => {
+          if (choice === QuitChoice.CANCEL) {
+            uiState.quitConfirmationRequest?.onConfirm(false, 'cancel');
+          } else if (choice === QuitChoice.QUIT) {
+            uiState.quitConfirmationRequest?.onConfirm(true, 'quit');
+          } else if (choice === QuitChoice.SAVE_AND_QUIT) {
+            uiState.quitConfirmationRequest?.onConfirm(true, 'save_and_quit');
+          } else if (choice === QuitChoice.SUMMARY_AND_QUIT) {
+            uiState.quitConfirmationRequest?.onConfirm(
+              true,
+              'summary_and_quit',
+            );
+          }
+        }}
+      />
+    );
+  }
   if (uiState.confirmationRequest) {
     return (
       <ConsentPrompt
@@ -165,6 +191,20 @@ export const DialogManager = ({
     return <ModelSwitchDialog onSelect={uiActions.handleVisionSwitchSelect} />;
   }
   if (uiState.isAuthenticating) {
+    // Show Qwen OAuth progress if it's Qwen auth and OAuth is active
+    if (uiState.isQwenAuth && uiState.isQwenAuthenticating) {
+      return (
+        <QwenOAuthProgress
+          deviceAuth={uiState.deviceAuth || undefined}
+          authStatus={uiState.authStatus}
+          authMessage={uiState.authMessage}
+          onTimeout={uiActions.handleQwenAuthTimeout}
+          onCancel={uiActions.handleQwenAuthCancel}
+        />
+      );
+    }
+
+    // Default auth progress for other auth types
     return (
       <AuthInProgress
         onTimeout={() => {
@@ -200,20 +240,29 @@ export const DialogManager = ({
       </Box>
     );
   }
-  if (uiState.showPrivacyNotice) {
-    return (
-      <PrivacyNotice
-        onExit={() => uiActions.exitPrivacyNotice()}
-        config={config}
-      />
-    );
-  }
-
   if (uiState.isPermissionsDialogOpen) {
     return (
       <PermissionsModifyTrustDialog
         onExit={uiActions.closePermissionsDialog}
         addItem={addItem}
+      />
+    );
+  }
+
+  if (uiState.isSubagentCreateDialogOpen) {
+    return (
+      <AgentCreationWizard
+        onClose={uiActions.closeSubagentCreateDialog}
+        config={config}
+      />
+    );
+  }
+
+  if (uiState.isAgentsManagerDialogOpen) {
+    return (
+      <AgentsManagerDialog
+        onClose={uiActions.closeAgentsManagerDialog}
+        config={config}
       />
     );
   }

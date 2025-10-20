@@ -39,8 +39,6 @@ import {
   ideContextStore,
   getErrorMessage,
   getAllGeminiMdFilenames,
-  AuthType,
-  clearCachedCredentialFile,
   ShellExecutionService,
 } from '@qwen-code/qwen-code-core';
 import { validateAuthMethod } from '../config/auth.js';
@@ -50,6 +48,7 @@ import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useAuthCommand } from './auth/useAuth.js';
+import { useQwenAuth } from './hooks/useQwenAuth.js';
 import { useQuotaAndFallback } from './hooks/useQuotaAndFallback.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
@@ -91,12 +90,12 @@ import { useGitBranchName } from './hooks/useGitBranchName.js';
 import { useExtensionUpdates } from './hooks/useExtensionUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useQuitConfirmation } from './hooks/useQuitConfirmation.js';
-import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
-import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { type VisionSwitchOutcome } from './components/ModelSwitchDialog.js';
 import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
+import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
+import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -140,7 +139,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [quittingMessages, setQuittingMessages] = useState<
     HistoryItem[] | null
   >(null);
-  const [showPrivacyNotice, setShowPrivacyNotice] = useState<boolean>(false);
   const [themeError, setThemeError] = useState<string | null>(
     initializationResult.themeError,
   );
@@ -337,10 +335,25 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.themeError,
   );
 
-  const { authState, setAuthState, authError, onAuthError } = useAuthCommand(
-    settings,
-    config,
-  );
+  const {
+    setAuthState,
+    authError,
+    onAuthError,
+    isAuthDialogOpen,
+    isAuthenticating,
+    handleAuthSelect,
+    openAuthDialog,
+  } = useAuthCommand(settings, config);
+
+  // Qwen OAuth authentication state
+  const {
+    isQwenAuth,
+    isQwenAuthenticating,
+    deviceAuth,
+    authStatus,
+    authMessage,
+    cancelQwenAuth,
+  } = useQwenAuth(settings, isAuthenticating);
 
   const { proQuotaRequest, handleProQuotaChoice } = useQuotaAndFallback({
     config,
@@ -350,44 +363,19 @@ export const AppContainer = (props: AppContainerProps) => {
     setModelSwitchedFromQuotaError,
   });
 
-  // Derive auth state variables for backward compatibility with UIStateContext
-  const isAuthDialogOpen = authState === AuthState.Updating;
-  const isAuthenticating = authState === AuthState.Unauthenticated;
+  // Handle Qwen OAuth timeout
+  const handleQwenAuthTimeout = useCallback(() => {
+    onAuthError('Qwen OAuth authentication timed out. Please try again.');
+    cancelQwenAuth();
+    setAuthState(AuthState.Updating);
+  }, [onAuthError, cancelQwenAuth, setAuthState]);
 
-  // Create handleAuthSelect wrapper for backward compatibility
-  const handleAuthSelect = useCallback(
-    async (authType: AuthType | undefined, scope: SettingScope) => {
-      if (authType) {
-        await clearCachedCredentialFile();
-        settings.setValue(scope, 'security.auth.selectedType', authType);
-
-        try {
-          await config.refreshAuth(authType);
-          setAuthState(AuthState.Authenticated);
-        } catch (e) {
-          onAuthError(
-            `Failed to authenticate: ${e instanceof Error ? e.message : String(e)}`,
-          );
-          return;
-        }
-
-        if (
-          authType === AuthType.LOGIN_WITH_GOOGLE &&
-          config.isBrowserLaunchSuppressed()
-        ) {
-          await runExitCleanup();
-          console.log(`
-----------------------------------------------------------------
-Logging in with Google... Please restart Gemini CLI to continue.
-----------------------------------------------------------------
-          `);
-          process.exit(0);
-        }
-      }
-      setAuthState(AuthState.Authenticated);
-    },
-    [settings, config, setAuthState, onAuthError],
-  );
+  // Handle Qwen OAuth cancel
+  const handleQwenAuthCancel = useCallback(() => {
+    onAuthError('Qwen OAuth authentication cancelled.');
+    cancelQwenAuth();
+    setAuthState(AuthState.Updating);
+  }, [onAuthError, cancelQwenAuth, setAuthState]);
 
   // Sync user tier from config when authentication changes
   // TODO: Implement getUserTier() method on Config if needed
@@ -450,8 +438,17 @@ Logging in with Google... Please restart Gemini CLI to continue.
   const { toggleVimEnabled } = useVimMode();
 
   const { showQuitConfirmation } = useQuitConfirmation();
-  const { openSubagentCreateDialog } = useSubagentCreateDialog();
-  const { openAgentsManagerDialog } = useAgentsManagerDialog();
+
+  const {
+    isSubagentCreateDialogOpen,
+    openSubagentCreateDialog,
+    closeSubagentCreateDialog,
+  } = useSubagentCreateDialog();
+  const {
+    isAgentsManagerDialogOpen,
+    openAgentsManagerDialog,
+    closeAgentsManagerDialog,
+  } = useAgentsManagerDialog();
 
   // Vision model auto-switch dialog state (must be before slashCommandActions)
   const [isVisionSwitchDialogOpen, setIsVisionSwitchDialogOpen] =
@@ -467,10 +464,9 @@ Logging in with Google... Please restart Gemini CLI to continue.
 
   const slashCommandActions = useMemo(
     () => ({
-      openAuthDialog: () => setAuthState(AuthState.Updating),
+      openAuthDialog,
       openThemeDialog,
       openEditorDialog,
-      openPrivacyNotice: () => setShowPrivacyNotice(true),
       openSettingsDialog,
       openModelDialog,
       openPermissionsDialog,
@@ -485,28 +481,24 @@ Logging in with Google... Please restart Gemini CLI to continue.
       toggleCorgiMode: () => setCorgiMode((prev) => !prev),
       dispatchExtensionStateUpdate,
       addConfirmUpdateExtensionRequest,
-      setQuittingMessages,
-      openModelSelectionDialog: openModelDialog,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
       _showQuitConfirmation: showQuitConfirmation,
     }),
     [
-      setAuthState,
+      openAuthDialog,
       openThemeDialog,
       openEditorDialog,
       openSettingsDialog,
       openModelDialog,
-      setQuittingMessages,
       setDebugMessage,
-      setShowPrivacyNotice,
       setCorgiMode,
       dispatchExtensionStateUpdate,
       openPermissionsDialog,
       addConfirmUpdateExtensionRequest,
+      showQuitConfirmation,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
-      showQuitConfirmation,
     ],
   );
 
@@ -803,7 +795,6 @@ Logging in with Google... Please restart Gemini CLI to continue.
       !isAuthDialogOpen &&
       !isThemeDialogOpen &&
       !isEditorDialogOpen &&
-      !showPrivacyNotice &&
       !showWelcomeBackDialog &&
       !isVisionSwitchDialogOpen &&
       welcomeBackChoice !== 'restart' &&
@@ -820,7 +811,6 @@ Logging in with Google... Please restart Gemini CLI to continue.
     isAuthDialogOpen,
     isThemeDialogOpen,
     isEditorDialogOpen,
-    showPrivacyNotice,
     showWelcomeBackDialog,
     isVisionSwitchDialogOpen,
     welcomeBackChoice,
@@ -960,8 +950,6 @@ Logging in with Google... Please restart Gemini CLI to continue.
     isSettingsDialogOpen,
     closeSettingsDialog,
     isFolderTrustDialogOpen,
-    showPrivacyNotice,
-    setShowPrivacyNotice,
     showWelcomeBackDialog,
     handleWelcomeBackClose,
     quitConfirmationRequest,
@@ -984,6 +972,12 @@ Logging in with Google... Please restart Gemini CLI to continue.
       }
 
       // First press: Prioritize cleanup tasks
+
+      // Special case: If quit-confirm dialog is open, Ctrl+C means "quit immediately"
+      if (quitConfirmationRequest) {
+        handleSlashCommand('/quit');
+        return;
+      }
 
       // 1. Close other dialogs (highest priority)
       /**
@@ -1026,6 +1020,7 @@ Logging in with Google... Please restart Gemini CLI to continue.
       closeAnyOpenDialog,
       streamingState,
       cancelOngoingRequest,
+      quitConfirmationRequest,
       buffer,
     ],
   );
@@ -1038,17 +1033,18 @@ Logging in with Google... Please restart Gemini CLI to continue.
       }
 
       if (keyMatchers[Command.QUIT](key)) {
-        if (!ctrlCPressedOnce) {
-          cancelOngoingRequest?.();
+        if (isAuthenticating) {
+          return;
         }
 
+        // On first press: set flag, start timer, and call handleExit for cleanup/quit-confirm
+        // On second press (within 500ms): handleExit sees flag and does fast quit
         if (!ctrlCPressedOnce) {
           setCtrlCPressedOnce(true);
           ctrlCTimerRef.current = setTimeout(() => {
             setCtrlCPressedOnce(false);
             ctrlCTimerRef.current = null;
           }, CTRL_EXIT_PROMPT_DURATION_MS);
-          return;
         }
 
         handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
@@ -1111,10 +1107,10 @@ Logging in with Google... Please restart Gemini CLI to continue.
       setCtrlDPressedOnce,
       ctrlDTimerRef,
       handleSlashCommand,
-      cancelOngoingRequest,
       activePtyId,
       embeddedShellFocused,
       settings.merged.general?.debugKeystrokeLogging,
+      isAuthenticating,
     ],
   );
 
@@ -1183,17 +1179,19 @@ Logging in with Google... Please restart Gemini CLI to continue.
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
+    !!quitConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isModelDialogOpen ||
     isVisionSwitchDialogOpen ||
     isPermissionsDialogOpen ||
-    isAuthenticating ||
     isAuthDialogOpen ||
+    (isAuthenticating && isQwenAuthenticating) ||
     isEditorDialogOpen ||
-    showPrivacyNotice ||
     showIdeRestartPrompt ||
-    !!proQuotaRequest;
+    !!proQuotaRequest ||
+    isSubagentCreateDialogOpen ||
+    isAgentsManagerDialogOpen;
 
   const pendingHistoryItems = useMemo(
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
@@ -1210,9 +1208,14 @@ Logging in with Google... Please restart Gemini CLI to continue.
       isConfigInitialized,
       authError,
       isAuthDialogOpen,
+      // Qwen OAuth state
+      isQwenAuth,
+      isQwenAuthenticating,
+      deviceAuth,
+      authStatus,
+      authMessage,
       editorError,
       isEditorDialogOpen,
-      showPrivacyNotice,
       corgiMode,
       debugMessage,
       quittingMessages,
@@ -1226,6 +1229,7 @@ Logging in with Google... Please restart Gemini CLI to continue.
       confirmationRequest,
       confirmUpdateExtensionRequests,
       loopDetectionConfirmationRequest,
+      quitConfirmationRequest,
       geminiMdFileCount,
       streamingState,
       initError,
@@ -1287,6 +1291,9 @@ Logging in with Google... Please restart Gemini CLI to continue.
       showWelcomeBackDialog,
       welcomeBackInfo,
       welcomeBackChoice,
+      // Subagent dialogs
+      isSubagentCreateDialogOpen,
+      isAgentsManagerDialogOpen,
     }),
     [
       isThemeDialogOpen,
@@ -1295,9 +1302,14 @@ Logging in with Google... Please restart Gemini CLI to continue.
       isConfigInitialized,
       authError,
       isAuthDialogOpen,
+      // Qwen OAuth state
+      isQwenAuth,
+      isQwenAuthenticating,
+      deviceAuth,
+      authStatus,
+      authMessage,
       editorError,
       isEditorDialogOpen,
-      showPrivacyNotice,
       corgiMode,
       debugMessage,
       quittingMessages,
@@ -1311,6 +1323,7 @@ Logging in with Google... Please restart Gemini CLI to continue.
       confirmationRequest,
       confirmUpdateExtensionRequests,
       loopDetectionConfirmationRequest,
+      quitConfirmationRequest,
       geminiMdFileCount,
       streamingState,
       initError,
@@ -1373,6 +1386,9 @@ Logging in with Google... Please restart Gemini CLI to continue.
       showWelcomeBackDialog,
       welcomeBackInfo,
       welcomeBackChoice,
+      // Subagent dialogs
+      isSubagentCreateDialogOpen,
+      isAgentsManagerDialogOpen,
     ],
   );
 
@@ -1383,9 +1399,11 @@ Logging in with Google... Please restart Gemini CLI to continue.
       handleAuthSelect,
       setAuthState,
       onAuthError,
+      // Qwen OAuth handlers
+      handleQwenAuthTimeout,
+      handleQwenAuthCancel,
       handleEditorSelect,
       exitEditorDialog,
-      exitPrivacyNotice: () => setShowPrivacyNotice(false),
       closeSettingsDialog,
       closeModelDialog,
       closePermissionsDialog,
@@ -1406,6 +1424,9 @@ Logging in with Google... Please restart Gemini CLI to continue.
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
+      // Subagent dialogs
+      closeSubagentCreateDialog,
+      closeAgentsManagerDialog,
     }),
     [
       handleThemeSelect,
@@ -1413,6 +1434,9 @@ Logging in with Google... Please restart Gemini CLI to continue.
       handleAuthSelect,
       setAuthState,
       onAuthError,
+      // Qwen OAuth handlers
+      handleQwenAuthTimeout,
+      handleQwenAuthCancel,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1433,6 +1457,9 @@ Logging in with Google... Please restart Gemini CLI to continue.
       handleVisionSwitchSelect,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
+      // Subagent dialogs
+      closeSubagentCreateDialog,
+      closeAgentsManagerDialog,
     ],
   );
 

@@ -116,8 +116,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'quit' && (
         <SessionSummaryDisplay duration={itemForDisplay.duration} />
       )}
-      {item.type === 'quit_confirmation' && (
-        <SessionSummaryDisplay duration={item.duration} />
+      {itemForDisplay.type === 'quit_confirmation' && (
+        <SessionSummaryDisplay duration={itemForDisplay.duration} />
       )}
       {itemForDisplay.type === 'tool_group' && (
         <ToolGroupMessage

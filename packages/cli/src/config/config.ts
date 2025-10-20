@@ -758,7 +758,7 @@ export async function loadCliConfig(
       },
     ]) as ConfigParameters['systemPromptMappings'],
     authType: settings.security?.auth?.selectedType,
-    contentGeneratorConfig: settings.model?.generationConfig,
+    generationConfig: settings.model?.generationConfig,
     cliVersion: await getCliVersion(),
     tavilyApiKey:
       argv.tavilyApiKey ||

@@ -32,10 +32,6 @@ export interface DialogCloseOptions {
   // Folder trust dialog
   isFolderTrustDialogOpen: boolean;
 
-  // Privacy notice
-  showPrivacyNotice: boolean;
-  setShowPrivacyNotice: (show: boolean) => void;
-
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   handleWelcomeBackClose: () => void;
@@ -76,12 +72,6 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isFolderTrustDialogOpen) {
       // FolderTrustDialog doesn't expose close function, but ESC would prevent exit
       // We follow the same pattern - prevent exit behavior
-      return true;
-    }
-
-    if (options.showPrivacyNotice) {
-      // PrivacyNotice uses onExit callback
-      options.setShowPrivacyNotice(false);
       return true;
     }
 

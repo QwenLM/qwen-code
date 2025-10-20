@@ -386,3 +386,7 @@ export interface ConfirmationRequest {
 export interface LoopDetectionConfirmationRequest {
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
+
+export interface QuitConfirmationRequest {
+  onConfirm: (shouldQuit: boolean, action?: string) => void;
+}

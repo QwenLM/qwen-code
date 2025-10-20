@@ -6,17 +6,16 @@
 
 import { render, cleanup } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  DEFAULT_GEMINI_FLASH_LITE_MODEL,
-  DEFAULT_GEMINI_FLASH_MODEL,
-  DEFAULT_GEMINI_MODEL,
-  DEFAULT_GEMINI_MODEL_AUTO,
-} from '@qwen-code/qwen-code-core';
 import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  AVAILABLE_MODELS_QWEN,
+  MAINLINE_CODER,
+  MAINLINE_VLM,
+} from '../models/availableModels.js';
 
 vi.mock('../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -40,8 +39,9 @@ const renderComponent = (
   const mockConfig = contextValue
     ? ({
         // --- Functions used by ModelDialog ---
-        getModel: vi.fn(() => DEFAULT_GEMINI_MODEL_AUTO),
+        getModel: vi.fn(() => MAINLINE_CODER),
         setModel: vi.fn(),
+        getAuthType: vi.fn(() => 'qwen-oauth'),
 
         // --- Functions used by ClearcutLogger ---
         getUsageStatisticsEnabled: vi.fn(() => true),
@@ -83,9 +83,6 @@ describe('<ModelDialog />', () => {
     const { getByText } = renderComponent();
     expect(getByText('Select Model')).toBeDefined();
     expect(getByText('(Press Esc to close)')).toBeDefined();
-    expect(
-      getByText('> To use a specific Gemini model, use the --model flag.'),
-    ).toBeDefined();
   });
 
   it('passes all model options to DescriptiveRadioButtonSelect', () => {
@@ -93,28 +90,26 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
 
     const props = mockedSelect.mock.calls[0][0];
-    expect(props.items).toHaveLength(4);
-    expect(props.items[0].value).toBe(DEFAULT_GEMINI_MODEL_AUTO);
-    expect(props.items[1].value).toBe(DEFAULT_GEMINI_MODEL);
-    expect(props.items[2].value).toBe(DEFAULT_GEMINI_FLASH_MODEL);
-    expect(props.items[3].value).toBe(DEFAULT_GEMINI_FLASH_LITE_MODEL);
+    expect(props.items).toHaveLength(AVAILABLE_MODELS_QWEN.length);
+    expect(props.items[0].value).toBe(MAINLINE_CODER);
+    expect(props.items[1].value).toBe(MAINLINE_VLM);
     expect(props.showNumbers).toBe(true);
   });
 
   it('initializes with the model from ConfigContext', () => {
-    const mockGetModel = vi.fn(() => DEFAULT_GEMINI_FLASH_MODEL);
+    const mockGetModel = vi.fn(() => MAINLINE_VLM);
     renderComponent({}, { getModel: mockGetModel });
 
     expect(mockGetModel).toHaveBeenCalled();
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
-        initialIndex: 2,
+        initialIndex: 1,
       }),
       undefined,
     );
   });
 
-  it('initializes with "auto" model if context is not provided', () => {
+  it('initializes with default coder model if context is not provided', () => {
     renderComponent({}, undefined);
 
     expect(mockedSelect).toHaveBeenCalledWith(
@@ -125,7 +120,7 @@ describe('<ModelDialog />', () => {
     );
   });
 
-  it('initializes with "auto" model if getModel returns undefined', () => {
+  it('initializes with default coder model if getModel returns undefined', () => {
     const mockGetModel = vi.fn(() => undefined);
     // @ts-expect-error This test validates component robustness when getModel
     // returns an unexpected undefined value.
@@ -133,7 +128,7 @@ describe('<ModelDialog />', () => {
 
     expect(mockGetModel).toHaveBeenCalled();
 
-    // When getModel returns undefined, preferredModel falls back to DEFAULT_GEMINI_MODEL_AUTO
+    // When getModel returns undefined, preferredModel falls back to MAINLINE_CODER
     // which has index 0, so initialIndex should be 0
     expect(mockedSelect).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -150,10 +145,10 @@ describe('<ModelDialog />', () => {
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    childOnSelect(DEFAULT_GEMINI_MODEL);
+    childOnSelect(MAINLINE_CODER);
 
     // Assert against the default mock provided by renderComponent
-    expect(mockConfig?.setModel).toHaveBeenCalledWith(DEFAULT_GEMINI_MODEL);
+    expect(mockConfig?.setModel).toHaveBeenCalledWith(MAINLINE_CODER);
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -196,10 +191,16 @@ describe('<ModelDialog />', () => {
   });
 
   it('updates initialIndex when config context changes', () => {
-    const mockGetModel = vi.fn(() => DEFAULT_GEMINI_MODEL_AUTO);
+    const mockGetModel = vi.fn(() => MAINLINE_CODER);
+    const mockGetAuthType = vi.fn(() => 'qwen-oauth');
     const { rerender } = render(
       <ConfigContext.Provider
-        value={{ getModel: mockGetModel } as unknown as Config}
+        value={
+          {
+            getModel: mockGetModel,
+            getAuthType: mockGetAuthType,
+          } as unknown as Config
+        }
       >
         <ModelDialog onClose={vi.fn()} />
       </ConfigContext.Provider>,
@@ -207,8 +208,11 @@ describe('<ModelDialog />', () => {
 
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
 
-    mockGetModel.mockReturnValue(DEFAULT_GEMINI_FLASH_LITE_MODEL);
-    const newMockConfig = { getModel: mockGetModel } as unknown as Config;
+    mockGetModel.mockReturnValue(MAINLINE_VLM);
+    const newMockConfig = {
+      getModel: mockGetModel,
+      getAuthType: mockGetAuthType,
+    } as unknown as Config;
 
     rerender(
       <ConfigContext.Provider value={newMockConfig}>
@@ -218,6 +222,6 @@ describe('<ModelDialog />', () => {
 
     // Should be called at least twice: initial render + re-render after context change
     expect(mockedSelect).toHaveBeenCalledTimes(2);
-    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(3);
+    expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(1);
   });
 });

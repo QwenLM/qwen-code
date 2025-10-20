@@ -80,7 +80,7 @@ export type ContentGeneratorConfig = {
 export function createContentGeneratorConfig(
   config: Config,
   authType: AuthType | undefined,
-  contentGeneratorConfig?: ContentGeneratorConfig,
+  generationConfig?: Partial<ContentGeneratorConfig>,
 ): ContentGeneratorConfig {
   const geminiApiKey = process.env['GEMINI_API_KEY'] || undefined;
   const googleApiKey = process.env['GOOGLE_API_KEY'] || undefined;
@@ -88,12 +88,8 @@ export function createContentGeneratorConfig(
   const googleCloudLocation = process.env['GOOGLE_CLOUD_LOCATION'] || undefined;
 
   const newContentGeneratorConfig: ContentGeneratorConfig = {
-    ...(contentGeneratorConfig || {}),
-    model:
-      contentGeneratorConfig?.model ||
-      process.env['OPENAI_MODEL'] ||
-      process.env['QWEN_MODEL'] ||
-      DEFAULT_QWEN_MODEL,
+    ...(generationConfig || {}),
+    model: generationConfig?.model || DEFAULT_QWEN_MODEL,
     authType,
     proxy: config?.getProxy(),
   };
@@ -127,6 +123,7 @@ export function createContentGeneratorConfig(
     // For Qwen OAuth, we'll handle the API key dynamically in createContentGenerator
     // Set a special marker to indicate this is Qwen OAuth
     newContentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
+    newContentGeneratorConfig.model = DEFAULT_QWEN_MODEL;
 
     return newContentGeneratorConfig;
   }

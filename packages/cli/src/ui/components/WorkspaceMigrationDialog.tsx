@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Text, useInput } from 'ink';
+import { Box, Text } from 'ink';
 import {
   type Extension,
   performWorkspaceExtensionMigration,
@@ -12,6 +12,7 @@ import {
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { theme } from '../semantic-colors.js';
 import { useState } from 'react';
+import { useKeypress } from '../hooks/useKeypress.js';
 
 export function WorkspaceMigrationDialog(props: {
   workspaceExtensions: Extension[];
@@ -32,11 +33,14 @@ export function WorkspaceMigrationDialog(props: {
     setMigrationComplete(true);
   };
 
-  useInput((input) => {
-    if (migrationComplete && input === 'q') {
-      process.exit(0);
-    }
-  });
+  useKeypress(
+    (key) => {
+      if (migrationComplete && key.sequence === 'q') {
+        process.exit(0);
+      }
+    },
+    { isActive: true },
+  );
 
   if (migrationComplete) {
     return (

@@ -25,12 +25,14 @@ export interface UIActions {
   ) => void;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string) => void;
+  // Qwen OAuth handlers
+  handleQwenAuthTimeout: () => void;
+  handleQwenAuthCancel: () => void;
   handleEditorSelect: (
     editorType: EditorType | undefined,
     scope: SettingScope,
   ) => void;
   exitEditorDialog: () => void;
-  exitPrivacyNotice: () => void;
   closeSettingsDialog: () => void;
   closeModelDialog: () => void;
   closePermissionsDialog: () => void;
@@ -51,6 +53,9 @@ export interface UIActions {
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
+  // Subagent dialogs
+  closeSubagentCreateDialog: () => void;
+  closeAgentsManagerDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

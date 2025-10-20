@@ -21,7 +21,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { formatDuration } from '../utils/formatters.js';
-import { runExitCleanup } from '../../utils/cleanup.js';
 import type {
   Message,
   HistoryItemWithoutId,
@@ -46,7 +45,6 @@ interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openThemeDialog: () => void;
   openEditorDialog: () => void;
-  openPrivacyNotice: () => void;
   openSettingsDialog: () => void;
   openModelDialog: () => void;
   openPermissionsDialog: () => void;
@@ -55,8 +53,6 @@ interface SlashCommandProcessorActions {
   toggleCorgiMode: () => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
-  setQuittingMessages: (message: HistoryItem[]) => void;
-  openModelSelectionDialog: () => void;
   openSubagentCreateDialog: () => void;
   openAgentsManagerDialog: () => void;
   _showQuitConfirmation: () => void;
@@ -391,9 +387,6 @@ export const useSlashCommandProcessor = (
                     case 'editor':
                       actions.openEditorDialog();
                       return { type: 'handled' };
-                    case 'privacy':
-                      actions.openPrivacyNotice();
-                      return { type: 'handled' };
                     case 'settings':
                       actions.openSettingsDialog();
                       return { type: 'handled' };
@@ -478,7 +471,7 @@ export const useSlashCommandProcessor = (
                           const { sessionStartTime } = session.stats;
                           const wallDuration = now - sessionStartTime.getTime();
 
-                          actions.setQuittingMessages([
+                          actions.quit([
                             {
                               type: 'user',
                               text: `/quit`,
@@ -490,10 +483,6 @@ export const useSlashCommandProcessor = (
                               id: now,
                             },
                           ]);
-                          setTimeout(async () => {
-                            await runExitCleanup();
-                            process.exit(0);
-                          }, 100);
                         }
                       }
                     },

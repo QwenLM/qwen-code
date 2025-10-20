@@ -50,7 +50,6 @@
     "src/ui/commands/directoryCommand.test.tsx",
     "src/ui/commands/ideCommand.test.ts",
     "src/ui/commands/initCommand.test.ts",
-    "src/ui/commands/privacyCommand.test.ts",
     "src/ui/commands/quitCommand.test.ts",
     "src/ui/commands/mcpCommand.test.ts",
     "src/ui/commands/memoryCommand.test.ts",

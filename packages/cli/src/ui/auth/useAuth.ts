@@ -4,10 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect, useCallback } from 'react';
-import type { LoadedSettings } from '../../config/settings.js';
+import { useState, useCallback, useEffect } from 'react';
+import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
-import { getErrorMessage } from '@qwen-code/qwen-code-core';
+import {
+  clearCachedCredentialFile,
+  getErrorMessage,
+} from '@qwen-code/qwen-code-core';
+import { runExitCleanup } from '../../utils/cleanup.js';
 import { AuthState } from '../types.js';
 import { validateAuthMethod } from '../../config/auth.js';
 
@@ -26,71 +30,106 @@ export function validateAuthMethodWithSettings(
 }
 
 export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
+  // If no auth type is selected, start in Updating state (shows auth dialog)
   const [authState, setAuthState] = useState<AuthState>(
-    AuthState.Unauthenticated,
+    settings.merged.security?.auth?.selectedType === undefined
+      ? AuthState.Updating
+      : AuthState.Unauthenticated,
   );
 
   const [authError, setAuthError] = useState<string | null>(null);
 
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(false);
+
   const onAuthError = useCallback(
-    (error: string) => {
+    (error: string | null) => {
       setAuthError(error);
-      setAuthState(AuthState.Updating);
+      if (error) {
+        setAuthState(AuthState.Updating);
+      }
     },
     [setAuthError, setAuthState],
   );
 
+  // Authentication flow
   useEffect(() => {
-    (async () => {
-      if (authState !== AuthState.Unauthenticated) {
-        return;
-      }
-
+    const authFlow = async () => {
       const authType = settings.merged.security?.auth?.selectedType;
-      if (!authType) {
-        if (process.env['GEMINI_API_KEY']) {
-          onAuthError(
-            'Existing API key detected (GEMINI_API_KEY). Select "Gemini API Key" option to use it.',
-          );
-        } else {
-          onAuthError('No authentication method selected.');
-        }
-        return;
-      }
-      const error = validateAuthMethodWithSettings(authType, settings);
-      if (error) {
-        onAuthError(error);
+      if (isAuthDialogOpen || !authType) {
         return;
       }
 
-      const defaultAuthType = process.env['GEMINI_DEFAULT_AUTH_TYPE'];
-      if (
-        defaultAuthType &&
-        !Object.values(AuthType).includes(defaultAuthType as AuthType)
-      ) {
-        onAuthError(
-          `Invalid value for GEMINI_DEFAULT_AUTH_TYPE: "${defaultAuthType}". ` +
-            `Valid values are: ${Object.values(AuthType).join(', ')}.`,
-        );
+      const validationError = validateAuthMethodWithSettings(
+        authType,
+        settings,
+      );
+      if (validationError) {
+        onAuthError(validationError);
         return;
       }
 
       try {
+        setIsAuthenticating(true);
         await config.refreshAuth(authType);
-
         console.log(`Authenticated via "${authType}".`);
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
       } catch (e) {
         onAuthError(`Failed to login. Message: ${getErrorMessage(e)}`);
+      } finally {
+        setIsAuthenticating(false);
       }
-    })();
-  }, [settings, config, authState, setAuthState, setAuthError, onAuthError]);
+    };
+
+    void authFlow();
+  }, [isAuthDialogOpen, settings, config, onAuthError]);
+
+  // Handle auth selection from dialog
+  const handleAuthSelect = useCallback(
+    async (authType: AuthType | undefined, scope: SettingScope) => {
+      if (authType) {
+        await clearCachedCredentialFile();
+
+        settings.setValue(scope, 'security.auth.selectedType', authType);
+
+        if (
+          authType === AuthType.LOGIN_WITH_GOOGLE &&
+          config.isBrowserLaunchSuppressed()
+        ) {
+          await runExitCleanup();
+          console.log(`
+----------------------------------------------------------------
+Logging in with Google... Please restart Gemini CLI to continue.
+----------------------------------------------------------------
+          `);
+          process.exit(0);
+        }
+      }
+
+      setIsAuthDialogOpen(false);
+      setAuthError(null);
+    },
+    [settings, config],
+  );
+
+  const openAuthDialog = useCallback(() => {
+    setIsAuthDialogOpen(true);
+  }, []);
+
+  const cancelAuthentication = useCallback(() => {
+    setIsAuthenticating(false);
+  }, []);
 
   return {
     authState,
     setAuthState,
     authError,
     onAuthError,
+    isAuthDialogOpen,
+    isAuthenticating,
+    handleAuthSelect,
+    openAuthDialog,
+    cancelAuthentication,
   };
 };

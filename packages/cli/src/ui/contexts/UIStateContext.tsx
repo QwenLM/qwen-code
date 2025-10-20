@@ -12,9 +12,11 @@ import type {
   ShellConfirmationRequest,
   ConfirmationRequest,
   LoopDetectionConfirmationRequest,
+  QuitConfirmationRequest,
   HistoryItemWithoutId,
   StreamingState,
 } from '../types.js';
+import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
@@ -47,9 +49,20 @@ export interface UIState {
   isConfigInitialized: boolean;
   authError: string | null;
   isAuthDialogOpen: boolean;
+  // Qwen OAuth state
+  isQwenAuth: boolean;
+  isQwenAuthenticating: boolean;
+  deviceAuth: DeviceAuthorizationInfo | null;
+  authStatus:
+    | 'idle'
+    | 'polling'
+    | 'success'
+    | 'error'
+    | 'timeout'
+    | 'rate_limit';
+  authMessage: string | null;
   editorError: string | null;
   isEditorDialogOpen: boolean;
-  showPrivacyNotice: boolean;
   corgiMode: boolean;
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
@@ -63,6 +76,7 @@ export interface UIState {
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
+  quitConfirmationRequest: QuitConfirmationRequest | null;
   geminiMdFileCount: number;
   streamingState: StreamingState;
   initError: string | null;
@@ -128,6 +142,9 @@ export interface UIState {
     lastPrompt?: string;
   } | null;
   welcomeBackChoice: 'continue' | 'restart' | null;
+  // Subagent dialogs
+  isSubagentCreateDialogOpen: boolean;
+  isAgentsManagerDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

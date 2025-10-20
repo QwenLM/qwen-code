@@ -149,12 +149,16 @@ export async function startInteractiveUI(
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
+    const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
       <SettingsContext.Provider value={settings}>
         <KeypressProvider
           kittyProtocolEnabled={kittyProtocolStatus.enabled}
           config={config}
           debugKeystrokeLogging={settings.merged.general?.debugKeystrokeLogging}
+          pasteWorkaround={
+            process.platform === 'win32' || nodeMajorVersion < 20
+          }
         >
           <SessionStatsProvider>
             <VimModeProvider settings={settings}>
