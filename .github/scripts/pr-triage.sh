@@ -26,21 +26,13 @@ process_pr() {
     fi
 
     if [[ -z "${ISSUE_NUMBER}" ]]; then
-        echo "⚠️  No linked issue found for PR #${PR_NUMBER}, adding status/need-issue label"
-        if ! gh pr edit "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --add-label "status/need-issue" 2>/dev/null; then
-            echo "   ⚠️ Failed to add label (may already exist or have permission issues)"
-        fi
-        # Add PR number to the list
-        if [[ -z "${PRS_NEEDING_COMMENT}" ]]; then
-            PRS_NEEDING_COMMENT="${PR_NUMBER}"
-        else
-            PRS_NEEDING_COMMENT="${PRS_NEEDING_COMMENT},${PR_NUMBER}"
-        fi
-        echo "needs_comment=true" >> "${GITHUB_OUTPUT}"
+        echo "ℹ️  No linked issue found for PR #${PR_NUMBER} - this is acceptable for independent contributions"
+        # We no longer require PRs to have linked issues
+        # Independent valuable contributions are encouraged
     else
         echo "🔗 Found linked issue #${ISSUE_NUMBER}"
 
-        # Remove status/need-issue label if present
+        # Remove status/need-issue label if present (legacy cleanup)
         if ! gh pr edit "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --remove-label "status/need-issue" 2>/dev/null; then
             echo "   status/need-issue label not present or could not be removed"
         fi
@@ -77,6 +69,21 @@ process_pr() {
                     LABELS_TO_ADD="${label}"
                 else
                     LABELS_TO_ADD="${LABELS_TO_ADD},${label}"
+                fi
+            fi
+        done
+
+        # Find labels to remove (on PR but not on issue)
+        local LABELS_TO_REMOVE=""
+        for label in "${PR_LABEL_ARRAY[@]}"; do
+            if [[ -n "${label}" ]] && [[ " ${ISSUE_LABEL_ARRAY[*]} " != *" ${label} "* ]]; then
+                # Don't remove status/need-issue since we already handled it (legacy cleanup)
+                if [[ "${label}" != "status/need-issue" ]]; then
+                    if [[ -z "${LABELS_TO_REMOVE}" ]]; then
+                        LABELS_TO_REMOVE="${label}"
+                    else
+                        LABELS_TO_REMOVE="${LABELS_TO_REMOVE},${label}"
+                    fi
                 fi
             fi
         done
