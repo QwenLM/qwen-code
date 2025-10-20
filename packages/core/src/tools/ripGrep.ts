@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { EOL } from 'node:os';
+import { EOL, tmpdir } from 'node:os';
 import { spawn } from 'node:child_process';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -58,6 +58,8 @@ class GrepToolInvocation extends BaseToolInvocation<
   RipGrepToolParams,
   ToolResult
 > {
+  private readonly tempIgnoreFiles: string[] = [];
+
   constructor(
     private readonly config: Config,
     params: RipGrepToolParams,
@@ -109,8 +111,27 @@ class GrepToolInvocation extends BaseToolInvocation<
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
       const workspaceContext = this.config.getWorkspaceContext();
+      const fileService = this.config.getFileService();
+      const fileFilteringOptions = this.config.getFileFilteringOptions();
+      const qwenIgnoreFiles =
+        fileFilteringOptions.respectGeminiIgnore === false
+          ? []
+          : this.getQwenIgnoreFilePaths();
       const searchDirAbs = this.resolveAndValidatePath(this.params.path);
       const searchDirDisplay = this.params.path || '.';
+
+      // if (this.config.getDebugMode()) {
+      console.log(
+        `[GrepTool] Using qwenignore files: ${
+          qwenIgnoreFiles.length > 0
+            ? qwenIgnoreFiles.join(', ')
+            : 'none (qwenignore disabled or file missing)'
+        }`,
+      );
+      console.log(
+        `[GrepTool] File filtering: respectGitIgnore=${fileFilteringOptions.respectGitIgnore ?? true}, respectQwenIgnore=${fileFilteringOptions.respectGeminiIgnore ?? true}`,
+      );
+      // }
 
       // Determine which directories to search
       let searchDirectories: readonly string[];
@@ -125,26 +146,37 @@ class GrepToolInvocation extends BaseToolInvocation<
       let allMatches: GrepMatch[] = [];
       const totalMaxMatches = DEFAULT_TOTAL_MAX_MATCHES;
 
-      if (this.config.getDebugMode()) {
-        console.log(`[GrepTool] Total result limit: ${totalMaxMatches}`);
-      }
-
       for (const searchDir of searchDirectories) {
         const searchResult = await this.performRipgrepSearch({
           pattern: this.params.pattern,
           path: searchDir,
           include: this.params.include,
           signal,
+          ignoreFiles: qwenIgnoreFiles,
         });
+
+        let filteredMatches = searchResult;
+        if (
+          fileFilteringOptions.respectGitIgnore ||
+          fileFilteringOptions.respectGeminiIgnore
+        ) {
+          filteredMatches = searchResult.filter((match) => {
+            const absoluteMatchPath = path.resolve(searchDir, match.filePath);
+            return !fileService.shouldIgnoreFile(
+              absoluteMatchPath,
+              fileFilteringOptions,
+            );
+          });
+        }
 
         if (searchDirectories.length > 1) {
           const dirName = path.basename(searchDir);
-          searchResult.forEach((match) => {
+          filteredMatches.forEach((match) => {
             match.filePath = path.join(dirName, match.filePath);
           });
         }
 
-        allMatches = allMatches.concat(searchResult);
+        allMatches = allMatches.concat(filteredMatches);
 
         if (allMatches.length >= totalMaxMatches) {
           allMatches = allMatches.slice(0, totalMaxMatches);
@@ -219,6 +251,8 @@ class GrepToolInvocation extends BaseToolInvocation<
         llmContent: `Error during grep search operation: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
       };
+    } finally {
+      this.cleanupTemporaryIgnoreFiles();
     }
   }
 
@@ -265,8 +299,9 @@ class GrepToolInvocation extends BaseToolInvocation<
     path: string;
     include?: string;
     signal: AbortSignal;
+    ignoreFiles?: string[];
   }): Promise<GrepMatch[]> {
-    const { pattern, path: absolutePath, include } = options;
+    const { pattern, path: absolutePath, include, ignoreFiles } = options;
 
     const rgArgs = [
       '--line-number',
@@ -279,6 +314,12 @@ class GrepToolInvocation extends BaseToolInvocation<
 
     if (include) {
       rgArgs.push('--glob', include);
+    }
+
+    if (ignoreFiles && ignoreFiles.length > 0) {
+      for (const ignoreFile of ignoreFiles) {
+        rgArgs.push('--ignore-file', ignoreFile);
+      }
     }
 
     const excludes = [
@@ -388,6 +429,43 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
     }
     return description;
+  }
+
+  private getQwenIgnoreFilePaths(): string[] {
+    const patterns = this.config.getFileService().getGeminiIgnorePatterns();
+    if (patterns.length === 0) {
+      return [];
+    }
+
+    const tempFilePath = path.join(
+      tmpdir(),
+      `qwen-ignore-${process.pid}-${Date.now()}-${Math.random()
+        .toString(16)
+        .slice(2)}.rgignore`,
+    );
+
+    try {
+      const fileContents = `${patterns.join(EOL)}${EOL}`;
+      fs.writeFileSync(tempFilePath, fileContents, 'utf8');
+      this.tempIgnoreFiles.push(tempFilePath);
+      return [tempFilePath];
+    } catch (error: unknown) {
+      console.warn(
+        `Failed to create temporary .qwenignore for ripgrep: ${getErrorMessage(error)}`,
+      );
+      return [];
+    }
+  }
+
+  private cleanupTemporaryIgnoreFiles(): void {
+    for (const filePath of this.tempIgnoreFiles) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // ignore cleanup errors
+      }
+    }
+    this.tempIgnoreFiles.length = 0;
   }
 }
 

@@ -52,8 +52,38 @@ export class GitIgnoreParser implements GitIgnoreFilter {
   }
 
   private addPatterns(patterns: string[]) {
-    this.ig.add(patterns);
-    this.patterns.push(...patterns);
+    const normalizedPatterns = patterns.map((pattern) => {
+      if (!pattern) {
+        return pattern;
+      }
+
+      if (path.isAbsolute(pattern)) {
+        const relativePattern = path.relative(this.projectRoot, pattern);
+
+        if (relativePattern === '' || relativePattern === '.') {
+          return '/';
+        }
+
+        if (!relativePattern.startsWith('..')) {
+          let normalized = relativePattern.replace(/\\/g, '/');
+
+          if (pattern.endsWith('/') && !normalized.endsWith('/')) {
+            normalized += '/';
+          }
+
+          if (!normalized.startsWith('/')) {
+            normalized = `/${normalized}`;
+          }
+
+          return normalized;
+        }
+      }
+
+      return pattern;
+    });
+
+    this.ig.add(normalizedPatterns);
+    this.patterns.push(...normalizedPatterns);
   }
 
   isIgnored(filePath: string): boolean {
