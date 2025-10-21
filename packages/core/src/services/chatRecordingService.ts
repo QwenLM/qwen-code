@@ -62,7 +62,7 @@ export type ConversationRecordExtra =
       type: 'user';
     }
   | {
-      type: 'gemini';
+      type: 'qwen';
       toolCalls?: ToolCallRecord[];
       thoughts?: Array<ThoughtSummary & { timestamp: string }>;
       tokens?: TokensSummary | null;
@@ -102,7 +102,7 @@ export interface ResumedSessionData {
  * - Token usage statistics
  * - Assistant thoughts and reasoning
  *
- * Sessions are stored as JSON files in ~/.gemini/tmp/<project_hash>/chats/
+ * Sessions are stored as JSON files in ~/.qwen/tmp/<project_hash>/chats/
  */
 export class ChatRecordingService {
   private conversationFile: string | null = null;
@@ -204,7 +204,7 @@ export class ChatRecordingService {
     try {
       this.updateConversation((conversation) => {
         const msg = this.newMessage(message.type, message.content);
-        if (msg.type === 'gemini') {
+        if (msg.type === 'qwen') {
           // If it's a new Gemini message then incorporate any queued thoughts.
           conversation.messages.push({
             ...msg,
@@ -263,7 +263,7 @@ export class ChatRecordingService {
         const lastMsg = this.getLastMessage(conversation);
         // If the last message already has token info, it's because this new token info is for a
         // new message that hasn't been recorded yet.
-        if (lastMsg && lastMsg.type === 'gemini' && !lastMsg.tokens) {
+        if (lastMsg && lastMsg.type === 'qwen' && !lastMsg.tokens) {
           lastMsg.tokens = tokens;
           this.queuedTokens = null;
         } else {
@@ -307,16 +307,16 @@ export class ChatRecordingService {
         // message from tool calls, when we dequeued the thoughts.
         if (
           !lastMsg ||
-          lastMsg.type !== 'gemini' ||
+          lastMsg.type !== 'qwen' ||
           this.queuedThoughts.length > 0
         ) {
           const newMsg: MessageRecord = {
-            ...this.newMessage('gemini' as const, ''),
+            ...this.newMessage('qwen' as const, ''),
             // This isn't strictly necessary, but TypeScript apparently can't
             // tell that the first parameter to newMessage() becomes the
             // resulting message's type, and so it thinks that toolCalls may
             // not be present.  Confirming the type here satisfies it.
-            type: 'gemini' as const,
+            type: 'qwen' as const,
             toolCalls: enrichedToolCalls,
             thoughts: this.queuedThoughts,
             model,

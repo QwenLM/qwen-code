@@ -110,7 +110,7 @@ export function getCoreSystemPrompt(
   model?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
-  // default path is .gemini/system.md but can be modified via custom path in QWEN_SYSTEM_MD
+  // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
   let systemMdEnabled = false;
   // The default path for the system prompt file. This can be overridden.
   let systemMdPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));

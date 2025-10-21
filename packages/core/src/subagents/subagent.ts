@@ -841,7 +841,7 @@ export class SubAgentScope {
     } catch (error) {
       await reportError(
         error,
-        'Error initializing Gemini chat session.',
+        'Error initializing chat session.',
         start_history,
         'startChat',
       );

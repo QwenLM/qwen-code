@@ -169,7 +169,7 @@ class WebSearchToolInvocation extends BaseToolInvocation<
 }
 
 /**
- * A tool to perform web searches using Google Search via the Gemini API.
+ * A tool to perform web searches using Tavily Search via the Tavily API.
  */
 export class WebSearchTool extends BaseDeclarativeTool<
   WebSearchToolParams,

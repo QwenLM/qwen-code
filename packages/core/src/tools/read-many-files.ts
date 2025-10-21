@@ -98,7 +98,7 @@ type FileProcessingResult =
 
 /**
  * Creates the default exclusion patterns including dynamic patterns.
- * This combines the shared patterns with dynamic patterns like GEMINI.md.
+ * This combines the shared patterns with dynamic patterns like QWEN.md.
  * TODO(adh): Consider making this configurable or extendable through a command line argument.
  */
 function getDefaultExcludes(config?: Config): string[] {
@@ -262,7 +262,7 @@ ${finalExclusionPatternsForDescription
       if (qwenIgnoredCount > 0) {
         skippedFiles.push({
           path: `${qwenIgnoredCount} file(s)`,
-          reason: 'gemini ignored',
+          reason: 'qwen ignored',
         });
       }
     } catch (error) {

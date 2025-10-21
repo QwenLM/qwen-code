@@ -227,7 +227,7 @@ export interface ToolConfig {
  */
 export interface ModelConfig {
   /**
-   * The name or identifier of the model to be used (e.g., 'gemini-2.5-pro').
+   * The name or identifier of the model to be used (e.g., 'qwen3-coder-plus').
    *
    * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */

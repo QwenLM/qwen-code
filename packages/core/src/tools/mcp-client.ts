@@ -94,7 +94,7 @@ export class McpClient {
     private readonly debugMode: boolean,
   ) {
     this.client = new Client({
-      name: `gemini-cli-mcp-client-${this.serverName}`,
+      name: `qwen-cli-mcp-client-${this.serverName}`,
       version: '0.0.1',
     });
   }
