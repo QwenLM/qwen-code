@@ -13,47 +13,29 @@ import {
   type Mock,
   afterEach,
 } from 'vitest';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { BaseLlmClient } from '../core/baseLlmClient.js';
-import { Config } from '../config/config.js';
+import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import type { Config } from '../config/config.js';
 import {
   subagentGenerator,
   type SubagentGeneratedContent,
 } from './subagentGenerator.js';
-import type { ContentGenerator } from '../core/contentGenerator.js';
-
-// Mock BaseLlmClient and Config constructor
-vi.mock('../core/baseLlmClient.js');
-vi.mock('../config/config.js');
 
 describe('subagentGenerator', () => {
   let mockClient: BaseLlmClient;
-  let mockContentGenerator: ContentGenerator;
-  let MockConfig: Mock;
+  let mockConfig: Config;
   const abortSignal = new AbortController().signal;
 
   beforeEach(() => {
-    mockContentGenerator = {
-      generateContent: vi.fn(),
-      generateContentStream: vi.fn(),
-      batchEmbedContents: vi.fn(),
-    } as unknown as ContentGenerator;
+    // Create a mock client with generateJson method
+    mockClient = {
+      generateJson: vi.fn(),
+    } as unknown as BaseLlmClient;
 
-    MockConfig = vi.mocked(Config);
-    const mockConfigInstance = new MockConfig(
-      'test-api-key',
-      'qwen3-coder-plus',
-      false,
-      '.',
-      false,
-      undefined,
-      false,
-      undefined,
-      undefined,
-      undefined,
-    );
-
-    mockClient = new BaseLlmClient(mockContentGenerator, mockConfigInstance);
+    // Create a mock config that returns the mock client and model
+    mockConfig = {
+      getBaseLlmClient: vi.fn().mockReturnValue(mockClient),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    } as unknown as Config;
   });
 
   afterEach(() => {
@@ -62,11 +44,11 @@ describe('subagentGenerator', () => {
 
   it('should throw error for empty user description', async () => {
     await expect(
-      subagentGenerator('', mockClient, abortSignal),
+      subagentGenerator('', mockConfig, abortSignal),
     ).rejects.toThrow('User description cannot be empty');
 
     await expect(
-      subagentGenerator('   ', mockClient, abortSignal),
+      subagentGenerator('   ', mockConfig, abortSignal),
     ).rejects.toThrow('User description cannot be empty');
 
     expect(mockClient.generateJson).not.toHaveBeenCalled();
@@ -86,7 +68,7 @@ describe('subagentGenerator', () => {
 
     const result = await subagentGenerator(
       userDescription,
-      mockClient,
+      mockConfig,
       abortSignal,
     );
 
@@ -106,7 +88,7 @@ describe('subagentGenerator', () => {
 
     // Check other parameters
     expect(callParams.abortSignal).toBe(abortSignal);
-    expect(callParams.model).toBe(DEFAULT_QWEN_MODEL);
+    expect(callParams.model).toBe('qwen3-coder-plus');
     expect(callParams.systemInstruction).toContain(
       'You are an elite AI agent architect',
     );
@@ -123,7 +105,7 @@ describe('subagentGenerator', () => {
     (mockClient.generateJson as Mock).mockResolvedValue(incompleteResponse);
 
     await expect(
-      subagentGenerator(userDescription, mockClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
 
     expect(mockClient.generateJson).toHaveBeenCalledTimes(1);
@@ -140,7 +122,7 @@ describe('subagentGenerator', () => {
     (mockClient.generateJson as Mock).mockResolvedValue(emptyFieldsResponse);
 
     await expect(
-      subagentGenerator(userDescription, mockClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
   });
 
@@ -149,7 +131,7 @@ describe('subagentGenerator', () => {
     (mockClient.generateJson as Mock).mockRejectedValue(new Error('API Error'));
 
     await expect(
-      subagentGenerator(userDescription, mockClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('API Error');
   });
 
@@ -163,11 +145,11 @@ describe('subagentGenerator', () => {
 
     (mockClient.generateJson as Mock).mockResolvedValue(mockResponse);
 
-    await subagentGenerator(userDescription, mockClient, abortSignal);
+    await subagentGenerator(userDescription, mockConfig, abortSignal);
 
     expect(mockClient.generateJson).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: DEFAULT_QWEN_MODEL,
+        model: 'qwen3-coder-plus',
         contents: expect.any(Object),
         schema: expect.objectContaining({
           type: 'object',
@@ -196,7 +178,7 @@ describe('subagentGenerator', () => {
 
     (mockClient.generateJson as Mock).mockResolvedValue(mockResponse);
 
-    await subagentGenerator(userDescription, mockClient, abortSignal);
+    await subagentGenerator(userDescription, mockConfig, abortSignal);
 
     const generateJsonCall = (mockClient.generateJson as Mock).mock.calls[0];
     const callParams = generateJsonCall[0];
@@ -220,7 +202,7 @@ describe('subagentGenerator', () => {
     (mockClient.generateJson as Mock).mockResolvedValue(null);
 
     await expect(
-      subagentGenerator(userDescription, mockClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
   });
 
@@ -229,7 +211,7 @@ describe('subagentGenerator', () => {
     (mockClient.generateJson as Mock).mockResolvedValue(undefined);
 
     await expect(
-      subagentGenerator(userDescription, mockClient, abortSignal),
+      subagentGenerator(userDescription, mockConfig, abortSignal),
     ).rejects.toThrow('Invalid response from LLM: missing required fields');
   });
 });
