@@ -9,6 +9,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { DiffUpdateResult } from '../ide/ideContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import type { WriteFileToolParams } from './write-file.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -274,6 +275,13 @@ export abstract class BaseDeclarativeTool<
   TResult extends ToolResult,
 > extends DeclarativeTool<TParams, TResult> {
   build(params: TParams): ToolInvocation<TParams, TResult> {
+    // Issue: https://github.com/QwenLM/qwen-code/issues/535
+    // Workaround issue of some params.content type is object, but their schema type is string. 
+    const writeFileToolParams = params as WriteFileToolParams;
+    if (writeFileToolParams.content != null && typeof writeFileToolParams.content !== 'string') {
+      writeFileToolParams.content = JSON.stringify(writeFileToolParams.content);
+    }
+
     const validationError = this.validateToolParams(params);
     if (validationError) {
       throw new Error(validationError);
