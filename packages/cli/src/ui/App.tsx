@@ -153,11 +153,11 @@ function isToolExecuting(pendingHistoryItems: HistoryItemWithoutId[]) {
 
 export const AppWrapper = (props: AppProps) => {
   const kittyProtocolStatus = useKittyKeyboardProtocol();
-  const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
+  // const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
   return (
     <KeypressProvider
       kittyProtocolEnabled={kittyProtocolStatus.enabled}
-      pasteWorkaround={process.platform === 'win32' || nodeMajorVersion < 20}
+      // pasteWorkaround={process.platform === 'win32' || nodeMajorVersion < 20}
       config={props.config}
       debugKeystrokeLogging={
         props.settings.merged.general?.debugKeystrokeLogging
