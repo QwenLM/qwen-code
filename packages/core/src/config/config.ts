@@ -4,27 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Node built-ins
+import type { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import process from 'node:process';
-import { GeminiClient } from '../core/client.js';
+
+// External dependencies
+import { ProxyAgent, setGlobalDispatcher } from 'undici';
+
+// Types
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import type { FallbackModelHandler } from '../fallback/types.js';
+import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import type { AnyToolInvocation } from '../tools/tools.js';
+
+// Core
+import { BaseLlmClient } from '../core/baseLlmClient.js';
+import { GeminiClient } from '../core/client.js';
 import {
   AuthType,
   createContentGenerator,
   createContentGeneratorConfig,
 } from '../core/contentGenerator.js';
-import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
-import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { tokenLimit } from '../core/tokenLimits.js';
+
+// Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
-import { SubagentManager } from '../subagents/subagent-manager.js';
+
+// Tools
 import { EditTool } from '../tools/edit.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { GlobTool } from '../tools/glob.js';
@@ -33,47 +49,53 @@ import { LSTool } from '../tools/ls.js';
 import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { ReadManyFilesTool } from '../tools/read-many-files.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
+import { canUseRipgrep, RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
+import { SmartEditTool } from '../tools/smart-edit.js';
 import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
-import type { AnyToolInvocation } from '../tools/tools.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search.js';
 import { WriteFileTool } from '../tools/write-file.js';
-import { SmartEditTool } from '../tools/smart-edit.js';
-import { canUseRipgrep } from '../tools/ripGrep.js';
-import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
-import { FileExclusions } from '../utils/ignorePatterns.js';
-import { WorkspaceContext } from '../utils/workspaceContext.js';
-import {
-  DEFAULT_QWEN_EMBEDDING_MODEL,
-  DEFAULT_GEMINI_FLASH_MODEL,
-} from './models.js';
-import { Storage } from './storage.js';
-import { OutputFormat } from '../output/types.js';
-import type { EventEmitter } from 'events';
-import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import { BaseLlmClient } from '../core/baseLlmClient.js';
-import type { FallbackModelHandler } from '../fallback/types.js';
-import { setGlobalDispatcher, ProxyAgent } from 'undici';
+
+// Other modules
 import { ideContextStore } from '../ide/ideContext.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { OutputFormat } from '../output/types.js';
+import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { SubagentManager } from '../subagents/subagent-manager.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
   initializeTelemetry,
-  StartSessionEvent,
-  RipgrepFallbackEvent,
-  uiTelemetryService,
   logCliConfiguration,
   logRipgrepFallback,
+  RipgrepFallbackEvent,
+  StartSessionEvent,
   type TelemetryTarget,
+  uiTelemetryService,
 } from '../telemetry/index.js';
 
-// Re-export OAuth config type
-export type { AnyToolInvocation, MCPOAuthConfig };
+// Utils
+import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
+import { FileExclusions } from '../utils/ignorePatterns.js';
+import { WorkspaceContext } from '../utils/workspaceContext.js';
+
+// Local config modules
+import type { FileFilteringOptions } from './constants.js';
+import {
+  DEFAULT_FILE_FILTERING_OPTIONS,
+  DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
+} from './constants.js';
+import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
+import { Storage } from './storage.js';
+
+// Re-export types
+export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
+export {
+  DEFAULT_FILE_FILTERING_OPTIONS,
+  DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
+};
 
 export enum ApprovalMode {
   PLAN = 'plan',
@@ -136,18 +158,6 @@ export interface ExtensionInstallMetadata {
   ref?: string;
   autoUpdate?: boolean;
 }
-
-import type { FileFilteringOptions } from './constants.js';
-import {
-  DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-  DEFAULT_FILE_FILTERING_OPTIONS,
-} from './constants.js';
-
-export type { FileFilteringOptions };
-export {
-  DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-  DEFAULT_FILE_FILTERING_OPTIONS,
-};
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 4_000_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
@@ -233,8 +243,6 @@ export interface ConfigParameters {
   includeDirectories?: string[];
   bugCommand?: BugCommandSettings;
   model: string;
-  apiKey?: string;
-  baseUrl?: string;
   extensionContextFilePaths?: string[];
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
@@ -247,7 +255,6 @@ export interface ConfigParameters {
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
   ideMode?: boolean;
-  enableOpenAILogging?: boolean;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
   cliVersion?: string;
@@ -431,9 +438,6 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this._generationConfig = {
       model: params.model,
-      apiKey: params.apiKey,
-      baseUrl: params.baseUrl,
-      enableOpenAILogging: params.enableOpenAILogging ?? false,
       ...(params.generationConfig || {}),
     };
     this.contentGeneratorConfig = this._generationConfig;
@@ -1123,5 +1127,3 @@ export class Config {
     return registry;
   }
 }
-// Export model constants for use in CLI
-export { DEFAULT_GEMINI_FLASH_MODEL };

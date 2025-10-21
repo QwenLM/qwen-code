@@ -82,6 +82,13 @@ export function LoopDetectionConfirmation({
             <Box marginTop={1}>
               <RadioButtonSelect items={OPTIONS} onSelect={onComplete} />
             </Box>
+            <Box marginTop={1}>
+              <Text color={theme.text.secondary}>
+                Note: To disable loop detection checks for all future sessions,
+                set &quot;model.skipLoopDetection&quot; to true in your
+                settings.json.
+              </Text>
+            </Box>
           </Box>
         </Box>
       </Box>

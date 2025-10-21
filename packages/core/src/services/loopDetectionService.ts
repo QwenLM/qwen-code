@@ -22,7 +22,7 @@ import {
   isFunctionCall,
   isFunctionResponse,
 } from '../utils/messageInspectors.js';
-import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
@@ -424,7 +424,7 @@ export class LoopDetectionService {
       result = await this.config.getBaseLlmClient().generateJson({
         contents,
         schema,
-        model: DEFAULT_QWEN_FLASH_MODEL,
+        model: this.config.getModel() || DEFAULT_QWEN_MODEL,
         systemInstruction: LOOP_DETECTION_SYSTEM_PROMPT,
         abortSignal: signal,
         promptId: this.promptId,

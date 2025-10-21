@@ -7,7 +7,6 @@
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Content } from '@google/genai';
-import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
 import type { Config } from '../config/config.js';
@@ -54,14 +53,6 @@ describe('checkNextSpeaker', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-    mockConfig = {
-      getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
-      getSessionId: vi.fn().mockReturnValue('test-session-id'),
-      getModel: () => 'test-model',
-      storage: {
-        getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
-      },
-    } as unknown as Config;
 
     mockBaseLlmClient = new BaseLlmClient(
       {
@@ -70,8 +61,21 @@ describe('checkNextSpeaker', () => {
         countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as ContentGenerator,
-      mockConfig,
+      {} as Config,
     );
+
+    // Add generateJson mock to the client
+    mockBaseLlmClient.generateJson = vi.fn();
+
+    mockConfig = {
+      getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getModel: () => 'test-model',
+      getBaseLlmClient: vi.fn().mockReturnValue(mockBaseLlmClient),
+      storage: {
+        getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
+      },
+    } as unknown as Config;
 
     // GeminiChat will receive the mocked instances via the mocked GoogleGenAI constructor
     chatInstance = new GeminiChat(
@@ -92,7 +96,7 @@ describe('checkNextSpeaker', () => {
     (chatInstance.getHistory as Mock).mockReturnValue([]);
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -106,7 +110,7 @@ describe('checkNextSpeaker', () => {
     ]);
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -126,7 +130,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -146,7 +150,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -165,7 +169,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -185,7 +189,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -203,7 +207,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -221,7 +225,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -239,7 +243,7 @@ describe('checkNextSpeaker', () => {
 
     const result = await checkNextSpeaker(
       chatInstance,
-      mockBaseLlmClient,
+      mockConfig,
       abortSignal,
       promptId,
     );
@@ -256,17 +260,12 @@ describe('checkNextSpeaker', () => {
     };
     (mockBaseLlmClient.generateJson as Mock).mockResolvedValue(mockApiResponse);
 
-    await checkNextSpeaker(
-      chatInstance,
-      mockBaseLlmClient,
-      abortSignal,
-      promptId,
-    );
+    await checkNextSpeaker(chatInstance, mockConfig, abortSignal, promptId);
 
     expect(mockBaseLlmClient.generateJson).toHaveBeenCalled();
     const generateJsonCall = (mockBaseLlmClient.generateJson as Mock).mock
       .calls[0];
-    expect(generateJsonCall[0].model).toBe(DEFAULT_QWEN_FLASH_MODEL);
+    expect(generateJsonCall[0].model).toBe('test-model');
     expect(generateJsonCall[0].promptId).toBe(promptId);
   });
 });

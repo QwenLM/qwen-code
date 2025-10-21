@@ -5,10 +5,10 @@
  */
 
 import type { Content } from '@google/genai';
-import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
+import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
+import type { Config } from '../config/config.js';
 
 const CHECK_PROMPT = `Analyze *only* the content and structure of your immediately preceding response (your last turn in the conversation history). Based *strictly* on that response, determine who should logically speak next: the 'user' or the 'model' (you).
 **Decision Rules (apply in order):**
@@ -41,7 +41,7 @@ export interface NextSpeakerResponse {
 
 export async function checkNextSpeaker(
   chat: GeminiChat,
-  baseLlmClient: BaseLlmClient,
+  config: Config,
   abortSignal: AbortSignal,
   promptId: string,
 ): Promise<NextSpeakerResponse | null> {
@@ -109,10 +109,10 @@ export async function checkNextSpeaker(
   ];
 
   try {
-    const parsedResponse = (await baseLlmClient.generateJson({
+    const parsedResponse = (await config.getBaseLlmClient().generateJson({
       contents,
       schema: RESPONSE_SCHEMA,
-      model: DEFAULT_QWEN_FLASH_MODEL,
+      model: config.getModel() || DEFAULT_QWEN_MODEL,
       abortSignal,
       promptId,
     })) as unknown as NextSpeakerResponse;

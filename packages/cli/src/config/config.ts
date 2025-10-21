@@ -727,8 +727,6 @@ export async function loadCliConfig(
     fileDiscoveryService: fileService,
     bugCommand: settings.advanced?.bugCommand,
     model: resolvedModel,
-    apiKey: argv.openaiApiKey || process.env['OPENAI_API_KEY'],
-    baseUrl: argv.openaiBaseUrl || process.env['OPENAI_BASE_URL'],
     extensionContextFilePaths,
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns: settings.model?.maxSessionTurns ?? -1,
@@ -737,12 +735,17 @@ export async function loadCliConfig(
     extensions: allExtensions,
     blockedMcpServers,
     noBrowser: !!process.env['NO_BROWSER'],
-    enableOpenAILogging:
-      (typeof argv.openaiLogging === 'undefined'
-        ? settings.model?.enableOpenAILogging
-        : argv.openaiLogging) ?? false,
     authType: settings.security?.auth?.selectedType,
-    generationConfig: settings.model?.generationConfig,
+    generationConfig: {
+      ...(settings.model?.generationConfig || {}),
+      model: resolvedModel,
+      apiKey: argv.openaiApiKey || process.env['OPENAI_API_KEY'],
+      baseUrl: argv.openaiBaseUrl || process.env['OPENAI_BASE_URL'],
+      enableOpenAILogging:
+        (typeof argv.openaiLogging === 'undefined'
+          ? settings.model?.enableOpenAILogging
+          : argv.openaiLogging) ?? false,
+    },
     cliVersion: await getCliVersion(),
     tavilyApiKey:
       argv.tavilyApiKey ||

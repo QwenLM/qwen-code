@@ -135,7 +135,7 @@ describe('FileTokenStorage', () => {
       await storage.setCredentials(credentials);
 
       expect(mockFs.mkdir).toHaveBeenCalledWith(
-        path.join('/home/test', '.gemini'),
+        path.join('/home/test', '.qwen'),
         { recursive: true, mode: 0o700 },
       );
       expect(mockFs.writeFile).toHaveBeenCalled();
@@ -201,7 +201,7 @@ describe('FileTokenStorage', () => {
       await storage.deleteCredentials('test-server');
 
       expect(mockFs.unlink).toHaveBeenCalledWith(
-        path.join('/home/test', '.gemini', 'mcp-oauth-tokens-v2.json'),
+        path.join('/home/test', '.qwen', 'mcp-oauth-tokens-v2.json'),
       );
     });
 
@@ -282,7 +282,7 @@ describe('FileTokenStorage', () => {
       await storage.clearAll();
 
       expect(mockFs.unlink).toHaveBeenCalledWith(
-        path.join('/home/test', '.gemini', 'mcp-oauth-tokens-v2.json'),
+        path.join('/home/test', '.qwen', 'mcp-oauth-tokens-v2.json'),
       );
     });
 

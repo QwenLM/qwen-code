@@ -612,7 +612,7 @@ export class GeminiClient {
 
       const nextSpeakerCheck = await checkNextSpeaker(
         this.getChat(),
-        this.config.getBaseLlmClient(),
+        this.config,
         signal,
         prompt_id,
       );

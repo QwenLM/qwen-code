@@ -247,7 +247,6 @@ describe('Server Config (config.ts)', () => {
         authType,
         {
           model: MODEL,
-          enableOpenAILogging: false,
         },
       );
       // Verify that contentGeneratorConfig is updated

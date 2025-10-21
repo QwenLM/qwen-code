@@ -645,6 +645,7 @@ describe('LoopDetectionService LLM Checks', () => {
       getBaseLlmClient: () => mockBaseLlmClient,
       getDebugMode: () => false,
       getTelemetryEnabled: () => true,
+      getModel: () => 'test-model',
     } as unknown as Config;
 
     service = new LoopDetectionService(mockConfig);

@@ -9,5 +9,8 @@ exports[`LoopDetectionConfirmation > renders correctly 1`] = `
  │                                                                                                  │
  │ ● 1. Keep loop detection enabled (esc)                                                           │
  │   2. Disable loop detection for this session                                                     │
+ │                                                                                                  │
+ │ Note: To disable loop detection checks for all future sessions, set "model.skipLoopDetection" to │
+ │  true in your settings.json.                                                                     │
  ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;

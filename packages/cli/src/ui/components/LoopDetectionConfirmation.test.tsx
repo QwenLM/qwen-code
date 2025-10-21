@@ -30,5 +30,10 @@ describe('LoopDetectionConfirmation', () => {
     expect(output).toContain(
       'This can happen due to repetitive tool calls or other model behavior',
     );
+    expect(output).toContain(
+      'Note: To disable loop detection checks for all future sessions',
+    );
+    expect(output).toContain('model.skipLoopDetection');
+    expect(output).toContain('settings.json');
   });
 });
