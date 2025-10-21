@@ -42,7 +42,6 @@ import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { createPolicyEngineConfig } from './policy.js';
 import type { ExtensionEnablementManager } from './extensions/extensionEnablement.js';
 
 // Simple console logger for now - replace with actual logger if available
@@ -609,8 +608,6 @@ export async function loadCliConfig(
     throw err;
   }
 
-  const policyEngineConfig = createPolicyEngineConfig(settings, approvalMode);
-
   // Interactive mode: explicit -i flag or (TTY + no args + no -p flag)
   const hasQuery = !!argv.query;
   const interactive =
@@ -701,7 +698,6 @@ export async function loadCliConfig(
     fullContext: argv.allFiles || false,
     coreTools: settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
-    policyEngineConfig,
     excludeTools,
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
     toolCallCommand: settings.tools?.callCommand,
@@ -772,8 +768,6 @@ export async function loadCliConfig(
     output: {
       format: (argv.outputFormat ?? settings.output?.format) as OutputFormat,
     },
-    enableMessageBusIntegration:
-      settings.tools?.enableMessageBusIntegration ?? false,
   });
 }
 

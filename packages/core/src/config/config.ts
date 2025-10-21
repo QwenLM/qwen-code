@@ -56,11 +56,8 @@ import { OutputFormat } from '../output/types.js';
 import type { EventEmitter } from 'events';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { BaseLlmClient } from '../core/baseLlmClient.js';
-import { MessageBus } from '../confirmation-bus/message-bus.js';
-import type { PolicyEngineConfig } from '../policy/types.js';
 import type { FallbackModelHandler } from '../fallback/types.js';
 import { setGlobalDispatcher, ProxyAgent } from 'undici';
-import { PolicyEngine } from '../policy/policy-engine.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import {
@@ -273,9 +270,7 @@ export interface ConfigParameters {
   enableToolOutputTruncation?: boolean;
   eventEmitter?: EventEmitter;
   useSmartEdit?: boolean;
-  policyEngineConfig?: PolicyEngineConfig;
   output?: OutputSettings;
-  enableMessageBusIntegration?: boolean;
 }
 
 export class Config {
@@ -366,10 +361,7 @@ export class Config {
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
-  private readonly messageBus: MessageBus;
-  private readonly policyEngine: PolicyEngine;
   private readonly outputSettings: OutputSettings;
-  private readonly enableMessageBusIntegration: boolean;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -474,16 +466,12 @@ export class Config {
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
     this.useSmartEdit = params.useSmartEdit ?? false;
-    this.enableMessageBusIntegration =
-      params.enableMessageBusIntegration ?? false;
     this.extensionManagement = params.extensionManagement ?? true;
     this.storage = new Storage(this.targetDir);
     this.enablePromptCompletion = params.enablePromptCompletion ?? false;
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
-    this.policyEngine = new PolicyEngine(params.policyEngineConfig);
-    this.messageBus = new MessageBus(this.policyEngine);
     this.outputSettings = {
       format: params.output?.format ?? OutputFormat.TEXT,
     };
@@ -1054,14 +1042,6 @@ export class Config {
     return this.subagentManager;
   }
 
-  getMessageBus(): MessageBus {
-    return this.messageBus;
-  }
-
-  getEnableMessageBusIntegration(): boolean {
-    return this.enableMessageBusIntegration;
-  }
-
   async createToolRegistry(): Promise<ToolRegistry> {
     const registry = new ToolRegistry(this, this.eventEmitter);
 
@@ -1095,24 +1075,7 @@ export class Config {
       }
 
       if (isEnabled) {
-        // Pass message bus to tools when feature flag is enabled
-        // This first implementation is only focused on the general case of
-        // the tool registry.
-        const messageBusEnabled = this.getEnableMessageBusIntegration();
-        if (this.debugMode && messageBusEnabled) {
-          console.log(
-            `[DEBUG] enableMessageBusIntegration setting: ${messageBusEnabled}`,
-          );
-        }
-        const toolArgs = messageBusEnabled
-          ? [...args, this.getMessageBus()]
-          : args;
-        if (this.debugMode && messageBusEnabled) {
-          console.log(
-            `[DEBUG] Registering ${className} with messageBus: ${messageBusEnabled ? 'YES' : 'NO'}`,
-          );
-        }
-        registry.registerTool(new ToolClass(...toolArgs));
+        registry.registerTool(new ToolClass(...args));
       }
     };
 
