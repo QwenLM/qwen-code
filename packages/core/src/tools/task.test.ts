@@ -72,6 +72,7 @@ describe('TaskTool', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getMaxConcurrentSubagents: vi.fn().mockReturnValue(5), // Default value for testing
     } as unknown as Config;
 
     changeListeners = [];

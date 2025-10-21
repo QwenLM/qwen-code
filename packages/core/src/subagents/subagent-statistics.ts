@@ -117,7 +117,7 @@ export class SubagentStatistics {
     ];
     if (typeof stats.totalTokens === 'number') {
       lines.push(
-        `🔢 Tokens: ${stats.totalTokens.toLocaleString()}${stats.inputTokens || stats.outputTokens ? ` (in ${stats.inputTokens ?? 0}, out ${stats.outputTokens ?? 0})` : ''}`,
+        `🔢 Tokens: ${stats.totalTokens.toLocaleString('en-US')}${stats.inputTokens || stats.outputTokens ? ` (in ${stats.inputTokens ?? 0}, out ${stats.outputTokens ?? 0})` : ''}`,
       );
     }
     return lines.join('\n');
@@ -153,7 +153,7 @@ export class SubagentStatistics {
     );
     if (typeof stats.totalTokens === 'number') {
       lines.push(
-        `🔢 Tokens: ${stats.totalTokens.toLocaleString()} (in ${stats.inputTokens ?? 0}, out ${stats.outputTokens ?? 0})`,
+        `🔢 Tokens: ${stats.totalTokens.toLocaleString('en-US')} (in ${stats.inputTokens ?? 0}, out ${stats.outputTokens ?? 0})`,
       );
     }
     if (stats.toolUsage && stats.toolUsage.length) {

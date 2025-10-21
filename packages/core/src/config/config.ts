@@ -245,6 +245,7 @@ export interface ConfigParameters {
   enablePromptCompletion?: boolean;
   skipLoopDetection?: boolean;
   vlmSwitchMode?: string;
+  maxConcurrentSubagents?: number;
 }
 
 export class Config {
@@ -337,6 +338,7 @@ export class Config {
   private readonly enablePromptCompletion: boolean = false;
   private readonly skipLoopDetection: boolean;
   private readonly vlmSwitchMode: string | undefined;
+  private readonly maxConcurrentSubagents: number;
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
@@ -433,6 +435,7 @@ export class Config {
     this.storage = new Storage(this.targetDir);
     this.enablePromptCompletion = params.enablePromptCompletion ?? false;
     this.vlmSwitchMode = params.vlmSwitchMode;
+    this.maxConcurrentSubagents = params.maxConcurrentSubagents ?? 5; // Default to 5 concurrent subagents
     this.fileExclusions = new FileExclusions(this);
 
     // Initialize logger asynchronously
@@ -985,6 +988,10 @@ export class Config {
 
   getVlmSwitchMode(): string | undefined {
     return this.vlmSwitchMode;
+  }
+
+  getMaxConcurrentSubagents(): number {
+    return this.maxConcurrentSubagents;
   }
 
   async getGitService(): Promise<GitService> {

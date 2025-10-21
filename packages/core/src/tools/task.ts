@@ -6,6 +6,7 @@
 
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
+import type { Config } from '../config/config.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -16,7 +17,6 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
 } from './tools.js';
-import type { Config } from '../config/config.js';
 import type { SubagentManager } from '../subagents/subagent-manager.js';
 import {
   type SubagentConfig,
@@ -46,6 +46,43 @@ export interface TaskParams {
  * The tool dynamically loads available subagents and includes them in its description
  * for the model to choose from.
  */
+
+/**
+ * Global registry to track active subagent executions across all instances
+ */
+class SubagentExecutionRegistry {
+  private activeExecutions = 0;
+  private waitingExecutions: Array<() => void> = [];
+
+  async acquire(maxConcurrent: number): Promise<void> {
+    return new Promise((resolve) => {
+      if (this.activeExecutions < maxConcurrent) {
+        this.activeExecutions++;
+        resolve();
+      } else {
+        this.waitingExecutions.push(resolve);
+      }
+    });
+  }
+
+  release(): void {
+    this.activeExecutions--;
+    
+    // If there are waiting executions, allow the next one to proceed
+    if (this.waitingExecutions.length > 0) {
+      const next = this.waitingExecutions.shift();
+      if (next) {
+        this.activeExecutions++;
+        next();
+      }
+    }
+  }
+}
+
+const subagentRegistry = new SubagentExecutionRegistry();
+
+
+
 export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
   static readonly Name: string = ToolNames.TASK;
 
@@ -126,7 +163,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     } else {
       subagentDescriptions = this.availableSubagents
         .map((subagent) => `- **${subagent.name}**: ${subagent.description}`)
-        .join('\n');
+        .join('\\n');
     }
 
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. 
@@ -460,104 +497,113 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // Acquire a slot based on the configured concurrent limit
+    const maxConcurrent = this.config.getMaxConcurrentSubagents();
+    await subagentRegistry.acquire(maxConcurrent);
+    
     try {
-      // Load the subagent configuration
-      const subagentConfig = await this.subagentManager.loadSubagent(
-        this.params.subagent_type,
-      );
+      try {
+        // Load the subagent configuration
+        const subagentConfig = await this.subagentManager.loadSubagent(
+          this.params.subagent_type,
+        );
 
-      if (!subagentConfig) {
-        const errorDisplay = {
+        if (!subagentConfig) {
+          const errorDisplay = {
+            type: 'task_execution' as const,
+            subagentName: this.params.subagent_type,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason: `Subagent "${this.params.subagent_type}" not found`,
+          };
+
+          return {
+            llmContent: `Subagent "${this.params.subagent_type}" not found`,
+            returnDisplay: errorDisplay,
+          };
+        }
+
+        // Initialize the current display state
+        this.currentDisplay = {
           type: 'task_execution' as const,
-          subagentName: this.params.subagent_type,
+          subagentName: subagentConfig.name,
           taskDescription: this.params.description,
           taskPrompt: this.params.prompt,
-          status: 'failed' as const,
-          terminateReason: `Subagent "${this.params.subagent_type}" not found`,
+          status: 'running' as const,
+          subagentColor: subagentConfig.color,
+        };
+
+        // Set up event listeners for real-time updates
+        this.setupEventListeners(updateOutput);
+
+        // Send initial display
+        if (updateOutput) {
+          updateOutput(this.currentDisplay);
+        }
+        const subagentScope = await this.subagentManager.createSubagentScope(
+          subagentConfig,
+          this.config,
+          { eventEmitter: this.eventEmitter },
+        );
+
+        // Create context state with the task prompt
+        const contextState = new ContextState();
+        contextState.set('task_prompt', this.params.prompt);
+
+        // Execute the subagent (blocking)
+        await subagentScope.runNonInteractive(contextState, signal);
+
+        // Get the results
+        const finalText = subagentScope.getFinalText();
+        const terminateMode = subagentScope.getTerminateMode();
+        const success = terminateMode === SubagentTerminateMode.GOAL;
+        const executionSummary = subagentScope.getExecutionSummary();
+
+        if (signal?.aborted) {
+          this.updateDisplay(
+            {
+              status: 'cancelled',
+              terminateReason: 'Task was cancelled by user',
+              executionSummary,
+            },
+            updateOutput,
+          );
+        } else {
+          this.updateDisplay(
+            {
+              status: success ? 'completed' : 'failed',
+              terminateReason: terminateMode,
+              result: finalText,
+              executionSummary,
+            },
+            updateOutput,
+          );
+        }
+
+        return {
+          llmContent: [{ text: finalText }],
+          returnDisplay: this.currentDisplay!,
+        };
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        console.error(`[TaskTool] Error running subagent: ${errorMessage}`);
+
+        const errorDisplay: TaskResultDisplay = {
+          ...this.currentDisplay!,
+          status: 'failed',
+          terminateReason: `Failed to run subagent: ${errorMessage}`,
         };
 
         return {
-          llmContent: `Subagent "${this.params.subagent_type}" not found`,
+          llmContent: `Failed to run subagent: ${errorMessage}`,
           returnDisplay: errorDisplay,
         };
       }
-
-      // Initialize the current display state
-      this.currentDisplay = {
-        type: 'task_execution' as const,
-        subagentName: subagentConfig.name,
-        taskDescription: this.params.description,
-        taskPrompt: this.params.prompt,
-        status: 'running' as const,
-        subagentColor: subagentConfig.color,
-      };
-
-      // Set up event listeners for real-time updates
-      this.setupEventListeners(updateOutput);
-
-      // Send initial display
-      if (updateOutput) {
-        updateOutput(this.currentDisplay);
-      }
-      const subagentScope = await this.subagentManager.createSubagentScope(
-        subagentConfig,
-        this.config,
-        { eventEmitter: this.eventEmitter },
-      );
-
-      // Create context state with the task prompt
-      const contextState = new ContextState();
-      contextState.set('task_prompt', this.params.prompt);
-
-      // Execute the subagent (blocking)
-      await subagentScope.runNonInteractive(contextState, signal);
-
-      // Get the results
-      const finalText = subagentScope.getFinalText();
-      const terminateMode = subagentScope.getTerminateMode();
-      const success = terminateMode === SubagentTerminateMode.GOAL;
-      const executionSummary = subagentScope.getExecutionSummary();
-
-      if (signal?.aborted) {
-        this.updateDisplay(
-          {
-            status: 'cancelled',
-            terminateReason: 'Task was cancelled by user',
-            executionSummary,
-          },
-          updateOutput,
-        );
-      } else {
-        this.updateDisplay(
-          {
-            status: success ? 'completed' : 'failed',
-            terminateReason: terminateMode,
-            result: finalText,
-            executionSummary,
-          },
-          updateOutput,
-        );
-      }
-
-      return {
-        llmContent: [{ text: finalText }],
-        returnDisplay: this.currentDisplay!,
-      };
-    } catch (error) {
-      const errorMessage =
-        error instanceof Error ? error.message : String(error);
-      console.error(`[TaskTool] Error running subagent: ${errorMessage}`);
-
-      const errorDisplay: TaskResultDisplay = {
-        ...this.currentDisplay!,
-        status: 'failed',
-        terminateReason: `Failed to run subagent: ${errorMessage}`,
-      };
-
-      return {
-        llmContent: `Failed to run subagent: ${errorMessage}`,
-        returnDisplay: errorDisplay,
-      };
+    } finally {
+      // Always release the slot when execution completes
+      subagentRegistry.release();
     }
   }
 }
