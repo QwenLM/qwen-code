@@ -270,7 +270,7 @@ describe('activate', () => {
 
       expect(executeCommandMock).toHaveBeenCalledWith(
         'workbench.extensions.installExtension',
-        'QwenLM.qwen-code-vscode-ide-companion',
+        'qwenlm.qwen-code-vscode-ide-companion',
       );
     });
 

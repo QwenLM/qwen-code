@@ -15,7 +15,7 @@ import {
   type IdeInfo,
 } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
 
-const CLI_IDE_COMPANION_IDENTIFIER = 'QwenLM.qwen-code-vscode-ide-companion';
+const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
 export const DIFF_SCHEME = 'qwen-diff';
 
