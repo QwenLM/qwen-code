@@ -57,16 +57,22 @@ export class GitIgnoreParser implements GitIgnoreFilter {
   }
 
   isIgnored(filePath: string): boolean {
-    const resolved = path.resolve(this.projectRoot, filePath);
-    const relativePath = path.relative(this.projectRoot, resolved);
+    try {
+      const resolved = path.resolve(this.projectRoot, filePath);
+      const relativePath = path.relative(this.projectRoot, resolved);
 
-    if (relativePath === '' || relativePath.startsWith('..')) {
-      return false;
+      if (relativePath === '' || relativePath.startsWith('..')) {
+        return false;
+      }
+
+      // Even in windows, Ignore expects forward slashes.
+      const normalizedPath = relativePath.replace(/\\/g, '/');
+      return this.ig.ignores(normalizedPath);
+    } catch (error) {
+      // Handle cases where the ignore library throws errors due to path issues
+      console.warn(`Warning: Error checking ignore status for ${filePath}:`, error);
+      return false; // Default to not ignoring the file if there's an error
     }
-
-    // Even in windows, Ignore expects forward slashes.
-    const normalizedPath = relativePath.replace(/\\/g, '/');
-    return this.ig.ignores(normalizedPath);
   }
 
   getPatterns(): string[] {
