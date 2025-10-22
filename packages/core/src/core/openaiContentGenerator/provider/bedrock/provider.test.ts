@@ -12,10 +12,10 @@ import {
   vi,
   type MockedFunction,
 } from 'vitest';
-import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { AuthType } from '../../contentGenerator.js';
-import { BedrockOpenAICompatibleProvider } from './bedrock.js';
-import type { Config } from '../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../../contentGenerator.js';
+import { AuthType } from '../../../contentGenerator.js';
+import { BedrockOpenAICompatibleProvider } from './provider.js';
+import type { Config } from '../../../../config/config.js';
 
 describe('BedrockOpenAICompatibleProvider', () => {
   let mockConfig: Config;
