@@ -200,9 +200,9 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // Deepseek-chat: 8k max tokens
   [/^deepseek-chat$/, LIMITS['8k']],
-  
+
   // Deepseek-reasoner: 64k max tokens
-  [/^deepseek-reasoner$/, LIMITS['64k']]
+  [/^deepseek-reasoner$/, LIMITS['64k']],
 ];
 
 /**
