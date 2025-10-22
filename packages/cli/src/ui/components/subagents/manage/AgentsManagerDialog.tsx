@@ -14,7 +14,6 @@ import { AgentDeleteStep } from './AgentDeleteStep.js';
 import { ToolSelector } from '../create/ToolSelector.js';
 import { ColorSelector } from '../create/ColorSelector.js';
 import { MANAGEMENT_STEPS } from '../types.js';
-import { Colors } from '../../../colors.js';
 import { theme } from '../../../semantic-colors.js';
 import { getColorForDisplay, shouldShowColor } from '../utils.js';
 import type { SubagentConfig, Config } from '@qwen-code/qwen-code-core';
@@ -317,7 +316,7 @@ export function AgentsManagerDialog({
       {/* Main content wrapped in bounding box */}
       <Box
         borderStyle="single"
-        borderColor={Colors.Gray}
+        borderColor={theme.border.default}
         flexDirection="column"
         padding={1}
         width="100%"
