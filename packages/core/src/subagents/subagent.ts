@@ -329,7 +329,10 @@ export class SubAgentScope {
       this.eventEmitter?.emit(SubAgentEventType.START, {
         subagentId: this.subagentId,
         name: this.name,
-        model: this.modelConfig.model,
+        model:
+          this.modelConfig.model ||
+          this.runtimeContext.getModel() ||
+          DEFAULT_QWEN_MODEL,
         tools: (this.toolConfig?.tools || ['*']).map((t) =>
           typeof t === 'string' ? t : t.name,
         ),
@@ -367,7 +370,9 @@ export class SubAgentScope {
         };
 
         const responseStream = await chat.sendMessageStream(
-          this.modelConfig.model ?? DEFAULT_QWEN_MODEL,
+          this.modelConfig.model ||
+            this.runtimeContext.getModel() ||
+            DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
         );
@@ -827,10 +832,6 @@ export class SubAgentScope {
 
       if (systemInstruction) {
         generationConfig.systemInstruction = systemInstruction;
-      }
-
-      if (this.modelConfig.model) {
-        await this.runtimeContext.setModel(this.modelConfig.model);
       }
 
       return new GeminiChat(

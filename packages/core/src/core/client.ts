@@ -4,38 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// External dependencies
 import type {
-  GenerateContentConfig,
-  PartListUnion,
   Content,
+  GenerateContentConfig,
   GenerateContentResponse,
+  PartListUnion,
   Tool,
 } from '@google/genai';
-import { type Config, ApprovalMode } from '../config/config.js';
+
+// Config
+import { ApprovalMode, type Config } from '../config/config.js';
 import {
   DEFAULT_GEMINI_FLASH_MODEL,
   DEFAULT_GEMINI_MODEL_AUTO,
   DEFAULT_THINKING_MODE,
 } from '../config/models.js';
-import { LoopDetectionService } from '../services/loopDetectionService.js';
-import { type ChatRecordingService } from '../services/chatRecordingService.js';
-import {
-  uiTelemetryService,
-  logChatCompression,
-  logNextSpeakerCheck,
-  makeChatCompressionEvent,
-  NextSpeakerCheckEvent,
-} from '../telemetry/index.js';
-import { TaskTool } from '../tools/task.js';
-import {
-  getDirectoryContextString,
-  getEnvironmentContext,
-} from '../utils/environmentContext.js';
-import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage } from '../utils/errors.js';
-import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import { retryWithBackoff } from '../utils/retry.js';
-import { flatMapTextParts, getResponseText } from '../utils/partUtils.js';
+
+// Core modules
 import type { ContentGenerator } from './contentGenerator.js';
 import { GeminiChat } from './geminiChat.js';
 import {
@@ -47,14 +33,45 @@ import {
 } from './prompts.js';
 import { tokenLimit } from './tokenLimits.js';
 import {
-  type ChatCompressionInfo,
-  type ServerGeminiStreamEvent,
   CompressionStatus,
   GeminiEventType,
   Turn,
+  type ChatCompressionInfo,
+  type ServerGeminiStreamEvent,
 } from './turn.js';
-import { type IdeContext, type File } from '../ide/types.js';
+
+// Services
+import { type ChatRecordingService } from '../services/chatRecordingService.js';
+import { LoopDetectionService } from '../services/loopDetectionService.js';
+
+// Tools
+import { TaskTool } from '../tools/task.js';
+
+// Telemetry
+import {
+  NextSpeakerCheckEvent,
+  logChatCompression,
+  logNextSpeakerCheck,
+  makeChatCompressionEvent,
+  uiTelemetryService,
+} from '../telemetry/index.js';
+
+// Utilities
+import {
+  getDirectoryContextString,
+  getEnvironmentContext,
+} from '../utils/environmentContext.js';
+import { reportError } from '../utils/errorReporting.js';
+import { getErrorMessage } from '../utils/errors.js';
+import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
+import { flatMapTextParts, getResponseText } from '../utils/partUtils.js';
+import { retryWithBackoff } from '../utils/retry.js';
+
+// IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
+import { type File, type IdeContext } from '../ide/types.js';
+
+// Fallback handling
 import { handleFallback } from '../fallback/handler.js';
 
 export function isThinkingSupported(model: string) {
