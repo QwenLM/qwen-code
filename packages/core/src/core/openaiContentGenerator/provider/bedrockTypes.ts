@@ -189,31 +189,9 @@ export interface BedrockMetadataEvent {
 }
 
 /**
- * Model ID mapping for common Qwen model names to Bedrock model IDs
- */
-export const BEDROCK_MODEL_MAP: Record<string, string> = {
-  // Qwen3-Coder models (30B instruction-tuned model)
-  'qwen-coder': 'qwen.qwen3-coder-30b-a3b-v1:0',
-  'qwen3-coder': 'qwen.qwen3-coder-30b-a3b-v1:0',
-  'qwen-3-coder': 'qwen.qwen3-coder-30b-a3b-v1:0',
-  'qwen-coder-30b': 'qwen.qwen3-coder-30b-a3b-v1:0',
-  'qwen3-coder-30b': 'qwen.qwen3-coder-30b-a3b-v1:0',
-  // Qwen3 general purpose model (32B dense model)
-  'qwen3': 'qwen.qwen3-32b-v1:0',
-  'qwen-3': 'qwen.qwen3-32b-v1:0',
-  'qwen3-32b': 'qwen.qwen3-32b-v1:0',
-};
-
-/**
- * Get Bedrock model ID from common model name
+ * Get Bedrock model ID - returns the model name as-is since Bedrock requires exact model IDs
+ * Users must specify the full Bedrock model ID (e.g., "qwen.qwen3-coder-30b-a3b-v1:0")
  */
 export function getBedrockModelId(modelName: string): string {
-  // If it already looks like a Bedrock model ID, return as-is
-  if (modelName.includes('.') || modelName.startsWith('qwen.')) {
-    return modelName;
-  }
-
-  // Check our mapping
-  const normalized = modelName.toLowerCase();
-  return BEDROCK_MODEL_MAP[normalized] || modelName;
+  return modelName;
 }
