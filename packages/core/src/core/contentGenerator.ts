@@ -120,7 +120,7 @@ export function createContentGeneratorConfig(
         config.getModel() ||
         process.env['BEDROCK_MODEL'] ||
         process.env['QWEN_MODEL'] ||
-        'qwen-coder', // Will be mapped to qwen.qwen3-coder-30b-a3b-v1:0
+        'qwen.qwen3-coder-30b-a3b-v1:0', // Default to Qwen3-Coder-30B
     } as ContentGeneratorConfig;
   }
 

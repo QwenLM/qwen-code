@@ -10,10 +10,19 @@ Qwen Code now supports using Qwen3-Coder models via Amazon Bedrock, allowing you
 
 ## Available Models
 
-Amazon Bedrock provides access to the following Qwen models:
+Amazon Bedrock provides access to Qwen models. Model availability varies by region:
 
-- `qwen.qwen3-coder-30b-a3b-v1:0` (Qwen3-Coder-30B-A3B-Instruct) - Specialized for code generation
-- `qwen.qwen3-32b-v1:0` (Qwen3 32B dense) - General purpose model
+### us-east-1
+- `qwen.qwen3-coder-30b-a3b-v1:0` - Qwen3-Coder-30B-A3B-Instruct (code generation)
+- `qwen.qwen3-32b-v1:0` - Qwen3 32B dense (general purpose)
+
+### us-west-2
+- `qwen.qwen3-coder-480b-a35b-v1:0` - Qwen3 Coder 480B A35B Instruct (code generation)
+- `qwen.qwen3-235b-a22b-2507-v1:0` - Qwen3 235B A22B 2507 (general purpose)
+- `qwen.qwen3-coder-30b-a3b-v1:0` - Qwen3-Coder-30B-A3B-Instruct (code generation)
+- `qwen.qwen3-32b-v1:0` - Qwen3 32B dense (general purpose)
+
+Check the [AWS Bedrock Console](https://console.aws.amazon.com/bedrock/) for the latest available models in your region.
 
 ## Setup
 
@@ -53,34 +62,31 @@ When starting Qwen Code, select "Amazon Bedrock" from the authentication menu us
 
 ### 3. (Optional) Configure Model
 
-By default, Qwen Code uses `qwen-coder` (Qwen3-Coder-30B). You can override this:
+By default, Qwen Code uses `qwen.qwen3-coder-30b-a3b-v1:0` (Qwen3-Coder-30B). You can override this with environment variables or in settings:
 
 ```bash
-export BEDROCK_MODEL=qwen3-32b  # Use the general-purpose 32B model
-# Or use the full Bedrock model ID
+# Via environment variable - use the exact Bedrock model ID
 export BEDROCK_MODEL=qwen.qwen3-32b-v1:0
+```
+
+```json
+// Or in ~/.qwen/settings.json - use the exact Bedrock model ID
+{
+  "authType": "bedrock",
+  "model": "qwen.qwen3-coder-30b-a3b-v1:0"
+}
 ```
 
 ## Configuration Options
 
 ### Environment Variables
 
-| Variable                | Description              | Default       |
-| ----------------------- | ------------------------ | ------------- |
-| `AWS_REGION`            | AWS region for Bedrock   | `us-east-1`   |
-| `AWS_PROFILE`           | Named AWS profile to use | None          |
-| `AWS_ACCESS_KEY_ID`     | AWS access key           | None          |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key           | None          |
-| `BEDROCK_MODEL`         | Bedrock model ID         | `qwen-coder`  |
+| Variable                | Description                          | Default                             |
+| ----------------------- | ------------------------------------ | ----------------------------------- |
+| `AWS_REGION`            | AWS region for Bedrock               | `us-east-1`                         |
+| `AWS_PROFILE`           | Named AWS profile to use             | None                                |
+| `AWS_ACCESS_KEY_ID`     | AWS access key                       | None                                |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key                       | None                                |
+| `BEDROCK_MODEL`         | Full Bedrock model ID                | `qwen.qwen3-coder-30b-a3b-v1:0`     |
 
-### Model Name Mapping
-
-Qwen Code automatically maps common model names to Bedrock model IDs:
-
-| Common Name      | Bedrock Model ID                |
-| ---------------- | ------------------------------- |
-| `qwen-coder`     | `qwen.qwen3-coder-30b-a3b-v1:0` |
-| `qwen3-coder`    | `qwen.qwen3-coder-30b-a3b-v1:0` |
-| `qwen-coder-30b` | `qwen.qwen3-coder-30b-a3b-v1:0` |
-| `qwen3`          | `qwen.qwen3-32b-v1:0`           |
-| `qwen3-32b`      | `qwen.qwen3-32b-v1:0`           |
+**Note**: You must use the exact Bedrock model ID (e.g., `qwen.qwen3-coder-30b-a3b-v1:0`). Model name shortcuts are not supported.
