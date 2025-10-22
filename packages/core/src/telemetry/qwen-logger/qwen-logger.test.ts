@@ -263,7 +263,7 @@ describe('QwenLogger', () => {
       expect(enqueueSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           event_type: 'action',
-          type: 'connection',
+          type: 'ide',
           name: 'ide_connection',
           snapshots: JSON.stringify({
             connection_type: IdeConnectionType.SESSION,
