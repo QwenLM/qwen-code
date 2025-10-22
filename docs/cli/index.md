@@ -7,11 +7,8 @@ Within Qwen Code, `packages/cli` is the frontend for users to send and receive p
 - **[Authentication](./authentication.md):** A guide to setting up authentication with Qwen OAuth and OpenAI-compatible providers.
 - **[Commands](./commands.md):** A reference for Qwen Code CLI commands (e.g., `/help`, `/tools`, `/theme`).
 - **[Configuration](./configuration.md):** A guide to tailoring Qwen Code CLI behavior using configuration files.
-- **[Headless Mode](../headless.md):** A comprehensive guide to using Qwen Code programmatically for scripting and automation.
-- **[Token Caching](./token-caching.md):** Optimize API costs through token caching.
 - **[Themes](./themes.md)**: A guide to customizing the CLI's appearance with different themes.
 - **[Tutorials](tutorials.md)**: A tutorial showing how to use Qwen Code to automate a development task.
-- **[Welcome Back](./welcome-back.md)**: Learn about the Welcome Back feature that helps you resume work seamlessly across sessions.
 
 ## Non-interactive mode
 
