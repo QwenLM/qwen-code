@@ -1,5 +1,5 @@
 export default {
-  overview: 'Overview',
+  index: 'Introduction',
   'file-system': 'File System',
   'multi-file': 'Multi-File Read',
   shell: 'Shell',

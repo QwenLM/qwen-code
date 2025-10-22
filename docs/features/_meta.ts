@@ -1,5 +1,5 @@
 export default {
-  subagent: 'Subagent',
+  subagents: 'Subagents',
   checkpointing: 'Checkpointing',
   sandbox: 'Sandbox Support',
   'headless-mode': 'Headless Mode',

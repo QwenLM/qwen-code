@@ -54,4 +54,3 @@ Qwen Code's built-in tools can be broadly categorized as follows:
 Additionally, these tools incorporate:
 
 - **[MCP servers](./mcp-server.md)**: MCP servers act as a bridge between the model and your local environment or other services like APIs.
-- **[Sandboxing](../sandbox.md)**: Sandboxing isolates the model and its changes from your environment to reduce potential risk.

@@ -9,8 +9,8 @@ export default {
   tutorials: 'Tutorials',
   'keyboard-shortcuts': 'Keyboard Shortcuts',
   'trusted-folders': 'Trusted Folders',
-  Uninstall: 'Uninstall',
   'qwen-ignore': 'Ignoring Files',
+  Uninstall: 'Uninstall',
 };
 
 /**

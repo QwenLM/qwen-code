@@ -1,4 +1,4 @@
 export default {
-  index: 'Introduction',
+  'ide-integration': 'Introduction',
   'ide-companion-spec': 'IDE Companion Spec',
 };
