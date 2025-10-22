@@ -5,18 +5,18 @@
  */
 
 import type OpenAI from 'openai';
-import type { Config } from '../../../config/config.js';
-import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { AuthType } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
-import type { OpenAICompatibleProvider } from './types.js';
-import { BedrockClient } from '../../../utils/bedrockClient.js';
+import type { Config } from '../../../../config/config.js';
+import type { ContentGeneratorConfig } from '../../../contentGenerator.js';
+import { AuthType } from '../../../contentGenerator.js';
+import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../../constants.js';
+import type { OpenAICompatibleProvider } from '../types.js';
+import { BedrockClient } from '../../../../utils/bedrockClient.js';
 import {
   convertOpenAIToBedrock,
   convertBedrockToOpenAI,
   convertBedrockStreamToOpenAI,
-} from './bedrockConverter.js';
-import type { BedrockStreamEvent } from './bedrockTypes.js';
+} from './converter.js';
+import type { BedrockStreamEvent } from './types.js';
 
 /**
  * Bedrock provider for AWS Bedrock Converse API

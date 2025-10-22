@@ -19,7 +19,7 @@ import type {
   BedrockToolConfig,
   BedrockTool,
   BedrockSystemContent,
-} from './bedrockTypes.js';
+} from './types.js';
 
 /**
  * Convert OpenAI chat completion request to Bedrock Converse format

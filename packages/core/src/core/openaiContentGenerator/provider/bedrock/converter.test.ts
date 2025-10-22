@@ -10,11 +10,8 @@ import {
   convertOpenAIToBedrock,
   convertBedrockToOpenAI,
   convertBedrockStreamToOpenAI,
-} from './bedrockConverter.js';
-import type {
-  BedrockConverseResponse,
-  BedrockStreamEvent,
-} from './bedrockTypes.js';
+} from './converter.js';
+import type { BedrockConverseResponse, BedrockStreamEvent } from './types.js';
 
 describe('bedrockConverter', () => {
   describe('convertOpenAIToBedrock', () => {
@@ -24,7 +21,10 @@ describe('bedrockConverter', () => {
         messages: [{ role: 'user', content: 'Hello, world!' }],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.modelId).toBe('qwen.qwen3-coder-30b-a3b-v1:0');
       expect(result.messages).toHaveLength(1);
@@ -42,7 +42,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.system).toBeDefined();
       expect(result.system).toHaveLength(1);
@@ -60,7 +63,10 @@ describe('bedrockConverter', () => {
         top_p: 0.9,
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.inferenceConfig).toBeDefined();
       expect(result.inferenceConfig!.temperature).toBe(0.7);
@@ -77,7 +83,10 @@ describe('bedrockConverter', () => {
         top_p: 0,
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.inferenceConfig).toBeDefined();
       expect(result.inferenceConfig!.temperature).toBeUndefined();
@@ -92,7 +101,10 @@ describe('bedrockConverter', () => {
         stop: ['END', 'STOP'],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.inferenceConfig!.stopSequences).toEqual(['END', 'STOP']);
     });
@@ -104,7 +116,10 @@ describe('bedrockConverter', () => {
         stop: 'END',
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.inferenceConfig!.stopSequences).toEqual(['END']);
     });
@@ -116,7 +131,10 @@ describe('bedrockConverter', () => {
         stop: ['END', null as never, 'STOP'],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.inferenceConfig!.stopSequences).toEqual(['END', 'STOP']);
     });
@@ -142,7 +160,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.toolConfig).toBeDefined();
       expect(result.toolConfig!.tools).toHaveLength(1);
@@ -165,7 +186,10 @@ describe('bedrockConverter', () => {
         tool_choice: 'auto',
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.toolConfig!.toolChoice).toEqual({ auto: {} });
     });
@@ -183,7 +207,10 @@ describe('bedrockConverter', () => {
         tool_choice: 'required',
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.toolConfig!.toolChoice).toEqual({ any: {} });
     });
@@ -201,7 +228,10 @@ describe('bedrockConverter', () => {
         tool_choice: { type: 'function', function: { name: 'test_tool' } },
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.toolConfig!.toolChoice).toEqual({
         tool: { name: 'test_tool' },
@@ -219,7 +249,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.system).toHaveLength(1);
       expect(result.messages).toHaveLength(3);
@@ -250,7 +283,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.messages).toHaveLength(2);
       expect(result.messages[1].role).toBe('assistant');
@@ -289,7 +325,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.messages).toHaveLength(3);
       expect(result.messages[2].role).toBe('user');
@@ -318,7 +357,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.messages[0].content).toHaveLength(2);
       expect(result.messages[0].content[0]).toEqual({ text: 'Hello' });
@@ -335,7 +377,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.system).toHaveLength(2);
       expect(result.system![0].text).toBe('You are helpful');
@@ -348,7 +393,10 @@ describe('bedrockConverter', () => {
         messages: [],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.messages).toEqual([]);
       expect(result.system).toBeUndefined();
@@ -372,7 +420,10 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertOpenAIToBedrock(
+        openaiRequest,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.messages[0].content).toHaveLength(2);
       expect(result.messages[0].content[0]).toEqual({
@@ -399,7 +450,10 @@ describe('bedrockConverter', () => {
         },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices).toHaveLength(1);
       expect(result.choices[0].message.role).toBe('assistant');
@@ -436,7 +490,10 @@ describe('bedrockConverter', () => {
         },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices[0].message.tool_calls).toBeDefined();
       expect(result.choices[0].message.tool_calls).toHaveLength(1);
@@ -459,7 +516,10 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 5, outputTokens: 5, totalTokens: 10 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices[0].message.content).toBe('Hello world!');
     });
@@ -485,7 +545,10 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 15, totalTokens: 25 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices[0].message.content).toBe('Let me check that.');
       expect(result.choices[0].message.tool_calls).toHaveLength(1);
@@ -500,7 +563,10 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 1000, totalTokens: 1010 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices[0].finish_reason).toBe('length');
     });
@@ -514,7 +580,10 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices[0].finish_reason).toBe('content_filter');
     });
@@ -528,7 +597,10 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
+      const result = convertBedrockToOpenAI(
+        bedrockResponse,
+        'qwen.qwen3-coder-30b-a3b-v1:0',
+      );
 
       expect(result.choices[0].finish_reason).toBe('stop');
     });

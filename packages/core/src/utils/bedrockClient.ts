@@ -14,8 +14,8 @@ import type {
   BedrockConverseRequest,
   BedrockConverseResponse,
   BedrockStreamEvent,
-} from '../core/openaiContentGenerator/provider/bedrockTypes.js';
-import { getBedrockModelId } from '../core/openaiContentGenerator/provider/bedrockTypes.js';
+} from '../core/openaiContentGenerator/provider/bedrock/types.js';
+import { getBedrockModelId } from '../core/openaiContentGenerator/provider/bedrock/types.js';
 
 /**
  * Configuration for Bedrock client
