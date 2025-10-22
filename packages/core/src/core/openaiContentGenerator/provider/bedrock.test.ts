@@ -28,7 +28,7 @@ describe('BedrockOpenAICompatibleProvider', () => {
     } as unknown as Config;
 
     contentGeneratorConfig = {
-      model: 'qwen-coder',
+      model: 'qwen.qwen3-coder-30b-a3b-v1:0',
       authType: AuthType.USE_BEDROCK,
       timeout: 60000,
       maxRetries: 3,
@@ -240,7 +240,7 @@ describe('BedrockOpenAICompatibleProvider', () => {
         mockConfig,
       );
       const request = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: 'Hello' }],
       };
 
@@ -254,7 +254,7 @@ describe('BedrockOpenAICompatibleProvider', () => {
         mockConfig,
       );
       const complexRequest = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           { role: 'system' as const, content: 'You are helpful' },
           { role: 'user' as const, content: 'Hello' },
@@ -279,7 +279,7 @@ describe('BedrockOpenAICompatibleProvider', () => {
         mockConfig,
       );
       const minimalRequest = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: 'Hi' }],
       };
 
@@ -293,7 +293,7 @@ describe('BedrockOpenAICompatibleProvider', () => {
         mockConfig,
       );
       const streamRequest = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: 'Hello' }],
         stream: true,
       };
@@ -309,7 +309,7 @@ describe('BedrockOpenAICompatibleProvider', () => {
         mockConfig,
       );
       const originalRequest = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: 'Hello' }],
         temperature: 0.5,
       };

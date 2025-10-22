@@ -143,7 +143,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           {
             role: 'user' as const,
@@ -195,7 +195,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Test' }] }],
         inferenceConfig: {},
       };
@@ -235,7 +235,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Test' }] }],
         inferenceConfig: {},
       };
@@ -269,7 +269,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Help me' }] }],
         system: [{ text: 'You are helpful' }],
         inferenceConfig: {},
@@ -304,7 +304,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Test' }] }],
         inferenceConfig: {
           maxTokens: 100,
@@ -350,7 +350,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Weather?' }] }],
         inferenceConfig: {},
         toolConfig: {
@@ -410,7 +410,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Hi' }] }],
         inferenceConfig: {},
       };
@@ -445,7 +445,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Hi' }] }],
         inferenceConfig: {},
       };
@@ -485,7 +485,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Test' }] }],
         inferenceConfig: {},
       };
@@ -541,7 +541,7 @@ describe('BedrockClient', () => {
 
       const client = new BedrockClient();
       const request = {
-        modelId: 'qwen-coder',
+        modelId: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user' as const, content: [{ text: 'Search' }] }],
         inferenceConfig: {},
       };

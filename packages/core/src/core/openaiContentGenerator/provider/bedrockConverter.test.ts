@@ -20,13 +20,13 @@ describe('bedrockConverter', () => {
   describe('convertOpenAIToBedrock', () => {
     it('should convert simple user message', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello, world!' }],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
-      expect(result.modelId).toBe('qwen-coder');
+      expect(result.modelId).toBe('qwen.qwen3-coder-30b-a3b-v1:0');
       expect(result.messages).toHaveLength(1);
       expect(result.messages[0].role).toBe('user');
       expect(result.messages[0].content).toHaveLength(1);
@@ -35,14 +35,14 @@ describe('bedrockConverter', () => {
 
     it('should extract system messages', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           { role: 'system', content: 'You are a helpful assistant' },
           { role: 'user', content: 'Hello!' },
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.system).toBeDefined();
       expect(result.system).toHaveLength(1);
@@ -53,14 +53,14 @@ describe('bedrockConverter', () => {
 
     it('should convert inference parameters', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         temperature: 0.7,
         max_tokens: 1000,
         top_p: 0.9,
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.inferenceConfig).toBeDefined();
       expect(result.inferenceConfig!.temperature).toBe(0.7);
@@ -70,14 +70,14 @@ describe('bedrockConverter', () => {
 
     it('should handle null and undefined inference parameters', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         temperature: null as never,
         max_tokens: undefined,
         top_p: 0,
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.inferenceConfig).toBeDefined();
       expect(result.inferenceConfig!.temperature).toBeUndefined();
@@ -87,43 +87,43 @@ describe('bedrockConverter', () => {
 
     it('should convert stop sequences', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         stop: ['END', 'STOP'],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.inferenceConfig!.stopSequences).toEqual(['END', 'STOP']);
     });
 
     it('should convert single stop sequence string', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         stop: 'END',
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.inferenceConfig!.stopSequences).toEqual(['END']);
     });
 
     it('should filter null values from stop sequences', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         stop: ['END', null as never, 'STOP'],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.inferenceConfig!.stopSequences).toEqual(['END', 'STOP']);
     });
 
     it('should convert tool definitions', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         tools: [
           {
@@ -142,7 +142,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.toolConfig).toBeDefined();
       expect(result.toolConfig!.tools).toHaveLength(1);
@@ -154,7 +154,7 @@ describe('bedrockConverter', () => {
 
     it('should convert tool_choice auto', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         tools: [
           {
@@ -165,14 +165,14 @@ describe('bedrockConverter', () => {
         tool_choice: 'auto',
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.toolConfig!.toolChoice).toEqual({ auto: {} });
     });
 
     it('should convert tool_choice required', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         tools: [
           {
@@ -183,14 +183,14 @@ describe('bedrockConverter', () => {
         tool_choice: 'required',
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.toolConfig!.toolChoice).toEqual({ any: {} });
     });
 
     it('should convert tool_choice specific function', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [{ role: 'user', content: 'Hello!' }],
         tools: [
           {
@@ -201,7 +201,7 @@ describe('bedrockConverter', () => {
         tool_choice: { type: 'function', function: { name: 'test_tool' } },
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.toolConfig!.toolChoice).toEqual({
         tool: { name: 'test_tool' },
@@ -210,7 +210,7 @@ describe('bedrockConverter', () => {
 
     it('should handle multi-turn conversation', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           { role: 'system', content: 'You are helpful' },
           { role: 'user', content: 'Hi' },
@@ -219,7 +219,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.system).toHaveLength(1);
       expect(result.messages).toHaveLength(3);
@@ -230,7 +230,7 @@ describe('bedrockConverter', () => {
 
     it('should handle assistant message with tool calls', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           { role: 'user', content: 'What is the weather?' },
           {
@@ -250,7 +250,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.messages).toHaveLength(2);
       expect(result.messages[1].role).toBe('assistant');
@@ -267,7 +267,7 @@ describe('bedrockConverter', () => {
 
     it('should handle tool result messages', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           { role: 'user', content: 'What is the weather?' },
           {
@@ -289,7 +289,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.messages).toHaveLength(3);
       expect(result.messages[2].role).toBe('user');
@@ -306,7 +306,7 @@ describe('bedrockConverter', () => {
 
     it('should handle array content in user messages', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           {
             role: 'user',
@@ -318,7 +318,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.messages[0].content).toHaveLength(2);
       expect(result.messages[0].content[0]).toEqual({ text: 'Hello' });
@@ -327,7 +327,7 @@ describe('bedrockConverter', () => {
 
     it('should handle multiple system messages', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           { role: 'system', content: 'You are helpful' },
           { role: 'system', content: 'Be concise' },
@@ -335,7 +335,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.system).toHaveLength(2);
       expect(result.system![0].text).toBe('You are helpful');
@@ -344,11 +344,11 @@ describe('bedrockConverter', () => {
 
     it('should handle empty messages array', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.messages).toEqual([]);
       expect(result.system).toBeUndefined();
@@ -356,7 +356,7 @@ describe('bedrockConverter', () => {
 
     it('should handle assistant message with content and tool calls', () => {
       const openaiRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-coder',
+        model: 'qwen.qwen3-coder-30b-a3b-v1:0',
         messages: [
           {
             role: 'assistant',
@@ -372,7 +372,7 @@ describe('bedrockConverter', () => {
         ],
       };
 
-      const result = convertOpenAIToBedrock(openaiRequest, 'qwen-coder');
+      const result = convertOpenAIToBedrock(openaiRequest, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.messages[0].content).toHaveLength(2);
       expect(result.messages[0].content[0]).toEqual({
@@ -399,7 +399,7 @@ describe('bedrockConverter', () => {
         },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices).toHaveLength(1);
       expect(result.choices[0].message.role).toBe('assistant');
@@ -436,7 +436,7 @@ describe('bedrockConverter', () => {
         },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices[0].message.tool_calls).toBeDefined();
       expect(result.choices[0].message.tool_calls).toHaveLength(1);
@@ -459,7 +459,7 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 5, outputTokens: 5, totalTokens: 10 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices[0].message.content).toBe('Hello world!');
     });
@@ -485,7 +485,7 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 15, totalTokens: 25 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices[0].message.content).toBe('Let me check that.');
       expect(result.choices[0].message.tool_calls).toHaveLength(1);
@@ -500,7 +500,7 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 1000, totalTokens: 1010 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices[0].finish_reason).toBe('length');
     });
@@ -514,7 +514,7 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices[0].finish_reason).toBe('content_filter');
     });
@@ -528,7 +528,7 @@ describe('bedrockConverter', () => {
         usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       };
 
-      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen-coder');
+      const result = convertBedrockToOpenAI(bedrockResponse, 'qwen.qwen3-coder-30b-a3b-v1:0');
 
       expect(result.choices[0].finish_reason).toBe('stop');
     });
@@ -561,7 +561,7 @@ describe('bedrockConverter', () => {
       ];
 
       const chunks = Array.from(
-        convertBedrockStreamToOpenAI(events, 'qwen-coder'),
+        convertBedrockStreamToOpenAI(events, 'qwen.qwen3-coder-30b-a3b-v1:0'),
       );
 
       expect(chunks.length).toBeGreaterThan(0);
@@ -613,7 +613,7 @@ describe('bedrockConverter', () => {
       ];
 
       const chunks = Array.from(
-        convertBedrockStreamToOpenAI(events, 'qwen-coder'),
+        convertBedrockStreamToOpenAI(events, 'qwen.qwen3-coder-30b-a3b-v1:0'),
       );
 
       const toolChunks = chunks.filter(
@@ -662,7 +662,7 @@ describe('bedrockConverter', () => {
       ];
 
       const chunks = Array.from(
-        convertBedrockStreamToOpenAI(events, 'qwen-coder'),
+        convertBedrockStreamToOpenAI(events, 'qwen.qwen3-coder-30b-a3b-v1:0'),
       );
 
       // Metadata events are not included in OpenAI chunks
@@ -674,7 +674,7 @@ describe('bedrockConverter', () => {
       const events: BedrockStreamEvent[] = [];
 
       const chunks = Array.from(
-        convertBedrockStreamToOpenAI(events, 'qwen-coder'),
+        convertBedrockStreamToOpenAI(events, 'qwen.qwen3-coder-30b-a3b-v1:0'),
       );
 
       expect(chunks).toHaveLength(0);
