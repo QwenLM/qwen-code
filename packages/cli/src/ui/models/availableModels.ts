@@ -22,6 +22,17 @@ export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
     label: MAINLINE_CODER,
     description: 'Optimized for code generation and understanding',
   },
+  // Additional Qwen commercial models exposed when using Qwen OAuth
+  {
+    id: 'qwen3-coder',
+    label: 'qwen3-coder',
+    description: 'Qwen 3 coding model (standard)',
+  },
+  {
+    id: 'qwen3-coder-plus',
+    label: 'qwen3-coder-plus',
+    description: 'Qwen 3 coding model (plus: larger context and higher throughput)',
+  },
   {
     id: MAINLINE_VLM,
     label: MAINLINE_VLM,
