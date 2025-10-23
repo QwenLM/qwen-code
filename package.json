@@ -63,10 +63,10 @@
     }
   },
   "bin": {
-    "qwen": "bundle/gemini.js"
+    "qwen": "dist/cli.js"
   },
   "files": [
-    "bundle/",
+    "dist/",
     "README.md",
     "LICENSE"
   ],

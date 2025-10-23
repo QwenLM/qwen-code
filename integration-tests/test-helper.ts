@@ -148,7 +148,7 @@ export class TestRig {
   _interactiveOutput = '';
 
   constructor() {
-    this.bundlePath = join(__dirname, '..', 'bundle/gemini.js');
+    this.bundlePath = join(__dirname, '..', 'dist/cli.js');
     this.testDir = null;
   }
 
