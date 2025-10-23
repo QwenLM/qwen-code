@@ -38,7 +38,8 @@ vi.mock('fs', async (importOriginal) => {
 import { ShellTool } from '../tools/shell.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { GrepTool } from '../tools/grep.js';
-import { RipGrepTool, canUseRipgrep } from '../tools/ripGrep.js';
+import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { RipGrepTool } from '../tools/ripGrep.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -75,8 +76,10 @@ vi.mock('../tools/ls');
 vi.mock('../tools/read-file');
 vi.mock('../tools/grep.js');
 vi.mock('../tools/ripGrep.js', () => ({
-  canUseRipgrep: vi.fn(),
   RipGrepTool: class MockRipGrepTool {},
+}));
+vi.mock('../utils/ripgrepUtils.js', () => ({
+  canUseRipgrep: vi.fn(),
 }));
 vi.mock('../tools/glob');
 vi.mock('../tools/edit');

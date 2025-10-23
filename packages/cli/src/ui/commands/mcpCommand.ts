@@ -20,6 +20,7 @@ import {
   MCPServerStatus,
   getErrorMessage,
   MCPOAuthTokenStorage,
+  MCPOAuthProvider,
 } from '@qwen-code/qwen-code-core';
 import { appEvents, AppEvent } from '../../utils/events.js';
 import { MessageType, type HistoryItemMcpStatus } from '../types.js';
@@ -92,9 +93,6 @@ const authCommand: SlashCommand = {
         },
         Date.now(),
       );
-
-      // Import dynamically to avoid circular dependencies
-      const { MCPOAuthProvider } = await import('@qwen-code/qwen-code-core');
 
       let oauthConfig = server.oauth;
       if (!oauthConfig) {

@@ -8,43 +8,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
-import { downloadRipGrep } from '@joshua.litt/get-ripgrep';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { fileExists } from '../utils/fileUtils.js';
-import { Storage } from '../config/storage.js';
+import { ensureRipgrepPath } from '../utils/ripgrepUtils.js';
 
 const DEFAULT_TOTAL_MAX_MATCHES = 20000;
-
-function getRgPath(): string {
-  return path.join(Storage.getGlobalBinDir(), 'rg');
-}
-
-/**
- * Checks if `rg` exists, if not then attempt to download it.
- */
-export async function canUseRipgrep(): Promise<boolean> {
-  if (await fileExists(getRgPath())) {
-    return true;
-  }
-
-  await downloadRipGrep(Storage.getGlobalBinDir());
-  return await fileExists(getRgPath());
-}
-
-/**
- * Ensures `rg` is downloaded, or throws.
- */
-export async function ensureRgPath(): Promise<string> {
-  if (await canUseRipgrep()) {
-    return getRgPath();
-  }
-  throw new Error('Cannot use ripgrep.');
-}
 
 /**
  * Parameters for the GrepTool
@@ -320,7 +292,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push(absolutePath);
 
     try {
-      const rgPath = await ensureRgPath();
+      const rgPath = await ensureRipgrepPath();
       const output = await new Promise<string>((resolve, reject) => {
         const child = spawn(rgPath, rgArgs, {
           windowsHide: true,
@@ -342,11 +314,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         child.on('error', (err) => {
           options.signal.removeEventListener('abort', cleanup);
-          reject(
-            new Error(
-              `Failed to start ripgrep: ${err.message}. Please ensure @lvce-editor/ripgrep is properly installed.`,
-            ),
-          );
+          reject(new Error(`Failed to start ripgrep: ${err.message}.`));
         });
 
         child.on('close', (code) => {

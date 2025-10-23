@@ -30,16 +30,24 @@ const external = [
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
+  'tiktoken',
 ];
 
 esbuild
   .build({
     entryPoints: ['packages/cli/index.ts'],
     bundle: true,
-    outfile: 'bundle/gemini.js',
+    outfile: 'dist/cli.js',
     platform: 'node',
     format: 'esm',
+    target: 'node20',
     external,
+    packages: 'bundle',
+    inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+    banner: {
+      js: `// Force strict mode and setup for ESM
+"use strict";`,
+    },
     alias: {
       'is-in-ci': path.resolve(
         __dirname,
@@ -48,17 +56,20 @@ esbuild
     },
     define: {
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),
-    },
-    banner: {
-      js: `import { createRequire } from 'module'; const require = createRequire(import.meta.url); globalThis.__filename = require('url').fileURLToPath(import.meta.url); globalThis.__dirname = require('path').dirname(globalThis.__filename);`,
+      // Make global available for compatibility
+      global: 'globalThis',
     },
     loader: { '.node': 'file' },
     metafile: true,
     write: true,
+    keepNames: true,
   })
   .then(({ metafile }) => {
     if (process.env.DEV === 'true') {
-      writeFileSync('./bundle/esbuild.json', JSON.stringify(metafile, null, 2));
+      writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));
     }
   })
-  .catch(() => process.exit(1));
+  .catch((error) => {
+    console.error('esbuild build failed:', error);
+    process.exitCode = 1;
+  });
