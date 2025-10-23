@@ -128,16 +128,6 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
 
-      - name: 'Upload Integration Test Results'
-        if: |-
-          ${{ always() && github.event.inputs.force_skip_tests != 'true' }}
-        uses: 'actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808' # ratchet:actions/upload-artifact@v4
-        with:
-          name: 'integration-test-results-${{ github.run_id }}'
-          path: '.integration-tests/'
-          retention-days: 7
-          if-no-files-found: 'warn'
-
       - name: 'Configure Git User'
         run: |
           git config user.name "github-actions[bot]"
