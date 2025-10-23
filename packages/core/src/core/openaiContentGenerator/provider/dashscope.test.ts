@@ -587,7 +587,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
-    it('should add empty text item with cache control if last item is not text for streaming requests', () => {
+    it('should add cache control directly to image content if last item is not text for streaming requests', () => {
       const requestWithNonTextLast: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen-max',
         stream: true, // This will trigger cache control on last message
@@ -612,12 +612,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const content = result.messages[0]
         .content as OpenAI.Chat.ChatCompletionContentPart[];
-      expect(content).toHaveLength(3);
+      expect(content).toHaveLength(2);
 
-      // Should add empty text item with cache control
-      expect(content[2]).toEqual({
-        type: 'text',
-        text: '',
+      // Should add cache control directly to the image item
+      expect(content[1]).toEqual({
+        type: 'image_url',
+        image_url: { url: 'https://example.com/image.jpg' },
         cache_control: { type: 'ephemeral' },
       });
     });
@@ -691,7 +691,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(content).toEqual([
         {
           type: 'text',
-          text: '',
+          text: ' ',
           cache_control: { type: 'ephemeral' },
         },
       ]);
