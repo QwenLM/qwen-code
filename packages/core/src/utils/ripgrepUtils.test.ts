@@ -124,21 +124,25 @@ describe('ripgrepUtils', () => {
       const combinations: Array<{
         platform: string;
         arch: string;
-        expected: string;
       }> = [
-        { platform: 'darwin', arch: 'x64', expected: 'x64-darwin/rg' },
-        { platform: 'darwin', arch: 'arm64', expected: 'arm64-darwin/rg' },
-        { platform: 'linux', arch: 'x64', expected: 'x64-linux/rg' },
-        { platform: 'linux', arch: 'arm64', expected: 'arm64-linux/rg' },
-        { platform: 'win32', arch: 'x64', expected: 'x64-win32/rg.exe' },
+        { platform: 'darwin', arch: 'x64' },
+        { platform: 'darwin', arch: 'arm64' },
+        { platform: 'linux', arch: 'x64' },
+        { platform: 'linux', arch: 'arm64' },
+        { platform: 'win32', arch: 'x64' },
       ];
 
-      combinations.forEach(({ platform, arch, expected }) => {
+      combinations.forEach(({ platform, arch }) => {
         Object.defineProperty(process, 'platform', { value: platform });
         Object.defineProperty(process, 'arch', { value: arch });
 
         const rgPath = getRipgrepPath();
-        expect(rgPath).toContain(expected);
+        const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
+        const expectedPathSegment = path.join(
+          `${arch}-${platform}`,
+          binaryName,
+        );
+        expect(rgPath).toContain(expectedPathSegment);
       });
 
       // Restore original values
