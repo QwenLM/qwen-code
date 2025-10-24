@@ -101,15 +101,27 @@ jobs:
       - name: 'Get the version'
         id: 'version'
         run: |
-          VERSION_JSON=$(node scripts/get-release-version.js)
+          VERSION_ARGS=()
+          if [[ "${IS_NIGHTLY}" == "true" ]]; then
+            VERSION_ARGS+=(--type=nightly)
+          elif [[ "${IS_PREVIEW}" == "true" ]]; then
+            VERSION_ARGS+=(--type=preview)
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              VERSION_ARGS+=("--preview_version_override=${MANUAL_VERSION}")
+            fi
+          else
+            VERSION_ARGS+=(--type=stable)
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              VERSION_ARGS+=("--stable_version_override=${MANUAL_VERSION}")
+            fi
+          fi
+
+          VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
           echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
 
-          # Get the previous tag for release notes generation
-          CURRENT_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)
-          PREVIOUS_TAG=$(node scripts/get-previous-tag.js "$CURRENT_TAG" || echo "")
-          echo "PREVIOUS_TAG=${PREVIOUS_TAG}" >> "$GITHUB_OUTPUT"
+          echo "PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
@@ -189,13 +201,13 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
-          PREVIOUS_TAG: '${{ steps.version.outputs.PREVIOUS_TAG }}'
+          PREVIOUS_RELEASE_TAG: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
         run: |-
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
             --target "$RELEASE_BRANCH" \
             --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "$PREVIOUS_TAG" \
+            --notes-start-tag "$PREVIOUS_RELEASE_TAG" \
             --generate-notes
 
       - name: 'Create Issue on Failure'

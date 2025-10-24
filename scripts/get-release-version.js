@@ -26,36 +26,8 @@ function getArgs() {
   return args;
 }
 
-function getLatestTag(pattern) {
-  const command = `git tag -l '${pattern}'`;
-  try {
-    const tags = execSync(command)
-      .toString()
-      .trim()
-      .split('\n')
-      .filter(Boolean);
-    if (tags.length === 0) return '';
-
-    // Convert tags to versions (remove 'v' prefix) and sort by semver
-    const versions = tags
-      .map((tag) => tag.replace(/^v/, ''))
-      .filter((version) => semver.valid(version))
-      .sort((a, b) => semver.rcompare(a, b)); // rcompare for descending order
-
-    if (versions.length === 0) return '';
-
-    // Return the latest version with 'v' prefix restored
-    return `v${versions[0]}`;
-  } catch (error) {
-    console.error(
-      `Failed to get latest git tag for pattern "${pattern}": ${error.message}`,
-    );
-    return '';
-  }
-}
-
 function getVersionFromNPM(distTag) {
-  const command = `npm view @google/gemini-cli version --tag=${distTag}`;
+  const command = `npm view @qwen-code/qwen-code version --tag=${distTag}`;
   try {
     return execSync(command).toString().trim();
   } catch (error) {
@@ -67,7 +39,7 @@ function getVersionFromNPM(distTag) {
 }
 
 function getAllVersionsFromNPM() {
-  const command = `npm view @google/gemini-cli versions --json`;
+  const command = `npm view @qwen-code/qwen-code versions --json`;
   try {
     const versionsJson = execSync(command).toString().trim();
     return JSON.parse(versionsJson);
@@ -78,7 +50,7 @@ function getAllVersionsFromNPM() {
 }
 
 function isVersionDeprecated(version) {
-  const command = `npm view @google/gemini-cli@${version} deprecated`;
+  const command = `npm view @qwen-code/qwen-code@${version} deprecated`;
   try {
     const output = execSync(command).toString().trim();
     return output.length > 0;
@@ -159,7 +131,7 @@ function detectRollbackAndGetBaseline(npmDistTag) {
 function doesVersionExist(version) {
   // Check NPM
   try {
-    const command = `npm view @google/gemini-cli@${version} version 2>/dev/null`;
+    const command = `npm view @qwen-code/qwen-code@${version} version 2>/dev/null`;
     const output = execSync(command).toString().trim();
     if (output === version) {
       console.error(`Version ${version} already exists on NPM.`);
@@ -229,11 +201,20 @@ function getAndVerifyTags(npmDistTag, _gitTagPattern) {
   };
 }
 
+function getLatestStableReleaseTag() {
+  try {
+    const { latestTag } = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
+    return latestTag;
+  } catch (error) {
+    console.error(
+      `Failed to determine latest stable release tag: ${error.message}`,
+    );
+    return '';
+  }
+}
+
 function promoteNightlyVersion() {
-  const { latestVersion, latestTag } = getAndVerifyTags(
-    'nightly',
-    'v*-nightly*',
-  );
+  const { latestVersion } = getAndVerifyTags('nightly', 'v*-nightly*');
   const baseVersion = latestVersion.split('-')[0];
   const versionParts = baseVersion.split('.');
   const major = versionParts[0];
@@ -244,7 +225,6 @@ function promoteNightlyVersion() {
   return {
     releaseVersion: `${major}.${nextMinor}.0-nightly.${date}.${gitShortHash}`,
     npmTag: 'nightly',
-    previousReleaseTag: latestTag,
   };
 }
 
@@ -254,12 +234,9 @@ function getNightlyVersion() {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const gitShortHash = execSync('git rev-parse --short HEAD').toString().trim();
   const releaseVersion = `${baseVersion}-nightly.${date}.${gitShortHash}`;
-  const previousReleaseTag = getLatestTag('v*-nightly*');
-
   return {
     releaseVersion,
     npmTag: 'nightly',
-    previousReleaseTag,
   };
 }
 
@@ -290,15 +267,9 @@ function getStableVersion(args) {
     releaseVersion = latestPreviewVersion.replace(/-preview.*/, '');
   }
 
-  const { latestTag: previousStableTag } = getAndVerifyTags(
-    'latest',
-    'v[0-9].[0-9].[0-9]',
-  );
-
   return {
     releaseVersion,
     npmTag: 'latest',
-    previousReleaseTag: previousStableTag,
   };
 }
 
@@ -321,15 +292,9 @@ function getPreviewVersion(args) {
       latestNightlyVersion.replace(/-nightly.*/, '') + '-preview.0';
   }
 
-  const { latestTag: previousPreviewTag } = getAndVerifyTags(
-    'preview',
-    'v*-preview*',
-  );
-
   return {
     releaseVersion,
     npmTag: 'preview',
-    previousReleaseTag: previousPreviewTag,
   };
 }
 
@@ -341,7 +306,7 @@ function getPatchVersion(patchFrom) {
   }
   const distTag = patchFrom === 'stable' ? 'latest' : 'preview';
   const pattern = distTag === 'latest' ? 'v[0-9].[0-9].[0-9]' : 'v*-preview*';
-  const { latestVersion, latestTag } = getAndVerifyTags(distTag, pattern);
+  const { latestVersion } = getAndVerifyTags(distTag, pattern);
 
   if (patchFrom === 'stable') {
     // For stable versions, increment the patch number: 0.5.4 -> 0.5.5
@@ -353,7 +318,6 @@ function getPatchVersion(patchFrom) {
     return {
       releaseVersion,
       npmTag: distTag,
-      previousReleaseTag: latestTag,
     };
   } else {
     // For preview versions, increment the preview number: 0.6.0-preview.2 -> 0.6.0-preview.3
@@ -373,7 +337,6 @@ function getPatchVersion(patchFrom) {
     return {
       releaseVersion,
       npmTag: distTag,
-      previousReleaseTag: latestTag,
     };
   }
 }
@@ -437,6 +400,8 @@ export function getVersion(options = {}) {
     releaseTag: `v${versionData.releaseVersion}`,
     ...versionData,
   };
+
+  result.previousReleaseTag = getLatestStableReleaseTag();
 
   return result;
 }
