@@ -20,12 +20,14 @@ export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
   {
     id: MAINLINE_CODER,
     label: MAINLINE_CODER,
-    description: 'Optimized for code generation and understanding',
+    description:
+      'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
   },
   {
     id: MAINLINE_VLM,
     label: MAINLINE_VLM,
-    description: 'Vision model with multimodal capabilities',
+    description:
+      'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
     isVision: true,
   },
 ];

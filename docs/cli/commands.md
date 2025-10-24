@@ -66,17 +66,6 @@ Slash commands provide meta-level control over the CLI itself.
       - **Description:** Display all directories added by `/directory add` and `--include-directories`.
       - **Usage:** `/directory show`
 
-- **`/directory`** (or **`/dir`**)
-  - **Description:** Manage workspace directories for multi-directory support.
-  - **Sub-commands:**
-    - **`add`**:
-      - **Description:** Add a directory to the workspace. The path can be absolute or relative to the current working directory. Moreover, the reference from home directory is supported as well.
-      - **Usage:** `/directory add <path1>,<path2>`
-      - **Note:** Disabled in restrictive sandbox profiles. If you're using that, use `--include-directories` when starting the session instead.
-    - **`show`**:
-      - **Description:** Display all directories added by `/directory add` and `--include-directories`.
-      - **Usage:** `/directory show`
-
 - **`/editor`**
   - **Description:** Open a dialog for selecting supported editors.
 
@@ -107,6 +96,20 @@ Slash commands provide meta-level control over the CLI itself.
     - **`refresh`**:
       - **Description:** Reload the hierarchical instructional memory from all context files (default: `QWEN.md`) found in the configured locations (global, project/ancestors, and sub-directories). This updates the model with the latest context content.
     - **Note:** For more details on how context files contribute to hierarchical memory, see the [CLI Configuration documentation](./configuration.md#context-files-hierarchical-instructional-context).
+
+- **`/model`**
+  - **Description:** Switch the model for the current session. Opens a dialog to select from available models based on your authentication type.
+  - **Usage:** `/model`
+  - **Features:**
+    - Shows a dialog with all available models for your current authentication type
+    - Displays model descriptions and capabilities (e.g., vision support)
+    - Changes the model for the current session only
+    - Supports both Qwen models (via OAuth) and OpenAI models (via API key)
+  - **Available Models:**
+    - **Qwen Coder:** The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)
+    - **Qwen Vision:** The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23) - supports image analysis
+    - **OpenAI Models:** Available when using OpenAI authentication (configured via `OPENAI_MODEL` environment variable)
+  - **Note:** Model selection is session-specific and does not persist across different Qwen Code sessions. To set a default model, use the `model.name` setting in your configuration.
 
 - **`/restore`**
   - **Description:** Restores the project files to the state they were in just before a tool was executed. This is particularly useful for undoing file edits made by a tool. If run without a tool call ID, it will list available checkpoints to restore from.
