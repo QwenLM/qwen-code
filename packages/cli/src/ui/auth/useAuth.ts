@@ -30,17 +30,17 @@ export function validateAuthMethodWithSettings(
 }
 
 export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
-  // If no auth type is selected, start in Updating state (shows auth dialog)
+  const unAuthenticated =
+    settings.merged.security?.auth?.selectedType === undefined;
+
   const [authState, setAuthState] = useState<AuthState>(
-    settings.merged.security?.auth?.selectedType === undefined
-      ? AuthState.Updating
-      : AuthState.Unauthenticated,
+    unAuthenticated ? AuthState.Updating : AuthState.Unauthenticated,
   );
 
   const [authError, setAuthError] = useState<string | null>(null);
 
   const [isAuthenticating, setIsAuthenticating] = useState(false);
-  const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(false);
+  const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(unAuthenticated);
 
   const onAuthError = useCallback(
     (error: string | null) => {

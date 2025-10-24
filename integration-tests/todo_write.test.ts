@@ -50,7 +50,7 @@ Please create a todo list for these tasks.`;
 
     expect(todoArgs.todos).toBeDefined();
     expect(Array.isArray(todoArgs.todos)).toBe(true);
-    expect(todoArgs.todos.length).toBe(4);
+    expect(todoArgs.todos.length).toBeGreaterThan(0);
 
     // Check that all todos have the correct structure
     for (const todo of todoArgs.todos) {

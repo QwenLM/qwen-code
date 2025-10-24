@@ -19,7 +19,7 @@ describe('Interactive file system', () => {
   });
 
   it.skipIf(process.platform === 'win32')(
-    'should perform a read-then-write sequence',
+    'should perform a read-then-write sequence in interactive mode',
     async () => {
       const fileName = 'version.txt';
       await rig.setup('interactive-read-then-write');
