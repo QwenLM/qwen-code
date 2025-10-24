@@ -57,7 +57,7 @@ describe('getVersion', () => {
     // For doesVersionExist checks - default to not found
     if (
       command.includes('npm view') &&
-      command.includes('@google/gemini-cli@')
+      command.includes('@qwen-code/qwen-code@')
     ) {
       throw new Error('NPM version not found');
     }
@@ -83,7 +83,7 @@ describe('getVersion', () => {
       const result = getVersion({ type: 'preview' });
       expect(result.releaseVersion).toBe('0.8.0-preview.0');
       expect(result.npmTag).toBe('preview');
-      expect(result.previousReleaseTag).toBe('v0.7.0-preview.1');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
     it('should calculate the next nightly version from package.json', () => {
@@ -92,7 +92,7 @@ describe('getVersion', () => {
       // Note: The base version now comes from package.json, not the previous nightly tag.
       expect(result.releaseVersion).toBe('0.8.0-nightly.20250917.d3bf8a3d');
       expect(result.npmTag).toBe('nightly');
-      expect(result.previousReleaseTag).toBe('v0.8.0-nightly.20250916.abcdef');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
     it('should calculate the next patch version for a stable release', () => {
@@ -108,7 +108,7 @@ describe('getVersion', () => {
       const result = getVersion({ type: 'patch', 'patch-from': 'preview' });
       expect(result.releaseVersion).toBe('0.7.0-preview.2');
       expect(result.npmTag).toBe('preview');
-      expect(result.previousReleaseTag).toBe('v0.7.0-preview.1');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
     });
   });
 
@@ -124,7 +124,7 @@ describe('getVersion', () => {
         // Mock the deprecation check
         if (
           command.includes(
-            'npm view @google/gemini-cli@0.9.0-nightly.20250917.deprecated deprecated',
+            'npm view @qwen-code/qwen-code@0.9.0-nightly.20250917.deprecated deprecated',
           )
         )
           return 'This version is deprecated';
@@ -162,14 +162,14 @@ describe('getVersion', () => {
         // The calculated preview 0.8.0-preview.0 already exists on NPM
         if (
           command.includes(
-            'npm view @google/gemini-cli@0.8.0-preview.0 version',
+            'npm view @qwen-code/qwen-code@0.8.0-preview.0 version',
           )
         )
           return '0.8.0-preview.0';
         // The next one is available
         if (
           command.includes(
-            'npm view @google/gemini-cli@0.8.0-preview.1 version',
+            'npm view @qwen-code/qwen-code@0.8.0-preview.1 version',
           )
         )
           throw new Error('Not found');
