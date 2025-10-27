@@ -309,7 +309,7 @@ Preview of changes to be made to GLOBAL memory:
     if (!fact || typeof fact !== 'string' || fact.trim() === '') {
       const errorMessage = 'Parameter "fact" must be a non-empty string.';
       return {
-        llmContent: JSON.stringify({ success: false, error: errorMessage }),
+        llmContent: `Error: ${errorMessage}`,
         returnDisplay: `Error: ${errorMessage}`,
       };
     }
@@ -324,10 +324,7 @@ Global: ${globalPath} (shared across all projects)
 Project: ${projectPath} (current project only)`;
 
       return {
-        llmContent: JSON.stringify({
-          success: false,
-          error: 'Please specify where to save this memory',
-        }),
+        llmContent: errorMessage,
         returnDisplay: errorMessage,
       };
     }
@@ -344,10 +341,7 @@ Project: ${projectPath} (current project only)`;
         await fs.writeFile(memoryFilePath, modified_content, 'utf-8');
         const successMessage = `Okay, I've updated the ${scope} memory file with your modifications.`;
         return {
-          llmContent: JSON.stringify({
-            success: true,
-            message: successMessage,
-          }),
+          llmContent: successMessage,
           returnDisplay: successMessage,
         };
       } else {
@@ -359,10 +353,7 @@ Project: ${projectPath} (current project only)`;
         });
         const successMessage = `Okay, I've remembered that in ${scope} memory: "${fact}"`;
         return {
-          llmContent: JSON.stringify({
-            success: true,
-            message: successMessage,
-          }),
+          llmContent: successMessage,
           returnDisplay: successMessage,
         };
       }
@@ -372,11 +363,9 @@ Project: ${projectPath} (current project only)`;
       console.error(
         `[MemoryTool] Error executing save_memory for fact "${fact}" in ${scope}: ${errorMessage}`,
       );
+
       return {
-        llmContent: JSON.stringify({
-          success: false,
-          error: `Failed to save memory. Detail: ${errorMessage}`,
-        }),
+        llmContent: `Error saving memory: ${errorMessage}`,
         returnDisplay: `Error saving memory: ${errorMessage}`,
         error: {
           message: errorMessage,

@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OpenAIContentConverter } from './converter.js';
 import type { StreamingToolCallParser } from './streamingToolCallParser.js';
+import type { GenerateContentParameters, Content } from '@google/genai';
 
 describe('OpenAIContentConverter', () => {
   let converter: OpenAIContentConverter;
@@ -66,6 +67,79 @@ describe('OpenAIContentConverter', () => {
         }
       ).streamingToolCallParser;
       expect(parser.getBuffer(0)).toBe('');
+    });
+  });
+
+  describe('convertGeminiRequestToOpenAI', () => {
+    const createRequestWithFunctionResponse = (
+      response: Record<string, unknown>,
+    ): GenerateContentParameters => {
+      const contents: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'shell',
+                args: {},
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'shell',
+                response,
+              },
+            },
+          ],
+        },
+      ];
+      return {
+        model: 'models/test',
+        contents,
+      };
+    };
+
+    it('should extract raw output from function response objects', () => {
+      const request = createRequestWithFunctionResponse({
+        output: 'Raw output text',
+      });
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const toolMessage = messages.find((message) => message.role === 'tool');
+
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe('Raw output text');
+    });
+
+    it('should prioritize error field when present', () => {
+      const request = createRequestWithFunctionResponse({
+        error: 'Command failed',
+      });
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const toolMessage = messages.find((message) => message.role === 'tool');
+
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe('Command failed');
+    });
+
+    it('should stringify non-string responses', () => {
+      const request = createRequestWithFunctionResponse({
+        data: { value: 42 },
+      });
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+      const toolMessage = messages.find((message) => message.role === 'tool');
+
+      expect(toolMessage).toBeDefined();
+      expect(toolMessage?.content).toBe('{"data":{"value":42}}');
     });
   });
 });

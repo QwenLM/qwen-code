@@ -276,10 +276,7 @@ export class OpenAIContentConverter {
         messages.push({
           role: 'tool' as const,
           tool_call_id: funcResponse.id || '',
-          content:
-            typeof funcResponse.response === 'string'
-              ? funcResponse.response
-              : JSON.stringify(funcResponse.response),
+          content: this.extractFunctionResponseContent(funcResponse.response),
         });
       }
       return;
@@ -357,6 +354,36 @@ export class OpenAIContentConverter {
     }
 
     return { textParts, functionCalls, functionResponses, mediaParts };
+  }
+
+  private extractFunctionResponseContent(response: unknown): string {
+    if (response === null || response === undefined) {
+      return '';
+    }
+
+    if (typeof response === 'string') {
+      return response;
+    }
+
+    if (typeof response === 'object') {
+      const responseObject = response as Record<string, unknown>;
+      const output = responseObject['output'];
+      if (typeof output === 'string') {
+        return output;
+      }
+
+      const error = responseObject['error'];
+      if (typeof error === 'string') {
+        return error;
+      }
+    }
+
+    try {
+      const serialized = JSON.stringify(response);
+      return serialized ?? String(response);
+    } catch {
+      return String(response);
+    }
   }
 
   /**
