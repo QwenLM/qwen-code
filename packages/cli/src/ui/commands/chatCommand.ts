@@ -89,9 +89,9 @@ const listCommand: SlashCommand = {
       const isoString = chat.mtime.toISOString();
       const match = isoString.match(/(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
       const formattedDate = match ? `${match[1]} ${match[2]}` : 'Invalid Date';
-      message += `  - \u001b[36m${paddedName}\u001b[0m  \u001b[90m(saved on ${formattedDate})\u001b[0m\n`;
+      message += `  - ${paddedName}  (saved on ${formattedDate})\n`;
     }
-    message += `\n\u001b[90mNote: Newest last, oldest first\u001b[0m`;
+    message += `\nNote: Newest last, oldest first`;
     return {
       type: 'message',
       messageType: 'info',

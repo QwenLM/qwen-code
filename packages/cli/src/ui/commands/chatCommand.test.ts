@@ -139,8 +139,8 @@ describe('chatCommand', () => {
         .match(/(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
       const formattedDate = isoDate ? `${isoDate[1]} ${isoDate[2]}` : '';
       expect(content).toContain(formattedDate);
-      const index1 = content.indexOf('- \u001b[36mtest1\u001b[0m');
-      const index2 = content.indexOf('- \u001b[36mtest2\u001b[0m');
+      const index1 = content.indexOf('- test1');
+      const index2 = content.indexOf('- test2');
       expect(index1).toBeGreaterThanOrEqual(0);
       expect(index2).toBeGreaterThan(index1);
     });
