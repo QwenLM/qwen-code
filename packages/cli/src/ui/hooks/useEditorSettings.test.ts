@@ -109,7 +109,7 @@ describe('useEditorSettings', () => {
 
     expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
       scope,
-      'preferredEditor',
+      'general.preferredEditor',
       editorType,
     );
 
@@ -139,7 +139,7 @@ describe('useEditorSettings', () => {
 
     expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
       scope,
-      'preferredEditor',
+      'general.preferredEditor',
       undefined,
     );
 
@@ -170,7 +170,7 @@ describe('useEditorSettings', () => {
 
       expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
         scope,
-        'preferredEditor',
+        'general.preferredEditor',
         editorType,
       );
 
@@ -199,7 +199,7 @@ describe('useEditorSettings', () => {
 
       expect(mockLoadedSettings.setValue).toHaveBeenCalledWith(
         scope,
-        'preferredEditor',
+        'general.preferredEditor',
         editorType,
       );
 

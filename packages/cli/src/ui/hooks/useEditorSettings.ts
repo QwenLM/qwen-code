@@ -45,7 +45,7 @@ export const useEditorSettings = (
       }
 
       try {
-        loadedSettings.setValue(scope, 'preferredEditor', editorType);
+        loadedSettings.setValue(scope, 'general.preferredEditor', editorType);
         addItem(
           {
             type: MessageType.INFO,
