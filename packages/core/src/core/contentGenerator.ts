@@ -14,8 +14,8 @@ import type {
 } from '@google/genai';
 import { GoogleGenAI } from '@google/genai';
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
-import type { Config } from '../config/config.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import type { Config } from '../config/config.js';
 
 import type { UserTierId } from '../code_assist/types.js';
 import { InstallationManager } from '../utils/installationManager.js';
@@ -82,53 +82,37 @@ export function createContentGeneratorConfig(
   authType: AuthType | undefined,
   generationConfig?: Partial<ContentGeneratorConfig>,
 ): ContentGeneratorConfig {
-  const geminiApiKey = process.env['GEMINI_API_KEY'] || undefined;
-  const googleApiKey = process.env['GOOGLE_API_KEY'] || undefined;
-  const googleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'] || undefined;
-  const googleCloudLocation = process.env['GOOGLE_CLOUD_LOCATION'] || undefined;
-
-  const newContentGeneratorConfig: ContentGeneratorConfig = {
+  const newContentGeneratorConfig: Partial<ContentGeneratorConfig> = {
     ...(generationConfig || {}),
-    model: generationConfig?.model || DEFAULT_QWEN_MODEL,
     authType,
     proxy: config?.getProxy(),
   };
 
-  // If we are using Google auth or we are in Cloud Shell, there is nothing else to validate for now
-  if (
-    authType === AuthType.LOGIN_WITH_GOOGLE ||
-    authType === AuthType.CLOUD_SHELL
-  ) {
-    return newContentGeneratorConfig;
-  }
-
-  if (authType === AuthType.USE_GEMINI && geminiApiKey) {
-    newContentGeneratorConfig.apiKey = geminiApiKey;
-    newContentGeneratorConfig.vertexai = false;
-
-    return newContentGeneratorConfig;
-  }
-
-  if (
-    authType === AuthType.USE_VERTEX_AI &&
-    (googleApiKey || (googleCloudProject && googleCloudLocation))
-  ) {
-    newContentGeneratorConfig.apiKey = googleApiKey;
-    newContentGeneratorConfig.vertexai = true;
-
-    return newContentGeneratorConfig;
-  }
-
   if (authType === AuthType.QWEN_OAUTH) {
     // For Qwen OAuth, we'll handle the API key dynamically in createContentGenerator
     // Set a special marker to indicate this is Qwen OAuth
-    newContentGeneratorConfig.apiKey = 'QWEN_OAUTH_DYNAMIC_TOKEN';
-    newContentGeneratorConfig.model = DEFAULT_QWEN_MODEL;
-
-    return newContentGeneratorConfig;
+    return {
+      ...newContentGeneratorConfig,
+      model: DEFAULT_QWEN_MODEL,
+      apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+    } as ContentGeneratorConfig;
   }
 
-  return newContentGeneratorConfig;
+  if (authType === AuthType.USE_OPENAI) {
+    if (!newContentGeneratorConfig.apiKey) {
+      throw new Error('OpenAI API key is required');
+    }
+
+    return {
+      ...newContentGeneratorConfig,
+      model: newContentGeneratorConfig?.model || 'qwen3-coder-plus',
+    } as ContentGeneratorConfig;
+  }
+
+  return {
+    ...newContentGeneratorConfig,
+    model: newContentGeneratorConfig?.model || DEFAULT_QWEN_MODEL,
+  } as ContentGeneratorConfig;
 }
 
 export async function createContentGenerator(

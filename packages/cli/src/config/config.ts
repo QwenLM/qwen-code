@@ -13,7 +13,6 @@ import { extensionsCommand } from '../commands/extensions.js';
 import {
   ApprovalMode,
   Config,
-  DEFAULT_QWEN_MODEL,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
   EditTool,
@@ -669,13 +668,11 @@ export async function loadCliConfig(
     );
   }
 
-  const defaultModel = DEFAULT_QWEN_MODEL;
-  const resolvedModel: string =
+  const resolvedModel: string | undefined =
     argv.model ||
     process.env['OPENAI_MODEL'] ||
     process.env['QWEN_MODEL'] ||
-    settings.model?.name ||
-    defaultModel;
+    settings.model?.name;
 
   const sandboxConfig = await loadSandboxConfig(settings, argv);
   const screenReader =

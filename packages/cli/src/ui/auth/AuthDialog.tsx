@@ -70,11 +70,7 @@ export function AuthDialog({
         return item.value === defaultAuthType;
       }
 
-      if (process.env['GEMINI_API_KEY']) {
-        return item.value === AuthType.USE_GEMINI;
-      }
-
-      return item.value === AuthType.LOGIN_WITH_GOOGLE;
+      return item.value === AuthType.QWEN_OAUTH;
     }),
   );
 
