@@ -15,12 +15,14 @@ import type {
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
   Config,
+  EditorType,
 } from '@qwen-code/qwen-code-core';
 import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
 
 export interface ToolConfirmationMessageProps {
@@ -44,6 +46,11 @@ export const ToolConfirmationMessage: React.FC<
 }) => {
   const { onConfirm } = confirmationDetails;
   const childWidth = terminalWidth - 2; // 2 for padding
+
+  const settings = useSettings();
+  const preferredEditor = settings.merged.general?.preferredEditor as
+    | EditorType
+    | undefined;
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
@@ -199,7 +206,7 @@ export const ToolConfirmationMessage: React.FC<
         key: 'Yes, allow always',
       });
     }
-    if (!config.getIdeMode() || !isDiffingEnabled) {
+    if ((!config.getIdeMode() || !isDiffingEnabled) && preferredEditor) {
       options.push({
         label: 'Modify with external editor',
         value: ToolConfirmationOutcome.ModifyWithEditor,
