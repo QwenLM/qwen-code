@@ -47,6 +47,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       setAuthError(error);
       if (error) {
         setAuthState(AuthState.Updating);
+        setIsAuthDialogOpen(true);
       }
     },
     [setAuthError, setAuthState],
