@@ -668,7 +668,7 @@ export async function loadCliConfig(
     );
   }
 
-  const resolvedModel: string | undefined =
+  const resolvedModel =
     argv.model ||
     process.env['OPENAI_MODEL'] ||
     process.env['QWEN_MODEL'] ||
@@ -736,8 +736,14 @@ export async function loadCliConfig(
     generationConfig: {
       ...(settings.model?.generationConfig || {}),
       model: resolvedModel,
-      apiKey: argv.openaiApiKey || process.env['OPENAI_API_KEY'],
-      baseUrl: argv.openaiBaseUrl || process.env['OPENAI_BASE_URL'],
+      apiKey:
+        argv.openaiApiKey ||
+        process.env['OPENAI_API_KEY'] ||
+        settings.security?.auth?.apiKey,
+      baseUrl:
+        argv.openaiBaseUrl ||
+        process.env['OPENAI_BASE_URL'] ||
+        settings.security?.auth?.baseUrl,
       enableOpenAILogging:
         (typeof argv.openaiLogging === 'undefined'
           ? settings.model?.enableOpenAILogging

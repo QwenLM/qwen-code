@@ -8,10 +8,13 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import { loadEnvironment, loadSettings } from './settings.js';
 
 export function validateAuthMethod(authMethod: string): string | null {
-  loadEnvironment(loadSettings().merged);
+  const settings = loadSettings();
+  loadEnvironment(settings.merged);
 
   if (authMethod === AuthType.USE_OPENAI) {
-    if (!process.env['OPENAI_API_KEY']) {
+    const hasApiKey =
+      process.env['OPENAI_API_KEY'] || settings.merged.security?.auth?.apiKey;
+    if (!hasApiKey) {
       return 'OPENAI_API_KEY environment variable not found. You can enter it interactively or add it to your .env file.';
     }
     return null;
@@ -25,15 +28,3 @@ export function validateAuthMethod(authMethod: string): string | null {
 
   return 'Invalid auth method selected.';
 }
-
-export const setOpenAIApiKey = (apiKey: string): void => {
-  process.env['OPENAI_API_KEY'] = apiKey;
-};
-
-export const setOpenAIBaseUrl = (baseUrl: string): void => {
-  process.env['OPENAI_BASE_URL'] = baseUrl;
-};
-
-export const setOpenAIModel = (model: string): void => {
-  process.env['OPENAI_MODEL'] = model;
-};

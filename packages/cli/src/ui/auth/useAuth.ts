@@ -6,12 +6,11 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
-import { AuthType, type Config } from '@qwen-code/qwen-code-core';
+import type { AuthType, Config } from '@qwen-code/qwen-code-core';
 import {
   clearCachedCredentialFile,
   getErrorMessage,
 } from '@qwen-code/qwen-code-core';
-import { runExitCleanup } from '../../utils/cleanup.js';
 import { AuthState } from '../types.js';
 import { validateAuthMethod } from '../../config/auth.js';
 
@@ -88,23 +87,48 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
 
   // Handle auth selection from dialog
   const handleAuthSelect = useCallback(
-    async (authType: AuthType | undefined, scope: SettingScope) => {
+    async (
+      authType: AuthType | undefined,
+      scope: SettingScope,
+      credentials?: {
+        apiKey?: string;
+        baseUrl?: string;
+        model?: string;
+      },
+    ) => {
       if (authType) {
         await clearCachedCredentialFile();
 
-        settings.setValue(scope, 'security.auth.selectedType', authType);
+        // Save OpenAI credentials if provided
+        if (credentials) {
+          // Update Config's internal generationConfig before calling refreshAuth
+          // This ensures refreshAuth has access to the new credentials
+          config.updateCredentials({
+            apiKey: credentials.apiKey,
+            baseUrl: credentials.baseUrl,
+            model: credentials.model,
+          });
 
-        if (
-          authType === AuthType.LOGIN_WITH_GOOGLE &&
-          config.isBrowserLaunchSuppressed()
-        ) {
-          await runExitCleanup();
-          console.log(`
-----------------------------------------------------------------
-Logging in with Google... Please restart Gemini CLI to continue.
-----------------------------------------------------------------
-          `);
-          process.exit(0);
+          // Also set environment variables for compatibility with other parts of the code
+          if (credentials.apiKey) {
+            settings.setValue(
+              scope,
+              'security.auth.apiKey',
+              credentials.apiKey,
+            );
+          }
+          if (credentials.baseUrl) {
+            settings.setValue(
+              scope,
+              'security.auth.baseUrl',
+              credentials.baseUrl,
+            );
+          }
+          if (credentials.model) {
+            settings.setValue(scope, 'model.name', credentials.model);
+          }
+
+          settings.setValue(scope, 'security.auth.selectedType', authType);
         }
       }
 

@@ -90,6 +90,7 @@ import {
 } from './constants.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL, DEFAULT_QWEN_MODEL } from './models.js';
 import { Storage } from './storage.js';
+import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -162,9 +163,6 @@ export interface ExtensionInstallMetadata {
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 4_000_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
-
-export const DEFAULT_QWEN_BASE_URL =
-  'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 export class MCPServerConfig {
   constructor(
@@ -292,7 +290,7 @@ export class Config {
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGenerator!: ContentGenerator;
-  private readonly _generationConfig: Partial<ContentGeneratorConfig>;
+  private _generationConfig: Partial<ContentGeneratorConfig>;
   private readonly embeddingModel: string;
   private readonly sandbox: SandboxConfig | undefined;
   private readonly targetDir: string;
@@ -443,7 +441,7 @@ export class Config {
     this._generationConfig = {
       model: params.model,
       ...(params.generationConfig || {}),
-      baseUrl: params.generationConfig?.baseUrl || DEFAULT_QWEN_BASE_URL,
+      baseUrl: params.generationConfig?.baseUrl || DEFAULT_DASHSCOPE_BASE_URL,
     };
     this.contentGeneratorConfig = this
       ._generationConfig as ContentGeneratorConfig;
@@ -523,6 +521,26 @@ export class Config {
 
   getContentGenerator(): ContentGenerator {
     return this.contentGenerator;
+  }
+
+  /**
+   * Updates the credentials in the generation config.
+   * This is needed when credentials are set after Config construction.
+   */
+  updateCredentials(credentials: {
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+  }): void {
+    if (credentials.apiKey) {
+      this._generationConfig.apiKey = credentials.apiKey;
+    }
+    if (credentials.baseUrl) {
+      this._generationConfig.baseUrl = credentials.baseUrl;
+    }
+    if (credentials.model) {
+      this._generationConfig.model = credentials.model;
+    }
   }
 
   async refreshAuth(authMethod: AuthType) {

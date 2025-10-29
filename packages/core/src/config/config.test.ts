@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode, DEFAULT_QWEN_BASE_URL } from './config.js';
+import { Config, ApprovalMode } from './config.js';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../tools/memoryTool.js';
 import {
@@ -16,6 +16,7 @@ import {
   QwenLogger,
 } from '../telemetry/index.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
   createContentGeneratorConfig,
@@ -250,7 +251,7 @@ describe('Server Config (config.ts)', () => {
         authType,
         {
           model: MODEL,
-          baseUrl: DEFAULT_QWEN_BASE_URL,
+          baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
         },
       );
       // Verify that contentGeneratorConfig is updated

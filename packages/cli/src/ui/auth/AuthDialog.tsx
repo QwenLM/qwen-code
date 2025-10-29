@@ -8,12 +8,7 @@ import type React from 'react';
 import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
-import {
-  setOpenAIApiKey,
-  setOpenAIBaseUrl,
-  setOpenAIModel,
-  validateAuthMethod,
-} from '../../config/auth.js';
+import { validateAuthMethod } from '../../config/auth.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -21,7 +16,15 @@ import { OpenAIKeyPrompt } from '../components/OpenAIKeyPrompt.js';
 import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
 
 interface AuthDialogProps {
-  onSelect: (authMethod: AuthType | undefined, scope: SettingScope) => void;
+  onSelect: (
+    authMethod: AuthType | undefined,
+    scope: SettingScope,
+    credentials?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+    },
+  ) => void;
   settings: LoadedSettings;
   initialErrorMessage?: string | null;
 }
@@ -97,11 +100,12 @@ export function AuthDialog({
     baseUrl: string,
     model: string,
   ) => {
-    setOpenAIApiKey(apiKey);
-    setOpenAIBaseUrl(baseUrl);
-    setOpenAIModel(model);
     setShowOpenAIKeyPrompt(false);
-    onSelect(AuthType.USE_OPENAI, SettingScope.User);
+    onSelect(AuthType.USE_OPENAI, SettingScope.User, {
+      apiKey,
+      baseUrl,
+      model,
+    });
   };
 
   const handleOpenAIKeyCancel = () => {
