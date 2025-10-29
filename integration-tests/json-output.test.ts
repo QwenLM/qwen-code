@@ -36,10 +36,10 @@ describe('JSON output', () => {
   });
 
   it('should return a JSON error for enforced auth mismatch before running', async () => {
-    process.env['GOOGLE_GENAI_USE_GCA'] = 'true';
+    process.env['QWEN_OAUTH'] = 'true';
     await rig.setup('json-output-auth-mismatch', {
       settings: {
-        security: { auth: { enforcedType: 'gemini-api-key' } },
+        security: { auth: { enforcedType: 'openai' } },
       },
     });
 
@@ -50,7 +50,7 @@ describe('JSON output', () => {
     } catch (e) {
       thrown = e as Error;
     } finally {
-      delete process.env['GOOGLE_GENAI_USE_GCA'];
+      delete process.env['QWEN_OAUTH'];
     }
 
     expect(thrown).toBeDefined();
@@ -79,11 +79,7 @@ describe('JSON output', () => {
     expect(payload.error).toBeDefined();
     expect(payload.error.type).toBe('Error');
     expect(payload.error.code).toBe(1);
-    expect(payload.error.message).toContain(
-      'configured auth type is gemini-api-key',
-    );
-    expect(payload.error.message).toContain(
-      'current auth type is oauth-personal',
-    );
+    expect(payload.error.message).toContain('configured auth type is openai');
+    expect(payload.error.message).toContain('current auth type is qwen-oauth');
   });
 });
