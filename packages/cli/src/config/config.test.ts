@@ -2399,6 +2399,73 @@ describe('loadCliConfig useRipgrep', () => {
   });
 });
 
+describe('loadCliConfig useBuiltinRipgrep', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should be true by default when useBuiltinRipgrep is not set in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {};
+    const config = await loadCliConfig(
+      settings,
+      [],
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      'test-session',
+      argv,
+    );
+    expect(config.getUseBuiltinRipgrep()).toBe(true);
+  });
+
+  it('should be false when useBuiltinRipgrep is set to false in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = { tools: { useBuiltinRipgrep: false } };
+    const config = await loadCliConfig(
+      settings,
+      [],
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      'test-session',
+      argv,
+    );
+    expect(config.getUseBuiltinRipgrep()).toBe(false);
+  });
+
+  it('should be true when useBuiltinRipgrep is explicitly set to true in settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = { tools: { useBuiltinRipgrep: true } };
+    const config = await loadCliConfig(
+      settings,
+      [],
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      'test-session',
+      argv,
+    );
+    expect(config.getUseBuiltinRipgrep()).toBe(true);
+  });
+});
+
 describe('screenReader configuration', () => {
   const originalArgv = process.argv;
 

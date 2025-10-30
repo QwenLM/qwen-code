@@ -14,7 +14,7 @@ export const ToolNames = {
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
   READ_MANY_FILES: 'read_many_files',
-  GREP: 'search_file_content',
+  GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
   TODO_WRITE: 'todo_write',

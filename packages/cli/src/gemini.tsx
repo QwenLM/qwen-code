@@ -387,7 +387,11 @@ export async function main() {
     let input = config.getQuestion();
     const startupWarnings = [
       ...(await getStartupWarnings()),
-      ...(await getUserStartupWarnings()),
+      ...(await getUserStartupWarnings({
+        workspaceRoot: process.cwd(),
+        useRipgrep: settings.merged.tools?.useRipgrep ?? true,
+        useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
+      })),
     ];
 
     // Render UI, passing necessary config values. Check that there is no command line question.

@@ -193,8 +193,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
     })
     .option('proxy', {
       type: 'string',
-      description:
-        'Proxy for Qwen Code, like schema://user:password@host:port',
+      description: 'Proxy for Qwen Code, like schema://user:password@host:port',
     })
     .deprecateOption(
       'proxy',
@@ -761,6 +760,7 @@ export async function loadCliConfig(
     interactive,
     trustedFolder,
     useRipgrep: settings.tools?.useRipgrep,
+    useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     enablePromptCompletion: settings.general?.enablePromptCompletion ?? false,
