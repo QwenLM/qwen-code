@@ -18,7 +18,7 @@
 // limitations under the License.
 
 import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
-import { dirname, join, basename } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
@@ -33,10 +33,18 @@ if (!existsSync(distDir)) {
   mkdirSync(distDir);
 }
 
-// Find and copy all .sb files from packages to the root of the dist directory
+// Find and copy all .sb files from packages to preserve their relative paths in the dist directory
 const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
 for (const file of sbFiles) {
-  copyFileSync(join(root, file), join(distDir, basename(file)));
+  const sourcePath = join(root, file);
+  const destPath = join(distDir, file); // Preserve the relative path from packages/
+  const destDir = dirname(destPath);
+
+  if (!existsSync(destDir)) {
+    mkdirSync(destDir, { recursive: true });
+  }
+
+  copyFileSync(sourcePath, destPath);
 }
 
 console.log('Copied sandbox profiles to dist/');
