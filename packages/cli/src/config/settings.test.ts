@@ -66,6 +66,8 @@ import {
   loadEnvironment,
   migrateDeprecatedSettings,
   SettingScope,
+  SETTINGS_VERSION,
+  SETTINGS_VERSION_KEY,
 } from './settings.js';
 import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
 
@@ -94,6 +96,7 @@ vi.mock('fs', async (importOriginal) => {
     existsSync: vi.fn(),
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
     mkdirSync: vi.fn(),
     realpathSync: (p: string) => p,
   };
@@ -171,11 +174,15 @@ describe('Settings Loading and Merging', () => {
         getSystemSettingsPath(),
         'utf-8',
       );
-      expect(settings.system.settings).toEqual(systemSettingsContent);
+      expect(settings.system.settings).toEqual({
+        ...systemSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
       expect(settings.user.settings).toEqual({});
       expect(settings.workspace.settings).toEqual({});
       expect(settings.merged).toEqual({
         ...systemSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
       });
     });
 
@@ -207,10 +214,14 @@ describe('Settings Loading and Merging', () => {
         expectedUserSettingsPath,
         'utf-8',
       );
-      expect(settings.user.settings).toEqual(userSettingsContent);
+      expect(settings.user.settings).toEqual({
+        ...userSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
       expect(settings.workspace.settings).toEqual({});
       expect(settings.merged).toEqual({
         ...userSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
       });
     });
 
@@ -241,9 +252,13 @@ describe('Settings Loading and Merging', () => {
         'utf-8',
       );
       expect(settings.user.settings).toEqual({});
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
+      expect(settings.workspace.settings).toEqual({
+        ...workspaceSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
       expect(settings.merged).toEqual({
         ...workspaceSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
       });
     });
 
@@ -304,10 +319,20 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.system.settings).toEqual(systemSettingsContent);
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
+      expect(settings.system.settings).toEqual({
+        ...systemSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.user.settings).toEqual({
+        ...userSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.workspace.settings).toEqual({
+        ...workspaceSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
       expect(settings.merged).toEqual({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         ui: {
           theme: 'system-theme',
         },
@@ -361,6 +386,7 @@ describe('Settings Loading and Merging', () => {
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
       expect(settings.merged).toEqual({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         ui: {
           theme: 'legacy-dark',
         },
@@ -411,6 +437,132 @@ describe('Settings Loading and Merging', () => {
 
       expect(settings.merged.tools?.allowed).toEqual(['fs', 'shell']);
       expect((settings.merged as TestSettings)['allowedTools']).toBeUndefined();
+    });
+
+    it('should add version field to migrated settings file', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const legacySettingsContent = {
+        theme: 'dark',
+        model: 'qwen-coder',
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Verify that fs.writeFileSync was called with migrated settings including version
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+    });
+
+    it('should not re-migrate settings that have version field', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const migratedSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        ui: {
+          theme: 'dark',
+        },
+        model: {
+          name: 'qwen-coder',
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(migratedSettingsContent);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Verify that fs.renameSync and fs.writeFileSync were NOT called
+      // (because no migration was needed)
+      expect(fs.renameSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should add version field to V2 settings without version and write to disk', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V2 format but no version field
+      const v2SettingsWithoutVersion = {
+        ui: {
+          theme: 'dark',
+        },
+        model: {
+          name: 'qwen-coder',
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(v2SettingsWithoutVersion);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Verify that fs.writeFileSync was called (to add version)
+      // but NOT fs.renameSync (no backup needed, just adding version)
+      expect(fs.renameSync).not.toHaveBeenCalled();
+      expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+
+      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writtenPath = writeCall[0];
+      const writtenContent = JSON.parse(writeCall[1] as string);
+
+      expect(writtenPath).toBe(USER_SETTINGS_PATH);
+      expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+      expect(writtenContent.ui?.theme).toBe('dark');
+      expect(writtenContent.model?.name).toBe('qwen-coder');
+    });
+
+    it('should correctly handle partially migrated settings without version field', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // Edge case: model already in V2 format (object), but autoAccept in V1 format
+      const partiallyMigratedContent = {
+        model: {
+          name: 'qwen-coder',
+        },
+        autoAccept: false, // V1 key
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(partiallyMigratedContent);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Verify that the migrated settings preserve the model object correctly
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const writeCall = (fs.writeFileSync as Mock).mock.calls[0];
+      const writtenContent = JSON.parse(writeCall[1] as string);
+
+      // Model should remain as an object, not double-nested
+      expect(writtenContent.model).toEqual({ name: 'qwen-coder' });
+      // autoAccept should be migrated to tools.autoAccept
+      expect(writtenContent.tools?.autoAccept).toBe(false);
+      // Version field should be added
+      expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
     });
 
     it('should correctly merge and migrate legacy array properties from multiple scopes', () => {
@@ -515,11 +667,24 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.systemDefaults.settings).toEqual(systemDefaultsContent);
-      expect(settings.system.settings).toEqual(systemSettingsContent);
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
+      expect(settings.systemDefaults.settings).toEqual({
+        ...systemDefaultsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.system.settings).toEqual({
+        ...systemSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.user.settings).toEqual({
+        ...userSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.workspace.settings).toEqual({
+        ...workspaceSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
       expect(settings.merged).toEqual({
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         context: {
           fileName: 'WORKSPACE_CONTEXT.md',
           includeDirectories: [
@@ -866,8 +1031,14 @@ describe('Settings Loading and Merging', () => {
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
 
-      expect(settings.user.settings).toEqual(userSettingsContent);
-      expect(settings.workspace.settings).toEqual(workspaceSettingsContent);
+      expect(settings.user.settings).toEqual({
+        ...userSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
+      expect(settings.workspace.settings).toEqual({
+        ...workspaceSettingsContent,
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+      });
       expect(settings.merged.mcpServers).toEqual({
         'user-server': {
           command: 'user-command',
@@ -1696,9 +1867,13 @@ describe('Settings Loading and Merging', () => {
           'utf-8',
         );
         expect(settings.system.path).toBe(MOCK_ENV_SYSTEM_SETTINGS_PATH);
-        expect(settings.system.settings).toEqual(systemSettingsContent);
+        expect(settings.system.settings).toEqual({
+          ...systemSettingsContent,
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        });
         expect(settings.merged).toEqual({
           ...systemSettingsContent,
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
         });
       });
     });
@@ -2248,6 +2423,44 @@ describe('Settings Loading and Merging', () => {
         customWittyPhrases: ['test phrase'],
       });
     });
+
+    it('should remove version field when migrating to V1', () => {
+      const v2Settings = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        ui: {
+          theme: 'dark',
+        },
+        model: {
+          name: 'qwen-coder',
+        },
+      };
+      const v1Settings = migrateSettingsToV1(v2Settings);
+
+      // Version field should not be present in V1 settings
+      expect(v1Settings[SETTINGS_VERSION_KEY]).toBeUndefined();
+      // Other fields should be properly migrated
+      expect(v1Settings).toEqual({
+        theme: 'dark',
+        model: 'qwen-coder',
+      });
+    });
+
+    it('should handle version field in unrecognized properties', () => {
+      const v2Settings = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        general: {
+          vimMode: true,
+        },
+        someUnrecognizedKey: 'value',
+      };
+      const v1Settings = migrateSettingsToV1(v2Settings);
+
+      // Version field should be filtered out
+      expect(v1Settings[SETTINGS_VERSION_KEY]).toBeUndefined();
+      // Unrecognized keys should be preserved
+      expect(v1Settings['someUnrecognizedKey']).toBe('value');
+      expect(v1Settings['vimMode']).toBe(true);
+    });
   });
 
   describe('loadEnvironment', () => {
@@ -2367,6 +2580,73 @@ describe('Settings Loading and Merging', () => {
         someUnrecognizedKey: 'value',
       };
       expect(needsMigration(settings)).toBe(false);
+    });
+
+    describe('with version field', () => {
+      it('should return false when version field indicates current or newer version', () => {
+        const settingsWithVersion = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+          theme: 'dark', // Even though this is a V1 key, version field takes precedence
+        };
+        expect(needsMigration(settingsWithVersion)).toBe(false);
+      });
+
+      it('should return false when version field indicates a newer version', () => {
+        const settingsWithNewerVersion = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION + 1,
+          theme: 'dark',
+        };
+        expect(needsMigration(settingsWithNewerVersion)).toBe(false);
+      });
+
+      it('should return true when version field indicates an older version', () => {
+        const settingsWithOldVersion = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION - 1,
+          theme: 'dark',
+        };
+        expect(needsMigration(settingsWithOldVersion)).toBe(true);
+      });
+
+      it('should use fallback logic when version field is not a number', () => {
+        const settingsWithInvalidVersion = {
+          [SETTINGS_VERSION_KEY]: 'not-a-number',
+          theme: 'dark',
+        };
+        expect(needsMigration(settingsWithInvalidVersion)).toBe(true);
+      });
+
+      it('should use fallback logic when version field is missing', () => {
+        const settingsWithoutVersion = {
+          theme: 'dark',
+        };
+        expect(needsMigration(settingsWithoutVersion)).toBe(true);
+      });
+    });
+
+    describe('edge case: partially migrated settings', () => {
+      it('should return true for partially migrated settings without version field', () => {
+        // This simulates the dangerous edge case: model already in V2 format,
+        // but other fields in V1 format
+        const partiallyMigrated = {
+          model: {
+            name: 'qwen-coder',
+          },
+          autoAccept: false, // V1 key
+        };
+        expect(needsMigration(partiallyMigrated)).toBe(true);
+      });
+
+      it('should return false for partially migrated settings WITH version field', () => {
+        // With version field, we trust that it's been properly migrated
+        const partiallyMigratedWithVersion = {
+          [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+          model: {
+            name: 'qwen-coder',
+          },
+          autoAccept: false, // This would look like V1 but version says it's V2
+        };
+        expect(needsMigration(partiallyMigratedWithVersion)).toBe(false);
+      });
     });
   });
 
