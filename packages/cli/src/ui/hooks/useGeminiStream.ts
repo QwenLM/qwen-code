@@ -303,9 +303,30 @@ export const useGeminiStream = (
     getPromptCount,
   ]);
 
+  // Implement double-Esc behavior to cancel ongoing request (legacy UX)
+  const escPressCountRef = useRef(0);
+  const escTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   useKeypress(
     (key) => {
       if (key.name === 'escape' && !isShellFocused) {
+        if (escPressCountRef.current === 0) {
+          escPressCountRef.current = 1;
+          if (escTimerRef.current) {
+            clearTimeout(escTimerRef.current);
+          }
+          escTimerRef.current = setTimeout(() => {
+            escPressCountRef.current = 0;
+            escTimerRef.current = null;
+          }, 500);
+          return;
+        }
+        // Second Esc within window: perform cancel
+        if (escTimerRef.current) {
+          clearTimeout(escTimerRef.current);
+          escTimerRef.current = null;
+        }
+        escPressCountRef.current = 0;
         cancelOngoingRequest();
       }
     },
@@ -993,7 +1014,15 @@ export const useGeminiStream = (
 
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
-      if (isResponding) {
+      // Do not submit tool responses if the turn was cancelled by the user
+      // or if we're currently responding to avoid overlapping submissions.
+      if (turnCancelledRef.current || isResponding) {
+        // Mark any completed tools as submitted to prevent re-processing.
+        const completedIds = completedToolCallsFromScheduler
+          .map((t) => t.request.callId);
+        if (completedIds.length > 0) {
+          markToolsAsSubmitted(completedIds);
+        }
         return;
       }
 
