@@ -5,6 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
+import { waitFor } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
 import type { TodoItem } from './TodoDisplay.js';
 import { TodoDisplay } from './TodoDisplay.js';
@@ -94,5 +95,31 @@ describe('TodoDisplay', () => {
     const output = lastFrame();
     expect(output).toContain('Task 1');
     expect(output).toContain('Task 2');
+  });
+
+  it('should truncate when max height is provided', async () => {
+    const longTodos: TodoItem[] = Array.from({ length: 10 }).map(
+      (_, index) => ({
+        id: `${index + 1}`,
+        content: `Task ${index + 1}`,
+        status: 'pending',
+      }),
+    );
+
+    const { lastFrame } = render(
+      <TodoDisplay todos={longTodos} maxHeight={3} maxWidth={40} />,
+    );
+
+    await waitFor(() => {
+      const frame = lastFrame();
+      if (!frame) {
+        throw new Error('Expected rendered frame');
+      }
+      const visibleTasks = frame.match(/Task \d+/g) ?? [];
+      expect(visibleTasks.length).toBeLessThan(10);
+    });
+
+    const output = lastFrame();
+    expect(output).not.toContain('Task 1');
   });
 });

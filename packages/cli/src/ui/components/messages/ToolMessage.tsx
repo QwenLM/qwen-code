@@ -130,9 +130,17 @@ const useResultDisplayRenderer = (
 /**
  * Component to render todo list results
  */
-const TodoResultRenderer: React.FC<{ data: TodoResultDisplay }> = ({
-  data,
-}) => <TodoDisplay todos={data.todos} />;
+const TodoResultRenderer: React.FC<{
+  data: TodoResultDisplay;
+  availableHeight?: number;
+  childWidth: number;
+}> = ({ data, availableHeight, childWidth }) => (
+  <TodoDisplay
+    todos={data.todos}
+    maxHeight={availableHeight}
+    maxWidth={typeof availableHeight === 'number' ? childWidth : undefined}
+  />
+);
 
 const PlanResultRenderer: React.FC<{
   data: PlanResultDisplay;
@@ -327,7 +335,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
           <Box flexDirection="column">
             {displayRenderer.type === 'todo' && (
-              <TodoResultRenderer data={displayRenderer.data} />
+              <TodoResultRenderer
+                data={displayRenderer.data}
+                availableHeight={availableHeight}
+                childWidth={childWidth}
+              />
             )}
             {displayRenderer.type === 'plan' && (
               <PlanResultRenderer

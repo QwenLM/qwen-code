@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
+import { ScrollView } from './shared/ScrollView.js';
 
 export interface TodoItem {
   id: string;
@@ -16,6 +17,9 @@ export interface TodoItem {
 
 interface TodoDisplayProps {
   todos: TodoItem[];
+  maxHeight?: number;
+  maxWidth?: number;
+  overflowDirection?: 'top' | 'bottom';
 }
 
 const STATUS_ICONS = {
@@ -24,30 +28,52 @@ const STATUS_ICONS = {
   completed: '●',
 } as const;
 
-export const TodoDisplay: React.FC<TodoDisplayProps> = ({ todos }) => {
+export const TodoDisplay: React.FC<TodoDisplayProps> = ({
+  todos,
+  maxHeight,
+  maxWidth,
+  overflowDirection = 'top',
+}) => {
   if (!todos || todos.length === 0) {
     return null;
   }
 
+  if (typeof maxHeight === 'number' && !Number.isNaN(maxHeight)) {
+    const height = Math.max(2, Math.floor(maxHeight));
+    const renderIndicator = (hiddenCount: number) =>
+      hiddenCount > 0 ? (
+        <Box>
+          <Text color={Colors.Gray} wrap="truncate">
+            ↑ {hiddenCount} hidden task{hiddenCount === 1 ? '' : 's'}
+          </Text>
+        </Box>
+      ) : null;
+
+    return (
+      <ScrollView<TodoItem>
+        height={height}
+        width={typeof maxWidth === 'number' ? maxWidth : undefined}
+        data={todos}
+        stickTo={overflowDirection === 'bottom' ? 'top' : 'bottom'}
+        renderOverflowIndicator={renderIndicator}
+        getItemKey={(item) => item.id}
+        renderItem={(item: TodoItem) => renderTodoItemRow(item)}
+      />
+    );
+  }
+
   return (
     <Box flexDirection="column">
-      {todos.map((todo) => (
-        <TodoItemRow key={todo.id} todo={todo} />
-      ))}
+      {todos.map((todo) => renderTodoItemRow(todo))}
     </Box>
   );
 };
 
-interface TodoItemRowProps {
-  todo: TodoItem;
-}
-
-const TodoItemRow: React.FC<TodoItemRowProps> = ({ todo }) => {
+const renderTodoItemRow = (todo: TodoItem) => {
   const statusIcon = STATUS_ICONS[todo.status];
   const isCompleted = todo.status === 'completed';
   const isInProgress = todo.status === 'in_progress';
 
-  // Use the same color for both status icon and text, like RadioButtonSelect
   const itemColor = isCompleted
     ? Colors.Foreground
     : isInProgress
@@ -55,18 +81,11 @@ const TodoItemRow: React.FC<TodoItemRowProps> = ({ todo }) => {
       : Colors.Foreground;
 
   return (
-    <Box flexDirection="row" minHeight={1}>
-      {/* Status Icon */}
-      <Box width={3}>
-        <Text color={itemColor}>{statusIcon}</Text>
-      </Box>
-
-      {/* Content */}
-      <Box flexGrow={1}>
-        <Text color={itemColor} strikethrough={isCompleted} wrap="wrap">
-          {todo.content}
-        </Text>
-      </Box>
+    <Box>
+      <Text color={itemColor}>{`${statusIcon} `}</Text>
+      <Text color={itemColor} strikethrough={isCompleted} wrap="wrap">
+        {todo.content}
+      </Text>
     </Box>
   );
 };
