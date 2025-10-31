@@ -16,7 +16,7 @@ import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
 } from '../tools/tools.js';
-import { getEnvironmentContext } from '../utils/environmentContext.js';
+import { getInitialChatHistory } from '../utils/environmentContext.js';
 import type {
   Content,
   Part,
@@ -807,11 +807,7 @@ export class SubAgentScope {
       );
     }
 
-    const envParts = await getEnvironmentContext(this.runtimeContext);
-    const envHistory: Content[] = [
-      { role: 'user', parts: envParts },
-      { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
-    ];
+    const envHistory = await getInitialChatHistory(this.runtimeContext);
 
     const start_history = [
       ...envHistory,

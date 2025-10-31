@@ -32,7 +32,6 @@ import { GeminiChat } from '../core/geminiChat.js';
 import { executeToolCall } from '../core/nonInteractiveToolExecutor.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../tools/tools.js';
-import { getEnvironmentContext } from '../utils/environmentContext.js';
 import { ContextState, SubAgentScope } from './subagent.js';
 import type {
   ModelConfig,
@@ -44,7 +43,20 @@ import { SubagentTerminateMode } from './types.js';
 
 vi.mock('../core/geminiChat.js');
 vi.mock('../core/contentGenerator.js');
-vi.mock('../utils/environmentContext.js');
+vi.mock('../utils/environmentContext.js', () => ({
+  getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
+  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
+    {
+      role: 'user',
+      parts: [{ text: 'Env Context' }],
+    },
+    {
+      role: 'model',
+      parts: [{ text: 'Got it. Thanks for the context!' }],
+    },
+    ...(extraHistory ?? []),
+  ]),
+}));
 vi.mock('../core/nonInteractiveToolExecutor.js');
 vi.mock('../ide/ide-client.js');
 vi.mock('../core/client.js');
@@ -174,9 +186,6 @@ describe('subagent.ts', () => {
     beforeEach(async () => {
       vi.clearAllMocks();
 
-      vi.mocked(getEnvironmentContext).mockResolvedValue([
-        { text: 'Env Context' },
-      ]);
       vi.mocked(createContentGenerator).mockResolvedValue({
         getGenerativeModel: vi.fn(),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
