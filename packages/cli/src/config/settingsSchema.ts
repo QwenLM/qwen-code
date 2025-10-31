@@ -1072,15 +1072,34 @@ const SETTINGS_SCHEMA = {
       },
       tavilyApiKey: {
         type: 'string',
-        label: 'Tavily API Key',
+        label: 'Tavily API Key (Deprecated)',
         category: 'Advanced',
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'The API key for the Tavily API. Required to enable the web_search tool functionality.',
+          '⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.',
         showInDialog: false,
       },
     },
+  },
+
+  webSearch: {
+    type: 'object',
+    label: 'Web Search',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as
+      | {
+          provider: Array<{
+            type: 'tavily' | 'google' | 'dashscope';
+            apiKey?: string;
+            searchEngineId?: string;
+          }>;
+          default: string;
+        }
+      | undefined,
+    description: 'Configuration for web search providers.',
+    showInDialog: false,
   },
 
   experimental: {
