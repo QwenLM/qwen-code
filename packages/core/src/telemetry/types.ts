@@ -46,7 +46,7 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   mcp_servers_count: number;
   mcp_tools_count?: number;
   mcp_tools?: string;
-  output_format: OutputFormat;
+  output_format: OutputFormat | 'stream-json';
 
   constructor(config: Config, toolRegistry?: ToolRegistry) {
     const generatorConfig = config.getContentGeneratorConfig();

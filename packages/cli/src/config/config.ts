@@ -7,7 +7,6 @@
 import type {
   FileFilteringOptions,
   MCPServerConfig,
-  OutputFormat,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import {
@@ -24,6 +23,8 @@ import {
   WriteFileTool,
   resolveTelemetrySettings,
   FatalConfigError,
+  InputFormat,
+  OutputFormat,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import yargs, { type Argv } from 'yargs';
@@ -119,7 +120,24 @@ export interface CliArgs {
   screenReader: boolean | undefined;
   vlmSwitchMode: string | undefined;
   useSmartEdit: boolean | undefined;
+  inputFormat?: string | undefined;
   outputFormat: string | undefined;
+  includePartialMessages?: boolean;
+}
+
+function normalizeOutputFormat(
+  format: string | OutputFormat | undefined,
+): OutputFormat | undefined {
+  if (!format) {
+    return undefined;
+  }
+  if (format === 'stream-json') {
+    return OutputFormat.STREAM_JSON;
+  }
+  if (format === 'json' || format === OutputFormat.JSON) {
+    return OutputFormat.JSON;
+  }
+  return OutputFormat.TEXT;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -336,11 +354,23 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). Overrides settings files.',
           default: process.env['VLM_SWITCH_MODE'],
         })
+        .option('input-format', {
+          type: 'string',
+          choices: ['text', 'stream-json'],
+          description: 'The format consumed from standard input.',
+          default: 'text',
+        })
         .option('output-format', {
           alias: 'o',
           type: 'string',
           description: 'The format of the CLI output.',
-          choices: ['text', 'json'],
+          choices: ['text', 'json', 'stream-json'],
+        })
+        .option('include-partial-messages', {
+          type: 'boolean',
+          description:
+            'Include partial assistant messages when using stream-json output.',
+          default: false,
         })
         .deprecateOption(
           'show-memory-usage',
@@ -384,6 +414,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           }
           if (argv['yolo'] && argv['approvalMode']) {
             return 'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.';
+          }
+          if (
+            argv['includePartialMessages'] &&
+            argv['outputFormat'] !== 'stream-json'
+          ) {
+            return '--include-partial-messages requires --output-format stream-json';
           }
           return true;
         }),
@@ -565,6 +601,22 @@ export async function loadCliConfig(
 
   let mcpServers = mergeMcpServers(settings, activeExtensions);
   const question = argv.promptInteractive || argv.prompt || '';
+  const inputFormat: InputFormat =
+    (argv.inputFormat as InputFormat | undefined) ?? InputFormat.TEXT;
+  const argvOutputFormat = normalizeOutputFormat(
+    argv.outputFormat as string | OutputFormat | undefined,
+  );
+  const settingsOutputFormat = normalizeOutputFormat(settings.output?.format);
+  const outputFormat =
+    argvOutputFormat ?? settingsOutputFormat ?? OutputFormat.TEXT;
+  const outputSettingsFormat: OutputFormat =
+    outputFormat === OutputFormat.STREAM_JSON
+      ? settingsOutputFormat &&
+        settingsOutputFormat !== OutputFormat.STREAM_JSON
+        ? settingsOutputFormat
+        : OutputFormat.TEXT
+      : (outputFormat as OutputFormat);
+  const includePartialMessages = Boolean(argv.includePartialMessages);
 
   // Determine approval mode with backward compatibility
   let approvalMode: ApprovalMode;
@@ -609,8 +661,10 @@ export async function loadCliConfig(
   // Interactive mode: explicit -i flag or (TTY + no args + no -p flag)
   const hasQuery = !!argv.query;
   const interactive =
-    !!argv.promptInteractive ||
-    (process.stdin.isTTY && !hasQuery && !argv.prompt);
+    inputFormat === 'stream-json'
+      ? false
+      : !!argv.promptInteractive ||
+        (process.stdin.isTTY && !hasQuery && !argv.prompt);
   // In non-interactive mode, exclude tools that require a prompt.
   const extraExcludes: string[] = [];
   if (!interactive && !argv.experimentalAcp) {
@@ -732,6 +786,9 @@ export async function loadCliConfig(
     blockedMcpServers,
     noBrowser: !!process.env['NO_BROWSER'],
     authType: settings.security?.auth?.selectedType,
+    inputFormat,
+    outputFormat,
+    includePartialMessages,
     generationConfig: {
       ...(settings.model?.generationConfig || {}),
       model: resolvedModel,
@@ -772,7 +829,7 @@ export async function loadCliConfig(
     eventEmitter: appEvents,
     useSmartEdit: argv.useSmartEdit ?? settings.useSmartEdit,
     output: {
-      format: (argv.outputFormat ?? settings.output?.format) as OutputFormat,
+      format: outputSettingsFormat,
     },
   });
 }

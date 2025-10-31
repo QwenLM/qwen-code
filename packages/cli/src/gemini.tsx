@@ -4,58 +4,59 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
-import { render } from 'ink';
-import { AppContainer } from './ui/AppContainer.js';
-import { loadCliConfig, parseArguments } from './config/config.js';
-import * as cliConfig from './config/config.js';
-import { readStdin } from './utils/readStdin.js';
-import { basename } from 'node:path';
-import v8 from 'node:v8';
-import os from 'node:os';
-import dns from 'node:dns';
-import { randomUUID } from 'node:crypto';
-import { start_sandbox } from './utils/sandbox.js';
-import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import { loadSettings, migrateDeprecatedSettings } from './config/settings.js';
-import { themeManager } from './ui/themes/theme-manager.js';
-import { getStartupWarnings } from './utils/startupWarnings.js';
-import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
-import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
-import { runNonInteractive } from './nonInteractiveCli.js';
-import { ExtensionStorage, loadExtensions } from './config/extension.js';
-import {
-  cleanupCheckpoints,
-  registerCleanup,
-  runExitCleanup,
-} from './utils/cleanup.js';
-import { getCliVersion } from './utils/version.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   getOauthClient,
   logUserPrompt,
 } from '@qwen-code/qwen-code-core';
+import { render } from 'ink';
+import { randomUUID } from 'node:crypto';
+import dns from 'node:dns';
+import os from 'node:os';
+import { basename } from 'node:path';
+import v8 from 'node:v8';
+import React from 'react';
+import { validateAuthMethod } from './config/auth.js';
+import * as cliConfig from './config/config.js';
+import { loadCliConfig, parseArguments } from './config/config.js';
+import { ExtensionStorage, loadExtensions } from './config/extension.js';
+import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
+import { loadSettings, migrateDeprecatedSettings } from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
 } from './core/initializer.js';
-import { validateAuthMethod } from './config/auth.js';
+import { runNonInteractive } from './nonInteractiveCli.js';
+import { runStreamJsonSession } from './streamJson/session.js';
+import { AppContainer } from './ui/AppContainer.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
+import { KeypressProvider } from './ui/contexts/KeypressContext.js';
+import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
+import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
+import { themeManager } from './ui/themes/theme-manager.js';
+import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
-import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
-import { computeWindowTitle } from './utils/windowTitle.js';
-import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
-import { VimModeProvider } from './ui/contexts/VimModeContext.js';
-import { KeypressProvider } from './ui/contexts/KeypressContext.js';
-import { appEvents, AppEvent } from './utils/events.js';
-import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import {
-  relaunchOnExitCode,
+  cleanupCheckpoints,
+  registerCleanup,
+  runExitCleanup,
+} from './utils/cleanup.js';
+import { AppEvent, appEvents } from './utils/events.js';
+import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
+import { readStdin } from './utils/readStdin.js';
+import {
   relaunchAppInChildProcess,
+  relaunchOnExitCode,
 } from './utils/relaunch.js';
+import { start_sandbox } from './utils/sandbox.js';
+import { getStartupWarnings } from './utils/startupWarnings.js';
+import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getCliVersion } from './utils/version.js';
+import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 
 export function validateDnsResolutionOrder(
@@ -106,9 +107,9 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   return [];
 }
 
-import { runZedIntegration } from './zed-integration/zedIntegration.js';
-import { loadSandboxConfig } from './config/sandboxConfig.js';
 import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
+import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { runZedIntegration } from './zed-integration/zedIntegration.js';
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -418,6 +419,29 @@ export async function main() {
         input = `${stdinData}\n\n${input}`;
       }
     }
+    const inputFormat =
+      typeof config.getInputFormat === 'function'
+        ? config.getInputFormat()
+        : 'text';
+
+    if (inputFormat === 'stream-json') {
+      const trimmedInput = (input ?? '').trim();
+      const nonInteractiveConfig = await validateNonInteractiveAuth(
+        settings.merged.security?.auth?.selectedType,
+        settings.merged.security?.auth?.useExternal,
+        config,
+        settings,
+      );
+
+      await runStreamJsonSession(
+        nonInteractiveConfig,
+        settings,
+        trimmedInput.length > 0 ? trimmedInput : undefined,
+      );
+      await runExitCleanup();
+      process.exit(0);
+    }
+
     if (!input) {
       console.error(
         `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,

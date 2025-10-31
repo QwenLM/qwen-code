@@ -22,6 +22,7 @@ import {
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi } from 'vitest';
+import type { StreamJsonUserEnvelope } from './streamJson/types.js';
 import type { LoadedSettings } from './config/settings.js';
 
 // Mock core modules
@@ -68,12 +69,13 @@ describe('runNonInteractive', () => {
   let mockGeminiClient: {
     sendMessageStream: vi.Mock;
     getChatRecordingService: vi.Mock;
+    getChat: vi.Mock;
   };
+  let mockGetDebugResponses: vi.Mock;
 
   beforeEach(async () => {
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
-
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
     });
@@ -91,6 +93,8 @@ describe('runNonInteractive', () => {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
     } as unknown as ToolRegistry;
 
+    mockGetDebugResponses = vi.fn(() => []);
+
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
       getChatRecordingService: vi.fn(() => ({
@@ -99,14 +103,18 @@ describe('runNonInteractive', () => {
         recordMessageTokens: vi.fn(),
         recordToolCalls: vi.fn(),
       })),
+      getChat: vi.fn(() => ({
+        getDebugResponses: mockGetDebugResponses,
+      })),
     };
+
+    let currentModel = 'test-model';
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getMaxSessionTurns: vi.fn().mockReturnValue(10),
-      getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/project/.gemini/tmp'),
@@ -118,6 +126,12 @@ describe('runNonInteractive', () => {
       getOutputFormat: vi.fn().mockReturnValue('text'),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
+      getIncludePartialMessages: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getModel: vi.fn(() => currentModel),
+      setModel: vi.fn(async (model: string) => {
+        currentModel = model;
+      }),
     } as unknown as Config;
 
     mockSettings = {
@@ -872,5 +886,178 @@ describe('runNonInteractive', () => {
     expect(mockAction).toHaveBeenCalledWith(expect.any(Object), 'arg1 arg2');
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Acknowledged');
+  });
+
+  it('should emit stream-json envelopes when output format is stream-json', async () => {
+    (mockConfig.getOutputFormat as vi.Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as vi.Mock).mockReturnValue(false);
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const events: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Hello stream' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 4 } },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Stream input',
+      'prompt-stream',
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+
+    expect(envelopes[0]).toMatchObject({
+      type: 'user',
+      message: { content: 'Stream input' },
+    });
+    const assistantEnvelope = envelopes.find((env) => env.type === 'assistant');
+    expect(assistantEnvelope).toBeTruthy();
+    expect(assistantEnvelope?.message?.content?.[0]).toMatchObject({
+      type: 'text',
+      text: 'Hello stream',
+    });
+    const resultEnvelope = envelopes.at(-1);
+    expect(resultEnvelope).toMatchObject({
+      type: 'result',
+      is_error: false,
+      num_turns: 1,
+    });
+  });
+
+  it('should emit a single user envelope when userEnvelope is provided', async () => {
+    (mockConfig.getOutputFormat as vi.Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as vi.Mock).mockReturnValue(false);
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Handled once' },
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 2 } },
+        },
+      ]),
+    );
+
+    const userEnvelope = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: '来自 envelope 的消息',
+          },
+        ],
+      },
+    } as unknown as StreamJsonUserEnvelope;
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'ignored input',
+      'prompt-envelope',
+      {
+        userEnvelope,
+      },
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+
+    const userEnvelopes = envelopes.filter((env) => env.type === 'user');
+    expect(userEnvelopes).toHaveLength(0);
+  });
+
+  it('should include usage metadata and API duration in stream-json result', async () => {
+    (mockConfig.getOutputFormat as vi.Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as vi.Mock).mockReturnValue(false);
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const usageMetadata = {
+      promptTokenCount: 11,
+      candidatesTokenCount: 5,
+      totalTokenCount: 16,
+      cachedContentTokenCount: 3,
+    };
+    mockGetDebugResponses.mockReturnValue([{ usageMetadata }]);
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    let current = 0;
+    nowSpy.mockImplementation(() => {
+      current += 500;
+      return current;
+    });
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'All done' },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'usage test',
+      'prompt-usage',
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    const resultEnvelope = envelopes.at(-1);
+    expect(resultEnvelope?.type).toBe('result');
+    expect(resultEnvelope?.duration_api_ms).toBeGreaterThan(0);
+    expect(resultEnvelope?.usage).toEqual({
+      input_tokens: 11,
+      output_tokens: 5,
+      total_tokens: 16,
+      cache_read_input_tokens: 3,
+    });
+
+    nowSpy.mockRestore();
   });
 });
