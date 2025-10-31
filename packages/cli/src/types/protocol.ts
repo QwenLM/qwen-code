@@ -1,6 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 /**
+ * Annotation for attaching metadata to content blocks
+ */
+export interface Annotation {
+  type: string;
+  value: string;
+}
+
+/**
  * Usage information types
  */
 export interface Usage {
@@ -37,7 +45,7 @@ export interface ModelUsage {
 export interface CLIPermissionDenial {
   tool_name: string;
   tool_use_id: string;
-  tool_input: Record<string, any>;
+  tool_input: unknown;
 }
 
 /**
@@ -46,26 +54,30 @@ export interface CLIPermissionDenial {
 export interface TextBlock {
   type: 'text';
   text: string;
+  annotations?: Annotation[];
 }
 
 export interface ThinkingBlock {
   type: 'thinking';
   thinking: string;
-  signature: string;
+  signature?: string;
+  annotations?: Annotation[];
 }
 
 export interface ToolUseBlock {
   type: 'tool_use';
   id: string;
   name: string;
-  input: Record<string, any>;
+  input: unknown;
+  annotations?: Annotation[];
 }
 
 export interface ToolResultBlock {
   type: 'tool_result';
   tool_use_id: string;
-  content: string | Array<Record<string, any>> | null;
+  content?: string | ContentBlock[];
   is_error?: boolean;
+  annotations?: Annotation[];
 }
 
 export type ContentBlock =
@@ -79,7 +91,7 @@ export type ContentBlock =
  */
 export interface APIUserMessage {
   role: 'user';
-  content: string | ToolResultBlock[];
+  content: string | ContentBlock[];
 }
 
 export interface APIAssistantMessage {
@@ -101,6 +113,7 @@ export interface CLIUserMessage {
   session_id: string;
   message: APIUserMessage;
   parent_tool_use_id: string | null;
+  options?: Record<string, unknown>;
 }
 
 export interface CLIAssistantMessage {
@@ -151,6 +164,7 @@ export interface CLIResultMessageSuccess {
   usage: ExtendedUsage;
   modelUsage?: Record<string, ModelUsage>;
   permission_denials: CLIPermissionDenial[];
+  [key: string]: unknown;
 }
 
 export interface CLIResultMessageError {
@@ -166,6 +180,12 @@ export interface CLIResultMessageError {
   usage: ExtendedUsage;
   modelUsage?: Record<string, ModelUsage>;
   permission_denials: CLIPermissionDenial[];
+  error?: {
+    type?: string;
+    message: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
 }
 
 export type CLIResultMessage = CLIResultMessageSuccess | CLIResultMessageError;
@@ -232,7 +252,7 @@ export interface PermissionSuggestion {
   type: 'allow' | 'deny' | 'modify';
   label: string;
   description?: string;
-  modifiedInput?: Record<string, any>;
+  modifiedInput?: unknown;
 }
 
 /**
@@ -261,7 +281,7 @@ export interface CLIControlPermissionRequest {
   subtype: 'can_use_tool';
   tool_name: string;
   tool_use_id: string;
-  input: Record<string, any>;
+  input: unknown;
   permission_suggestions: PermissionSuggestion[] | null;
   blocked_path: string | null;
 }
@@ -280,7 +300,7 @@ export interface CLIControlSetPermissionModeRequest {
 export interface CLIHookCallbackRequest {
   subtype: 'hook_callback';
   callback_id: string;
-  input: any;
+  input: unknown;
   tool_use_id: string | null;
 }
 
@@ -331,19 +351,19 @@ export interface CLIControlRequest {
 export interface PermissionApproval {
   allowed: boolean;
   reason?: string;
-  modifiedInput?: Record<string, any>;
+  modifiedInput?: unknown;
 }
 
 export interface ControlResponse {
   subtype: 'success';
   request_id: string;
-  response: Record<string, any> | null;
+  response: unknown;
 }
 
 export interface ControlErrorResponse {
   subtype: 'error';
   request_id: string;
-  error: string;
+  error: string | { message: string; [key: string]: unknown };
 }
 
 export interface CLIControlResponse {

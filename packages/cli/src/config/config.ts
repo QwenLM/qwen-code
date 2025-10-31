@@ -131,7 +131,7 @@ function normalizeOutputFormat(
   if (!format) {
     return undefined;
   }
-  if (format === 'stream-json') {
+  if (format === OutputFormat.STREAM_JSON) {
     return OutputFormat.STREAM_JSON;
   }
   if (format === 'json' || format === OutputFormat.JSON) {
@@ -417,7 +417,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           }
           if (
             argv['includePartialMessages'] &&
-            argv['outputFormat'] !== 'stream-json'
+            argv['outputFormat'] !== OutputFormat.STREAM_JSON
           ) {
             return '--include-partial-messages requires --output-format stream-json';
           }
@@ -661,7 +661,7 @@ export async function loadCliConfig(
   // Interactive mode: explicit -i flag or (TTY + no args + no -p flag)
   const hasQuery = !!argv.query;
   const interactive =
-    inputFormat === 'stream-json'
+    inputFormat === InputFormat.STREAM_JSON
       ? false
       : !!argv.promptInteractive ||
         (process.stdin.isTTY && !hasQuery && !argv.prompt);

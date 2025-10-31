@@ -171,7 +171,8 @@ export async function runNonInteractive(
       debugMode: config.getDebugMode(),
     });
 
-    const isStreamJsonOutput = config.getOutputFormat() === 'stream-json';
+    const isStreamJsonOutput =
+      config.getOutputFormat() === OutputFormat.STREAM_JSON;
     const streamJsonContext = options.streamJson;
     const streamJsonWriter = isStreamJsonOutput
       ? (streamJsonContext?.writer ??

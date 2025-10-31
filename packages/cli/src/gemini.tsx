@@ -8,6 +8,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   getOauthClient,
+  InputFormat,
   logUserPrompt,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
@@ -418,16 +419,17 @@ export async function main() {
     const inputFormat =
       typeof config.getInputFormat === 'function'
         ? config.getInputFormat()
-        : 'text';
+        : InputFormat.TEXT;
 
-    if (inputFormat === 'stream-json') {
+    const nonInteractiveConfig = await validateNonInteractiveAuth(
+      settings.merged.security?.auth?.selectedType,
+      settings.merged.security?.auth?.useExternal,
+      config,
+      settings,
+    );
+
+    if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
-      const nonInteractiveConfig = await validateNonInteractiveAuth(
-        settings.merged.security?.auth?.selectedType,
-        settings.merged.security?.auth?.useExternal,
-        config,
-        settings,
-      );
 
       await runStreamJsonSession(
         nonInteractiveConfig,
@@ -454,13 +456,6 @@ export async function main() {
       auth_type: config.getContentGeneratorConfig()?.authType,
       prompt_length: input.length,
     });
-
-    const nonInteractiveConfig = await validateNonInteractiveAuth(
-      settings.merged.security?.auth?.selectedType,
-      settings.merged.security?.auth?.useExternal,
-      config,
-      settings,
-    );
 
     if (config.getDebugMode()) {
       console.log('Session ID: %s', sessionId);

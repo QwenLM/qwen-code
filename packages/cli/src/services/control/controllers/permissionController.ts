@@ -18,7 +18,10 @@ import type {
   ToolCallRequestInfo,
   WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
-import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  InputFormat,
+  ToolConfirmationOutcome,
+} from '@qwen-code/qwen-code-core';
 import type {
   CLIControlPermissionRequest,
   CLIControlSetPermissionModeRequest,
@@ -409,7 +412,7 @@ export class PermissionController extends BaseController {
   ): Promise<void> {
     try {
       const inputFormat = this.context.config.getInputFormat?.();
-      const isStreamJsonMode = inputFormat === 'stream-json';
+      const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
 
       if (!isStreamJsonMode) {
         // No SDK available - use local permission check
