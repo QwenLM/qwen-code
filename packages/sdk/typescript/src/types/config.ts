@@ -112,8 +112,8 @@ export type CreateQueryOptions = {
   singleTurn?: boolean;
 
   // Advanced options
-  /** AbortSignal for cancellation support */
-  signal?: AbortSignal;
+  /** AbortController for cancellation support */
+  abortController?: AbortController;
   /** Enable debug output (inherits stderr) */
   debug?: boolean;
   /** Callback for stderr output */
@@ -136,8 +136,8 @@ export type TransportOptions = {
   mcpServers?: Record<string, ExternalMcpServerConfig>;
   /** Environment variables */
   env?: Record<string, string>;
-  /** AbortSignal for cancellation support */
-  signal?: AbortSignal;
+  /** AbortController for cancellation support */
+  abortController?: AbortController;
   /** Enable debug output */
   debug?: boolean;
   /** Callback for stderr output */

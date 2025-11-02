@@ -7,8 +7,11 @@
 /**
  * Control Dispatcher
  *
- * Routes control requests between SDK and CLI to appropriate controllers.
- * Manages pending request registry and handles cancellation/cleanup.
+ * Layer 2 of the control plane architecture. Routes control requests between
+ * SDK and CLI to appropriate controllers, manages pending request registries,
+ * and handles cancellation/cleanup. Application code MUST NOT depend on
+ * controller instances exposed by this class; instead, use ControlService,
+ * which wraps these controllers with a stable programmatic API.
  *
  * Controllers:
  * - SystemController: initialize, interrupt, set_model, supported_commands
@@ -23,15 +26,15 @@
 import type { IControlContext } from './ControlContext.js';
 import type { IPendingRequestRegistry } from './controllers/baseController.js';
 import { SystemController } from './controllers/systemController.js';
-import { PermissionController } from './controllers/permissionController.js';
-import { MCPController } from './controllers/mcpController.js';
-import { HookController } from './controllers/hookController.js';
+// import { PermissionController } from './controllers/permissionController.js';
+// import { MCPController } from './controllers/mcpController.js';
+// import { HookController } from './controllers/hookController.js';
 import type {
   CLIControlRequest,
   CLIControlResponse,
   ControlResponse,
   ControlRequestPayload,
-} from '../../types/protocol.js';
+} from '../types.js';
 
 /**
  * Tracks an incoming request from SDK awaiting CLI response
@@ -61,9 +64,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
   // Make controllers publicly accessible
   readonly systemController: SystemController;
-  readonly permissionController: PermissionController;
-  readonly mcpController: MCPController;
-  readonly hookController: HookController;
+  // readonly permissionController: PermissionController;
+  // readonly mcpController: MCPController;
+  // readonly hookController: HookController;
 
   // Central pending request registries
   private pendingIncomingRequests: Map<string, PendingIncomingRequest> =
@@ -80,13 +83,13 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       this,
       'SystemController',
     );
-    this.permissionController = new PermissionController(
-      context,
-      this,
-      'PermissionController',
-    );
-    this.mcpController = new MCPController(context, this, 'MCPController');
-    this.hookController = new HookController(context, this, 'HookController');
+    // this.permissionController = new PermissionController(
+    //   context,
+    //   this,
+    //   'PermissionController',
+    // );
+    // this.mcpController = new MCPController(context, this, 'MCPController');
+    // this.hookController = new HookController(context, this, 'HookController');
 
     // Listen for main abort signal
     this.context.abortSignal.addEventListener('abort', () => {
@@ -107,11 +110,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
       // Send success response
       this.sendSuccessResponse(request_id, response);
-
-      // Special handling for initialize: send SystemMessage after success response
-      if (payload.subtype === 'initialize') {
-        this.systemController.sendSystemMessage();
-      }
     } catch (error) {
       // Send error response
       const errorMessage =
@@ -145,7 +143,11 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     if (responsePayload.subtype === 'success') {
       pending.resolve(responsePayload);
     } else {
-      pending.reject(new Error(responsePayload.error));
+      const errorMessage =
+        typeof responsePayload.error === 'string'
+          ? responsePayload.error
+          : (responsePayload.error?.message ?? 'Unknown error');
+      pending.reject(new Error(errorMessage));
     }
   }
 
@@ -228,9 +230,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
     // Cleanup controllers (MCP controller will close all clients)
     this.systemController.cleanup();
-    this.permissionController.cleanup();
-    this.mcpController.cleanup();
-    this.hookController.cleanup();
+    // this.permissionController.cleanup();
+    // this.mcpController.cleanup();
+    // this.hookController.cleanup();
   }
 
   /**
@@ -300,16 +302,16 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       case 'supported_commands':
         return this.systemController;
 
-      case 'can_use_tool':
-      case 'set_permission_mode':
-        return this.permissionController;
+      // case 'can_use_tool':
+      // case 'set_permission_mode':
+      //   return this.permissionController;
 
-      case 'mcp_message':
-      case 'mcp_server_status':
-        return this.mcpController;
+      // case 'mcp_message':
+      // case 'mcp_server_status':
+      //   return this.mcpController;
 
-      case 'hook_callback':
-        return this.hookController;
+      // case 'hook_callback':
+      //   return this.hookController;
 
       default:
         throw new Error(`Unknown control request subtype: ${subtype}`);

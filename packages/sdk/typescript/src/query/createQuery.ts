@@ -11,7 +11,7 @@ import type {
   ExternalMcpServerConfig,
 } from '../types/config.js';
 import { ProcessTransport } from '../transport/ProcessTransport.js';
-import { resolveCliPath, parseExecutableSpec } from '../utils/cliPath.js';
+import { parseExecutableSpec } from '../utils/cliPath.js';
 import { Query } from './Query.js';
 
 /**
@@ -29,7 +29,7 @@ export type QueryOptions = {
     string,
     { connect: (transport: unknown) => Promise<void> }
   >;
-  signal?: AbortSignal;
+  abortController?: AbortController;
   debug?: boolean;
   stderr?: (message: string) => void;
 };
@@ -60,8 +60,8 @@ export function query({
   prompt: string | AsyncIterable<CLIUserMessage>;
   options?: QueryOptions;
 }): Query {
-  // Validate options
-  validateOptions(options);
+  // Validate options and obtain normalized executable metadata
+  const parsedExecutable = validateOptions(options);
 
   // Determine if this is a single-turn or multi-turn query
   // Single-turn: string prompt (simple Q&A)
@@ -74,13 +74,14 @@ export function query({
     singleTurn: isSingleTurn,
   };
 
-  // Resolve CLI path (auto-detect if not provided)
-  const pathToQwenExecutable = resolveCliPath(options.pathToQwenExecutable);
+  // Resolve CLI specification while preserving explicit runtime directives
+  const pathToQwenExecutable =
+    options.pathToQwenExecutable ?? parsedExecutable.executablePath;
 
-  // Pass signal to transport (it will handle AbortController internally)
-  const signal = options.signal;
+  // Use provided abortController or create a new one
+  const abortController = options.abortController ?? new AbortController();
 
-  // Create transport
+  // Create transport with abortController
   const transport = new ProcessTransport({
     pathToQwenExecutable,
     cwd: options.cwd,
@@ -88,13 +89,19 @@ export function query({
     permissionMode: options.permissionMode,
     mcpServers: options.mcpServers,
     env: options.env,
-    signal,
+    abortController,
     debug: options.debug,
     stderr: options.stderr,
   });
 
+  // Build query options with abortController
+  const finalQueryOptions: CreateQueryOptions = {
+    ...queryOptions,
+    abortController,
+  };
+
   // Create Query
-  const queryInstance = new Query(transport, queryOptions);
+  const queryInstance = new Query(transport, finalQueryOptions);
 
   // Handle prompt based on type
   if (isSingleTurn) {
@@ -110,10 +117,8 @@ export function query({
       parent_tool_use_id: null,
     };
 
-    // Send message after query is initialized
     (async () => {
       try {
-        // Wait a bit for initialization to complete
         await new Promise((resolve) => setTimeout(resolve, 0));
         transport.write(serializeJsonLine(message));
       } catch (err) {
@@ -139,9 +144,20 @@ export function query({
 export const createQuery = query;
 
 /**
- * Validates query configuration options.
+ * Validate query configuration options and normalize CLI executable details.
+ *
+ * Performs strict validation for each supported option, including
+ * permission mode, callbacks, AbortController usage, and executable spec.
+ * Returns the parsed executable description so callers can retain
+ * explicit runtime directives (e.g., `bun:/path/to/cli.js`) while still
+ * benefiting from early validation and auto-detection fallbacks when the
+ * specification is omitted.
  */
-function validateOptions(options: QueryOptions): void {
+function validateOptions(
+  options: QueryOptions,
+): ReturnType<typeof parseExecutableSpec> {
+  let parsedExecutable: ReturnType<typeof parseExecutableSpec>;
+
   // Validate permission mode if provided
   if (options.permissionMode) {
     const validModes = ['default', 'plan', 'auto-edit', 'yolo'];
@@ -157,14 +173,17 @@ function validateOptions(options: QueryOptions): void {
     throw new Error('canUseTool must be a function');
   }
 
-  // Validate signal is AbortSignal if provided
-  if (options.signal && !(options.signal instanceof AbortSignal)) {
-    throw new Error('signal must be an AbortSignal instance');
+  // Validate abortController is AbortController if provided
+  if (
+    options.abortController &&
+    !(options.abortController instanceof AbortController)
+  ) {
+    throw new Error('abortController must be an AbortController instance');
   }
 
   // Validate executable path early to provide clear error messages
   try {
-    parseExecutableSpec(options.pathToQwenExecutable);
+    parsedExecutable = parseExecutableSpec(options.pathToQwenExecutable);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid pathToQwenExecutable: ${errorMessage}`);
@@ -182,4 +201,6 @@ function validateOptions(options: QueryOptions): void {
       );
     }
   }
+
+  return parsedExecutable;
 }

@@ -34,16 +34,16 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       async () => {
         const controller = new AbortController();
 
-        // Abort after 2 seconds
+        // Abort after 5 seconds
         setTimeout(() => {
           controller.abort();
-        }, 2000);
+        }, 5000);
 
         const q = query({
           prompt: 'Write a very long story about TypeScript programming',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });
@@ -84,13 +84,16 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           prompt: 'Write a very long essay',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
-            debug: false,
+            abortController: controller,
+            debug: true,
           },
         });
 
         // Abort immediately
-        setTimeout(() => controller.abort(), 100);
+        setTimeout(() => {
+          controller.abort();
+          console.log('Aborted!');
+        }, 300);
 
         try {
           for await (const _message of q) {
@@ -266,7 +269,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           prompt: 'Write a long story',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });
@@ -369,7 +372,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           prompt: 'Write a very long essay about programming',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });
@@ -404,7 +407,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           prompt: 'Count to 100',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });
@@ -464,7 +467,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           prompt: 'Hello',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });

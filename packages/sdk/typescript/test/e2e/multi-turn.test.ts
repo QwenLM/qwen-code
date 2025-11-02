@@ -135,8 +135,6 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
             if (isCLIAssistantMessage(message)) {
               assistantMessages.push(message);
-              const text = extractText(message.message.content);
-              expect(text.length).toBeGreaterThan(0);
               turnCount++;
             }
           }

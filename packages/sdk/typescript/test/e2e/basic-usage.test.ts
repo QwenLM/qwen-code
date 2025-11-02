@@ -63,56 +63,50 @@ function getMessageType(message: CLIMessage | ControlMessage): string {
 
 describe('Basic Usage (E2E)', () => {
   describe('Message Type Recognition', () => {
-    it(
-      'should correctly identify message types using type guards',
-      async () => {
-        const q = query({
-          prompt:
-            'What files are in the current directory? List only the top-level files and folders.',
-          options: {
-            ...SHARED_TEST_OPTIONS,
-            cwd: process.cwd(),
-            debug: false,
-          },
-        });
+    it('should correctly identify message types using type guards', async () => {
+      const q = query({
+        prompt:
+          'What files are in the current directory? List only the top-level files and folders.',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: process.cwd(),
+          debug: true,
+        },
+      });
 
-        const messages: CLIMessage[] = [];
-        const messageTypes: string[] = [];
+      const messages: CLIMessage[] = [];
+      const messageTypes: string[] = [];
 
-        try {
-          for await (const message of q) {
-            messages.push(message);
-            const messageType = getMessageType(message);
-            messageTypes.push(messageType);
+      try {
+        for await (const message of q) {
+          messages.push(message);
+          const messageType = getMessageType(message);
+          messageTypes.push(messageType);
 
-            if (isCLIResultMessage(message)) {
-              break;
-            }
+          if (isCLIResultMessage(message)) {
+            break;
           }
-
-          expect(messages.length).toBeGreaterThan(0);
-          expect(messageTypes.length).toBe(messages.length);
-
-          // Should have at least assistant and result messages
-          expect(messageTypes.some((type) => type.includes('ASSISTANT'))).toBe(
-            true,
-          );
-          expect(messageTypes.some((type) => type.includes('RESULT'))).toBe(
-            true,
-          );
-
-          // Verify type guards work correctly
-          const assistantMessages = messages.filter(isCLIAssistantMessage);
-          const resultMessages = messages.filter(isCLIResultMessage);
-
-          expect(assistantMessages.length).toBeGreaterThan(0);
-          expect(resultMessages.length).toBeGreaterThan(0);
-        } finally {
-          await q.close();
         }
-      },
-      TEST_TIMEOUT,
-    );
+
+        expect(messages.length).toBeGreaterThan(0);
+        expect(messageTypes.length).toBe(messages.length);
+
+        // Should have at least assistant and result messages
+        expect(messageTypes.some((type) => type.includes('ASSISTANT'))).toBe(
+          true,
+        );
+        expect(messageTypes.some((type) => type.includes('RESULT'))).toBe(true);
+
+        // Verify type guards work correctly
+        const assistantMessages = messages.filter(isCLIAssistantMessage);
+        const resultMessages = messages.filter(isCLIResultMessage);
+
+        expect(assistantMessages.length).toBeGreaterThan(0);
+        expect(resultMessages.length).toBeGreaterThan(0);
+      } finally {
+        await q.close();
+      }
+    });
 
     it(
       'should handle message content extraction',
@@ -121,7 +115,7 @@ describe('Basic Usage (E2E)', () => {
           prompt: 'Say hello and explain what you are',
           options: {
             ...SHARED_TEST_OPTIONS,
-            debug: false,
+            debug: true,
           },
         });
 

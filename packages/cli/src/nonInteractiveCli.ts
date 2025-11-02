@@ -15,16 +15,14 @@ import {
   FatalInputError,
   promptIdContext,
   OutputFormat,
-  JsonFormatter,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
-import { StreamJsonWriter } from './streamJson/writer.js';
-import type {
-  StreamJsonUsage,
-  StreamJsonUserEnvelope,
-} from './streamJson/types.js';
-import type { StreamJsonController } from './streamJson/controller.js';
+import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
+import type { JsonOutputAdapterInterface } from './nonInteractive/io/JsonOutputAdapter.js';
+import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
+import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
+import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
@@ -35,129 +33,32 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
+import {
+  normalizePartList,
+  extractPartsFromUserMessage,
+  extractUsageFromGeminiClient,
+  calculateApproximateCost,
+  buildSystemMessage,
+} from './utils/nonInteractiveHelpers.js';
 
+/**
+ * Provides optional overrides for `runNonInteractive` execution.
+ *
+ * @param abortController - Optional abort controller for cancellation.
+ * @param adapter - Optional JSON output adapter for structured output formats.
+ * @param userMessage - Optional CLI user message payload for preformatted input.
+ * @param controlService - Optional control service for future permission handling.
+ */
 export interface RunNonInteractiveOptions {
   abortController?: AbortController;
-  streamJson?: {
-    writer?: StreamJsonWriter;
-    controller?: StreamJsonController;
-  };
-  userEnvelope?: StreamJsonUserEnvelope;
+  adapter?: JsonOutputAdapterInterface;
+  userMessage?: CLIUserMessage;
+  controlService?: ControlService;
 }
 
-function normalizePartList(parts: PartListUnion | null): Part[] {
-  if (!parts) {
-    return [];
-  }
-
-  if (typeof parts === 'string') {
-    return [{ text: parts }];
-  }
-
-  if (Array.isArray(parts)) {
-    return parts.map((part) =>
-      typeof part === 'string' ? { text: part } : (part as Part),
-    );
-  }
-
-  return [parts as Part];
-}
-
-function extractPartsFromEnvelope(
-  envelope: StreamJsonUserEnvelope | undefined,
-): PartListUnion | null {
-  if (!envelope) {
-    return null;
-  }
-
-  const content = envelope.message?.content;
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  if (Array.isArray(content)) {
-    const parts: Part[] = [];
-    for (const block of content) {
-      if (!block || typeof block !== 'object' || !('type' in block)) {
-        continue;
-      }
-      if (block.type === 'text' && block.text) {
-        parts.push({ text: block.text });
-      } else {
-        parts.push({ text: JSON.stringify(block) });
-      }
-    }
-    return parts.length > 0 ? parts : null;
-  }
-
-  return null;
-}
-
-function extractUsageFromGeminiClient(
-  geminiClient: unknown,
-): StreamJsonUsage | undefined {
-  if (
-    !geminiClient ||
-    typeof geminiClient !== 'object' ||
-    typeof (geminiClient as { getChat?: unknown }).getChat !== 'function'
-  ) {
-    return undefined;
-  }
-
-  try {
-    const chat = (geminiClient as { getChat: () => unknown }).getChat();
-    if (
-      !chat ||
-      typeof chat !== 'object' ||
-      typeof (chat as { getDebugResponses?: unknown }).getDebugResponses !==
-        'function'
-    ) {
-      return undefined;
-    }
-
-    const responses = (
-      chat as {
-        getDebugResponses: () => Array<Record<string, unknown>>;
-      }
-    ).getDebugResponses();
-    for (let i = responses.length - 1; i >= 0; i--) {
-      const metadata = responses[i]?.['usageMetadata'] as
-        | Record<string, unknown>
-        | undefined;
-      if (metadata) {
-        const promptTokens = metadata['promptTokenCount'];
-        const completionTokens = metadata['candidatesTokenCount'];
-        const totalTokens = metadata['totalTokenCount'];
-        const cachedTokens = metadata['cachedContentTokenCount'];
-
-        return {
-          input_tokens:
-            typeof promptTokens === 'number' ? promptTokens : undefined,
-          output_tokens:
-            typeof completionTokens === 'number' ? completionTokens : undefined,
-          total_tokens:
-            typeof totalTokens === 'number' ? totalTokens : undefined,
-          cache_read_input_tokens:
-            typeof cachedTokens === 'number' ? cachedTokens : undefined,
-        };
-      }
-    }
-  } catch (error) {
-    console.debug('Failed to extract usage metadata:', error);
-  }
-
-  return undefined;
-}
-
-function calculateApproximateCost(
-  usage: StreamJsonUsage | undefined,
-): number | undefined {
-  if (!usage) {
-    return undefined;
-  }
-  return 0;
-}
-
+/**
+ * Executes the non-interactive CLI flow for a single request.
+ */
 export async function runNonInteractive(
   config: Config,
   settings: LoadedSettings,
@@ -171,38 +72,46 @@ export async function runNonInteractive(
       debugMode: config.getDebugMode(),
     });
 
-    const isStreamJsonOutput =
-      config.getOutputFormat() === OutputFormat.STREAM_JSON;
-    const streamJsonContext = options.streamJson;
-    const streamJsonWriter = isStreamJsonOutput
-      ? (streamJsonContext?.writer ??
-        new StreamJsonWriter(config, config.getIncludePartialMessages()))
-      : undefined;
+    // Create output adapter based on format
+    let adapter: JsonOutputAdapterInterface | undefined;
+    const outputFormat = config.getOutputFormat();
+
+    if (options.adapter) {
+      adapter = options.adapter;
+    } else if (outputFormat === OutputFormat.JSON) {
+      adapter = new JsonOutputAdapter(config);
+    } else if (outputFormat === OutputFormat.STREAM_JSON) {
+      adapter = new StreamJsonOutputAdapter(
+        config,
+        config.getIncludePartialMessages(),
+      );
+    }
+
+    // Get readonly values once at the start
+    const sessionId = config.getSessionId();
+    const permissionMode = config.getApprovalMode() as PermissionMode;
 
     let turnCount = 0;
     let totalApiDurationMs = 0;
     const startTime = Date.now();
 
+    const stdoutErrorHandler = (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EPIPE') {
+        process.stdout.removeListener('error', stdoutErrorHandler);
+        process.exit(0);
+      }
+    };
+
     try {
       consolePatcher.patch();
-      // Handle EPIPE errors when the output is piped to a command that closes early.
-      process.stdout.on('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EPIPE') {
-          // Exit gracefully if the pipe is closed.
-          process.exit(0);
-        }
-      });
+      process.stdout.on('error', stdoutErrorHandler);
 
       const geminiClient = config.getGeminiClient();
       const abortController = options.abortController ?? new AbortController();
-      streamJsonContext?.controller?.setActiveRunAbortController?.(
-        abortController,
-      );
 
-      let initialPartList: PartListUnion | null = extractPartsFromEnvelope(
-        options.userEnvelope,
+      let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
+        options.userMessage,
       );
-      let usedEnvelopeInput = initialPartList !== null;
 
       if (!initialPartList) {
         let slashHandled = false;
@@ -217,7 +126,6 @@ export async function runNonInteractive(
             // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
             initialPartList = slashCommandResult as PartListUnion;
             slashHandled = true;
-            usedEnvelopeInput = false;
           }
         }
 
@@ -239,20 +147,23 @@ export async function runNonInteractive(
             );
           }
           initialPartList = processedQuery as PartListUnion;
-          usedEnvelopeInput = false;
         }
       }
 
       if (!initialPartList) {
         initialPartList = [{ text: input }];
-        usedEnvelopeInput = false;
       }
 
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
-      if (streamJsonWriter && !usedEnvelopeInput) {
-        streamJsonWriter.emitUserMessageFromParts(initialParts);
+      if (adapter) {
+        const systemMessage = await buildSystemMessage(
+          config,
+          sessionId,
+          permissionMode,
+        );
+        adapter.emitMessage(systemMessage);
       }
 
       while (true) {
@@ -272,56 +183,91 @@ export async function runNonInteractive(
           prompt_id,
         );
 
-        const assistantBuilder = streamJsonWriter?.createAssistantBuilder();
-        let responseText = '';
+        // Start assistant message for this turn
+        if (adapter) {
+          adapter.startAssistantMessage();
+        }
 
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
             handleCancellationError(config);
           }
 
-          if (event.type === GeminiEventType.Content) {
-            if (streamJsonWriter) {
-              assistantBuilder?.appendText(event.value);
-            } else if (config.getOutputFormat() === OutputFormat.JSON) {
-              responseText += event.value;
-            } else {
+          if (adapter) {
+            // Use adapter for all event processing
+            adapter.processEvent(event);
+            if (event.type === GeminiEventType.ToolCallRequest) {
+              toolCallRequests.push(event.value);
+            }
+          } else {
+            // Text output mode - direct stdout
+            if (event.type === GeminiEventType.Content) {
               process.stdout.write(event.value);
-            }
-          } else if (event.type === GeminiEventType.Thought) {
-            if (streamJsonWriter) {
-              const subject = event.value.subject?.trim();
-              const description = event.value.description?.trim();
-              const combined = [subject, description]
-                .filter((part) => part && part.length > 0)
-                .join(': ');
-              if (combined.length > 0) {
-                assistantBuilder?.appendThinking(combined);
-              }
-            }
-          } else if (event.type === GeminiEventType.ToolCallRequest) {
-            toolCallRequests.push(event.value);
-            if (streamJsonWriter) {
-              assistantBuilder?.appendToolUse(event.value);
+            } else if (event.type === GeminiEventType.ToolCallRequest) {
+              toolCallRequests.push(event.value);
             }
           }
         }
 
-        assistantBuilder?.finalize();
+        // Finalize assistant message
+        if (adapter) {
+          adapter.finalizeAssistantMessage();
+        }
         totalApiDurationMs += Date.now() - apiStartTime;
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
           for (const requestInfo of toolCallRequests) {
+            const finalRequestInfo = requestInfo;
+
+            /*
+            if (options.controlService) {
+              const permissionResult =
+                await options.controlService.permission.shouldAllowTool(
+                  requestInfo,
+                );
+              if (!permissionResult.allowed) {
+                if (config.getDebugMode()) {
+                  console.error(
+                    `[runNonInteractive] Tool execution denied: ${requestInfo.name}`,
+                    permissionResult.message ?? '',
+                  );
+                }
+                if (adapter && permissionResult.message) {
+                  adapter.emitSystemMessage('tool_denied', {
+                    tool: requestInfo.name,
+                    message: permissionResult.message,
+                  });
+                }
+                continue;
+              }
+
+              if (permissionResult.updatedArgs) {
+                finalRequestInfo = {
+                  ...requestInfo,
+                  args: permissionResult.updatedArgs,
+                };
+              }
+            }
+
+            const toolCallUpdateCallback = options.controlService
+              ? options.controlService.permission.getToolCallUpdateCallback()
+              : undefined;
+            */
             const toolResponse = await executeToolCall(
               config,
-              requestInfo,
+              finalRequestInfo,
               abortController.signal,
+              /*
+              toolCallUpdateCallback
+                ? { onToolCallsUpdate: toolCallUpdateCallback }
+                : undefined,
+              */
             );
 
             if (toolResponse.error) {
               handleToolError(
-                requestInfo.name,
+                finalRequestInfo.name,
                 toolResponse.error,
                 config,
                 toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
@@ -329,18 +275,18 @@ export async function runNonInteractive(
                   ? toolResponse.resultDisplay
                   : undefined,
               );
-              if (streamJsonWriter) {
+              if (adapter) {
                 const message =
                   toolResponse.resultDisplay || toolResponse.error.message;
-                streamJsonWriter.emitSystemMessage('tool_error', {
-                  tool: requestInfo.name,
+                adapter.emitSystemMessage('tool_error', {
+                  tool: finalRequestInfo.name,
                   message,
                 });
               }
             }
 
-            if (streamJsonWriter) {
-              streamJsonWriter.emitToolResult(requestInfo, toolResponse);
+            if (adapter) {
+              adapter.emitToolResult(finalRequestInfo, toolResponse);
             }
 
             if (toolResponse.responseParts) {
@@ -349,32 +295,39 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          if (streamJsonWriter) {
-            const usage = extractUsageFromGeminiClient(geminiClient);
-            streamJsonWriter.emitResult({
+          const usage = extractUsageFromGeminiClient(geminiClient);
+          if (adapter) {
+            // Get stats for JSON format output
+            const stats =
+              outputFormat === OutputFormat.JSON
+                ? uiTelemetryService.getMetrics()
+                : undefined;
+            adapter.emitResult({
               isError: false,
               durationMs: Date.now() - startTime,
               apiDurationMs: totalApiDurationMs,
               numTurns: turnCount,
               usage,
               totalCostUsd: calculateApproximateCost(usage),
+              stats,
             });
-          } else if (config.getOutputFormat() === OutputFormat.JSON) {
-            const formatter = new JsonFormatter();
-            const stats = uiTelemetryService.getMetrics();
-            process.stdout.write(formatter.format(responseText, stats));
           } else {
-            // Preserve the historical newline after a successful non-interactive run.
+            // Text output mode
             process.stdout.write('\n');
           }
           return;
         }
       }
     } catch (error) {
-      if (streamJsonWriter) {
-        const usage = extractUsageFromGeminiClient(config.getGeminiClient());
-        const message = error instanceof Error ? error.message : String(error);
-        streamJsonWriter.emitResult({
+      const usage = extractUsageFromGeminiClient(config.getGeminiClient());
+      const message = error instanceof Error ? error.message : String(error);
+      if (adapter) {
+        // Get stats for JSON format output
+        const stats =
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined;
+        adapter.emitResult({
           isError: true,
           durationMs: Date.now() - startTime,
           apiDurationMs: totalApiDurationMs,
@@ -382,11 +335,12 @@ export async function runNonInteractive(
           errorMessage: message,
           usage,
           totalCostUsd: calculateApproximateCost(usage),
+          stats,
         });
       }
       handleError(error, config);
     } finally {
-      streamJsonContext?.controller?.setActiveRunAbortController?.(null);
+      process.stdout.removeListener('error', stdoutErrorHandler);
       consolePatcher.cleanup();
       if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry(config);

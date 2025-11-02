@@ -21,7 +21,7 @@ import type {
   ControlRequestPayload,
   ControlResponse,
   CLIControlRequest,
-} from '../../../types/protocol.js';
+} from '../../types.js';
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000; // 30 seconds
 

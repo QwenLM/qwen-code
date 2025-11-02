@@ -15,7 +15,7 @@ import { BaseController } from './baseController.js';
 import type {
   ControlRequestPayload,
   CLIHookCallbackRequest,
-} from '../../../types/protocol.js';
+} from '../../types.js';
 
 export class HookController extends BaseController {
   /**

@@ -16,6 +16,7 @@ export interface Usage {
   output_tokens: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  total_tokens?: number;
 }
 
 export interface ExtendedUsage extends Usage {
@@ -126,9 +127,10 @@ export interface CLIAssistantMessage {
 
 export interface CLISystemMessage {
   type: 'system';
-  subtype: 'init' | 'compact_boundary';
+  subtype: string;
   uuid: string;
   session_id: string;
+  data?: unknown;
   cwd?: string;
   tools?: string[];
   mcp_servers?: Array<{
@@ -208,14 +210,24 @@ export interface ContentBlockStartEvent {
   content_block: ContentBlock;
 }
 
+export type ContentBlockDelta =
+  | {
+      type: 'text_delta';
+      text: string;
+    }
+  | {
+      type: 'thinking_delta';
+      thinking: string;
+    }
+  | {
+      type: 'input_json_delta';
+      partial_json: string;
+    };
+
 export interface ContentBlockDeltaEvent {
   type: 'content_block_delta';
   index: number;
-  delta: {
-    type: 'text_delta' | 'thinking_delta';
-    text?: string;
-    thinking?: string;
-  };
+  delta: ContentBlockDelta;
 }
 
 export interface ContentBlockStopEvent {

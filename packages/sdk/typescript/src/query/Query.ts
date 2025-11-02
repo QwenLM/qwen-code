@@ -101,7 +101,8 @@ export class Query implements AsyncIterable<CLIMessage> {
     this.options = options;
     this.sessionId = randomUUID();
     this.inputStream = new Stream<CLIMessage>();
-    this.abortController = new AbortController();
+    // Use provided abortController or create a new one
+    this.abortController = options.abortController ?? new AbortController();
     this.isSingleTurn = options.singleTurn ?? false;
 
     // Setup first result tracking
@@ -109,10 +110,16 @@ export class Query implements AsyncIterable<CLIMessage> {
       this.firstResultReceivedResolve = resolve;
     });
 
-    // Handle external abort signal
-    if (options.signal) {
-      options.signal.addEventListener('abort', () => {
-        this.abortController.abort();
+    // Handle abort signal if controller is provided and already aborted or will be aborted
+    if (this.abortController.signal.aborted) {
+      // Already aborted - set error immediately
+      this.inputStream.setError(new AbortError('Query aborted by user'));
+      this.close().catch((err) => {
+        console.error('[Query] Error during abort cleanup:', err);
+      });
+    } else {
+      // Listen for abort events on the controller's signal
+      this.abortController.signal.addEventListener('abort', () => {
         // Set abort error on the stream before closing
         this.inputStream.setError(new AbortError('Query aborted by user'));
         this.close().catch((err) => {
@@ -350,7 +357,7 @@ export class Query implements AsyncIterable<CLIMessage> {
         case 'can_use_tool':
           response = (await this.handlePermissionRequest(
             payload.tool_name,
-            payload.input,
+            payload.input as Record<string, unknown>,
             payload.permission_suggestions,
             requestAbortController.signal,
           )) as unknown as Record<string, unknown>;
@@ -530,9 +537,14 @@ export class Query implements AsyncIterable<CLIMessage> {
 
     // Resolve or reject based on response type
     if (payload.subtype === 'success') {
-      pending.resolve(payload.response);
+      pending.resolve(payload.response as Record<string, unknown> | null);
     } else {
-      pending.reject(new Error(payload.error ?? 'Unknown error'));
+      // Extract error message from error field (can be string or object)
+      const errorMessage =
+        typeof payload.error === 'string'
+          ? payload.error
+          : (payload.error?.message ?? 'Unknown error');
+      pending.reject(new Error(errorMessage));
     }
   }
 
@@ -764,6 +776,7 @@ export class Query implements AsyncIterable<CLIMessage> {
     } catch (error) {
       // Check if aborted - if so, set abort error on stream
       if (this.abortController.signal.aborted) {
+        console.log('[Query] Aborted during input streaming');
         this.inputStream.setError(
           new AbortError('Query aborted during input streaming'),
         );

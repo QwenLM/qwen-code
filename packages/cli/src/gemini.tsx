@@ -29,7 +29,7 @@ import {
   type InitializationResult,
 } from './core/initializer.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
-import { runStreamJsonSession } from './streamJson/session.js';
+import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
 import { AppContainer } from './ui/AppContainer.js';
 import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
 import { KeypressProvider } from './ui/contexts/KeypressContext.js';
@@ -408,18 +408,22 @@ export async function main() {
 
     await config.initialize();
 
-    // If not a TTY, read from stdin
-    // This is for cases where the user pipes input directly into the command
-    if (!process.stdin.isTTY) {
+    // Check input format BEFORE reading stdin
+    // In STREAM_JSON mode, stdin should be left for StreamJsonInputReader
+    const inputFormat =
+      typeof config.getInputFormat === 'function'
+        ? config.getInputFormat()
+        : InputFormat.TEXT;
+
+    // Only read stdin if NOT in stream-json mode
+    // In stream-json mode, stdin is used for protocol messages (control requests, etc.)
+    // and should be consumed by StreamJsonInputReader instead
+    if (inputFormat !== InputFormat.STREAM_JSON && !process.stdin.isTTY) {
       const stdinData = await readStdin();
       if (stdinData) {
         input = `${stdinData}\n\n${input}`;
       }
     }
-    const inputFormat =
-      typeof config.getInputFormat === 'function'
-        ? config.getInputFormat()
-        : InputFormat.TEXT;
 
     const nonInteractiveConfig = await validateNonInteractiveAuth(
       settings.merged.security?.auth?.selectedType,
@@ -428,13 +432,16 @@ export async function main() {
       settings,
     );
 
+    const prompt_id = Math.random().toString(16).slice(2);
+
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
 
-      await runStreamJsonSession(
+      await runNonInteractiveStreamJson(
         nonInteractiveConfig,
         settings,
-        trimmedInput.length > 0 ? trimmedInput : undefined,
+        trimmedInput.length > 0 ? trimmedInput : '',
+        prompt_id,
       );
       await runExitCleanup();
       process.exit(0);
@@ -447,7 +454,6 @@ export async function main() {
       process.exit(1);
     }
 
-    const prompt_id = Math.random().toString(16).slice(2);
     logUserPrompt(config, {
       'event.name': 'user_prompt',
       'event.timestamp': new Date().toISOString(),

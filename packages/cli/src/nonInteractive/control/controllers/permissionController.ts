@@ -28,7 +28,7 @@ import type {
   ControlRequestPayload,
   PermissionMode,
   PermissionSuggestion,
-} from '../../../types/protocol.js';
+} from '../../types.js';
 import { BaseController } from './baseController.js';
 
 // Import ToolCallConfirmationDetails types for type alignment

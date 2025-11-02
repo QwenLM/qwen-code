@@ -141,7 +141,7 @@ describe('Simple Query Execution (E2E)', () => {
       'should complete iteration after result',
       async () => {
         const q = query({
-          prompt: 'Test completion',
+          prompt: 'Hello, who are you?',
           options: {
             ...SHARED_TEST_OPTIONS,
             debug: false,
@@ -475,7 +475,7 @@ describe('Simple Query Execution (E2E)', () => {
           prompt: 'Write a very long story about TypeScript',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });
@@ -505,7 +505,7 @@ describe('Simple Query Execution (E2E)', () => {
           prompt: 'Write a very long essay',
           options: {
             ...SHARED_TEST_OPTIONS,
-            signal: controller.signal,
+            abortController: controller,
             debug: false,
           },
         });

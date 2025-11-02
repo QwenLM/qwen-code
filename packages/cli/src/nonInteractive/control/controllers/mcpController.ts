@@ -18,7 +18,7 @@ import { ResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import type {
   ControlRequestPayload,
   CLIControlMcpMessageRequest,
-} from '../../../types/protocol.js';
+} from '../../types.js';
 import type {
   MCPServerConfig,
   WorkspaceContext,

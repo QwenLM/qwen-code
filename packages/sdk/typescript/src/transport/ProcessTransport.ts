@@ -43,7 +43,6 @@ export class ProcessTransport implements Transport {
   private cleanupCallbacks: Array<() => void> = [];
   private closed = false;
   private abortController: AbortController | null = null;
-  private abortHandler: (() => void) | null = null;
   private exitListeners: ExitListener[] = [];
 
   constructor(options: TransportOptions) {
@@ -58,26 +57,26 @@ export class ProcessTransport implements Transport {
       return; // Already started
     }
 
+    // Use provided abortController or create a new one
+    this.abortController =
+      this.options.abortController ?? new AbortController();
+
     // Check if already aborted
-    if (this.options.signal?.aborted) {
-      throw new AbortError('Transport start aborted by signal');
+    if (this.abortController.signal.aborted) {
+      throw new AbortError('Transport start aborted');
     }
 
     const cliArgs = this.buildCliArguments();
     const cwd = this.options.cwd ?? process.cwd();
     const env = { ...process.env, ...this.options.env };
 
-    // Setup internal AbortController if signal provided
-    if (this.options.signal) {
-      this.abortController = new AbortController();
-      this.abortHandler = () => {
-        this.logForDebugging('Transport aborted by user signal');
-        this._exitError = new AbortError('Operation aborted by user');
-        this._isReady = false;
-        void this.close();
-      };
-      this.options.signal.addEventListener('abort', this.abortHandler);
-    }
+    // Setup abort handler
+    this.abortController.signal.addEventListener('abort', () => {
+      this.logForDebugging('Transport aborted by user');
+      this._exitError = new AbortError('Operation aborted by user');
+      this._isReady = false;
+      void this.close();
+    });
 
     // Create exit promise
     this.exitPromise = new Promise<void>((resolve) => {
@@ -103,8 +102,8 @@ export class ProcessTransport implements Transport {
           cwd,
           env,
           stdio: ['pipe', 'pipe', stderrMode],
-          // Use internal AbortController signal if available
-          signal: this.abortController?.signal,
+          // Use AbortController signal
+          signal: this.abortController.signal,
         },
       );
 
@@ -138,10 +137,7 @@ export class ProcessTransport implements Transport {
 
     // Handle process errors
     this.childProcess.on('error', (error) => {
-      if (
-        this.options.signal?.aborted ||
-        this.abortController?.signal.aborted
-      ) {
+      if (this.abortController?.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
       } else {
         this._exitError = new Error(`CLI process error: ${error.message}`);
@@ -155,10 +151,7 @@ export class ProcessTransport implements Transport {
       this._isReady = false;
 
       // Check if aborted
-      if (
-        this.options.signal?.aborted ||
-        this.abortController?.signal.aborted
-      ) {
+      if (this.abortController?.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
       } else if (code !== null && code !== 0 && !this.closed) {
         this._exitError = new Error(`CLI process exited with code ${code}`);
@@ -243,12 +236,6 @@ export class ProcessTransport implements Transport {
     this.closed = true;
     this._isReady = false;
 
-    // Clean up abort handler
-    if (this.abortHandler && this.options.signal) {
-      this.options.signal.removeEventListener('abort', this.abortHandler);
-      this.abortHandler = null;
-    }
-
     // Clean up exit listeners
     for (const { handler } of this.exitListeners) {
       this.childProcess?.off('exit', handler);
@@ -292,7 +279,7 @@ export class ProcessTransport implements Transport {
    */
   write(message: string): void {
     // Check abort status
-    if (this.options.signal?.aborted) {
+    if (this.abortController?.signal.aborted) {
       throw new AbortError('Cannot write: operation aborted');
     }
 
@@ -423,10 +410,7 @@ export class ProcessTransport implements Transport {
     const handler = (code: number | null, signal: NodeJS.Signals | null) => {
       let error: Error | undefined;
 
-      if (
-        this.options.signal?.aborted ||
-        this.abortController?.signal.aborted
-      ) {
+      if (this.abortController?.signal.aborted) {
         error = new AbortError('Process aborted by user');
       } else if (code !== null && code !== 0) {
         error = new Error(`Process exited with code ${code}`);

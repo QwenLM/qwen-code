@@ -22,6 +22,7 @@ import {
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { OutputFormat } from '@qwen-code/qwen-code-core';
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -158,6 +159,7 @@ describe('gemini.tsx main function', () => {
         getScreenReader: () => false,
         getGeminiMdFileCount: () => 0,
         getProjectRoot: () => '/',
+        getOutputFormat: () => OutputFormat.TEXT,
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -231,7 +233,7 @@ describe('gemini.tsx main function', () => {
     processExitSpy.mockRestore();
   });
 
-  it('invokes runStreamJsonSession and performs cleanup in stream-json mode', async () => {
+  it('invokes runNonInteractiveStreamJson and performs cleanup in stream-json mode', async () => {
     const originalIsTTY = Object.getOwnPropertyDescriptor(
       process.stdin,
       'isTTY',
@@ -262,7 +264,7 @@ describe('gemini.tsx main function', () => {
     const cleanupModule = await import('./utils/cleanup.js');
     const extensionModule = await import('./config/extension.js');
     const validatorModule = await import('./validateNonInterActiveAuth.js');
-    const sessionModule = await import('./streamJson/session.js');
+    const streamJsonModule = await import('./nonInteractive/session.js');
     const initializerModule = await import('./core/initializer.js');
     const startupWarningsModule = await import('./utils/startupWarnings.js');
     const userStartupWarningsModule = await import(
@@ -294,8 +296,8 @@ describe('gemini.tsx main function', () => {
     const validateAuthSpy = vi
       .spyOn(validatorModule, 'validateNonInteractiveAuth')
       .mockResolvedValue(validatedConfig);
-    const runSessionSpy = vi
-      .spyOn(sessionModule, 'runStreamJsonSession')
+    const runStreamJsonSpy = vi
+      .spyOn(streamJsonModule, 'runNonInteractiveStreamJson')
       .mockResolvedValue(undefined);
 
     vi.mocked(loadSettings).mockReturnValue({
@@ -354,8 +356,8 @@ describe('gemini.tsx main function', () => {
       delete process.env['SANDBOX'];
     }
 
-    expect(runSessionSpy).toHaveBeenCalledTimes(1);
-    const [configArg, settingsArg, promptArg] = runSessionSpy.mock.calls[0];
+    expect(runStreamJsonSpy).toHaveBeenCalledTimes(1);
+    const [configArg, settingsArg, promptArg] = runStreamJsonSpy.mock.calls[0];
     expect(configArg).toBe(validatedConfig);
     expect(settingsArg).toMatchObject({
       merged: expect.objectContaining({ security: expect.any(Object) }),

@@ -14,14 +14,11 @@
  */
 
 import { BaseController } from './baseController.js';
-import { CommandService } from '../../CommandService.js';
-import { BuiltinCommandLoader } from '../../BuiltinCommandLoader.js';
 import type {
   ControlRequestPayload,
   CLIControlInitializeRequest,
   CLIControlSetModelRequest,
-  CLISystemMessage,
-} from '../../../types/protocol.js';
+} from '../../types.js';
 
 export class SystemController extends BaseController {
   /**
@@ -80,58 +77,13 @@ export class SystemController extends BaseController {
   }
 
   /**
-   * Send system message to SDK
+   * Build control capabilities for initialize control response
    *
-   * Called after successful initialize response is sent
+   * This method constructs the control capabilities object that indicates
+   * what control features are available. It is used exclusively in the
+   * initialize control response.
    */
-  async sendSystemMessage(): Promise<void> {
-    const toolRegistry = this.context.config.getToolRegistry();
-    const tools = toolRegistry ? toolRegistry.getAllToolNames() : [];
-
-    const mcpServers = this.context.config.getMcpServers();
-    const mcpServerList = mcpServers
-      ? Object.keys(mcpServers).map((name) => ({
-          name,
-          status: 'connected',
-        }))
-      : [];
-
-    // Load slash commands
-    const slashCommands = await this.loadSlashCommandNames();
-
-    // Build capabilities
-    const capabilities = this.buildControlCapabilities();
-
-    const systemMessage: CLISystemMessage = {
-      type: 'system',
-      subtype: 'init',
-      uuid: this.context.sessionId,
-      session_id: this.context.sessionId,
-      cwd: this.context.config.getTargetDir(),
-      tools,
-      mcp_servers: mcpServerList,
-      model: this.context.config.getModel(),
-      permissionMode: this.context.permissionMode,
-      slash_commands: slashCommands,
-      apiKeySource: 'none',
-      qwen_code_version: this.context.config.getCliVersion() || 'unknown',
-      output_style: 'default',
-      agents: [],
-      skills: [],
-      capabilities,
-    };
-
-    this.context.streamJson.send(systemMessage);
-
-    if (this.context.debugMode) {
-      console.error('[SystemController] System message sent');
-    }
-  }
-
-  /**
-   * Build control capabilities for initialize response
-   */
-  private buildControlCapabilities(): Record<string, unknown> {
+  buildControlCapabilities(): Record<string, unknown> {
     const capabilities: Record<string, unknown> = {
       can_handle_can_use_tool: true,
       can_handle_hook_callback: true,
@@ -259,34 +211,5 @@ export class SystemController extends BaseController {
       subtype: 'supported_commands',
       commands,
     };
-  }
-
-  /**
-   * Load slash command names using CommandService
-   */
-  private async loadSlashCommandNames(): Promise<string[]> {
-    const controller = new AbortController();
-    try {
-      const service = await CommandService.create(
-        [new BuiltinCommandLoader(this.context.config)],
-        controller.signal,
-      );
-      const names = new Set<string>();
-      const commands = service.getCommands();
-      for (const command of commands) {
-        names.add(command.name);
-      }
-      return Array.from(names).sort();
-    } catch (error) {
-      if (this.context.debugMode) {
-        console.error(
-          '[SystemController] Failed to load slash commands:',
-          error,
-        );
-      }
-      return [];
-    } finally {
-      controller.abort();
-    }
   }
 }
