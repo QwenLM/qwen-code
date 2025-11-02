@@ -15,7 +15,7 @@ import { MessageType } from '../types.js';
 import { GIT_COMMIT_INFO } from '../../generated/git-commit.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getCliVersion } from '../../utils/version.js';
-import { IdeClient, sessionId, AuthType } from '@qwen-code/qwen-code-core';
+import { IdeClient, AuthType } from '@qwen-code/qwen-code-core';
 
 export const bugCommand: SlashCommand = {
   name: 'bug',
@@ -48,7 +48,7 @@ export const bugCommand: SlashCommand = {
     let info = `
 * **CLI Version:** ${cliVersion}
 * **Git Commit:** ${GIT_COMMIT_INFO}
-* **Session ID:** ${sessionId}
+* **Session ID:** ${config?.getSessionId() || 'unknown'}
 * **Operating System:** ${osVersion}
 * **Sandbox Environment:** ${sandboxEnv}
 * **Auth Type:** ${selectedAuthType}`;

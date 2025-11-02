@@ -154,6 +154,11 @@ vi.mock('../core/tokenLimits.js', () => ({
 
 describe('Server Config (config.ts)', () => {
   const MODEL = 'qwen3-coder-plus';
+
+  // Default mock for canUseRipgrep to return true (tests that care about ripgrep will override this)
+  beforeEach(() => {
+    vi.mocked(canUseRipgrep).mockResolvedValue(true);
+  });
   const SANDBOX: SandboxConfig = {
     command: 'docker',
     image: 'qwen-code-sandbox',
@@ -578,6 +583,40 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('UseBuiltinRipgrep Configuration', () => {
+    it('should default useBuiltinRipgrep to true when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+
+    it('should set useBuiltinRipgrep to false when provided as false', () => {
+      const paramsWithBuiltinRipgrep: ConfigParameters = {
+        ...baseParams,
+        useBuiltinRipgrep: false,
+      };
+      const config = new Config(paramsWithBuiltinRipgrep);
+      expect(config.getUseBuiltinRipgrep()).toBe(false);
+    });
+
+    it('should set useBuiltinRipgrep to true when explicitly provided as true', () => {
+      const paramsWithBuiltinRipgrep: ConfigParameters = {
+        ...baseParams,
+        useBuiltinRipgrep: true,
+      };
+      const config = new Config(paramsWithBuiltinRipgrep);
+      expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+
+    it('should default useBuiltinRipgrep to true when undefined', () => {
+      const paramsWithUndefinedBuiltinRipgrep: ConfigParameters = {
+        ...baseParams,
+        useBuiltinRipgrep: undefined,
+      };
+      const config = new Config(paramsWithUndefinedBuiltinRipgrep);
+      expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+  });
+
   describe('createToolRegistry', () => {
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
@@ -825,10 +864,60 @@ describe('setApprovalMode with folder trust', () => {
 
       expect(wasRipGrepRegistered).toBe(true);
       expect(wasGrepRegistered).toBe(false);
-      expect(logRipgrepFallback).not.toHaveBeenCalled();
+      expect(canUseRipgrep).toHaveBeenCalledWith(true);
     });
 
-    it('should register GrepTool as a fallback when useRipgrep is true but it is not available', async () => {
+    it('should register RipGrepTool with system ripgrep when useBuiltinRipgrep is false', async () => {
+      (canUseRipgrep as Mock).mockResolvedValue(true);
+      const config = new Config({
+        ...baseParams,
+        useRipgrep: true,
+        useBuiltinRipgrep: false,
+      });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+
+      expect(wasRipGrepRegistered).toBe(true);
+      expect(wasGrepRegistered).toBe(false);
+      expect(canUseRipgrep).toHaveBeenCalledWith(false);
+    });
+
+    it('should fall back to GrepTool and log error when useBuiltinRipgrep is false but system ripgrep is not available', async () => {
+      (canUseRipgrep as Mock).mockResolvedValue(false);
+      const config = new Config({
+        ...baseParams,
+        useRipgrep: true,
+        useBuiltinRipgrep: false,
+      });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+
+      expect(wasRipGrepRegistered).toBe(false);
+      expect(wasGrepRegistered).toBe(true);
+      expect(canUseRipgrep).toHaveBeenCalledWith(false);
+      expect(logRipgrepFallback).toHaveBeenCalledWith(
+        config,
+        expect.any(RipgrepFallbackEvent),
+      );
+      const event = (logRipgrepFallback as Mock).mock.calls[0][1];
+      expect(event.error).toContain('Ripgrep is not available');
+    });
+
+    it('should fall back to GrepTool and log error when useRipgrep is true and builtin ripgrep is not available', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(false);
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
@@ -843,15 +932,16 @@ describe('setApprovalMode with folder trust', () => {
 
       expect(wasRipGrepRegistered).toBe(false);
       expect(wasGrepRegistered).toBe(true);
+      expect(canUseRipgrep).toHaveBeenCalledWith(true);
       expect(logRipgrepFallback).toHaveBeenCalledWith(
         config,
         expect.any(RipgrepFallbackEvent),
       );
       const event = (logRipgrepFallback as Mock).mock.calls[0][1];
-      expect(event.error).toBeUndefined();
+      expect(event.error).toContain('Ripgrep is not available');
     });
 
-    it('should register GrepTool as a fallback when canUseRipgrep throws an error', async () => {
+    it('should fall back to GrepTool and log error when canUseRipgrep throws an error', async () => {
       const error = new Error('ripGrep check failed');
       (canUseRipgrep as Mock).mockRejectedValue(error);
       const config = new Config({ ...baseParams, useRipgrep: true });
@@ -890,7 +980,6 @@ describe('setApprovalMode with folder trust', () => {
       expect(wasRipGrepRegistered).toBe(false);
       expect(wasGrepRegistered).toBe(true);
       expect(canUseRipgrep).not.toHaveBeenCalled();
-      expect(logRipgrepFallback).not.toHaveBeenCalled();
     });
   });
 });

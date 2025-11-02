@@ -56,6 +56,10 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
 const MIGRATE_V2_OVERWRITE = true;
 
+// Settings version to track migration state
+export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION_KEY = '$version';
+
 const MIGRATION_MAP: Record<string, string> = {
   accessibility: 'ui.accessibility',
   allowedTools: 'tools.allowed',
@@ -216,8 +220,16 @@ function setNestedProperty(
 }
 
 export function needsMigration(settings: Record<string, unknown>): boolean {
-  // A file needs migration if it contains any top-level key that is moved to a
-  // nested location in V2.
+  // Check version field first - if present and matches current version, no migration needed
+  if (SETTINGS_VERSION_KEY in settings) {
+    const version = settings[SETTINGS_VERSION_KEY];
+    if (typeof version === 'number' && version >= SETTINGS_VERSION) {
+      return false;
+    }
+  }
+
+  // Fallback to legacy detection: A file needs migration if it contains any
+  // top-level key that is moved to a nested location in V2.
   const hasV1Keys = Object.entries(MIGRATION_MAP).some(([v1Key, v2Path]) => {
     if (v1Key === v2Path || !(v1Key in settings)) {
       return false;
@@ -250,6 +262,21 @@ function migrateSettingsToV2(
 
   for (const [oldKey, newPath] of Object.entries(MIGRATION_MAP)) {
     if (flatKeys.has(oldKey)) {
+      // Safety check: If this key is a V2 container (like 'model') and it's
+      // already an object, it's likely already in V2 format. Skip migration
+      // to prevent double-nesting (e.g., model.name.name).
+      if (
+        KNOWN_V2_CONTAINERS.has(oldKey) &&
+        typeof flatSettings[oldKey] === 'object' &&
+        flatSettings[oldKey] !== null &&
+        !Array.isArray(flatSettings[oldKey])
+      ) {
+        // This is already a V2 container, carry it over as-is
+        v2Settings[oldKey] = flatSettings[oldKey];
+        flatKeys.delete(oldKey);
+        continue;
+      }
+
       setNestedProperty(v2Settings, newPath, flatSettings[oldKey]);
       flatKeys.delete(oldKey);
     }
@@ -286,6 +313,9 @@ function migrateSettingsToV2(
       v2Settings[remainingKey] = newValue;
     }
   }
+
+  // Set version field to indicate this is a V2 settings file
+  v2Settings[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
 
   return v2Settings;
 }
@@ -336,6 +366,11 @@ export function migrateSettingsToV1(
 
   // Carry over any unrecognized keys
   for (const remainingKey of v2Keys) {
+    // Skip the version field - it's only for V2 format
+    if (remainingKey === SETTINGS_VERSION_KEY) {
+      continue;
+    }
+
     const value = v2Settings[remainingKey];
     if (value === undefined) {
       continue;
@@ -620,6 +655,22 @@ export function loadSettings(
               migratedInMemorScopes.add(scope);
             }
             settingsObject = migratedSettings;
+          }
+        } else if (!(SETTINGS_VERSION_KEY in settingsObject)) {
+          // No migration needed, but version field is missing - add it for future optimizations
+          settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
+          if (MIGRATE_V2_OVERWRITE) {
+            try {
+              fs.writeFileSync(
+                filePath,
+                JSON.stringify(settingsObject, null, 2),
+                'utf-8',
+              );
+            } catch (e) {
+              console.error(
+                `Error adding version to settings file: ${getErrorMessage(e)}`,
+              );
+            }
           }
         }
         return { settings: settingsObject as Settings, rawJson: content };

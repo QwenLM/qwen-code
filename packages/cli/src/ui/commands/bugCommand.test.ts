@@ -27,7 +27,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         getDetectedIdeDisplayName: vi.fn().mockReturnValue('VSCode'),
       }),
     },
-    sessionId: 'test-session-id',
   };
 });
 vi.mock('node:process', () => ({
@@ -59,6 +58,7 @@ describe('bugCommand', () => {
           getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => undefined,
           getIdeMode: () => true,
+          getSessionId: () => 'test-session-id',
         },
         settings: {
           merged: {
@@ -102,6 +102,7 @@ describe('bugCommand', () => {
           getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => ({ urlTemplate: customTemplate }),
           getIdeMode: () => true,
+          getSessionId: () => 'test-session-id',
         },
         settings: {
           merged: {
@@ -143,6 +144,7 @@ describe('bugCommand', () => {
           getModel: () => 'qwen3-coder-plus',
           getBugCommand: () => undefined,
           getIdeMode: () => true,
+          getSessionId: () => 'test-session-id',
           getContentGeneratorConfig: () => ({
             baseUrl: 'https://api.openai.com/v1',
           }),

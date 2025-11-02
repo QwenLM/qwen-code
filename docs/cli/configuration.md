@@ -246,6 +246,14 @@ Settings are organized into categories. All settings should be placed within the
     - It must return function output as JSON on `stdout`, analogous to [`functionResponse.response.content`](https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/inference#functionresponse).
   - **Default:** `undefined`
 
+- **`tools.useRipgrep`** (boolean):
+  - **Description:** Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.
+  - **Default:** `true`
+
+- **`tools.useBuiltinRipgrep`** (boolean):
+  - **Description:** Use the bundled ripgrep binary. When set to `false`, the system-level `rg` command will be used instead. This setting is only effective when `tools.useRipgrep` is `true`.
+  - **Default:** `true`
+
 #### `mcp`
 
 - **`mcp.serverCommand`** (string):

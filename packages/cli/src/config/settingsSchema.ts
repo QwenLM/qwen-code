@@ -847,6 +847,16 @@ const SETTINGS_SCHEMA = {
           'Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.',
         showInDialog: true,
       },
+      useBuiltinRipgrep: {
+        type: 'boolean',
+        label: 'Use Builtin Ripgrep',
+        category: 'Tools',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+        showInDialog: true,
+      },
       enableToolOutputTruncation: {
         type: 'boolean',
         label: 'Enable Tool Output Truncation',
