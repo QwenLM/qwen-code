@@ -15,7 +15,7 @@ import type {
   QuitConfirmationRequest,
   HistoryItemWithoutId,
   StreamingState,
-} from '../types.js';
+ SubagentFullscreenPanelState } from '../types.js';
 import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
@@ -145,6 +145,7 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  subagentFullscreenPanel: SubagentFullscreenPanelState | null;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

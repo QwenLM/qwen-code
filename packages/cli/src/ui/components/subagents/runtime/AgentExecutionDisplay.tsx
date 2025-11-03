@@ -16,6 +16,11 @@ import { useKeypress } from '../../../hooks/useKeypress.js';
 import { COLOR_OPTIONS } from '../constants.js';
 import { fmtDuration } from '../utils.js';
 import { ToolConfirmationMessage } from '../../messages/ToolConfirmationMessage.js';
+import { useUIActions } from '../../../contexts/UIActionsContext.js';
+import { useUIState } from '../../../contexts/UIStateContext.js';
+import type { SubagentFullscreenPanelState } from '../../../types.js';
+import { CTRL_ALT_E_SEQUENCE } from './fullscreenKeys.js';
+import { getStatusColor, getStatusText } from './status.js';
 
 export type DisplayMode = 'compact' | 'default' | 'verbose';
 
@@ -26,47 +31,23 @@ export interface AgentExecutionDisplayProps {
   config: Config;
 }
 
-const getStatusColor = (
-  status:
-    | TaskResultDisplay['status']
-    | 'executing'
-    | 'success'
-    | 'awaiting_approval',
-) => {
-  switch (status) {
-    case 'running':
-    case 'executing':
-    case 'awaiting_approval':
-      return theme.status.warning;
-    case 'completed':
-    case 'success':
-      return theme.status.success;
-    case 'cancelled':
-      return theme.status.warning;
-    case 'failed':
-      return theme.status.error;
-    default:
-      return theme.text.secondary;
-  }
-};
-
-const getStatusText = (status: TaskResultDisplay['status']) => {
-  switch (status) {
-    case 'running':
-      return 'Running';
-    case 'completed':
-      return 'Completed';
-    case 'cancelled':
-      return 'User Cancelled';
-    case 'failed':
-      return 'Failed';
-    default:
-      return 'Unknown';
-  }
-};
-
 const MAX_TOOL_CALLS = 5;
 const MAX_TASK_PROMPT_LINES = 5;
+const MAX_FULLSCREEN_RESULT_LINES = 12;
+
+const TOOL_CALL_STATUS_ICONS = {
+  executing: '⊷',
+  awaiting_approval: '?',
+  success: '✓',
+  failed: '✖',
+} as const;
+
+const TOOL_CALL_STATUS_TEXT = {
+  executing: 'Executing',
+  awaiting_approval: 'Awaiting approval',
+  success: 'Success',
+  failed: 'Failed',
+} as const;
 
 /**
  * Component to display subagent execution progress and results.
@@ -79,6 +60,16 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   childWidth,
   config,
 }) => {
+  const uiActions = useUIActions();
+  const uiState = useUIState();
+  const panelIdRef = React.useRef<string>(
+    `subagent-${Math.random().toString(36).slice(2)}`,
+  );
+  const panelId = panelIdRef.current;
+  const panelOpen = uiState.subagentFullscreenPanel?.panelId === panelId;
+  const renderDataRef = React.useRef<TaskResultDisplay>(data);
+  renderDataRef.current = data;
+
   const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
 
   const agentColor = useMemo(() => {
@@ -87,6 +78,12 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     );
     return colorOption?.value || theme.text.accent;
   }, [data.subagentColor]);
+
+  const fullscreenHint = ' Press ctrl+alt+e for fullscreen.';
+  const fullscreenContent = React.useMemo(
+    () => buildFullscreenContent(data),
+    [data],
+  );
 
   const footerText = React.useMemo(() => {
     // This component only listens to keyboard shortcut events when the subagent is running
@@ -99,21 +96,58 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         data.toolCalls && data.toolCalls.length > MAX_TOOL_CALLS;
 
       if (hasMoreToolCalls || hasMoreLines) {
-        return 'Press ctrl+r to show less, ctrl+e to show more.';
+        return `Press ctrl+r to show less, ctrl+e to show more.${fullscreenHint}`;
       }
-      return 'Press ctrl+r to show less.';
+      return `Press ctrl+r to show less.${fullscreenHint}`;
     }
 
     if (displayMode === 'verbose') {
-      return 'Press ctrl+e to show less.';
+      return `Press ctrl+e to show less.${fullscreenHint}`;
     }
 
-    return '';
+    if (displayMode === 'compact') {
+      return `Press ctrl+r to expand.${fullscreenHint}`;
+    }
+
+    return fullscreenHint.trim();
   }, [displayMode, data]);
 
-  // Handle keyboard shortcuts to control display mode
+  const openFullscreen = React.useCallback(() => {
+    const panel: SubagentFullscreenPanelState = {
+      panelId,
+      subagentName: data.subagentName,
+      status: data.status,
+      content: fullscreenContent,
+      getSnapshot: () => buildFullscreenContent(renderDataRef.current),
+    };
+    uiActions.openSubagentFullscreenPanel(panel);
+  }, [data, fullscreenContent, panelId, uiActions]);
+
+  const closeFullscreen = React.useCallback(() => {
+    uiActions.closeSubagentFullscreenPanel(panelId);
+  }, [panelId, uiActions]);
+
+  // Handle keyboard shortcuts to control display mode and fullscreen toggle
   useKeypress(
     (key) => {
+      const sequence = key.sequence ?? '';
+      const isCtrlAltToggle =
+        (key.ctrl && key.meta && key.name === 'e') ||
+        sequence === CTRL_ALT_E_SEQUENCE;
+
+      if (isCtrlAltToggle) {
+        if (panelOpen) {
+          closeFullscreen();
+        } else {
+          openFullscreen();
+        }
+        return;
+      }
+
+      if (panelOpen) {
+        return;
+      }
+
       if (key.ctrl && key.name === 'r') {
         // ctrl+r toggles between compact and default
         setDisplayMode((current) =>
@@ -128,6 +162,24 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     },
     { isActive: true },
   );
+
+  React.useEffect(() => {
+    if (!panelOpen) {
+      return;
+    }
+    uiActions.updateSubagentFullscreenPanel(panelId, {
+      content: fullscreenContent,
+      status: data.status,
+      subagentName: data.subagentName,
+    });
+  }, [
+    panelOpen,
+    data.status,
+    data.subagentName,
+    fullscreenContent,
+    panelId,
+    uiActions,
+  ]);
 
   if (displayMode === 'compact') {
     return (
@@ -200,6 +252,12 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
             </Text>
           </Box>
         )}
+
+        <Box flexDirection="row" marginTop={1}>
+          <Text color={theme.text.secondary}>
+            Press ctrl+alt+e for fullscreen.
+          </Text>
+        </Box>
       </Box>
     );
   }
@@ -220,6 +278,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       <TaskPromptSection
         taskPrompt={data.taskPrompt}
         displayMode={displayMode}
+        showFullscreenHint={true}
       />
 
       {/* Progress section for running tasks */}
@@ -271,7 +330,8 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 const TaskPromptSection: React.FC<{
   taskPrompt: string;
   displayMode: DisplayMode;
-}> = ({ taskPrompt, displayMode }) => {
+  showFullscreenHint?: boolean;
+}> = ({ taskPrompt, displayMode, showFullscreenHint = false }) => {
   const lines = taskPrompt.split('\n');
   const shouldTruncate = lines.length > 10;
   const showFull = displayMode === 'verbose';
@@ -293,6 +353,13 @@ const TaskPromptSection: React.FC<{
           {displayLines.join('\n') + (shouldTruncate && !showFull ? '...' : '')}
         </Text>
       </Box>
+      {showFullscreenHint && (
+        <Box paddingLeft={1}>
+          <Text color={theme.text.secondary}>
+            Press ctrl+alt+e for fullscreen.
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };
@@ -548,3 +615,149 @@ const ResultsSection: React.FC<{
     )}
   </Box>
 );
+
+function appendMultiline(
+  lines: string[],
+  text: string,
+  indent: string,
+  maxLines?: number,
+) {
+  if (!text) {
+    return;
+  }
+
+  const rawLines = text.split('\n');
+  const limitedLines =
+    maxLines !== undefined ? rawLines.slice(0, maxLines) : rawLines;
+
+  for (const rawLine of limitedLines) {
+    lines.push(`${indent}${rawLine}`);
+  }
+
+  if (maxLines !== undefined && rawLines.length > maxLines) {
+    lines.push(`${indent}…`);
+  }
+}
+
+function trimTrailingBlankLines(lines: string[]) {
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
+  }
+}
+
+function buildFullscreenContent(data: TaskResultDisplay): string[] {
+  const lines: string[] = [];
+
+  lines.push(`Agent: ${data.subagentName}`);
+  lines.push(`Status: ${getStatusText(data.status)}`);
+  if (data.taskDescription) {
+    lines.push(`Description: ${data.taskDescription}`);
+  }
+  lines.push('');
+
+  lines.push('Task Prompt:');
+  if (data.taskPrompt.trim().length === 0) {
+    lines.push('  <empty>');
+  } else {
+    appendMultiline(lines, data.taskPrompt, '  ');
+  }
+  lines.push('');
+
+  if (data.pendingConfirmation) {
+    lines.push('Pending Confirmation:');
+    lines.push(`  ${data.pendingConfirmation.title}`);
+    if (
+      'command' in data.pendingConfirmation &&
+      data.pendingConfirmation.command
+    ) {
+      lines.push(`  Command: ${data.pendingConfirmation.command}`);
+    }
+    if (
+      'toolName' in data.pendingConfirmation &&
+      data.pendingConfirmation.toolName
+    ) {
+      lines.push(`  Tool: ${data.pendingConfirmation.toolName}`);
+    }
+    if ('plan' in data.pendingConfirmation && data.pendingConfirmation.plan) {
+      appendMultiline(lines, data.pendingConfirmation.plan, '  ');
+    }
+    if (
+      'prompt' in data.pendingConfirmation &&
+      data.pendingConfirmation.prompt
+    ) {
+      appendMultiline(lines, data.pendingConfirmation.prompt, '  ');
+    }
+    lines.push('');
+  }
+
+  if (data.toolCalls && data.toolCalls.length > 0) {
+    lines.push('Tool Calls:');
+    data.toolCalls.forEach((toolCall, index) => {
+      const icon = TOOL_CALL_STATUS_ICONS[toolCall.status];
+      const statusText = TOOL_CALL_STATUS_TEXT[toolCall.status];
+      lines.push(`  ${index + 1}. ${icon} ${toolCall.name} — ${statusText}`);
+      if (toolCall.description) {
+        appendMultiline(lines, toolCall.description, '     ');
+      }
+      if (toolCall.error) {
+        lines.push(`     Error: ${toolCall.error}`);
+      }
+      if (toolCall.resultDisplay) {
+        lines.push('     Result:');
+        appendMultiline(
+          lines,
+          toolCall.resultDisplay,
+          '       ',
+          MAX_FULLSCREEN_RESULT_LINES,
+        );
+      } else if (toolCall.result) {
+        lines.push('     Result:');
+        appendMultiline(
+          lines,
+          toolCall.result,
+          '       ',
+          MAX_FULLSCREEN_RESULT_LINES,
+        );
+      }
+    });
+    lines.push('');
+  }
+
+  if (data.status === 'failed' && data.terminateReason) {
+    lines.push(`Failure reason: ${data.terminateReason}`);
+    lines.push('');
+  }
+
+  if (data.status === 'cancelled' && data.terminateReason) {
+    lines.push(`Cancelled: ${data.terminateReason}`);
+    lines.push('');
+  }
+
+  if (data.status === 'completed' && data.executionSummary) {
+    const summary = data.executionSummary;
+    lines.push('Execution Summary:');
+    lines.push(
+      `  Duration: ${fmtDuration(summary.totalDurationMs)} · Rounds: ${summary.rounds}`,
+    );
+    lines.push(
+      `  Tool Calls: ${summary.totalToolCalls} (${summary.successfulToolCalls} success, ${summary.failedToolCalls} failed)`,
+    );
+    lines.push(`  Success Rate: ${summary.successRate.toFixed(1)}%`);
+    lines.push(
+      `  Tokens: ${summary.totalTokens.toLocaleString()} (in ${summary.inputTokens.toLocaleString()}, out ${summary.outputTokens.toLocaleString()})`,
+    );
+    if (summary.estimatedCost) {
+      lines.push(`  Estimated Cost: $${summary.estimatedCost.toFixed(4)}`);
+    }
+    lines.push('');
+  }
+
+  if (data.result) {
+    lines.push('Result:');
+    appendMultiline(lines, data.result, '  ', MAX_FULLSCREEN_RESULT_LINES);
+    lines.push('');
+  }
+
+  trimTrailingBlankLines(lines);
+  return lines;
+}

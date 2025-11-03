@@ -26,6 +26,7 @@ import {
   ToolCallStatus,
   type HistoryItemWithoutId,
   AuthState,
+  type SubagentFullscreenPanelState,
 } from './types.js';
 import { MessageType, StreamingState } from './types.js';
 import {
@@ -149,6 +150,8 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult.geminiMdFileCount,
   );
   const [shellModeActive, setShellModeActive] = useState(false);
+  const [subagentFullscreenPanel, setSubagentFullscreenPanel] =
+    useState<SubagentFullscreenPanelState | null>(null);
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
     useState<boolean>(false);
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
@@ -450,6 +453,46 @@ export const AppContainer = (props: AppContainerProps) => {
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
 
+  const openSubagentFullscreenPanel = useCallback(
+    (panel: SubagentFullscreenPanelState) => {
+      setSubagentFullscreenPanel(panel);
+    },
+    [],
+  );
+
+  const closeSubagentFullscreenPanel = useCallback((panelId: string) => {
+    setSubagentFullscreenPanel((current) => {
+      if (!current || current.panelId !== panelId) {
+        return current;
+      }
+      current.onClose?.();
+      return null;
+    });
+  }, []);
+
+  const updateSubagentFullscreenPanel = useCallback(
+    (
+      panelId: string,
+      updates: Partial<
+        Pick<
+          SubagentFullscreenPanelState,
+          'content' | 'status' | 'subagentName'
+        >
+      >,
+    ) => {
+      setSubagentFullscreenPanel((current) => {
+        if (!current || current.panelId !== panelId) {
+          return current;
+        }
+        return {
+          ...current,
+          ...updates,
+        };
+      });
+    },
+    [],
+  );
+
   // Vision model auto-switch dialog state (must be before slashCommandActions)
   const [isVisionSwitchDialogOpen, setIsVisionSwitchDialogOpen] =
     useState(false);
@@ -730,7 +773,8 @@ export const AppContainer = (props: AppContainerProps) => {
     !isProcessing &&
     (streamingState === StreamingState.Idle ||
       streamingState === StreamingState.Responding) &&
-    !proQuotaRequest;
+    !proQuotaRequest &&
+    !subagentFullscreenPanel;
 
   const [controlsHeight, setControlsHeight] = useState(0);
 
@@ -1294,6 +1338,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      subagentFullscreenPanel,
     }),
     [
       isThemeDialogOpen,
@@ -1389,6 +1434,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      subagentFullscreenPanel,
     ],
   );
 
@@ -1427,6 +1473,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      openSubagentFullscreenPanel,
+      closeSubagentFullscreenPanel,
+      updateSubagentFullscreenPanel,
     }),
     [
       handleThemeSelect,
@@ -1460,6 +1509,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      openSubagentFullscreenPanel,
+      closeSubagentFullscreenPanel,
+      updateSubagentFullscreenPanel,
     ],
   );
 
