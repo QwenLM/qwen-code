@@ -661,7 +661,7 @@ export async function loadCliConfig(
   // Interactive mode determination with priority:
   // 1. If promptInteractive (-i flag) is provided, it is explicitly interactive
   // 2. If outputFormat is stream-json or json (no matter input-format) along with query or prompt, it is non-interactive
-  // 3. If no query or prompt is provided, the format arguments should be ignored, it is interactive
+  // 3. If no query or prompt is provided, check isTTY: TTY means interactive, non-TTY means non-interactive
   const hasQuery = !!argv.query;
   const hasPrompt = !!argv.prompt;
   let interactive: boolean;
@@ -676,8 +676,8 @@ export async function loadCliConfig(
     // Priority 2: JSON/stream-json output with query/prompt means non-interactive
     interactive = false;
   } else if (!hasQuery && !hasPrompt) {
-    // Priority 3: No query or prompt means interactive (format arguments ignored)
-    interactive = true;
+    // Priority 3: No query or prompt means interactive only if TTY (format arguments ignored)
+    interactive = process.stdin.isTTY ?? false;
   } else {
     // Default: If we have query/prompt but output format is TEXT, assume non-interactive
     // (fallback for edge cases where query/prompt is provided with TEXT output)

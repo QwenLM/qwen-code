@@ -19,7 +19,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
-import type { JsonOutputAdapterInterface } from './nonInteractive/io/JsonOutputAdapter.js';
+import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import type { ControlService } from './nonInteractive/control/ControlService.js';
@@ -39,6 +39,7 @@ import {
   extractUsageFromGeminiClient,
   calculateApproximateCost,
   buildSystemMessage,
+  createTaskToolProgressHandler,
 } from './utils/nonInteractiveHelpers.js';
 
 /**
@@ -217,6 +218,7 @@ export async function runNonInteractive(
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
+
           for (const requestInfo of toolCallRequests) {
             const finalRequestInfo = requestInfo;
 
@@ -254,16 +256,35 @@ export async function runNonInteractive(
               ? options.controlService.permission.getToolCallUpdateCallback()
               : undefined;
             */
+
+            // Only pass outputUpdateHandler for Task tool
+            const isTaskTool = finalRequestInfo.name === 'task';
+            const taskToolProgress = isTaskTool
+              ? createTaskToolProgressHandler(
+                  config,
+                  finalRequestInfo.callId,
+                  adapter,
+                )
+              : undefined;
+            const taskToolProgressHandler = taskToolProgress?.handler;
             const toolResponse = await executeToolCall(
               config,
               finalRequestInfo,
               abortController.signal,
-              /*
-              toolCallUpdateCallback
-                ? { onToolCallsUpdate: toolCallUpdateCallback }
+              isTaskTool && taskToolProgressHandler
+                ? {
+                    outputUpdateHandler: taskToolProgressHandler,
+                    /*
+                    toolCallUpdateCallback
+                      ? { onToolCallsUpdate: toolCallUpdateCallback }
+                      : undefined,
+                    */
+                  }
                 : undefined,
-              */
             );
+
+            // Note: In JSON mode, subagent messages are automatically added to the main
+            // adapter's messages array and will be output together on emitResult()
 
             if (toolResponse.error) {
               // In JSON/STREAM_JSON mode, tool errors are tolerated and formatted

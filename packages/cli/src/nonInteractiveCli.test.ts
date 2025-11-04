@@ -251,6 +251,7 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
+      undefined,
     );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
@@ -301,6 +302,9 @@ describe('runNonInteractive', () => {
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
+
+    // Enable debug mode so handleToolError logs to console.error
+    (mockConfig.getDebugMode as Mock).mockReturnValue(true);
 
     await runNonInteractive(
       mockConfig,
@@ -378,6 +382,9 @@ describe('runNonInteractive', () => {
     mockGeminiClient.sendMessageStream
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
+
+    // Enable debug mode so handleToolError logs to console.error
+    (mockConfig.getDebugMode as Mock).mockReturnValue(true);
 
     await runNonInteractive(
       mockConfig,
@@ -608,6 +615,7 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
+      undefined,
     );
 
     // JSON adapter emits array of messages, last one is result with stats
@@ -1211,7 +1219,14 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-tool',
       },
     };
-    const toolResponse: Part[] = [{ text: 'Tool executed successfully' }];
+    const toolResponse: Part[] = [
+      {
+        functionResponse: {
+          name: 'testTool',
+          response: { output: 'Tool executed successfully' },
+        },
+      },
+    ];
     mockCoreExecuteToolCall.mockResolvedValue({ responseParts: toolResponse });
 
     const firstCallEvents: ServerGeminiStreamEvent[] = [toolCallEvent];
@@ -1279,7 +1294,7 @@ describe('runNonInteractive', () => {
     expect(toolResultBlock?.content).toBe('Tool executed successfully');
   });
 
-  it('should emit system messages for tool errors in stream-json format', async () => {
+  it('should emit tool errors in tool_result blocks in stream-json format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
 
@@ -1346,14 +1361,30 @@ describe('runNonInteractive', () => {
       .filter((line) => line.trim().length > 0)
       .map((line) => JSON.parse(line));
 
-    // Should have system message for tool error
-    const systemMessages = envelopes.filter((env) => env.type === 'system');
-    const toolErrorSystemMessage = systemMessages.find(
-      (msg) => msg.subtype === 'tool_error',
+    // Tool errors are now captured in tool_result blocks with is_error=true,
+    // not as separate system messages (see comment in nonInteractiveCli.ts line 307-309)
+    const toolResultMessages = envelopes.filter(
+      (env) =>
+        env.type === 'user' &&
+        Array.isArray(env.message?.content) &&
+        env.message.content.some(
+          (block: unknown) =>
+            typeof block === 'object' &&
+            block !== null &&
+            'type' in block &&
+            block.type === 'tool_result',
+        ),
     );
-    expect(toolErrorSystemMessage).toBeTruthy();
-    expect(toolErrorSystemMessage?.data?.tool).toBe('errorTool');
-    expect(toolErrorSystemMessage?.data?.message).toBe('Tool execution failed');
+    expect(toolResultMessages.length).toBeGreaterThan(0);
+    const toolResultBlock = toolResultMessages[0]?.message?.content?.find(
+      (block: unknown) =>
+        typeof block === 'object' &&
+        block !== null &&
+        'type' in block &&
+        block.type === 'tool_result',
+    );
+    expect(toolResultBlock?.tool_use_id).toBe('tool-error');
+    expect(toolResultBlock?.is_error).toBe(true);
   });
 
   it('should emit partial messages when includePartialMessages is true', async () => {

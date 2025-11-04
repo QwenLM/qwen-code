@@ -619,11 +619,7 @@ export class SubAgentScope {
             name: toolName,
             success,
             error: errorMessage,
-            resultDisplay: call.response.resultDisplay
-              ? typeof call.response.resultDisplay === 'string'
-                ? call.response.resultDisplay
-                : JSON.stringify(call.response.resultDisplay)
-              : undefined,
+            responseParts: call.response.responseParts,
             durationMs: duration,
             timestamp: Date.now(),
           } as SubAgentToolResultEvent);
