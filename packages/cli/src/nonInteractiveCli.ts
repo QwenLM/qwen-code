@@ -266,6 +266,10 @@ export async function runNonInteractive(
             );
 
             if (toolResponse.error) {
+              // In JSON/STREAM_JSON mode, tool errors are tolerated and formatted
+              // as tool_result blocks. handleToolError will detect JSON/STREAM_JSON mode
+              // from config and allow the session to continue so the LLM can decide what to do next.
+              // In text mode, we still log the error.
               handleToolError(
                 finalRequestInfo.name,
                 toolResponse.error,
@@ -275,14 +279,9 @@ export async function runNonInteractive(
                   ? toolResponse.resultDisplay
                   : undefined,
               );
-              if (adapter) {
-                const message =
-                  toolResponse.resultDisplay || toolResponse.error.message;
-                adapter.emitSystemMessage('tool_error', {
-                  tool: finalRequestInfo.name,
-                  message,
-                });
-              }
+              // Note: We no longer emit a separate system message for tool errors
+              // in JSON/STREAM_JSON mode, as the error is already captured in the
+              // tool_result block with is_error=true.
             }
 
             if (adapter) {

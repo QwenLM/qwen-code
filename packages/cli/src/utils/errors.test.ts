@@ -291,90 +291,74 @@ describe('errors', () => {
         ).mockReturnValue(OutputFormat.JSON);
       });
 
-      it('should format error as JSON and exit with default code', () => {
-        expect(() => {
-          handleToolError(toolName, toolError, mockConfig);
-        }).toThrow('process.exit called with code: 54');
+      it('should log error message to stderr and not exit', () => {
+        handleToolError(toolName, toolError, mockConfig);
 
+        // In JSON mode, should not exit (just log to stderr)
         expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Tool failed',
-                code: 54,
-              },
-            },
-            null,
-            2,
-          ),
+          'Error executing tool test-tool: Tool failed',
         );
+        expect(processExitSpy).not.toHaveBeenCalled();
       });
 
-      it('should use custom error code', () => {
-        expect(() => {
-          handleToolError(toolName, toolError, mockConfig, 'CUSTOM_TOOL_ERROR');
-        }).toThrow('process.exit called with code: 54');
+      it('should log error with custom error code and not exit', () => {
+        handleToolError(toolName, toolError, mockConfig, 'CUSTOM_TOOL_ERROR');
 
+        // In JSON mode, should not exit (just log to stderr)
         expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Tool failed',
-                code: 'CUSTOM_TOOL_ERROR',
-              },
-            },
-            null,
-            2,
-          ),
+          'Error executing tool test-tool: Tool failed',
         );
+        expect(processExitSpy).not.toHaveBeenCalled();
       });
 
-      it('should use numeric error code and exit with that code', () => {
-        expect(() => {
-          handleToolError(toolName, toolError, mockConfig, 500);
-        }).toThrow('process.exit called with code: 500');
+      it('should log error with numeric error code and not exit', () => {
+        handleToolError(toolName, toolError, mockConfig, 500);
 
+        // In JSON mode, should not exit (just log to stderr)
         expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Tool failed',
-                code: 500,
-              },
-            },
-            null,
-            2,
-          ),
+          'Error executing tool test-tool: Tool failed',
         );
+        expect(processExitSpy).not.toHaveBeenCalled();
       });
 
       it('should prefer resultDisplay over error message', () => {
-        expect(() => {
-          handleToolError(
-            toolName,
-            toolError,
-            mockConfig,
-            'DISPLAY_ERROR',
-            'Display message',
-          );
-        }).toThrow('process.exit called with code: 54');
-
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Display message',
-                code: 'DISPLAY_ERROR',
-              },
-            },
-            null,
-            2,
-          ),
+        handleToolError(
+          toolName,
+          toolError,
+          mockConfig,
+          'DISPLAY_ERROR',
+          'Display message',
         );
+
+        // In JSON mode, should not exit (just log to stderr)
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          'Error executing tool test-tool: Display message',
+        );
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not exit in JSON mode', () => {
+        handleToolError(toolName, toolError, mockConfig);
+
+        // Should not throw (no exit)
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          'Error executing tool test-tool: Tool failed',
+        );
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not exit in STREAM_JSON mode', () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.STREAM_JSON);
+
+        handleToolError(toolName, toolError, mockConfig);
+
+        // Should not exit in STREAM_JSON mode
+        expect(consoleErrorSpy).toHaveBeenCalledWith(
+          'Error executing tool test-tool: Tool failed',
+        );
+        expect(processExitSpy).not.toHaveBeenCalled();
       });
     });
   });
