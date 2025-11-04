@@ -112,14 +112,19 @@ describe('ide-installer', () => {
           platform: 'linux',
         });
         await installer.install();
+
+        // Note: The implementation uses process.platform, not the mocked platform
+        const isActuallyWindows = process.platform === 'win32';
+        const expectedCommand = isActuallyWindows ? '"code"' : 'code';
+
         expect(child_process.spawnSync).toHaveBeenCalledWith(
-          'code',
+          expectedCommand,
           [
             '--install-extension',
             'qwenlm.qwen-code-vscode-ide-companion',
             '--force',
           ],
-          { stdio: 'pipe' },
+          { stdio: 'pipe', shell: isActuallyWindows },
         );
       });
 

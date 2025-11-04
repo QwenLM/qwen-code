@@ -916,17 +916,9 @@ export const AppContainer = (props: AppContainerProps) => {
     (result: IdeIntegrationNudgeResult) => {
       if (result.userSelection === 'yes') {
         handleSlashCommand('/ide install');
-        settings.setValue(
-          SettingScope.User,
-          'hasSeenIdeIntegrationNudge',
-          true,
-        );
+        settings.setValue(SettingScope.User, 'ide.hasSeenNudge', true);
       } else if (result.userSelection === 'dismiss') {
-        settings.setValue(
-          SettingScope.User,
-          'hasSeenIdeIntegrationNudge',
-          true,
-        );
+        settings.setValue(SettingScope.User, 'ide.hasSeenNudge', true);
       }
       setIdePromptAnswered(true);
     },
