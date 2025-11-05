@@ -154,7 +154,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Count how many lines we actually included after character truncation
       const finalLines = grepOutput
-        .split(EOL)
+        .split('\n')
         .filter(
           (line) =>
             line.trim() && !line.startsWith('File:') && !line.startsWith('---'),
