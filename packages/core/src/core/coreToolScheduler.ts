@@ -696,7 +696,7 @@ export class CoreToolScheduler {
                 response: createErrorResponse(
                   reqInfo,
                   new Error(permissionErrorMessage),
-                  ToolErrorType.TOOL_NOT_REGISTERED,
+                  ToolErrorType.EXECUTION_DENIED,
                 ),
                 durationMs: 0,
               };
@@ -811,6 +811,32 @@ export class CoreToolScheduler {
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
           } else {
+            /**
+             * In non-interactive mode where no user will respond to approval prompts,
+             * and not running as IDE companion or Zed integration, automatically deny approval.
+             * This is intended to create an explicit denial of the tool call,
+             * rather than silently waiting for approval and hanging forever.
+             */
+            const shouldAutoDeny =
+              !this.config.isInteractive() &&
+              !this.config.getIdeMode() &&
+              !this.config.getExperimentalZedIntegration();
+
+            if (shouldAutoDeny) {
+              // Treat as execution denied error, similar to excluded tools
+              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              continue;
+            }
+
             // Allow IDE to resolve confirmation
             if (
               confirmationDetails.type === 'edit' &&
