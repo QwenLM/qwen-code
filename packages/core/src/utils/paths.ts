@@ -4,9 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import * as crypto from 'node:crypto';
+import type { Config } from '../config/config.js';
+import { isNodeError } from './errors.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -190,4 +193,94 @@ export function isSubpath(parentPath: string, childPath: string): boolean {
     relative !== '..' &&
     !pathModule.isAbsolute(relative)
   );
+}
+
+/**
+ * Resolves a path with tilde (~) expansion and relative path resolution.
+ * Handles tilde expansion for home directory and resolves relative paths
+ * against the provided base directory or current working directory.
+ *
+ * @param baseDir The base directory to resolve relative paths against (defaults to current working directory)
+ * @param relativePath The path to resolve (can be relative, absolute, or tilde-prefixed)
+ * @returns The resolved absolute path
+ */
+export function resolvePath(
+  baseDir: string | undefined = process.cwd(),
+  relativePath: string,
+): string {
+  const homeDir = os.homedir();
+
+  if (relativePath === '~') {
+    return homeDir;
+  } else if (relativePath.startsWith('~/')) {
+    return path.join(homeDir, relativePath.slice(2));
+  } else if (path.isAbsolute(relativePath)) {
+    return relativePath;
+  } else {
+    return path.resolve(baseDir, relativePath);
+  }
+}
+
+export interface PathValidationOptions {
+  /**
+   * If true, allows both files and directories. If false (default), only allows directories.
+   */
+  allowFiles?: boolean;
+}
+
+/**
+ * Validates that a resolved path exists within the workspace boundaries.
+ *
+ * @param config The configuration object containing workspace context
+ * @param resolvedPath The absolute path to validate
+ * @param options Validation options
+ * @throws Error if the path is outside workspace boundaries, doesn't exist, or is not a directory (when allowFiles is false)
+ */
+export function validatePath(
+  config: Config,
+  resolvedPath: string,
+  options: PathValidationOptions = {},
+): void {
+  const { allowFiles = false } = options;
+  const workspaceContext = config.getWorkspaceContext();
+
+  if (!workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+    throw new Error('Path is not within workspace');
+  }
+
+  try {
+    const stats = fs.statSync(resolvedPath);
+    if (!allowFiles && !stats.isDirectory()) {
+      throw new Error(`Path is not a directory: ${resolvedPath}`);
+    }
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      throw new Error(`Path does not exist: ${resolvedPath}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Resolves a path relative to the workspace root and verifies that it exists
+ * within the workspace boundaries defined in the config.
+ *
+ * @param config The configuration object
+ * @param relativePath The relative path to resolve (optional, defaults to target directory)
+ * @param options Validation options (e.g., allowFiles to permit file paths)
+ */
+export function resolveAndValidatePath(
+  config: Config,
+  relativePath?: string,
+  options: PathValidationOptions = {},
+): string {
+  const targetDir = config.getTargetDir();
+
+  if (!relativePath) {
+    return targetDir;
+  }
+
+  const resolvedPath = resolvePath(targetDir, relativePath);
+  validatePath(config, resolvedPath, options);
+  return resolvedPath;
 }

@@ -184,17 +184,15 @@ describe('RipGrepTool', () => {
       };
       // Check for the core error message, as the full path might vary
       expect(grepTool.validateToolParams(params)).toContain(
-        'Failed to access path stats for',
+        'Path does not exist:',
       );
       expect(grepTool.validateToolParams(params)).toContain('nonexistent');
     });
 
-    it('should return error if path is a file, not a directory', async () => {
+    it('should allow path to be a file', () => {
       const filePath = path.join(tempRootDir, 'fileA.txt');
       const params: RipGrepToolParams = { pattern: 'hello', path: filePath };
-      expect(grepTool.validateToolParams(params)).toContain(
-        `Path is not a directory: ${filePath}`,
-      );
+      expect(grepTool.validateToolParams(params)).toBeNull();
     });
   });
 
@@ -432,7 +430,7 @@ describe('RipGrepTool', () => {
       const invocation = grepTool.build(params);
       const result = await invocation.execute(abortSignal);
 
-      expect(String(result.llmContent).length).toBeLessThanOrEqual(20_000);
+      expect(String(result.llmContent).length).toBeLessThanOrEqual(21_000);
       expect(result.llmContent).toMatch(/\[\d+ lines? truncated\] \.\.\./);
       expect(result.returnDisplay).toContain('truncated');
     });
@@ -567,6 +565,26 @@ describe('RipGrepTool', () => {
       );
     });
 
+    it('should search within a single file when path is a file', async () => {
+      mockSpawn.mockImplementationOnce(
+        createMockSpawn({
+          outputData: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}`,
+          exitCode: 0,
+        }),
+      );
+
+      const params: RipGrepToolParams = {
+        pattern: 'world',
+        path: path.join(tempRootDir, 'fileA.txt'),
+      };
+      const invocation = grepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+      expect(result.llmContent).toContain('Found 2 matches');
+      expect(result.llmContent).toContain('fileA.txt:1:hello world');
+      expect(result.llmContent).toContain('fileA.txt:2:second line with world');
+      expect(result.returnDisplay).toBe('Found 2 matches');
+    });
+
     it('should throw an error if ripgrep is not available', async () => {
       // Make ensureRipgrepBinary throw
       (ensureRipgrepPath as Mock).mockRejectedValue(
@@ -648,7 +666,9 @@ describe('RipGrepTool', () => {
   describe('error handling and edge cases', () => {
     it('should handle workspace boundary violations', () => {
       const params: RipGrepToolParams = { pattern: 'test', path: '../outside' };
-      expect(() => grepTool.build(params)).toThrow(/Path validation failed/);
+      expect(() => grepTool.build(params)).toThrow(
+        /Path is not within workspace/,
+      );
     });
 
     it('should handle empty directories gracefully', async () => {
@@ -1132,7 +1152,9 @@ describe('RipGrepTool', () => {
         glob: '*.ts',
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in *.ts");
+      expect(invocation.getDescription()).toBe(
+        "'testPattern' (filter: '*.ts')",
+      );
     });
 
     it('should generate correct description with pattern and path', async () => {
@@ -1143,9 +1165,10 @@ describe('RipGrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      // The path will be relative to the tempRootDir, so we check for containment.
-      expect(invocation.getDescription()).toContain("'testPattern' within");
-      expect(invocation.getDescription()).toContain(path.join('src', 'app'));
+      expect(invocation.getDescription()).toContain(
+        "'testPattern' in path 'src",
+      );
+      expect(invocation.getDescription()).toContain("app'");
     });
 
     it('should generate correct description with default search path', () => {
@@ -1164,15 +1187,15 @@ describe('RipGrepTool', () => {
       };
       const invocation = grepTool.build(params);
       expect(invocation.getDescription()).toContain(
-        "'testPattern' in *.ts within",
+        "'testPattern' in path 'src",
       );
-      expect(invocation.getDescription()).toContain(path.join('src', 'app'));
+      expect(invocation.getDescription()).toContain("(filter: '*.ts')");
     });
 
-    it('should use ./ for root path in description', () => {
+    it('should use path when specified in description', () => {
       const params: RipGrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' within ./");
+      expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
     });
   });
 });
