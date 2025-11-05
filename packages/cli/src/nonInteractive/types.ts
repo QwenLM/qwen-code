@@ -36,7 +36,6 @@ export interface ModelUsage {
   cacheReadInputTokens: number;
   cacheCreationInputTokens: number;
   webSearchRequests: number;
-  costUSD: number;
   contextWindow: number;
 }
 
@@ -162,7 +161,6 @@ export interface CLIResultMessageSuccess {
   duration_api_ms: number;
   num_turns: number;
   result: string;
-  total_cost_usd: number;
   usage: ExtendedUsage;
   modelUsage?: Record<string, ModelUsage>;
   permission_denials: CLIPermissionDenial[];
@@ -178,7 +176,6 @@ export interface CLIResultMessageError {
   duration_ms: number;
   duration_api_ms: number;
   num_turns: number;
-  total_cost_usd: number;
   usage: ExtendedUsage;
   modelUsage?: Record<string, ModelUsage>;
   permission_denials: CLIPermissionDenial[];

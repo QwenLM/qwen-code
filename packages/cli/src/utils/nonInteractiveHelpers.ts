@@ -11,19 +11,20 @@ import type {
   OutputUpdateHandler,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  SessionMetrics,
 } from '@qwen-code/qwen-code-core';
 import { ToolErrorType } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
   CLIUserMessage,
   Usage,
-  ExtendedUsage,
   PermissionMode,
   CLISystemMessage,
 } from '../nonInteractive/types.js';
 import { CommandService } from '../services/CommandService.js';
 import { BuiltinCommandLoader } from '../services/BuiltinCommandLoader.js';
 import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
+import { computeSessionStats } from '../ui/utils/computeStats.js';
 
 /**
  * Normalizes various part list formats into a consistent Part[] array.
@@ -147,20 +148,38 @@ export function extractUsageFromGeminiClient(
 }
 
 /**
- * Calculates approximate cost for API usage.
- * Currently returns 0 as a placeholder - cost calculation logic can be added here.
+ * Computes Usage information from SessionMetrics using computeSessionStats.
+ * Aggregates token usage across all models in the session.
  *
- * @param usage - Usage information from API response
- * @returns Approximate cost in USD or undefined if not calculable
+ * @param metrics - Session metrics from uiTelemetryService
+ * @returns Usage object with token counts
  */
-export function calculateApproximateCost(
-  usage: Usage | ExtendedUsage | undefined,
-): number | undefined {
-  if (!usage) {
-    return undefined;
+export function computeUsageFromMetrics(metrics: SessionMetrics): Usage {
+  const stats = computeSessionStats(metrics);
+  const { models } = metrics;
+
+  // Sum up output tokens (candidates) and total tokens across all models
+  const totalOutputTokens = Object.values(models).reduce(
+    (acc, model) => acc + model.tokens.candidates,
+    0,
+  );
+  const totalTokens = Object.values(models).reduce(
+    (acc, model) => acc + model.tokens.total,
+    0,
+  );
+
+  const usage: Usage = {
+    input_tokens: stats.totalPromptTokens,
+    output_tokens: totalOutputTokens,
+    cache_read_input_tokens: stats.totalCachedTokens,
+  };
+
+  // Only include total_tokens if it's greater than 0
+  if (totalTokens > 0) {
+    usage.total_tokens = totalTokens;
   }
-  // TODO: Implement actual cost calculation based on token counts and model pricing
-  return 0;
+
+  return usage;
 }
 
 /**

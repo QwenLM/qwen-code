@@ -608,7 +608,6 @@ class SessionManager {
       apiDurationMs,
       numTurns,
       usage: undefined,
-      totalCostUsd: undefined,
     });
   }
 

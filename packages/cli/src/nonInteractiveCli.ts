@@ -36,10 +36,9 @@ import {
 import {
   normalizePartList,
   extractPartsFromUserMessage,
-  extractUsageFromGeminiClient,
-  calculateApproximateCost,
   buildSystemMessage,
   createTaskToolProgressHandler,
+  computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
 
 /**
@@ -315,8 +314,10 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          const usage = extractUsageFromGeminiClient(geminiClient);
+          // For JSON and STREAM_JSON modes, compute usage from metrics
           if (adapter) {
+            const metrics = uiTelemetryService.getMetrics();
+            const usage = computeUsageFromMetrics(metrics);
             // Get stats for JSON format output
             const stats =
               outputFormat === OutputFormat.JSON
@@ -328,20 +329,21 @@ export async function runNonInteractive(
               apiDurationMs: totalApiDurationMs,
               numTurns: turnCount,
               usage,
-              totalCostUsd: calculateApproximateCost(usage),
               stats,
             });
           } else {
-            // Text output mode
+            // Text output mode - no usage needed
             process.stdout.write('\n');
           }
           return;
         }
       }
     } catch (error) {
-      const usage = extractUsageFromGeminiClient(config.getGeminiClient());
+      // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
       if (adapter) {
+        const metrics = uiTelemetryService.getMetrics();
+        const usage = computeUsageFromMetrics(metrics);
         // Get stats for JSON format output
         const stats =
           outputFormat === OutputFormat.JSON
@@ -354,7 +356,6 @@ export async function runNonInteractive(
           numTurns: turnCount,
           errorMessage: message,
           usage,
-          totalCostUsd: calculateApproximateCost(usage),
           stats,
         });
       }

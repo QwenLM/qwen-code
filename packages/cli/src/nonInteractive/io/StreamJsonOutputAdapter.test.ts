@@ -612,7 +612,6 @@ describe('StreamJsonOutputAdapter', () => {
         durationMs: 1000,
         apiDurationMs: 800,
         numTurns: 1,
-        totalCostUsd: 0.01,
       });
 
       expect(stdoutWriteSpy).toHaveBeenCalled();
@@ -625,7 +624,6 @@ describe('StreamJsonOutputAdapter', () => {
       expect(parsed.result).toBe('Response text');
       expect(parsed.duration_ms).toBe(1000);
       expect(parsed.num_turns).toBe(1);
-      expect(parsed.total_cost_usd).toBe(0.01);
     });
 
     it('should emit error result', () => {
@@ -636,7 +634,6 @@ describe('StreamJsonOutputAdapter', () => {
         durationMs: 500,
         apiDurationMs: 300,
         numTurns: 1,
-        totalCostUsd: 0.005,
       });
 
       const output = stdoutWriteSpy.mock.calls[0][0] as string;

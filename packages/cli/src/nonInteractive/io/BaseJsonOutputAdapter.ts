@@ -56,7 +56,6 @@ export interface ResultOptions {
   readonly apiDurationMs: number;
   readonly numTurns: number;
   readonly usage?: ExtendedUsage;
-  readonly totalCostUsd?: number;
   readonly stats?: SessionMetrics;
   readonly summary?: string;
   readonly subtype?: string;
@@ -1020,7 +1019,6 @@ export abstract class BaseJsonOutputAdapter {
         duration_ms: options.durationMs,
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
-        total_cost_usd: options.totalCostUsd ?? 0,
         usage,
         permission_denials: [],
         error: { message: errorMessage },
@@ -1037,7 +1035,6 @@ export abstract class BaseJsonOutputAdapter {
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
         result: resultText,
-        total_cost_usd: options.totalCostUsd ?? 0,
         usage,
         permission_denials: [],
       };
@@ -1075,7 +1072,6 @@ export abstract class BaseJsonOutputAdapter {
       duration_ms: 0,
       duration_api_ms: 0,
       num_turns: numTurns,
-      total_cost_usd: 0,
       usage,
       permission_denials: [],
       error: { message: errorMessage },

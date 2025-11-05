@@ -173,6 +173,45 @@ describe('runNonInteractive', () => {
     vi.restoreAllMocks();
   });
 
+  /**
+   * Creates a default mock SessionMetrics object.
+   * Can be overridden in individual tests if needed.
+   */
+  function createMockMetrics(
+    overrides?: Partial<SessionMetrics>,
+  ): SessionMetrics {
+    return {
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          accept: 0,
+          reject: 0,
+          modify: 0,
+          auto_accept: 0,
+        },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+      ...overrides,
+    };
+  }
+
+  /**
+   * Sets up the default mock for uiTelemetryService.getMetrics().
+   * Should be called in beforeEach or at the start of tests that need metrics.
+   */
+  function setupMetricsMock(overrides?: Partial<SessionMetrics>): void {
+    const mockMetrics = createMockMetrics(overrides);
+    vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+  }
+
   async function* createStreamFromEvents(
     events: ServerGeminiStreamEvent[],
   ): AsyncGenerator<ServerGeminiStreamEvent> {
@@ -475,27 +514,7 @@ describe('runNonInteractive', () => {
       createStreamFromEvents(events),
     );
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
-    const mockMetrics: SessionMetrics = {
-      models: {},
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 0,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+    setupMetricsMock();
 
     await runNonInteractive(
       mockConfig,
@@ -527,7 +546,9 @@ describe('runNonInteractive', () => {
     );
     expect(resultMessage).toBeTruthy();
     expect(resultMessage?.result).toBe('Hello World');
-    expect(resultMessage?.stats).toEqual(mockMetrics);
+    // Get the actual metrics that were used
+    const actualMetrics = vi.mocked(uiTelemetryService.getMetrics)();
+    expect(resultMessage?.stats).toEqual(actualMetrics);
   });
 
   it('should write JSON output with stats for tool-only commands (no text response)', async () => {
@@ -568,8 +589,7 @@ describe('runNonInteractive', () => {
       .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
 
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
-    const mockMetrics: SessionMetrics = {
-      models: {},
+    setupMetricsMock({
       tools: {
         totalCalls: 1,
         totalSuccess: 1,
@@ -596,12 +616,7 @@ describe('runNonInteractive', () => {
           },
         },
       },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+    });
 
     await runNonInteractive(
       mockConfig,
@@ -651,27 +666,7 @@ describe('runNonInteractive', () => {
       createStreamFromEvents(events),
     );
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
-    const mockMetrics: SessionMetrics = {
-      models: {},
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 0,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+    setupMetricsMock();
 
     await runNonInteractive(
       mockConfig,
@@ -703,11 +698,14 @@ describe('runNonInteractive', () => {
     );
     expect(resultMessage).toBeTruthy();
     expect(resultMessage?.result).toBe('');
-    expect(resultMessage?.stats).toEqual(mockMetrics);
+    // Get the actual metrics that were used
+    const actualMetrics = vi.mocked(uiTelemetryService.getMetrics)();
+    expect(resultMessage?.stats).toEqual(actualMetrics);
   });
 
   it('should handle errors in JSON format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
     const testError = new Error('Invalid input provided');
 
     mockGeminiClient.sendMessageStream.mockImplementation(() => {
@@ -753,6 +751,7 @@ describe('runNonInteractive', () => {
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
     const fatalError = new FatalInputError('Invalid command syntax provided');
 
     mockGeminiClient.sendMessageStream.mockImplementation(() => {
@@ -950,6 +949,7 @@ describe('runNonInteractive', () => {
   it('should emit stream-json envelopes when output format is stream-json', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1065,6 +1065,25 @@ describe('runNonInteractive', () => {
   it('should include usage metadata and API duration in stream-json result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock({
+      models: {
+        'test-model': {
+          api: {
+            totalRequests: 1,
+            totalErrors: 0,
+            totalLatencyMs: 500,
+          },
+          tokens: {
+            prompt: 11,
+            candidates: 5,
+            total: 16,
+            cached: 3,
+            thoughts: 0,
+            tool: 0,
+          },
+        },
+      },
+    });
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1125,6 +1144,7 @@ describe('runNonInteractive', () => {
   it('should not emit user message when userMessage option is provided (stream-json input binding)', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1198,6 +1218,7 @@ describe('runNonInteractive', () => {
   it('should emit tool results as user messages in stream-json format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1297,6 +1318,7 @@ describe('runNonInteractive', () => {
   it('should emit tool errors in tool_result blocks in stream-json format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1390,6 +1412,7 @@ describe('runNonInteractive', () => {
   it('should emit partial messages when includePartialMessages is true', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(true);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1446,6 +1469,7 @@ describe('runNonInteractive', () => {
   it('should handle thinking blocks in stream-json format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1503,6 +1527,7 @@ describe('runNonInteractive', () => {
   it('should handle multiple tool calls in stream-json format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
@@ -1613,6 +1638,7 @@ describe('runNonInteractive', () => {
   it('should handle userMessage with text content blocks in stream-json input mode', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
     (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
 
     const writes: string[] = [];
     processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
