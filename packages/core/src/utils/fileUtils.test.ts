@@ -809,8 +809,7 @@ describe('fileUtils', () => {
         5,
         5,
       ); // Read lines 6-10
-      const expectedContent =
-        lines.slice(5, 10).join('\n') + '\n---\n[10 lines truncated] ...';
+      const expectedContent = lines.slice(5, 10).join('\n');
 
       expect(result.llmContent).toBe(expectedContent);
       expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');

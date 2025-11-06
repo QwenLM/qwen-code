@@ -375,7 +375,7 @@ export async function processSingleFileContent(
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
         const content = await readFileWithEncoding(filePath);
-        const lines = content.split('\n');
+        const lines = content.split('\n').map((line) => line.trimEnd());
         const originalLineCount = lines.length;
 
         const startLine = offset || 0;
@@ -435,12 +435,6 @@ export async function processSingleFileContent(
         const contentRangeTruncated =
           startLine > 0 || actualEndLine < originalLineCount;
         const isTruncated = contentRangeTruncated || contentLengthTruncated;
-
-        // Add truncation notice to llmContent if needed
-        if (contentRangeTruncated) {
-          const omittedLines = originalLineCount - actualEndLine;
-          llmContent += `\n---\n[${omittedLines} ${omittedLines === 1 ? 'line' : 'lines'} truncated] ...`;
-        }
 
         // By default, return nothing to streamline the common case of a successful read_file.
         let returnDisplay = '';

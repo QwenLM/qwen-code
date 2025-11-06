@@ -90,8 +90,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       const nextOffset = this.params.offset
         ? this.params.offset + end - start + 1
         : end;
-      llmContent = `
-IMPORTANT: The file content has been truncated.
+      llmContent = `IMPORTANT: The file content has been truncated.
 Status: Showing lines ${start}-${end} of ${total} total lines.
 Action: To read more of the file, you can use the 'offset' and 'limit' parameters in a subsequent 'read_file' call. For example, to read the next section of the file, use offset: ${nextOffset}.
 
