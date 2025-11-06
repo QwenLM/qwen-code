@@ -13,7 +13,11 @@ import type {
   ToolCallResponseInfo,
   SessionMetrics,
 } from '@qwen-code/qwen-code-core';
-import { ToolErrorType } from '@qwen-code/qwen-code-core';
+import {
+  OutputFormat,
+  ToolErrorType,
+  getMCPServerStatus,
+} from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
   CLIUserMessage,
@@ -243,12 +247,24 @@ export async function buildSystemMessage(
   const mcpServerList = mcpServers
     ? Object.keys(mcpServers).map((name) => ({
         name,
-        status: 'connected',
+        status: getMCPServerStatus(name),
       }))
     : [];
 
   // Load slash commands
   const slashCommands = await loadSlashCommandNames(config);
+
+  // Load subagent names from config
+  let agentNames: string[] = [];
+  try {
+    const subagentManager = config.getSubagentManager();
+    const subagents = await subagentManager.listSubagents();
+    agentNames = subagents.map((subagent) => subagent.name);
+  } catch (error) {
+    if (config.getDebugMode()) {
+      console.error('[buildSystemMessage] Failed to load subagents:', error);
+    }
+  }
 
   const systemMessage: CLISystemMessage = {
     type: 'system',
@@ -261,13 +277,8 @@ export async function buildSystemMessage(
     model: config.getModel(),
     permissionMode,
     slash_commands: slashCommands,
-    apiKeySource: 'none',
     qwen_code_version: config.getCliVersion() || 'unknown',
-    output_style: 'default',
-    agents: [],
-    skills: [],
-    // Note: capabilities are NOT included in system messages
-    // They are only in the initialize control response
+    agents: agentNames,
   };
 
   return systemMessage;
@@ -536,10 +547,28 @@ export function createTaskToolProgressHandler(
         }
       }
 
+      // Handle subagent initial message (prompt) in non-interactive mode with json/stream-json output
+      // Emit when this is the first update (previous is undefined) and task starts
+      if (
+        !previous &&
+        taskDisplay.taskPrompt &&
+        !config.isInteractive() &&
+        (config.getOutputFormat() === OutputFormat.JSON ||
+          config.getOutputFormat() === OutputFormat.STREAM_JSON)
+      ) {
+        // Emit the user message with the correct parent_tool_use_id
+        adapter.emitUserMessage(
+          [{ text: taskDisplay.taskPrompt }],
+          taskToolCallId,
+        );
+      }
+
       // Update previous state
       previousTaskStates.set(callId, taskDisplay);
     }
   };
+
+  // No longer need to attach adapter to handler - task.ts uses TaskResultDisplay.message instead
 
   return {
     handler: outputUpdateHandler,

@@ -11,7 +11,11 @@ import type {
   TaskResultDisplay,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
-import { ToolErrorType } from '@qwen-code/qwen-code-core';
+import {
+  ToolErrorType,
+  MCPServerStatus,
+  getMCPServerStatus,
+} from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type {
   CLIUserMessage,
@@ -54,6 +58,15 @@ vi.mock('../ui/utils/computeStats.js', () => ({
     totalCachedTokens: 20,
   }),
 }));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    getMCPServerStatus: vi.fn(),
+  };
+});
 
 describe('normalizePartList', () => {
   it('should return empty array for null input', () => {
@@ -477,6 +490,10 @@ describe('buildSystemMessage', () => {
   let mockConfig: Config;
 
   beforeEach(() => {
+    vi.clearAllMocks();
+    // Mock getMCPServerStatus to return CONNECTED by default
+    vi.mocked(getMCPServerStatus).mockReturnValue(MCPServerStatus.CONNECTED);
+
     mockConfig = {
       getToolRegistry: vi.fn().mockReturnValue({
         getAllToolNames: vi.fn().mockReturnValue(['tool1', 'tool2']),

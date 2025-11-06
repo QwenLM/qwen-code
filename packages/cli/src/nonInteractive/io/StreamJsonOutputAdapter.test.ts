@@ -714,7 +714,14 @@ describe('StreamJsonOutputAdapter', () => {
       const parsed = JSON.parse(output);
 
       expect(parsed.type).toBe('user');
-      expect(parsed.message.content).toBe('Hello user');
+      expect(Array.isArray(parsed.message.content)).toBe(true);
+      if (Array.isArray(parsed.message.content)) {
+        expect(parsed.message.content).toHaveLength(1);
+        expect(parsed.message.content[0]).toEqual({
+          type: 'text',
+          text: 'Hello user',
+        });
+      }
     });
 
     it('should handle parent_tool_use_id', () => {

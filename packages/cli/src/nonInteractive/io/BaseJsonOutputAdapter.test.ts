@@ -23,6 +23,7 @@ import {
   type MessageState,
   type ResultOptions,
   partsToString,
+  partsToContentBlock,
   toolResultContent,
   extractTextFromBlocks,
   createExtendedUsage,
@@ -853,7 +854,7 @@ describe('BaseJsonOutputAdapter', () => {
   });
 
   describe('emitUserMessage', () => {
-    it('should emit user message', () => {
+    it('should emit user message with ContentBlock array', () => {
       const parts: Part[] = [{ text: 'Hello user' }];
 
       adapter.emitUserMessage(parts);
@@ -862,23 +863,34 @@ describe('BaseJsonOutputAdapter', () => {
       const message = adapter.emittedMessages[0];
       expect(message.type).toBe('user');
       if (message.type === 'user') {
-        expect(message.message.content).toBe('Hello user');
+        expect(Array.isArray(message.message.content)).toBe(true);
+        if (Array.isArray(message.message.content)) {
+          expect(message.message.content).toHaveLength(1);
+          expect(message.message.content[0]).toEqual({
+            type: 'text',
+            text: 'Hello user',
+          });
+        }
         expect(message.parent_tool_use_id).toBeNull();
       }
     });
 
-    it('should handle multiple parts', () => {
+    it('should handle multiple parts and merge into single text block', () => {
       const parts: Part[] = [{ text: 'Hello' }, { text: ' World' }];
 
       adapter.emitUserMessage(parts);
 
       const message = adapter.emittedMessages[0];
-      if (message.type === 'user') {
-        expect(message.message.content).toBe('Hello World');
+      if (message.type === 'user' && Array.isArray(message.message.content)) {
+        expect(message.message.content).toHaveLength(1);
+        expect(message.message.content[0]).toEqual({
+          type: 'text',
+          text: 'Hello World',
+        });
       }
     });
 
-    it('should handle non-text parts', () => {
+    it('should handle non-text parts by converting to text blocks', () => {
       const parts: Part[] = [
         { text: 'Hello' },
         { functionCall: { name: 'test' } },
@@ -887,8 +899,15 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.emitUserMessage(parts);
 
       const message = adapter.emittedMessages[0];
-      if (message.type === 'user') {
-        expect(message.message.content).toContain('Hello');
+      if (message.type === 'user' && Array.isArray(message.message.content)) {
+        expect(message.message.content.length).toBeGreaterThan(0);
+        const textBlock = message.message.content.find(
+          (block) => block.type === 'text',
+        );
+        expect(textBlock).toBeDefined();
+        if (textBlock && textBlock.type === 'text') {
+          expect(textBlock.text).toContain('Hello');
+        }
       }
     });
   });
@@ -1324,6 +1343,79 @@ describe('BaseJsonOutputAdapter', () => {
   });
 
   describe('helper functions', () => {
+    describe('partsToContentBlock', () => {
+      it('should convert text parts to TextBlock array', () => {
+        const parts: Part[] = [{ text: 'Hello' }, { text: ' World' }];
+
+        const result = partsToContentBlock(parts);
+
+        expect(result).toHaveLength(1);
+        expect(result[0]).toEqual({
+          type: 'text',
+          text: 'Hello World',
+        });
+      });
+
+      it('should handle functionResponse parts by extracting output', () => {
+        const parts: Part[] = [
+          { text: 'Result: ' },
+          {
+            functionResponse: {
+              name: 'test',
+              response: { output: 'function output' },
+            },
+          },
+        ];
+
+        const result = partsToContentBlock(parts);
+
+        expect(result).toHaveLength(1);
+        expect(result[0].type).toBe('text');
+        if (result[0].type === 'text') {
+          expect(result[0].text).toBe('Result: function output');
+        }
+      });
+
+      it('should handle non-text parts by converting to JSON string', () => {
+        const parts: Part[] = [
+          { text: 'Hello' },
+          { functionCall: { name: 'test' } },
+        ];
+
+        const result = partsToContentBlock(parts);
+
+        expect(result.length).toBeGreaterThan(0);
+        const textBlock = result.find((block) => block.type === 'text');
+        expect(textBlock).toBeDefined();
+        if (textBlock && textBlock.type === 'text') {
+          expect(textBlock.text).toContain('Hello');
+          expect(textBlock.text).toContain('functionCall');
+        }
+      });
+
+      it('should handle empty array', () => {
+        const result = partsToContentBlock([]);
+
+        expect(result).toEqual([]);
+      });
+
+      it('should merge consecutive text parts into single block', () => {
+        const parts: Part[] = [
+          { text: 'Part 1' },
+          { text: 'Part 2' },
+          { text: 'Part 3' },
+        ];
+
+        const result = partsToContentBlock(parts);
+
+        expect(result).toHaveLength(1);
+        expect(result[0]).toEqual({
+          type: 'text',
+          text: 'Part 1Part 2Part 3',
+        });
+      });
+    });
+
     describe('partsToString', () => {
       it('should convert text parts to string', () => {
         const parts: Part[] = [{ text: 'Hello' }, { text: ' World' }];

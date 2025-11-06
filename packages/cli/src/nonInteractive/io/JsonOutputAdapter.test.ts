@@ -556,7 +556,14 @@ describe('JsonOutputAdapter', () => {
       );
 
       expect(userMessage).toBeDefined();
-      expect(userMessage.message.content).toBe('Hello user');
+      expect(Array.isArray(userMessage.message.content)).toBe(true);
+      if (Array.isArray(userMessage.message.content)) {
+        expect(userMessage.message.content).toHaveLength(1);
+        expect(userMessage.message.content[0]).toEqual({
+          type: 'text',
+          text: 'Hello user',
+        });
+      }
     });
 
     it('should handle parent_tool_use_id', () => {
