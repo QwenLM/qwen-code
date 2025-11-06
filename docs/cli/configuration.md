@@ -171,6 +171,10 @@ Settings are organized into categories. All settings should be placed within the
   - **Description:** Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.
   - **Default:** `false`
 
+- **`model.skipStartupContext`** (boolean):
+  - **Description:** Skips sending the startup workspace context (environment summary and acknowledgement) at the beginning of each session. Enable this if you prefer to provide context manually or want to save tokens on startup.
+  - **Default:** `false`
+
 - **`model.enableOpenAILogging`** (boolean):
   - **Description:** Enables logging of OpenAI API calls for debugging and analysis. When enabled, API requests and responses are logged to JSON files.
   - **Default:** `false`

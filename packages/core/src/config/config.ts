@@ -288,6 +288,7 @@ export interface ConfigParameters {
   eventEmitter?: EventEmitter;
   useSmartEdit?: boolean;
   output?: OutputSettings;
+  skipStartupContext?: boolean;
 }
 
 export class Config {
@@ -377,6 +378,7 @@ export class Config {
   private readonly extensionManagement: boolean = true;
   private readonly enablePromptCompletion: boolean = false;
   private readonly skipLoopDetection: boolean;
+  private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
   readonly storage: Storage;
@@ -469,6 +471,7 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
+    this.skipStartupContext = params.skipStartupContext ?? false;
 
     // Web search
     this.webSearch = params.webSearch;
@@ -1039,6 +1042,10 @@ export class Config {
 
   getSkipLoopDetection(): boolean {
     return this.skipLoopDetection;
+  }
+
+  getSkipStartupContext(): boolean {
+    return this.skipStartupContext;
   }
 
   getVlmSwitchMode(): string | undefined {
