@@ -37,6 +37,7 @@ describe('GlobTool', () => {
     getFileExclusions: () => ({
       getGlobExcludes: () => [],
     }),
+    getTruncateToolOutputLines: () => 1000,
   } as unknown as Config;
 
   beforeEach(async () => {

@@ -161,11 +161,15 @@ class GlobToolInvocation extends BaseToolInvocation<
       );
 
       const totalFileCount = sortedEntries.length;
-      const truncated = totalFileCount > MAX_FILE_COUNT;
+      const fileLimit = Math.min(
+        MAX_FILE_COUNT,
+        this.config.getTruncateToolOutputLines(),
+      );
+      const truncated = totalFileCount > fileLimit;
 
-      // Limit to MAX_FILE_COUNT if needed
+      // Limit to fileLimit if needed
       const entriesToShow = truncated
-        ? sortedEntries.slice(0, MAX_FILE_COUNT)
+        ? sortedEntries.slice(0, fileLimit)
         : sortedEntries;
 
       const sortedAbsolutePaths = entriesToShow.map((entry) =>
@@ -178,7 +182,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (truncated) {
-        const omittedFiles = totalFileCount - MAX_FILE_COUNT;
+        const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
       }

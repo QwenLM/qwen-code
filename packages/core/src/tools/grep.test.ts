@@ -43,6 +43,8 @@ describe('GrepTool', () => {
     getFileExclusions: () => ({
       getGlobExcludes: () => [],
     }),
+    getTruncateToolOutputThreshold: () => 25000,
+    getTruncateToolOutputLines: () => 1000,
   } as unknown as Config;
 
   beforeEach(async () => {
@@ -282,6 +284,8 @@ describe('GrepTool', () => {
         getFileExclusions: () => ({
           getGlobExcludes: () => [],
         }),
+        getTruncateToolOutputThreshold: () => 25000,
+        getTruncateToolOutputLines: () => 1000,
       } as unknown as Config;
 
       const multiDirGrepTool = new GrepTool(multiDirConfig);

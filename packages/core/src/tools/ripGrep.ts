@@ -19,8 +19,6 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 
-const MAX_LLM_CONTENT_LENGTH = 20_000;
-
 /**
  * Parameters for the GrepTool (Simplified)
  */
@@ -97,43 +95,49 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Build header early to calculate available space
       const header = `Found ${totalMatches} ${matchTerm} for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}:\n---\n`;
 
+      const charLimit = this.config.getTruncateToolOutputThreshold();
+      const lineLimit = Math.min(
+        this.config.getTruncateToolOutputLines(),
+        this.params.limit ?? Number.POSITIVE_INFINITY,
+      );
+
       // Apply line limit first (if specified)
       let truncatedByLineLimit = false;
       let linesToInclude = allLines;
-      if (
-        this.params.limit !== undefined &&
-        allLines.length > this.params.limit
-      ) {
-        linesToInclude = allLines.slice(0, this.params.limit);
+      if (allLines.length > lineLimit) {
+        linesToInclude = allLines.slice(0, lineLimit);
         truncatedByLineLimit = true;
       }
 
       // Build output and track how many lines we include, respecting character limit
-      const parts: string[] = [];
-      let includedLines = 0;
+      let grepOutput = '';
       let truncatedByCharLimit = false;
-      let currentLength = 0;
+      let includedLines = 0;
+      if (Number.isFinite(charLimit)) {
+        const parts: string[] = [];
+        let currentLength = 0;
 
-      for (const line of linesToInclude) {
-        const sep = includedLines > 0 ? 1 : 0;
+        for (const line of linesToInclude) {
+          const sep = includedLines > 0 ? 1 : 0;
+          includedLines++;
 
-        includedLines++;
-
-        if (currentLength + line.length <= MAX_LLM_CONTENT_LENGTH) {
-          parts.push(line);
-          currentLength = currentLength + line.length + sep;
-        } else {
-          const remaining = Math.max(
-            MAX_LLM_CONTENT_LENGTH - currentLength - sep,
-            10,
-          );
-          parts.push(line.slice(0, remaining) + '...');
-          truncatedByCharLimit = true;
-          break;
+          const projectedLength = currentLength + line.length + sep;
+          if (projectedLength <= charLimit) {
+            parts.push(line);
+            currentLength = projectedLength;
+          } else {
+            const remaining = Math.max(charLimit - currentLength - sep, 10);
+            parts.push(line.slice(0, remaining) + '...');
+            truncatedByCharLimit = true;
+            break;
+          }
         }
-      }
 
-      const grepOutput = parts.join('\n');
+        grepOutput = parts.join('\n');
+      } else {
+        grepOutput = linesToInclude.join('\n');
+        includedLines = linesToInclude.length;
+      }
 
       // Build result
       let llmContent = header + grepOutput;

@@ -103,6 +103,8 @@ describe('RipGrepTool', () => {
     getWorkingDir: () => tempRootDir,
     getDebugMode: () => false,
     getUseBuiltinRipgrep: () => true,
+    getTruncateToolOutputThreshold: () => 25000,
+    getTruncateToolOutputLines: () => 1000,
   } as unknown as Config;
 
   beforeEach(async () => {
@@ -417,7 +419,7 @@ describe('RipGrepTool', () => {
     });
 
     it('should truncate llm content when exceeding maximum length', async () => {
-      const longMatch = 'fileA.txt:1:' + 'a'.repeat(25_000);
+      const longMatch = 'fileA.txt:1:' + 'a'.repeat(30_000);
 
       mockSpawn.mockImplementationOnce(
         createMockSpawn({
@@ -430,7 +432,7 @@ describe('RipGrepTool', () => {
       const invocation = grepTool.build(params);
       const result = await invocation.execute(abortSignal);
 
-      expect(String(result.llmContent).length).toBeLessThanOrEqual(21_000);
+      expect(String(result.llmContent).length).toBeLessThanOrEqual(26_000);
       expect(result.llmContent).toMatch(/\[\d+ lines? truncated\] \.\.\./);
       expect(result.returnDisplay).toContain('truncated');
     });

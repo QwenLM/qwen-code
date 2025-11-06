@@ -297,13 +297,12 @@ Settings are organized into categories. All settings should be placed within the
   - **Requires restart:** Yes
 
 - **`tools.truncateToolOutputThreshold`** (number):
-  - **Description:** Truncate tool output if it is larger than this many
-    characters. Set to -1 to disable.
+  - **Description:** Truncate tool output if it is larger than this many characters. Applies to Shell, Grep (including RipGrep), and Glob tools.
   - **Default:** `25000`
   - **Requires restart:** Yes
 
 - **`tools.truncateToolOutputLines`** (number):
-  - **Description:** The number of lines to keep when truncating tool output.
+  - **Description:** Maximum lines or entries kept when truncating tool output. Applies to Shell, Grep (including RipGrep), and Glob tools.
   - **Default:** `500`
   - **Requires restart:** Yes
 

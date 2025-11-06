@@ -1057,6 +1057,13 @@ export class Config {
   }
 
   getTruncateToolOutputThreshold(): number {
+    if (
+      !this.enableToolOutputTruncation ||
+      this.truncateToolOutputThreshold <= 0
+    ) {
+      return Number.POSITIVE_INFINITY;
+    }
+
     return Math.min(
       // Estimate remaining context window in characters (1 token ~= 4 chars).
       4 *
@@ -1067,6 +1074,10 @@ export class Config {
   }
 
   getTruncateToolOutputLines(): number {
+    if (!this.enableToolOutputTruncation || this.truncateToolOutputLines <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
     return this.truncateToolOutputLines;
   }
 

@@ -19,8 +19,6 @@ import type { Config } from '../config/config.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 
-const MAX_LLM_CONTENT_LENGTH = 20_000;
-
 // --- Interfaces ---
 
 /**
@@ -103,14 +101,17 @@ class GrepToolInvocation extends BaseToolInvocation<
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
+      const charLimit = this.config.getTruncateToolOutputThreshold();
+      const lineLimit = Math.min(
+        this.config.getTruncateToolOutputLines(),
+        this.params.limit ?? Number.POSITIVE_INFINITY,
+      );
+
       // Apply line limit if specified
       let truncatedByLineLimit = false;
       let matchesToInclude = rawMatches;
-      if (
-        this.params.limit !== undefined &&
-        rawMatches.length > this.params.limit
-      ) {
-        matchesToInclude = rawMatches.slice(0, this.params.limit);
+      if (rawMatches.length > lineLimit) {
+        matchesToInclude = rawMatches.slice(0, lineLimit);
         truncatedByLineLimit = true;
       }
 
@@ -147,8 +148,8 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Apply character limit as safety net
       let truncatedByCharLimit = false;
-      if (grepOutput.length > MAX_LLM_CONTENT_LENGTH) {
-        grepOutput = grepOutput.slice(0, MAX_LLM_CONTENT_LENGTH) + '...';
+      if (Number.isFinite(charLimit) && grepOutput.length > charLimit) {
+        grepOutput = grepOutput.slice(0, charLimit) + '...';
         truncatedByCharLimit = true;
       }
 
