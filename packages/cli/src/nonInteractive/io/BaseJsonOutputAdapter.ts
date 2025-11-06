@@ -13,11 +13,12 @@ import type {
   ServerGeminiStreamEvent,
   TaskResultDisplay,
 } from '@qwen-code/qwen-code-core';
-import { GeminiEventType } from '@qwen-code/qwen-code-core';
+import { GeminiEventType, ToolErrorType } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
   CLIAssistantMessage,
   CLIMessage,
+  CLIPermissionDenial,
   CLIResultMessage,
   CLIResultMessageError,
   CLIResultMessageSuccess,
@@ -123,6 +124,9 @@ export abstract class BaseJsonOutputAdapter {
 
   // Last assistant message for result generation
   protected lastAssistantMessage: CLIAssistantMessage | null = null;
+
+  // Track permission denials (execution denied tool calls)
+  protected permissionDenials: CLIPermissionDenial[] = [];
 
   constructor(config: Config) {
     this.config = config;
@@ -936,6 +940,7 @@ export abstract class BaseJsonOutputAdapter {
 
   /**
    * Emits a tool result message.
+   * Collects execution denied tool calls for inclusion in result messages.
    * @param request - Tool call request info
    * @param response - Tool call response info
    * @param parentToolUseId - Parent tool use ID (null for main agent)
@@ -945,6 +950,19 @@ export abstract class BaseJsonOutputAdapter {
     response: ToolCallResponseInfo,
     parentToolUseId: string | null = null,
   ): void {
+    // Track permission denials (execution denied errors)
+    if (
+      response.error &&
+      response.errorType === ToolErrorType.EXECUTION_DENIED
+    ) {
+      const denial: CLIPermissionDenial = {
+        tool_name: request.name,
+        tool_use_id: request.callId,
+        tool_input: request.args,
+      };
+      this.permissionDenials.push(denial);
+    }
+
     const block: ToolResultBlock = {
       type: 'tool_result',
       tool_use_id: request.callId,
@@ -988,6 +1006,7 @@ export abstract class BaseJsonOutputAdapter {
   /**
    * Builds a result message from options.
    * Helper method used by both emitResult implementations.
+   * Includes permission denials collected from execution denied tool calls.
    * @param options - Result options
    * @param lastAssistantMessage - Last assistant message for text extraction
    * @returns CLIResultMessage
@@ -1020,7 +1039,7 @@ export abstract class BaseJsonOutputAdapter {
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
         usage,
-        permission_denials: [],
+        permission_denials: [...this.permissionDenials],
         error: { message: errorMessage },
       };
     } else {
@@ -1036,7 +1055,7 @@ export abstract class BaseJsonOutputAdapter {
         num_turns: options.numTurns,
         result: resultText,
         usage,
-        permission_denials: [],
+        permission_denials: [...this.permissionDenials],
       };
 
       if (options.stats) {
@@ -1050,6 +1069,8 @@ export abstract class BaseJsonOutputAdapter {
   /**
    * Builds a subagent error result message.
    * Helper method used by both emitSubagentErrorResult implementations.
+   * Note: Subagent permission denials are not included here as they are tracked
+   * separately and would be included in the main agent's result message.
    * @param errorMessage - Error message
    * @param numTurns - Number of turns
    * @returns CLIResultMessageError
@@ -1108,6 +1129,9 @@ export function partsToString(parts: Part[]): string {
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
+  if (response.error) {
+    return response.error.message;
+  }
   if (
     typeof response.resultDisplay === 'string' &&
     response.resultDisplay.trim().length > 0
@@ -1118,9 +1142,6 @@ export function toolResultContent(
     // Always use functionResponsePartsToString to properly handle
     // functionResponse parts that contain output content
     return functionResponsePartsToString(response.responseParts);
-  }
-  if (response.error) {
-    return response.error.message;
   }
   return undefined;
 }
