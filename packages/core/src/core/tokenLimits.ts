@@ -47,8 +47,13 @@ export function normalize(model: string): string {
   // remove trailing build / date / revision suffixes:
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
   s = s.replace(/-preview/g, '');
-  // Special handling for Qwen model names that include "-latest" as part of the model name
-  if (!s.match(/^qwen-(?:plus|flash|vl-max)-latest$/)) {
+  // Special handling for model names that include date/version as part of the model identifier
+  // - Qwen models: qwen-plus-latest, qwen-flash-latest, qwen-vl-max-latest
+  // - Kimi models: kimi-k2-0905, kimi-k2-0711, etc. (keep date for version distinction)
+  if (
+    !s.match(/^qwen-(?:plus|flash|vl-max)-latest$/) &&
+    !s.match(/^kimi-k2-\d{4}$/)
+  ) {
     // Regex breakdown:
     // -(?:...)$ - Non-capturing group for suffixes at the end of the string
     // The following patterns are matched within the group:
@@ -165,9 +170,16 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^deepseek-v3(?:\.\d+)?(?:-.*)?$/, LIMITS['128k']],
 
   // -------------------
-  // GPT-OSS / Kimi / Llama & Mistral examples
+  // Moonshot / Kimi
   // -------------------
-  [/^kimi-k2-instruct.*$/, LIMITS['128k']],
+  [/^kimi-k2-0905$/, LIMITS['256k']], // Kimi-k2-0905-preview: 256K context
+  [/^kimi-k2-turbo.*$/, LIMITS['256k']], // Kimi-k2-turbo-preview: 256K context
+  [/^kimi-k2-0711$/, LIMITS['128k']], // Kimi-k2-0711-preview: 128K context
+  [/^kimi-k2-instruct.*$/, LIMITS['128k']], // Kimi-k2-instruct: 128K context
+
+  // -------------------
+  // GPT-OSS / Llama & Mistral examples
+  // -------------------
   [/^gpt-oss.*$/, LIMITS['128k']],
   [/^llama-4-scout.*$/, LIMITS['10m']],
   [/^mistral-large-2.*$/, LIMITS['128k']],

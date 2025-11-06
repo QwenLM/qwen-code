@@ -117,15 +117,16 @@ class VsCodeInstaller implements IdeInstaller {
       };
     }
 
+    const isWindows = process.platform === 'win32';
     try {
       const result = child_process.spawnSync(
-        commandPath,
+        isWindows ? `"${commandPath}"` : commandPath,
         [
           '--install-extension',
           'qwenlm.qwen-code-vscode-ide-companion',
           '--force',
         ],
-        { stdio: 'pipe' },
+        { stdio: 'pipe', shell: isWindows },
       );
 
       if (result.status !== 0) {

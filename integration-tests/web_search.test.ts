@@ -9,14 +9,53 @@ import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
 
 describe('web_search', () => {
   it('should be able to search the web', async () => {
-    // Skip if Tavily key is not configured
-    if (!process.env['TAVILY_API_KEY']) {
-      console.warn('Skipping web search test: TAVILY_API_KEY not set');
+    // Check if any web search provider is available
+    const hasTavilyKey = !!process.env['TAVILY_API_KEY'];
+    const hasGoogleKey =
+      !!process.env['GOOGLE_API_KEY'] &&
+      !!process.env['GOOGLE_SEARCH_ENGINE_ID'];
+
+    // Skip if no provider is configured
+    // Note: DashScope provider is automatically available for Qwen OAuth users,
+    // but we can't easily detect that in tests without actual OAuth credentials
+    if (!hasTavilyKey && !hasGoogleKey) {
+      console.warn(
+        'Skipping web search test: No web search provider configured. ' +
+          'Set TAVILY_API_KEY or GOOGLE_API_KEY+GOOGLE_SEARCH_ENGINE_ID environment variables.',
+      );
       return;
     }
 
     const rig = new TestRig();
-    await rig.setup('should be able to search the web');
+    // Configure web search in settings if provider keys are available
+    const webSearchSettings: Record<string, unknown> = {};
+    const providers: Array<{
+      type: string;
+      apiKey?: string;
+      searchEngineId?: string;
+    }> = [];
+
+    if (hasTavilyKey) {
+      providers.push({ type: 'tavily', apiKey: process.env['TAVILY_API_KEY'] });
+    }
+    if (hasGoogleKey) {
+      providers.push({
+        type: 'google',
+        apiKey: process.env['GOOGLE_API_KEY'],
+        searchEngineId: process.env['GOOGLE_SEARCH_ENGINE_ID'],
+      });
+    }
+
+    if (providers.length > 0) {
+      webSearchSettings.webSearch = {
+        provider: providers,
+        default: providers[0]?.type,
+      };
+    }
+
+    await rig.setup('should be able to search the web', {
+      settings: webSearchSettings,
+    });
 
     let result;
     try {

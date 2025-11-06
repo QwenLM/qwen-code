@@ -43,6 +43,7 @@ import { mcpCommand } from '../commands/mcp.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import type { ExtensionEnablementManager } from './extensions/extensionEnablement.js';
+import { buildWebSearchConfig } from './webSearch.js';
 
 // Simple console logger for now - replace with actual logger if available
 const logger = {
@@ -114,9 +115,13 @@ export interface CliArgs {
   openaiLogging: boolean | undefined;
   openaiApiKey: string | undefined;
   openaiBaseUrl: string | undefined;
+  openaiLoggingDir: string | undefined;
   proxy: string | undefined;
   includeDirectories: string[] | undefined;
   tavilyApiKey: string | undefined;
+  googleApiKey: string | undefined;
+  googleSearchEngineId: string | undefined;
+  webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
   vlmSwitchMode: string | undefined;
   useSmartEdit: boolean | undefined;
@@ -331,6 +336,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description:
             'Enable logging of OpenAI API calls for debugging and analysis',
         })
+        .option('openai-logging-dir', {
+          type: 'string',
+          description:
+            'Custom directory path for OpenAI API logs. Overrides settings files.',
+        })
         .option('openai-api-key', {
           type: 'string',
           description: 'OpenAI API key to use for authentication',
@@ -341,7 +351,20 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('tavily-api-key', {
           type: 'string',
-          description: 'Tavily API key for web search functionality',
+          description: 'Tavily API key for web search',
+        })
+        .option('google-api-key', {
+          type: 'string',
+          description: 'Google Custom Search API key',
+        })
+        .option('google-search-engine-id', {
+          type: 'string',
+          description: 'Google Custom Search Engine ID',
+        })
+        .option('web-search-default', {
+          type: 'string',
+          description:
+            'Default web search provider (dashscope, tavily, google)',
         })
         .option('screen-reader', {
           type: 'boolean',
@@ -822,12 +845,15 @@ export async function loadCliConfig(
         (typeof argv.openaiLogging === 'undefined'
           ? settings.model?.enableOpenAILogging
           : argv.openaiLogging) ?? false,
+      openAILoggingDir:
+        argv.openaiLoggingDir || settings.model?.openAILoggingDir,
     },
     cliVersion: await getCliVersion(),
-    tavilyApiKey:
-      argv.tavilyApiKey ||
-      settings.advanced?.tavilyApiKey ||
-      process.env['TAVILY_API_KEY'],
+    webSearch: buildWebSearchConfig(
+      argv,
+      settings,
+      settings.security?.auth?.selectedType,
+    ),
     summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
     chatCompression: settings.model?.chatCompression,

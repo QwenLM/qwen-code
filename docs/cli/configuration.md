@@ -171,6 +171,18 @@ Settings are organized into categories. All settings should be placed within the
   - **Description:** Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.
   - **Default:** `false`
 
+- **`model.enableOpenAILogging`** (boolean):
+  - **Description:** Enables logging of OpenAI API calls for debugging and analysis. When enabled, API requests and responses are logged to JSON files.
+  - **Default:** `false`
+
+- **`model.openAILoggingDir`** (string):
+  - **Description:** Custom directory path for OpenAI API logs. If not specified, defaults to `logs/openai` in the current working directory. Supports absolute paths, relative paths (resolved from current working directory), and `~` expansion (home directory).
+  - **Default:** `undefined`
+  - **Examples:**
+    - `"~/qwen-logs"` - Logs to `~/qwen-logs` directory
+    - `"./custom-logs"` - Logs to `./custom-logs` relative to current directory
+    - `"/tmp/openai-logs"` - Logs to absolute path `/tmp/openai-logs`
+
 #### `context`
 
 - **`context.fileName`** (string or array of strings):
@@ -305,7 +317,8 @@ Settings are organized into categories. All settings should be placed within the
   - **Default:** `undefined`
 
 - **`advanced.tavilyApiKey`** (string):
-  - **Description:** API key for Tavily web search service. Required to enable the `web_search` tool functionality. If not configured, the web search tool will be disabled and skipped.
+  - **Description:** API key for Tavily web search service. Used to enable the `web_search` tool functionality.
+  - **Note:** This is a legacy configuration format. For Qwen OAuth users, DashScope provider is automatically available without any configuration. For other authentication types, configure Tavily or Google providers using the new `webSearch` configuration format.
   - **Default:** `undefined`
 
 #### `mcpServers`
@@ -386,6 +399,8 @@ Here is an example of a `settings.json` file with the nested structure, new as o
   "model": {
     "name": "qwen3-coder-plus",
     "maxSessionTurns": 10,
+    "enableOpenAILogging": false,
+    "openAILoggingDir": "~/qwen-logs",
     "summarizeToolOutput": {
       "run_shell_command": {
         "tokenBudget": 100
@@ -474,8 +489,8 @@ The CLI automatically loads environment variables from an `.env` file. The loadi
   - Set to a string to customize the title of the CLI.
 - **`TAVILY_API_KEY`**:
   - Your API key for the Tavily web search service.
-  - Required to enable the `web_search` tool functionality.
-  - If not configured, the web search tool will be disabled and skipped.
+  - Used to enable the `web_search` tool functionality.
+  - **Note:** For Qwen OAuth users, DashScope provider is automatically available without any configuration. For other authentication types, configure Tavily or Google providers to enable web search.
   - Example: `export TAVILY_API_KEY="tvly-your-api-key-here"`
 
 ## Command-Line Arguments
@@ -556,6 +571,9 @@ Arguments passed directly when running the CLI can override other configurations
   - Displays the version of the CLI.
 - **`--openai-logging`**:
   - Enables logging of OpenAI API calls for debugging and analysis. This flag overrides the `enableOpenAILogging` setting in `settings.json`.
+- **`--openai-logging-dir <directory>`**:
+  - Sets a custom directory path for OpenAI API logs. This flag overrides the `openAILoggingDir` setting in `settings.json`. Supports absolute paths, relative paths, and `~` expansion.
+  - **Example:** `qwen --openai-logging-dir "~/qwen-logs" --openai-logging`
 - **`--tavily-api-key <api_key>`**:
   - Sets the Tavily API key for web search functionality for this session.
   - Example: `qwen --tavily-api-key tvly-your-api-key-here`

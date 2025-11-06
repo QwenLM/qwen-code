@@ -85,7 +85,7 @@ const distPackageJson = {
   bin: {
     qwen: 'cli.js',
   },
-  files: ['cli.js', 'vendor', 'README.md', 'LICENSE'],
+  files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE'],
   config: rootPackageJson.config,
   dependencies: runtimeDependencies,
   optionalDependencies: {

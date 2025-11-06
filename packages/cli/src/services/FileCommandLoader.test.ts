@@ -1227,4 +1227,28 @@ describe('FileCommandLoader', () => {
       expect(commands).toHaveLength(0);
     });
   });
+
+  describe('AbortError handling', () => {
+    it('should silently ignore AbortError when operation is cancelled', async () => {
+      const userCommandsDir = Storage.getUserCommandsDir();
+      mock({
+        [userCommandsDir]: {
+          'test1.toml': 'prompt = "Prompt 1"',
+          'test2.toml': 'prompt = "Prompt 2"',
+        },
+      });
+
+      const loader = new FileCommandLoader(null);
+      const controller = new AbortController();
+      const signal = controller.signal;
+
+      // Start loading and immediately abort
+      const loadPromise = loader.loadCommands(signal);
+      controller.abort();
+
+      // Should not throw or print errors
+      const commands = await loadPromise;
+      expect(commands).toHaveLength(0);
+    });
+  });
 });

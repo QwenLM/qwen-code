@@ -558,6 +558,16 @@ const SETTINGS_SCHEMA = {
         description: 'Enable OpenAI logging.',
         showInDialog: true,
       },
+      openAILoggingDir: {
+        type: 'string',
+        label: 'OpenAI Logging Directory',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.',
+        showInDialog: true,
+      },
       generationConfig: {
         type: 'object',
         label: 'Generation Configuration',
@@ -1072,15 +1082,34 @@ const SETTINGS_SCHEMA = {
       },
       tavilyApiKey: {
         type: 'string',
-        label: 'Tavily API Key',
+        label: 'Tavily API Key (Deprecated)',
         category: 'Advanced',
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'The API key for the Tavily API. Required to enable the web_search tool functionality.',
+          '⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.',
         showInDialog: false,
       },
     },
+  },
+
+  webSearch: {
+    type: 'object',
+    label: 'Web Search',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as
+      | {
+          provider: Array<{
+            type: 'tavily' | 'google' | 'dashscope';
+            apiKey?: string;
+            searchEngineId?: string;
+          }>;
+          default: string;
+        }
+      | undefined,
+    description: 'Configuration for web search providers.',
+    showInDialog: false,
   },
 
   experimental: {
