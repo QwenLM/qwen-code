@@ -299,10 +299,7 @@ export async function truncateAndSaveToFile(
     return {
       content: `Tool output was too large and has been truncated.
 The full output has been saved to: ${outputFile}
-To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above. For large files, you can use the offset and limit parameters to read specific sections:
-- ${ReadFileTool.Name} tool with offset=0, limit=100 to see the first 100 lines
-- ${ReadFileTool.Name} tool with offset=N to skip N lines from the beginning
-- ${ReadFileTool.Name} tool with limit=M to read only M lines at a time
+To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
 This allows you to efficiently examine different parts of the output without loading the entire file.
 Truncated part of the output:

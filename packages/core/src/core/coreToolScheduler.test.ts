@@ -1719,14 +1719,14 @@ describe('truncateAndSaveToFile', () => {
     );
 
     expect(result.content).toContain(
-      'read_file tool with the absolute file path above',
+      'Tool output was too large and has been truncated',
     );
-    expect(result.content).toContain('read_file tool with offset=0, limit=100');
+    expect(result.content).toContain('The full output has been saved to:');
     expect(result.content).toContain(
-      'read_file tool with offset=N to skip N lines',
+      'To read the complete output, use the read_file tool with the absolute file path above',
     );
     expect(result.content).toContain(
-      'read_file tool with limit=M to read only M lines',
+      'The truncated output below shows the beginning and end of the content',
     );
   });
 
