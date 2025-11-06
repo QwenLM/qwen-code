@@ -15,6 +15,7 @@ import {
   ToolErrorType,
   MCPServerStatus,
   getMCPServerStatus,
+  OutputFormat,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type {
@@ -530,11 +531,8 @@ describe('buildSystemMessage', () => {
       model: 'test-model',
       permissionMode: 'auto',
       slash_commands: ['commit', 'help', 'memory'],
-      apiKeySource: 'none',
       qwen_code_version: '1.0.0',
-      output_style: 'default',
       agents: [],
-      skills: [],
     });
   });
 
@@ -591,12 +589,15 @@ describe('createTaskToolProgressHandler', () => {
   beforeEach(() => {
     mockConfig = {
       getDebugMode: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(false),
+      getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
     } as unknown as Config;
 
     mockAdapter = {
       processSubagentToolCall: vi.fn(),
       emitSubagentErrorResult: vi.fn(),
       emitToolResult: vi.fn(),
+      emitUserMessage: vi.fn(),
     } as unknown as JsonOutputAdapterInterface;
   });
 
