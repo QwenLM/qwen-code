@@ -444,6 +444,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           ) {
             return '--include-partial-messages requires --output-format stream-json';
           }
+          if (
+            argv['inputFormat'] === 'stream-json' &&
+            argv['outputFormat'] !== OutputFormat.STREAM_JSON
+          ) {
+            return '--input-format stream-json requires --output-format stream-json';
+          }
           return true;
         }),
     )

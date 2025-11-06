@@ -5,6 +5,7 @@ export default {
   commands: 'Commands',
   configuration: 'Configuration',
   'configuration-v1': 'Configuration (v1)',
+  'structured-output': 'Structured Output',
   themes: 'Themes',
   tutorials: 'Tutorials',
   'keyboard-shortcuts': 'Keyboard Shortcuts',
