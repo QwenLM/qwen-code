@@ -19,6 +19,8 @@ import type { Config } from '../config/config.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 
+// const MAX_LLM_CONTENT_LENGTH = 20_000;
+
 // --- Interfaces ---
 
 /**
