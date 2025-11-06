@@ -13,9 +13,13 @@ import { useUIState } from '../contexts/UIStateContext.js';
 
 interface AppHeaderProps {
   version: string;
+  versionTips?: {
+    tips: string;
+    result: number;
+  };
 }
 
-export const AppHeader = ({ version }: AppHeaderProps) => {
+export const AppHeader = ({ version, versionTips }: AppHeaderProps) => {
   const settings = useSettings();
   const config = useConfig();
   const { nightly } = useUIState();
@@ -23,7 +27,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
   return (
     <Box flexDirection="column">
       {!(settings.merged.ui?.hideBanner || config.getScreenReader()) && (
-        <Header version={version} nightly={nightly} />
+        <Header version={version} nightly={nightly} versionTips={versionTips} />
       )}
       {!(settings.merged.ui?.hideTips || config.getScreenReader()) && (
         <Tips config={config} />

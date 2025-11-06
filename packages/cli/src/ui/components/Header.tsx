@@ -16,12 +16,17 @@ interface HeaderProps {
   customAsciiArt?: string; // For user-defined ASCII art
   version: string;
   nightly: boolean;
+  versionTips?: {
+    tips: string;
+    result: number;
+  };
 }
 
 export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
   version,
   nightly,
+  versionTips,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
   let displayTitle;
@@ -65,6 +70,8 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </Box>
       )}
+
+      <Text color={'red'}>{versionTips?.tips}</Text>
     </Box>
   );
 };

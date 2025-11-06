@@ -19,7 +19,7 @@ import { AppHeader } from './AppHeader.js';
 const MAX_GEMINI_MESSAGE_LINES = 65536;
 
 export const MainContent = () => {
-  const { version } = useAppContext();
+  const { version, versionTips } = useAppContext();
   const uiState = useUIState();
   const {
     pendingHistoryItems,
@@ -33,7 +33,11 @@ export const MainContent = () => {
       <Static
         key={uiState.historyRemountKey}
         items={[
-          <AppHeader key="app-header" version={version} />,
+          <AppHeader
+            key="app-header"
+            version={version}
+            versionTips={versionTips}
+          />,
           ...uiState.history.map((h) => (
             <HistoryItemDisplay
               terminalWidth={mainAreaWidth}

@@ -116,6 +116,10 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  versionTips?: {
+    tips: string;
+    result: number;
+  };
 }
 
 /**
@@ -1463,6 +1467,7 @@ export const AppContainer = (props: AppContainerProps) => {
             value={{
               version: props.version,
               startupWarnings: props.startupWarnings || [],
+              versionTips: props.versionTips,
             }}
           >
             <ShellFocusContext.Provider value={isFocused}>

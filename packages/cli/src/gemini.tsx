@@ -30,6 +30,7 @@ import {
   runExitCleanup,
 } from './utils/cleanup.js';
 import { getCliVersion } from './utils/version.js';
+import { getPackageJson } from './utils/package.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -57,6 +58,7 @@ import {
   relaunchAppInChildProcess,
 } from './utils/relaunch.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
+import { versionHint } from './utils/versionHint.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -140,6 +142,10 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
 ) {
   const version = await getCliVersion();
+  const packageJson = await getPackageJson();
+  const name = packageJson?.name || '@qwen-code/qwen-code';
+  const versionTips = await versionHint(version, name);
+
   setWindowTitle(basename(workspaceRoot), settings);
 
   // Create wrapper component to use hooks inside render
@@ -163,6 +169,7 @@ export async function startInteractiveUI(
                 settings={settings}
                 startupWarnings={startupWarnings}
                 version={version}
+                versionTips={versionTips}
                 initializationResult={initializationResult}
               />
             </VimModeProvider>
