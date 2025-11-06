@@ -686,6 +686,9 @@ describe('CoreToolScheduler with payload', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      isInteractive: () => true, // Required to prevent auto-denial of tool calls
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1006,6 +1009,9 @@ describe('CoreToolScheduler edit cancellation', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      isInteractive: () => true, // Required to prevent auto-denial of tool calls
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1658,6 +1664,9 @@ describe('CoreToolScheduler request queueing', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      isInteractive: () => true, // Required to prevent auto-denial of tool calls
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
     } as unknown as Config;
 
     const testTool = new TestApprovalTool(mockConfig);
@@ -1687,7 +1696,10 @@ describe('CoreToolScheduler request queueing', () => {
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
     const pendingConfirmations: Array<
-      (outcome: ToolConfirmationOutcome) => void
+      (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>
     > = [];
 
     const scheduler = new CoreToolScheduler({
@@ -1758,7 +1770,7 @@ describe('CoreToolScheduler request queueing', () => {
 
     // Approve the first tool with ProceedAlways
     const firstConfirmation = pendingConfirmations[0];
-    firstConfirmation(ToolConfirmationOutcome.ProceedAlways);
+    await firstConfirmation(ToolConfirmationOutcome.ProceedAlways);
 
     // Wait for all tools to be completed
     await vi.waitFor(() => {
