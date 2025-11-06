@@ -406,12 +406,7 @@ export type CLIMessage =
 
 export function isCLIUserMessage(msg: any): msg is CLIUserMessage {
   return (
-    msg &&
-    typeof msg === 'object' &&
-    msg.type === 'user' &&
-    'message' in msg &&
-    'session_id' in msg &&
-    'parent_tool_use_id' in msg
+    msg && typeof msg === 'object' && msg.type === 'user' && 'message' in msg
   );
 }
 
