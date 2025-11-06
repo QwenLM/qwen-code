@@ -291,6 +291,22 @@ Settings are organized into categories. All settings should be placed within the
   - **Description:** Use the bundled ripgrep binary. When set to `false`, the system-level `rg` command will be used instead. This setting is only effective when `tools.useRipgrep` is `true`.
   - **Default:** `true`
 
+- **`tools.enableToolOutputTruncation`** (boolean):
+  - **Description:** Enable truncation of large tool outputs.
+  - **Default:** `true`
+  - **Requires restart:** Yes
+
+- **`tools.truncateToolOutputThreshold`** (number):
+  - **Description:** Truncate tool output if it is larger than this many
+    characters. Set to -1 to disable.
+  - **Default:** `25000`
+  - **Requires restart:** Yes
+
+- **`tools.truncateToolOutputLines`** (number):
+  - **Description:** The number of lines to keep when truncating tool output.
+  - **Default:** `500`
+  - **Requires restart:** Yes
+
 #### `mcp`
 
 - **`mcp.serverCommand`** (string):

@@ -86,13 +86,14 @@ export class ChatCompressionService {
     hasFailedCompressionAttempt: boolean,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const curatedHistory = chat.getHistory(true);
-    const contextPercentageThreshold =
-      config.getChatCompression()?.contextPercentageThreshold;
+    const threshold =
+      config.getChatCompression()?.contextPercentageThreshold ??
+      COMPRESSION_TOKEN_THRESHOLD;
 
     // Regardless of `force`, don't do anything if the history is empty.
     if (
       curatedHistory.length === 0 ||
-      contextPercentageThreshold === 0 ||
+      threshold <= 0 ||
       (hasFailedCompressionAttempt && !force)
     ) {
       return {
@@ -109,8 +110,6 @@ export class ChatCompressionService {
 
     // Don't compress if not forced and we are under the limit.
     if (!force) {
-      const threshold =
-        contextPercentageThreshold ?? COMPRESSION_TOKEN_THRESHOLD;
       if (originalTokenCount < threshold * tokenLimit(model)) {
         return {
           newHistory: null,
