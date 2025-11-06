@@ -68,72 +68,66 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 - **File:** `glob.ts`
 - **Parameters:**
   - `pattern` (string, required): The glob pattern to match against (e.g., `"*.py"`, `"src/**/*.js"`).
-  - `path` (string, optional): The absolute path to the directory to search within. If omitted, searches the tool's root directory.
-  - `case_sensitive` (boolean, optional): Whether the search should be case-sensitive. Defaults to `false`.
-  - `respect_git_ignore` (boolean, optional): Whether to respect .gitignore patterns when finding files. Defaults to `true`.
+  - `path` (string, optional): The directory to search in. If not specified, the current working directory will be used.
 - **Behavior:**
   - Searches for files matching the glob pattern within the specified directory.
   - Returns a list of absolute paths, sorted with the most recently modified files first.
-  - Ignores common nuisance directories like `node_modules` and `.git` by default.
-- **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within src, sorted by modification time (newest first):\nsrc/file1.ts\nsrc/subdir/file2.ts...`
+  - Respects .gitignore and .qwenignore patterns by default.
+  - Limits results to 100 files to prevent context overflow.
+- **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/file1.ts\n/path/to/subdir/file2.ts\n---\n[95 files truncated] ...`
 - **Confirmation:** No.
 
-## 5. `search_file_content` (SearchText)
+## 5. `grep_search` (Grep)
 
-`search_file_content` searches for a regular expression pattern within the content of files in a specified directory. Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.
+`grep_search` searches for a regular expression pattern within the content of files in a specified directory. Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.
 
-- **Tool name:** `search_file_content`
-- **Display name:** SearchText
-- **File:** `grep.ts`
+- **Tool name:** `grep_search`
+- **Display name:** Grep
+- **File:** `ripGrep.ts` (with `grep.ts` as fallback)
 - **Parameters:**
-  - `pattern` (string, required): The regular expression (regex) to search for (e.g., `"function\s+myFunction"`).
-  - `path` (string, optional): The absolute path to the directory to search within. Defaults to the current working directory.
-  - `include` (string, optional): A glob pattern to filter which files are searched (e.g., `"*.js"`, `"src/**/*.{ts,tsx}"`). If omitted, searches most files (respecting common ignores).
-  - `maxResults` (number, optional): Maximum number of matches to return to prevent context overflow (default: 20, max: 100). Use lower values for broad searches, higher for specific searches.
+  - `pattern` (string, required): The regular expression pattern to search for in file contents (e.g., `"function\\s+myFunction"`, `"log.*Error"`).
+  - `path` (string, optional): File or directory to search in. Defaults to current working directory.
+  - `glob` (string, optional): Glob pattern to filter files (e.g. `"*.js"`, `"src/**/*.{ts,tsx}"`).
+  - `limit` (number, optional): Limit output to first N matching lines. Optional - shows all matches if not specified.
 - **Behavior:**
-  - Uses `git grep` if available in a Git repository for speed; otherwise, falls back to system `grep` or a JavaScript-based search.
-  - Returns a list of matching lines, each prefixed with its file path (relative to the search directory) and line number.
-  - Limits results to a maximum of 20 matches by default to prevent context overflow. When results are truncated, shows a clear warning with guidance on refining searches.
+  - Uses ripgrep for fast search when available; otherwise falls back to a JavaScript-based search implementation.
+  - Returns matching lines with file paths and line numbers.
+  - Case-insensitive by default.
+  - Respects .gitignore and .qwenignore patterns.
+  - Limits output to prevent context overflow.
 - **Output (`llmContent`):** A formatted string of matches, e.g.:
 
   ```
   Found 3 matches for pattern "myFunction" in path "." (filter: "*.ts"):
   ---
-  File: src/utils.ts
-  L15: export function myFunction() {
-  L22:   myFunction.call();
-  ---
-  File: src/index.ts
-  L5: import { myFunction } from './utils';
+  src/utils.ts:15:export function myFunction() {
+  src/utils.ts:22:  myFunction.call();
+  src/index.ts:5:import { myFunction } from './utils';
   ---
 
-  WARNING: Results truncated to prevent context overflow. To see more results:
-  - Use a more specific pattern to reduce matches
-  - Add file filters with the 'include' parameter (e.g., "*.js", "src/**")
-  - Specify a narrower 'path' to search in a subdirectory
-  - Increase 'maxResults' parameter if you need more matches (current: 20)
+  [0 lines truncated] ...
   ```
 
 - **Confirmation:** No.
 
-### `search_file_content` examples
+### `grep_search` examples
 
 Search for a pattern with default result limiting:
 
 ```
-search_file_content(pattern="function\s+myFunction", path="src")
+grep_search(pattern="function\\s+myFunction", path="src")
 ```
 
 Search for a pattern with custom result limiting:
 
 ```
-search_file_content(pattern="function", path="src", maxResults=50)
+grep_search(pattern="function", path="src", limit=50)
 ```
 
 Search for a pattern with file filtering and custom result limiting:
 
 ```
-search_file_content(pattern="function", include="*.js", maxResults=10)
+grep_search(pattern="function", glob="*.js", limit=10)
 ```
 
 ## 6. `edit` (Edit)

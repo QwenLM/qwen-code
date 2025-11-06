@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import { EOL } from 'node:os';
@@ -13,12 +12,14 @@ import { globStream } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
+import { resolveAndValidatePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
+
+const MAX_LLM_CONTENT_LENGTH = 20_000;
 
 // --- Interfaces ---
 
@@ -37,14 +38,14 @@ export interface GrepToolParams {
   path?: string;
 
   /**
-   * File pattern to include in the search (e.g. "*.js", "*.{ts,tsx}")
+   * Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")
    */
-  include?: string;
+  glob?: string;
 
   /**
-   * Maximum number of matches to return (optional, defaults to 20)
+   * Maximum number of matching lines to return (optional, shows all if not specified)
    */
-  maxResults?: number;
+  limit?: number;
 }
 
 /**
@@ -70,121 +71,57 @@ class GrepToolInvocation extends BaseToolInvocation<
     this.fileExclusions = config.getFileExclusions();
   }
 
-  /**
-   * Checks if a path is within the root directory and resolves it.
-   * @param relativePath Path relative to the root directory (or undefined for root).
-   * @returns The absolute path if valid and exists, or null if no path specified (to search all directories).
-   * @throws {Error} If path is outside root, doesn't exist, or isn't a directory.
-   */
-  private resolveAndValidatePath(relativePath?: string): string | null {
-    // If no path specified, return null to indicate searching all workspace directories
-    if (!relativePath) {
-      return null;
-    }
-
-    const targetPath = path.resolve(this.config.getTargetDir(), relativePath);
-
-    // Security Check: Ensure the resolved path is within workspace boundaries
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(targetPath)) {
-      const directories = workspaceContext.getDirectories();
-      throw new Error(
-        `Path validation failed: Attempted path "${relativePath}" resolves outside the allowed workspace directories: ${directories.join(', ')}`,
-      );
-    }
-
-    // Check existence and type after resolving
-    try {
-      const stats = fs.statSync(targetPath);
-      if (!stats.isDirectory()) {
-        throw new Error(`Path is not a directory: ${targetPath}`);
-      }
-    } catch (error: unknown) {
-      if (isNodeError(error) && error.code !== 'ENOENT') {
-        throw new Error(`Path does not exist: ${targetPath}`);
-      }
-      throw new Error(
-        `Failed to access path stats for ${targetPath}: ${error}`,
-      );
-    }
-
-    return targetPath;
-  }
-
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      const workspaceContext = this.config.getWorkspaceContext();
-      const searchDirAbs = this.resolveAndValidatePath(this.params.path);
+      // Default to target directory if no path is provided
+      const searchDirAbs = resolveAndValidatePath(
+        this.config,
+        this.params.path,
+      );
       const searchDirDisplay = this.params.path || '.';
 
-      // Determine which directories to search
-      let searchDirectories: readonly string[];
-      if (searchDirAbs === null) {
-        // No path specified - search all workspace directories
-        searchDirectories = workspaceContext.getDirectories();
-      } else {
-        // Specific path provided - search only that directory
-        searchDirectories = [searchDirAbs];
-      }
+      // Perform grep search
+      const rawMatches = await this.performGrepSearch({
+        pattern: this.params.pattern,
+        path: searchDirAbs,
+        glob: this.params.glob,
+        signal,
+      });
 
-      // Collect matches from all search directories
-      let allMatches: GrepMatch[] = [];
-      const maxResults = this.params.maxResults ?? 20; // Default to 20 results
-      let totalMatchesFound = 0;
-      let searchTruncated = false;
+      // Build search description
+      const searchLocationDescription = this.params.path
+        ? `in path "${searchDirDisplay}"`
+        : `in the workspace directory`;
 
-      for (const searchDir of searchDirectories) {
-        const matches = await this.performGrepSearch({
-          pattern: this.params.pattern,
-          path: searchDir,
-          include: this.params.include,
-          signal,
-        });
+      const filterDescription = this.params.glob
+        ? ` (filter: "${this.params.glob}")`
+        : '';
 
-        totalMatchesFound += matches.length;
-
-        // Add directory prefix if searching multiple directories
-        if (searchDirectories.length > 1) {
-          const dirName = path.basename(searchDir);
-          matches.forEach((match) => {
-            match.filePath = path.join(dirName, match.filePath);
-          });
-        }
-
-        // Apply result limiting
-        const remainingSlots = maxResults - allMatches.length;
-        if (remainingSlots <= 0) {
-          searchTruncated = true;
-          break;
-        }
-
-        if (matches.length > remainingSlots) {
-          allMatches = allMatches.concat(matches.slice(0, remainingSlots));
-          searchTruncated = true;
-          break;
-        } else {
-          allMatches = allMatches.concat(matches);
-        }
-      }
-
-      let searchLocationDescription: string;
-      if (searchDirAbs === null) {
-        const numDirs = workspaceContext.getDirectories().length;
-        searchLocationDescription =
-          numDirs > 1
-            ? `across ${numDirs} workspace directories`
-            : `in the workspace directory`;
-      } else {
-        searchLocationDescription = `in path "${searchDirDisplay}"`;
-      }
-
-      if (allMatches.length === 0) {
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${this.params.include ? ` (filter: "${this.params.include}")` : ''}.`;
+      // Check if we have any matches
+      if (rawMatches.length === 0) {
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
+      // Apply line limit if specified
+      let truncatedByLineLimit = false;
+      let matchesToInclude = rawMatches;
+      if (
+        this.params.limit !== undefined &&
+        rawMatches.length > this.params.limit
+      ) {
+        matchesToInclude = rawMatches.slice(0, this.params.limit);
+        truncatedByLineLimit = true;
+      }
+
+      const totalMatches = rawMatches.length;
+      const matchTerm = totalMatches === 1 ? 'match' : 'matches';
+
+      // Build header
+      const header = `Found ${totalMatches} ${matchTerm} for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}:\n---\n`;
+
       // Group matches by file
-      const matchesByFile = allMatches.reduce(
+      const matchesByFile = matchesToInclude.reduce(
         (acc, match) => {
           const fileKey = match.filePath;
           if (!acc[fileKey]) {
@@ -197,46 +134,51 @@ class GrepToolInvocation extends BaseToolInvocation<
         {} as Record<string, GrepMatch[]>,
       );
 
-      const matchCount = allMatches.length;
-      const matchTerm = matchCount === 1 ? 'match' : 'matches';
-
-      // Build the header with truncation info if needed
-      let headerText = `Found ${matchCount} ${matchTerm} for pattern "${this.params.pattern}" ${searchLocationDescription}${this.params.include ? ` (filter: "${this.params.include}")` : ''}`;
-
-      if (searchTruncated) {
-        headerText += ` (showing first ${matchCount} of ${totalMatchesFound}+ total matches)`;
-      }
-
-      let llmContent = `${headerText}:
----
-`;
-
+      // Build grep output
+      let grepOutput = '';
       for (const filePath in matchesByFile) {
-        llmContent += `File: ${filePath}\n`;
+        grepOutput += `File: ${filePath}\n`;
         matchesByFile[filePath].forEach((match) => {
           const trimmedLine = match.line.trim();
-          llmContent += `L${match.lineNumber}: ${trimmedLine}\n`;
+          grepOutput += `L${match.lineNumber}: ${trimmedLine}\n`;
         });
-        llmContent += '---\n';
+        grepOutput += '---\n';
       }
 
-      // Add truncation guidance if results were limited
-      if (searchTruncated) {
-        llmContent += `\nWARNING: Results truncated to prevent context overflow. To see more results:
-- Use a more specific pattern to reduce matches
-- Add file filters with the 'include' parameter (e.g., "*.js", "src/**")
-- Specify a narrower 'path' to search in a subdirectory
-- Increase 'maxResults' parameter if you need more matches (current: ${maxResults})`;
+      // Apply character limit as safety net
+      let truncatedByCharLimit = false;
+      if (grepOutput.length > MAX_LLM_CONTENT_LENGTH) {
+        grepOutput = grepOutput.slice(0, MAX_LLM_CONTENT_LENGTH) + '...';
+        truncatedByCharLimit = true;
       }
 
-      let displayText = `Found ${matchCount} ${matchTerm}`;
-      if (searchTruncated) {
-        displayText += ` (truncated from ${totalMatchesFound}+)`;
+      // Count how many lines we actually included after character truncation
+      const finalLines = grepOutput
+        .split('\n')
+        .filter(
+          (line) =>
+            line.trim() && !line.startsWith('File:') && !line.startsWith('---'),
+        );
+      const includedLines = finalLines.length;
+
+      // Build result
+      let llmContent = header + grepOutput;
+
+      // Add truncation notice if needed
+      if (truncatedByLineLimit || truncatedByCharLimit) {
+        const omittedMatches = totalMatches - includedLines;
+        llmContent += ` [${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
+      }
+
+      // Build display message
+      let displayMessage = `Found ${totalMatches} ${matchTerm}`;
+      if (truncatedByLineLimit || truncatedByCharLimit) {
+        displayMessage += ` (truncated)`;
       }
 
       return {
         llmContent: llmContent.trim(),
-        returnDisplay: displayText,
+        returnDisplay: displayMessage,
       };
     } catch (error) {
       console.error(`Error during GrepLogic execution: ${error}`);
@@ -329,50 +271,26 @@ class GrepToolInvocation extends BaseToolInvocation<
    * @returns A string describing the grep
    */
   getDescription(): string {
-    let description = `'${this.params.pattern}'`;
-    if (this.params.include) {
-      description += ` in ${this.params.include}`;
+    let description = `'${this.params.pattern}' in path '${this.params.path || './'}'`;
+    if (this.params.glob) {
+      description += ` (filter: '${this.params.glob}')`;
     }
-    if (this.params.path) {
-      const resolvedPath = path.resolve(
-        this.config.getTargetDir(),
-        this.params.path,
-      );
-      if (
-        resolvedPath === this.config.getTargetDir() ||
-        this.params.path === '.'
-      ) {
-        description += ` within ./`;
-      } else {
-        const relativePath = makeRelative(
-          resolvedPath,
-          this.config.getTargetDir(),
-        );
-        description += ` within ${shortenPath(relativePath)}`;
-      }
-    } else {
-      // When no path is specified, indicate searching all workspace directories
-      const workspaceContext = this.config.getWorkspaceContext();
-      const directories = workspaceContext.getDirectories();
-      if (directories.length > 1) {
-        description += ` across all workspace directories`;
-      }
-    }
+
     return description;
   }
 
   /**
    * Performs the actual search using the prioritized strategies.
-   * @param options Search options including pattern, absolute path, and include glob.
+   * @param options Search options including pattern, absolute path, and glob filter.
    * @returns A promise resolving to an array of match objects.
    */
   private async performGrepSearch(options: {
     pattern: string;
     path: string; // Expects absolute path
-    include?: string;
+    glob?: string;
     signal: AbortSignal;
   }): Promise<GrepMatch[]> {
-    const { pattern, path: absolutePath, include } = options;
+    const { pattern, path: absolutePath, glob } = options;
     let strategyUsed = 'none';
 
     try {
@@ -390,8 +308,8 @@ class GrepToolInvocation extends BaseToolInvocation<
           '--ignore-case',
           pattern,
         ];
-        if (include) {
-          gitArgs.push('--', include);
+        if (glob) {
+          gitArgs.push('--', glob);
         }
 
         try {
@@ -457,8 +375,8 @@ class GrepToolInvocation extends BaseToolInvocation<
           })
           .filter((dir): dir is string => !!dir);
         commonExcludes.forEach((dir) => grepArgs.push(`--exclude-dir=${dir}`));
-        if (include) {
-          grepArgs.push(`--include=${include}`);
+        if (glob) {
+          grepArgs.push(`--include=${glob}`);
         }
         grepArgs.push(pattern);
         grepArgs.push('.');
@@ -537,7 +455,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         'GrepLogic: Falling back to JavaScript grep implementation.',
       );
       strategyUsed = 'javascript fallback';
-      const globPattern = include ? include : '**/*';
+      const globPattern = glob ? glob : '**/*';
       const ignorePatterns = this.fileExclusions.getGlobExcludes();
 
       const filesIterator = globStream(globPattern, {
@@ -603,79 +521,36 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   constructor(private readonly config: Config) {
     super(
       GrepTool.Name,
-      'SearchText',
-      'Searches for a regular expression pattern within the content of files in a specified directory (or current working directory). Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.',
+      'Grep',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Task tool for open-ended searches requiring multiple rounds\n',
       Kind.Search,
       {
         properties: {
           pattern: {
-            description:
-              "The regular expression (regex) pattern to search for within file contents (e.g., 'function\\s+myFunction', 'import\\s+\\{.*\\}\\s+from\\s+.*').",
             type: 'string',
+            description:
+              'The regular expression pattern to search for in file contents',
+          },
+          glob: {
+            type: 'string',
+            description:
+              'Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")',
           },
           path: {
-            description:
-              'Optional: The absolute path to the directory to search within. If omitted, searches the current working directory.',
             type: 'string',
-          },
-          include: {
             description:
-              "Optional: A glob pattern to filter which files are searched (e.g., '*.js', '*.{ts,tsx}', 'src/**'). If omitted, searches all files (respecting potential global ignores).",
-            type: 'string',
+              'File or directory to search in. Defaults to current working directory.',
           },
-          maxResults: {
-            description:
-              'Optional: Maximum number of matches to return to prevent context overflow (default: 20, max: 100). Use lower values for broad searches, higher for specific searches.',
+          limit: {
             type: 'number',
-            minimum: 1,
-            maximum: 100,
+            description:
+              'Limit output to first N matching lines. Optional - shows all matches if not specified.',
           },
         },
         required: ['pattern'],
         type: 'object',
       },
     );
-  }
-
-  /**
-   * Checks if a path is within the root directory and resolves it.
-   * @param relativePath Path relative to the root directory (or undefined for root).
-   * @returns The absolute path if valid and exists, or null if no path specified (to search all directories).
-   * @throws {Error} If path is outside root, doesn't exist, or isn't a directory.
-   */
-  private resolveAndValidatePath(relativePath?: string): string | null {
-    // If no path specified, return null to indicate searching all workspace directories
-    if (!relativePath) {
-      return null;
-    }
-
-    const targetPath = path.resolve(this.config.getTargetDir(), relativePath);
-
-    // Security Check: Ensure the resolved path is within workspace boundaries
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(targetPath)) {
-      const directories = workspaceContext.getDirectories();
-      throw new Error(
-        `Path validation failed: Attempted path "${relativePath}" resolves outside the allowed workspace directories: ${directories.join(', ')}`,
-      );
-    }
-
-    // Check existence and type after resolving
-    try {
-      const stats = fs.statSync(targetPath);
-      if (!stats.isDirectory()) {
-        throw new Error(`Path is not a directory: ${targetPath}`);
-      }
-    } catch (error: unknown) {
-      if (isNodeError(error) && error.code !== 'ENOENT') {
-        throw new Error(`Path does not exist: ${targetPath}`);
-      }
-      throw new Error(
-        `Failed to access path stats for ${targetPath}: ${error}`,
-      );
-    }
-
-    return targetPath;
   }
 
   /**
@@ -686,27 +561,17 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: GrepToolParams,
   ): string | null {
+    // Validate pattern is a valid regex
     try {
       new RegExp(params.pattern);
     } catch (error) {
-      return `Invalid regular expression pattern provided: ${params.pattern}. Error: ${getErrorMessage(error)}`;
-    }
-
-    // Validate maxResults if provided
-    if (params.maxResults !== undefined) {
-      if (
-        !Number.isInteger(params.maxResults) ||
-        params.maxResults < 1 ||
-        params.maxResults > 100
-      ) {
-        return `maxResults must be an integer between 1 and 100, got: ${params.maxResults}`;
-      }
+      return `Invalid regular expression pattern: ${params.pattern}. Error: ${getErrorMessage(error)}`;
     }
 
     // Only validate path if one is provided
     if (params.path) {
       try {
-        this.resolveAndValidatePath(params.path);
+        resolveAndValidatePath(this.config, params.path);
       } catch (error) {
         return getErrorMessage(error);
       }
