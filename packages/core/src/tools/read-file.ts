@@ -67,8 +67,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   async execute(): Promise<ToolResult> {
     const result = await processSingleFileContent(
       this.params.absolute_path,
-      this.config.getTargetDir(),
-      this.config.getFileSystemService(),
+      this.config,
       this.params.offset,
       this.params.limit,
     );

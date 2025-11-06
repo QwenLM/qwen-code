@@ -30,7 +30,7 @@ import {
   readFileWithEncoding,
   fileExists,
 } from './fileUtils.js';
-import { StandardFileSystemService } from '../services/fileSystemService.js';
+import type { Config } from '../config/config.js';
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
@@ -49,6 +49,12 @@ describe('fileUtils', () => {
   let testBinaryFilePath: string;
   let nonexistentFilePath: string;
   let directoryPath: string;
+
+  const mockConfig = {
+    getTruncateToolOutputThreshold: () => 2500,
+    getTruncateToolOutputLines: () => 500,
+    getTargetDir: () => tempRootDir,
+  } as unknown as Config;
 
   beforeEach(() => {
     vi.resetAllMocks(); // Reset all mocks, including mime.getType
@@ -664,8 +670,7 @@ describe('fileUtils', () => {
       actualNodeFs.writeFileSync(testTextFilePath, content);
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(result.llmContent).toBe(content);
       expect(result.returnDisplay).toBe('');
@@ -675,8 +680,7 @@ describe('fileUtils', () => {
     it('should handle file not found', async () => {
       const result = await processSingleFileContent(
         nonexistentFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(result.error).toContain('File not found');
       expect(result.returnDisplay).toContain('File not found');
@@ -689,8 +693,7 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(result.error).toContain('Simulated read error');
       expect(result.returnDisplay).toContain('Simulated read error');
@@ -704,8 +707,7 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testImageFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(result.error).toContain('Simulated image read error');
       expect(result.returnDisplay).toContain('Simulated image read error');
@@ -717,8 +719,7 @@ describe('fileUtils', () => {
       mockMimeGetType.mockReturnValue('image/png');
       const result = await processSingleFileContent(
         testImageFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(
         (result.llmContent as { inlineData: unknown }).inlineData,
@@ -739,8 +740,7 @@ describe('fileUtils', () => {
       mockMimeGetType.mockReturnValue('application/pdf');
       const result = await processSingleFileContent(
         testPdfFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(
         (result.llmContent as { inlineData: unknown }).inlineData,
@@ -768,8 +768,7 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testSvgFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
 
       expect(result.llmContent).toBe(svgContent);
@@ -786,8 +785,7 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testBinaryFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
       expect(result.llmContent).toContain(
         'Cannot display content of binary file',
@@ -796,11 +794,7 @@ describe('fileUtils', () => {
     });
 
     it('should handle path being a directory', async () => {
-      const result = await processSingleFileContent(
-        directoryPath,
-        tempRootDir,
-        new StandardFileSystemService(),
-      );
+      const result = await processSingleFileContent(directoryPath, mockConfig);
       expect(result.error).toContain('Path is a directory');
       expect(result.returnDisplay).toContain('Path is a directory');
     });
@@ -811,12 +805,12 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
         5,
         5,
       ); // Read lines 6-10
-      const expectedContent = lines.slice(5, 10).join('\n');
+      const expectedContent =
+        lines.slice(5, 10).join('\n') + '\n---\n[10 lines truncated] ...';
 
       expect(result.llmContent).toBe(expectedContent);
       expect(result.returnDisplay).toBe('Read lines 6-10 of 20 from test.txt');
@@ -832,8 +826,7 @@ describe('fileUtils', () => {
       // Read from line 11 to 20. The start is not 0, so it's truncated.
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
         10,
         10,
       );
@@ -852,8 +845,7 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
         0,
         10,
       );
@@ -875,17 +867,16 @@ describe('fileUtils', () => {
 
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
       );
 
       expect(result.llmContent).toContain('Short line');
       expect(result.llmContent).toContain(
         longLine.substring(0, 2000) + '... [truncated]',
       );
-      expect(result.llmContent).toContain('Another short line');
+      expect(result.llmContent).not.toContain('Another short line');
       expect(result.returnDisplay).toBe(
-        'Read all 3 lines from test.txt (some lines were shortened)',
+        'Read lines 1-2 of 3 from test.txt (truncated)',
       );
       expect(result.isTruncated).toBe(true);
     });
@@ -897,8 +888,7 @@ describe('fileUtils', () => {
       // Read 5 lines, but there are 11 total
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
         0,
         5,
       );
@@ -916,15 +906,14 @@ describe('fileUtils', () => {
       // Read all 11 lines, including the long one
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
         0,
         11,
       );
 
       expect(result.isTruncated).toBe(true);
       expect(result.returnDisplay).toBe(
-        'Read all 11 lines from test.txt (some lines were shortened)',
+        'Read lines 1-11 of 11 from test.txt (truncated)',
       );
     });
 
@@ -942,14 +931,13 @@ describe('fileUtils', () => {
       // Read 10 lines out of 20, including the long line
       const result = await processSingleFileContent(
         testTextFilePath,
-        tempRootDir,
-        new StandardFileSystemService(),
+        mockConfig,
         0,
         10,
       );
       expect(result.isTruncated).toBe(true);
       expect(result.returnDisplay).toBe(
-        'Read lines 1-10 of 20 from test.txt (some lines were shortened)',
+        'Read lines 1-5 of 20 from test.txt (truncated)',
       );
     });
 
@@ -966,8 +954,7 @@ describe('fileUtils', () => {
       try {
         const result = await processSingleFileContent(
           testTextFilePath,
-          tempRootDir,
-          new StandardFileSystemService(),
+          mockConfig,
         );
 
         expect(result.error).toContain('File size exceeds the 20MB limit');

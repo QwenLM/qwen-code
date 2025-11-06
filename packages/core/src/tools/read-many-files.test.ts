@@ -88,6 +88,8 @@ describe('ReadManyFilesTool', () => {
         buildExcludePatterns: () => DEFAULT_FILE_EXCLUDES,
         getReadManyFilesExcludes: () => DEFAULT_FILE_EXCLUDES,
       }),
+      getTruncateToolOutputThreshold: () => 2500,
+      getTruncateToolOutputLines: () => 500,
     } as Partial<Config> as Config;
     tool = new ReadManyFilesTool(mockConfig);
 
@@ -500,6 +502,8 @@ describe('ReadManyFilesTool', () => {
           buildExcludePatterns: () => [],
           getReadManyFilesExcludes: () => [],
         }),
+        getTruncateToolOutputThreshold: () => 2500,
+        getTruncateToolOutputLines: () => 500,
       } as Partial<Config> as Config;
       tool = new ReadManyFilesTool(mockConfig);
 
