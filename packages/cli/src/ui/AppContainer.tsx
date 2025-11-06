@@ -551,6 +551,11 @@ export const AppContainer = (props: AppContainerProps) => {
     [visionSwitchResolver],
   );
 
+  // onDebugMessage should log to console, not update footer debugMessage
+  const onDebugMessage = useCallback((message: string) => {
+    console.debug(message);
+  }, []);
+
   const performMemoryRefresh = useCallback(async () => {
     historyManager.addItem(
       {
@@ -628,7 +633,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.addItem,
     config,
     settings,
-    setDebugMessage,
+    onDebugMessage,
     handleSlashCommand,
     shellModeActive,
     () => settings.merged.general?.preferredEditor as EditorType,
