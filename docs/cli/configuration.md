@@ -163,6 +163,27 @@ Settings are organized into categories. All settings should be placed within the
   - **Description:** Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely.
   - **Default:** `0.7`
 
+- **`model.generationConfig`** (object):
+  - **Description:** Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.
+  - **Default:** `undefined`
+  - **Example:**
+
+    ```json
+    {
+      "model": {
+        "generationConfig": {
+          "timeout": 60000,
+          "disableCacheControl": false,
+          "samplingParams": {
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_tokens": 1024
+          }
+        }
+      }
+    }
+    ```
+
 - **`model.skipNextSpeakerCheck`** (boolean):
   - **Description:** Skip the next speaker check.
   - **Default:** `false`
