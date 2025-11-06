@@ -160,7 +160,7 @@ Settings are organized into categories. All settings should be placed within the
   - **Default:** `undefined`
 
 - **`model.chatCompression.contextPercentageThreshold`** (number):
-  - **Description:** Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit.
+  - **Description:** Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely.
   - **Default:** `0.7`
 
 - **`model.skipNextSpeakerCheck`** (boolean):

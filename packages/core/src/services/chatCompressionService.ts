@@ -86,10 +86,13 @@ export class ChatCompressionService {
     hasFailedCompressionAttempt: boolean,
   ): Promise<{ newHistory: Content[] | null; info: ChatCompressionInfo }> {
     const curatedHistory = chat.getHistory(true);
+    const contextPercentageThreshold =
+      config.getChatCompression()?.contextPercentageThreshold;
 
     // Regardless of `force`, don't do anything if the history is empty.
     if (
       curatedHistory.length === 0 ||
+      contextPercentageThreshold === 0 ||
       (hasFailedCompressionAttempt && !force)
     ) {
       return {
@@ -103,9 +106,6 @@ export class ChatCompressionService {
     }
 
     const originalTokenCount = uiTelemetryService.getLastPromptTokenCount();
-
-    const contextPercentageThreshold =
-      config.getChatCompression()?.contextPercentageThreshold;
 
     // Don't compress if not forced and we are under the limit.
     if (!force) {
