@@ -1,0 +1,69 @@
+{
+  "name": "@qwen-code/sdk-typescript",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for programmatic access to qwen-code CLI",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src test",
+    "lint:fix": "eslint src test --fix",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "qwen",
+    "qwen-code",
+    "ai",
+    "code-assistant",
+    "sdk",
+    "typescript"
+  ],
+  "author": "Qwen Team",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@qwen-code/qwen-code": "file:../../cli"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@typescript-eslint/eslint-plugin": "^7.13.0",
+    "@typescript-eslint/parser": "^7.13.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qwen-ai/qwen-code.git",
+    "directory": "packages/sdk/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/qwen-ai/qwen-code/issues"
+  },
+  "homepage": "https://github.com/qwen-ai/qwen-code#readme"
+}
