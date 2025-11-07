@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-test-utils",
-  "version": "0.1.5",
+  "version": "0.1.5-nightly.20251107.d17c37af",
   "private": true,
   "main": "src/index.ts",
   "license": "Apache-2.0",
