@@ -279,7 +279,7 @@ ${finalExclusionPatternsForDescription
     const sortedFiles = Array.from(filesToConsider).sort();
     const truncateToolOutputLines = this.config.getTruncateToolOutputLines();
     const file_line_limit = Number.isFinite(truncateToolOutputLines)
-      ? truncateToolOutputLines / Math.max(1, sortedFiles.length)
+      ? Math.floor(truncateToolOutputLines / Math.max(1, sortedFiles.length))
       : undefined;
 
     const fileProcessingPromises = sortedFiles.map(
@@ -376,9 +376,12 @@ ${finalExclusionPatternsForDescription
             );
             let fileContentForLlm = '';
             if (fileReadResult.isTruncated) {
-              fileContentForLlm += `[WARNING: This file was truncated. To view the full content, use the 'read_file' tool on this specific file.]\n\n`;
+              const [start, end] = fileReadResult.linesShown!;
+              const total = fileReadResult.originalLineCount!;
+              fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
+            } else {
+              fileContentForLlm = fileReadResult.llmContent;
             }
-            fileContentForLlm += fileReadResult.llmContent;
             contentParts.push(`${separator}\n\n${fileContentForLlm}\n\n`);
           } else {
             // This is a Part for image/pdf, which we don't add the separator to.

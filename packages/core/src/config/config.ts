@@ -162,7 +162,7 @@ export interface ExtensionInstallMetadata {
 }
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 500;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
 
 export class MCPServerConfig {
   constructor(

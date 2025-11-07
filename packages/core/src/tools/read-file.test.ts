@@ -283,10 +283,6 @@ describe('ReadFileTool', () => {
       >;
 
       const result = await invocation.execute(abortSignal);
-      expect(result.llmContent).toContain(
-        'IMPORTANT: The file content has been truncated',
-      );
-      expect(result.llmContent).toContain('--- FILE CONTENT (truncated) ---');
       expect(result.returnDisplay).toContain(
         'Read lines 1-2 of 3 from longlines.txt (truncated)',
       );
@@ -421,10 +417,7 @@ describe('ReadFileTool', () => {
 
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toContain(
-        'IMPORTANT: The file content has been truncated',
-      );
-      expect(result.llmContent).toContain(
-        'Status: Showing lines 6-8 of 20 total lines',
+        'Showing lines 6-8 of 20 total lines',
       );
       expect(result.llmContent).toContain('Line 6');
       expect(result.llmContent).toContain('Line 7');

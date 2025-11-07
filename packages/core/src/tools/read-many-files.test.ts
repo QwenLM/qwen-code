@@ -556,15 +556,10 @@ describe('ReadManyFilesTool', () => {
         c.includes('large-file.txt'),
       );
 
-      expect(normalFileContent).not.toContain(
-        '[WARNING: This file was truncated.',
-      );
+      expect(normalFileContent).not.toContain('Showing lines');
       expect(truncatedFileContent).toContain(
-        "[WARNING: This file was truncated. To view the full content, use the 'read_file' tool on this specific file.]",
+        'Showing lines 1-250 of 2500 total lines.',
       );
-      // Check that the actual content is still there but truncated
-      expect(truncatedFileContent).toContain('L200');
-      expect(truncatedFileContent).not.toContain('L2400');
     });
 
     it('should read files with special characters like [] and () in the path', async () => {
