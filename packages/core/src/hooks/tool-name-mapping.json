@@ -1,0 +1,96 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tool Name Mapping Configuration",
+  "description": "Maps tool names between Claude Code and Qwen Code systems for compatibility",
+  "type": "object",
+  "properties": {
+    "Write": {
+      "type": "string",
+      "description": "Claude Code Write tool maps to Qwen Code equivalent",
+      "default": "write_file"
+    },
+    "Edit": {
+      "type": "string",
+      "description": "Claude Code Edit tool maps to Qwen Code equivalent",
+      "default": "edit"
+    },
+    "Bash": {
+      "type": "string",
+      "description": "Claude Code Bash tool maps to Qwen Code equivalent",
+      "default": "run_shell_command"
+    },
+    "TodoWrite": {
+      "type": "string",
+      "description": "Claude Code TodoWrite tool maps to Qwen Code equivalent",
+      "default": "todo_write"
+    },
+
+    "Read": {
+      "type": "string",
+      "description": "Claude Code Read tool maps to Qwen Code equivalent",
+      "default": "read_file"
+    },
+    "ReadManyFiles": {
+      "type": "string",
+      "description": "Claude Code ReadManyFiles tool maps to Qwen Code equivalent",
+      "default": "read_many_files"
+    },
+    "Grep": {
+      "type": "string",
+      "description": "Claude Code Grep tool maps to Qwen Code equivalent",
+      "default": "grep_search"
+    },
+    "Glob": {
+      "type": "string",
+      "description": "Claude Code Glob tool maps to Qwen Code equivalent",
+      "default": "glob"
+    },
+    "Ls": {
+      "type": "string",
+      "description": "Claude Code Ls tool maps to Qwen Code equivalent",
+      "default": "ls"
+    },
+
+    "Shell": {
+      "type": "string",
+      "description": "Claude Code Shell tool maps to Qwen Code equivalent",
+      "default": "run_shell_command"
+    },
+    "WebSearch": {
+      "type": "string",
+      "description": "Claude Code WebSearch tool maps to Qwen Code equivalent",
+      "default": "web_search"
+    },
+    "WebFetch": {
+      "type": "string",
+      "description": "Claude Code WebFetch tool maps to Qwen Code equivalent",
+      "default": "web_fetch"
+    },
+    "Memory": {
+      "type": "string",
+      "description": "Claude Code Memory tool maps to Qwen Code equivalent",
+      "default": "save_memory"
+    },
+    "Task": {
+      "type": "string",
+      "description": "Claude Code Task tool maps to Qwen Code equivalent",
+      "default": "task"
+    },
+    "ExitPlanMode": {
+      "type": "string",
+      "description": "Claude Code ExitPlanMode tool maps to Qwen Code equivalent",
+      "default": "exit_plan_mode"
+    }
+  },
+  "additionalProperties": {
+    "type": "string",
+    "description": "Additional custom tool mappings"
+  },
+  "examples": [
+    {
+      "Write": "write_file",
+      "Edit": "smart_replace",
+      "Bash": "execute_shell_command"
+    }
+  ]
+}

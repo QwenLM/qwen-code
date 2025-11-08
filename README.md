@@ -53,6 +53,7 @@ For detailed setup instructions, see [Authorization](#authorization).
 
 - **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits
 - **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
+- **Extensible Hook System** - Execute custom scripts at key points in the application lifecycle (compatible with Claude Code hooks)
 - **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
 - **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis
 
@@ -387,6 +388,102 @@ qwen
 - `Ctrl+C` - Cancel current operation
 - `Ctrl+D` - Exit (on empty line)
 - `Up/Down` - Navigate command history
+
+## Hook System
+
+Qwen Code features a powerful and extensible hook system that allows you to execute custom scripts at key points in the application lifecycle. The system is designed for automation, monitoring, security checks, and integration with external tools.
+
+### Hook Types
+
+Qwen Code supports the following hook types across different lifecycle events:
+
+| Hook Type              | Description                                    |
+| ---------------------- | ---------------------------------------------- |
+| `app.startup`          | Triggered when the application starts          |
+| `app.shutdown`         | Triggered when the application shuts down      |
+| `session.start`        | Triggered when a new session begins            |
+| `session.end`          | Triggered when a session ends                  |
+| `input.received`       | Triggered when input is received from the user |
+| `output.ready`         | Triggered when output is ready to be displayed |
+| `before.response`      | Triggered before the AI generates a response   |
+| `after.response`       | Triggered after the AI generates a response    |
+| `tool.before`          | Triggered before a tool is executed            |
+| `tool.after`           | Triggered after a tool is executed             |
+| `command.before`       | Triggered before a command is executed         |
+| `command.after`        | Triggered after a command is executed          |
+| `model.before_request` | Triggered before a model request is sent       |
+| `model.after_response` | Triggered after a model response is received   |
+| `file.before_read`     | Triggered before reading a file                |
+| `file.after_read`      | Triggered after reading a file                 |
+| `file.before_write`    | Triggered before writing a file                |
+| `file.after_write`     | Triggered after writing a file                 |
+| `error.occurred`       | Triggered when an error occurs                 |
+| `error.handled`        | Triggered when an error is handled             |
+
+### Configuration
+
+Hooks can be configured in your `.qwen/settings.json` file:
+
+```json
+{
+  "hooks": {
+    "enabled": true,
+    "timeoutMs": 10000,
+    "hooks": [
+      {
+        "type": "tool.before",
+        "scriptPath": "./hooks/security-check.js",
+        "enabled": true,
+        "priority": 10
+      },
+      {
+        "type": "session.end",
+        "inlineScript": "console.log('Session ended at ' + new Date().toISOString());",
+        "enabled": true,
+        "priority": 5
+      }
+    ],
+    "claudeHooks": [
+      {
+        "event": "PreToolUse",
+        "matcher": ["Write", "Edit"],
+        "command": "./hooks/security.js",
+        "timeout": 30,
+        "priority": 0,
+        "enabled": true
+      }
+    ]
+  }
+}
+```
+
+### Hook Scripts
+
+You can define hooks using either external scripts or inline JavaScript:
+
+- **External Scripts**: Use `scriptPath` to reference an external JavaScript/TypeScript file
+- **Inline Scripts**: Use `inlineScript` to define JavaScript directly in the configuration
+- **Claude-Compatible Hooks**: Use `claudeHooks` to maintain compatibility with Claude Code hook configurations
+
+### Payload Format
+
+Hook scripts receive a JSON payload via stdin with context-specific data:
+
+```json
+{
+  "id": "hook_execution_id",
+  "timestamp": 1700000000000,
+  "sessionId": "session-id",
+  "callId": "call-id",
+  "toolName": "tool-name",
+  "args": {},
+  "...": "additional context-specific fields"
+}
+```
+
+### Claude Code Compatibility
+
+The hook system maintains compatibility with Claude Code hooks. You can use existing Claude Code hook scripts with Qwen Code by configuring them under the `claudeHooks` section in your settings.
 
 ## Benchmark Results
 
