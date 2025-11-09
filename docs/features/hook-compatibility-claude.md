@@ -1,51 +1,63 @@
-# Qwen Code - Claude Code Hook and Tool System Compatibility Specification
+# Qwen Code - Claude Code Hook Compatibility
 
-## Overview
+## Compatibility Overview
 
-This document specifies the compatibility between Qwen Code and Claude Code hook and tool systems. Qwen Code has been designed to maintain compatibility with Claude Code patterns while extending functionality where beneficial.
+Qwen Code maintains compatibility with Claude Code hook patterns while extending functionality where beneficial. This compatibility allows Claude Code users to reuse their existing hook scripts with minimal changes.
 
-## Transcript Storage
+## Hook Event Mapping
 
-### Claude Code
+Claude Code events are mapped to Qwen Code hook types:
 
-- Stores conversation transcripts as JSONL files
-- Location: `~/.claude/projects/<project_id>/<session_id>.jsonl`
-- Contains conversation history with all user and assistant messages
+| Claude Code Event | Qwen Code Equivalent                  |
+| ----------------- | ------------------------------------- |
+| `PreToolUse`      | `tool.before`                         |
+| `PostToolUse`     | `tool.after`                          |
+| `Stop`            | `session.end`                         |
+| `SubagentStop`    | `session.end` (with subagent context) |
+| `UserPromptSubmit`| `input.received`                      |
+| `BeforeResponse`  | `before.response`                     |
+| `AfterResponse`   | `after.response`                      |
+| `SessionStart`    | `session.start`                       |
+| `AppStartup`      | `app.startup`                         |
+| `AppShutdown`     | `app.shutdown`                        |
 
-### Qwen Code
+## Claude-Compatible Hook Configuration
 
-- Stores conversation transcripts as JSON files
-- Location: `~/.qwen/tmp/<project_hash>/chats/session-<timestamp>-<session_id>.json`
-- Contains comprehensive conversation records with:
-  - User and assistant messages
-  - Tool calls and execution results
-  - Token usage statistics
-  - Assistant thoughts and reasoning
-  - File change snapshots
+Qwen Code supports Claude-compatible hook configuration through the `claudeHooks` section:
 
-## Hook System Compatibility
+```json
+{
+  "hooks": {
+    "enabled": true,
+    "timeoutMs": 10000,
+    "claudeHooks": [
+      {
+        "event": "PreToolUse",
+        "matcher": ["Write", "Edit"],
+        "command": "./hooks/security.js",
+        "timeout": 30,
+        "priority": 10,
+        "enabled": true
+      }
+    ]
+  }
+}
+```
 
-### Hook Event Mapping
+### Claude Hook Configuration Options
 
-| Claude Code Event | Qwen Code Equivalent                  | Status        |
-| ----------------- | ------------------------------------- | ------------- |
-| `PreToolUse`      | `tool.before`                         | ✅ Compatible |
-| `PostToolUse`     | `tool.after`                          | ✅ Compatible |
-| `Stop`            | `session.end`                         | ✅ Compatible |
-| `SubagentStop`    | `session.end` (with subagent context) | ✅ Compatible |
-| `InputReceived`   | `input.received`                      | ✅ Compatible |
-| `BeforeResponse`  | `before.response`                     | ✅ Compatible |
-| `AfterResponse`   | `after.response`                      | ✅ Compatible |
-| `SessionStart`    | `session.start`                       | ✅ Compatible |
-| `AppStartup`      | `app.startup`                         | ✅ Compatible |
-| `AppShutdown`     | `app.shutdown`                        | ✅ Compatible |
+- `event`: The Claude Code event to hook into
+- `matcher`: Optional list of tools to match (applies to tool events)
+- `command`: The command or script to execute
+- `timeout`: Timeout in seconds
+- `priority`: Execution priority (lower numbers execute first)
+- `enabled`: Whether the hook is enabled
 
-### Hook Payload Compatibility
+## Payload Format Compatibility
 
-#### Tool Execution Hooks
+### Tool Execution Events
 
 **Claude Code Format:**
-
 ```json
 {
   "session_id": "string",
@@ -59,22 +71,21 @@ This document specifies the compatibility between Qwen Code and Claude Code hook
 }
 ```
 
-**Qwen Code Format:**
-
+**Qwen Code Output (converted Claude format):**
 ```json
 {
-  "id": "tool_before_<callId>",
+  "session_id": "string",
+  "hook_event_name": "PreToolUse",
   "timestamp": number,
-  "callId": "string",
-  "toolName": "string",
-  "args": {}
+  "tool_name": "string",
+  "tool_input": {},
+  "transcript_path": "string"
 }
 ```
 
-#### Session Hooks
+### Session Events
 
 **Claude Code Format:**
-
 ```json
 {
   "session_id": "string",
@@ -85,57 +96,62 @@ This document specifies the compatibility between Qwen Code and Claude Code hook
 }
 ```
 
-**Qwen Code Format:**
-
-```json
-{
-  "id": "session_start_<sessionId>",
-  "timestamp": number,
-  "sessionId": "string"
-}
-```
-
-#### Subagent Stop Hook
-
-**Claude Code Format:**
-
+**Qwen Code Output (converted Claude format):**
 ```json
 {
   "session_id": "string",
-  "transcript_path": "string",
-  "cwd": "string",
-  "permission_mode": "string",
-  "hook_event_name": "SubagentStop",
-  "subagent_id": "string",
-  "subagent_name": "string"
-}
-```
-
-**Qwen Code Format:**
-
-```json
-{
-  "id": "subagent_session_end_<subagentId>",
+  "hook_event_name": "SessionStart",
   "timestamp": number,
-  "subagentId": "string",
-  "subagentName": "string",
-  "terminateReason": "string",
-  "summary": {}
+  "transcript_path": "string"
 }
 ```
 
-### Hook Output Format Compatibility
+## Tool Name Mapping
+
+Claude Code tools are mapped to Qwen Code equivalents:
+
+| Claude Code Tool | Qwen Code Equivalent |
+| ---------------- | -------------------- |
+| `Write`          | `write_file`         |
+| `Edit`           | `replace`            |
+| `Bash`           | `run_shell_command`  |
+| `TodoWrite`      | `todo_write`         |
+| `Read`           | `read_file`          |
+| `Grep`           | `grep`               |
+| `Glob`           | `glob`               |
+| `Ls`             | `ls`                 |
+| `WebSearch`      | `web_search`         |
+| `WebFetch`       | `web_fetch`          |
+
+## Tool Input Format Mapping
+
+Tool input parameters are mapped between the systems:
+
+### Write/Edit Tools
+- Claude: `{ file_path: "path", content: "content" }`
+- Qwen: `{ file_path: "path", content: "content" }`
+- Mapping: Direct field mapping
+
+### Bash/Shell Tools
+- Claude: `{ command: "cmd", description: "desc" }`
+- Qwen: `{ command: "cmd", description: "desc" }`
+- Mapping: Direct field mapping
+
+### Read/File Tools
+- Claude: `{ file_path: "path" }`
+- Qwen: `{ file_path: "path" }`
+- Mapping: Direct field mapping
+
+## Output Format Compatibility
 
 Both systems support identical output formats:
 
-#### Exit Code Output
-
+### Exit Code Output
 - Exit code 0: Success
 - Exit code 2: Blocking error (stops processing)
 - Other codes: Non-blocking error
 
-#### JSON Output Format
-
+### JSON Output Format
 ```json
 {
   "continue": true, // Whether Claude should continue
@@ -145,79 +161,25 @@ Both systems support identical output formats:
 }
 ```
 
-## Tool Name Mapping
-
-| Claude Code Tool | Qwen Code Equivalent | Status           |
-| ---------------- | -------------------- | ---------------- |
-| `Write`          | `write_file`         | ✅ Mapped        |
-| `Edit`           | `edit`               | ✅ Mapped        |
-| `Bash`           | `run_shell_command`  | ✅ Mapped        |
-| `TodoWrite`      | `todo_write`         | ✅ Mapped        |
-| `Read`           | `read_file`          | ✅ Mapped        |
-| `ReadManyFiles`  | `read_many_files`    | ✅ Mapped        |
-| `Grep`           | `grep_search`        | ✅ Mapped        |
-| `Glob`           | `glob`               | ✅ Mapped        |
-| `Ls`             | `ls`                 | ✅ Mapped        |
-| `Shell`          | `run_shell_command`  | ✅ Mapped        |
-| `WebSearch`      | `web_search`         | ✅ Mapped        |
-| `WebFetch`       | `web_fetch`          | ✅ Mapped        |
-| `Memory`         | `save_memory`        | ✅ Mapped        |
-| `Task`           | `task`               | ✅ Mapped        |
-| `ExitPlanMode`   | `exit_plan_mode`     | ✅ Mapped        |
-| `NotebookEdit`   | Not implemented      | ⚠️ No equivalent |
-
-## Configuration Format Compatibility
-
-### Claude Code Format (hooks.yaml)
-
-```yaml
-version: '1.0.0'
-hooks:
-  - event: 'PreToolUse'
-    matcher: ['Write', 'Edit']
-    command: './hooks/security.js'
-    timeout: 30
-```
-
-### Qwen Code Format (settings.json)
-
+For PreToolUse events with input updates:
 ```json
 {
-  "hooks": {
-    "enabled": true,
-    "timeoutMs": 10000,
-    "claudeHooks": [
-      {
-        "event": "PreToolUse",
-        "matcher": ["Write", "Edit"],
-        "command": "./hooks/security.js",
-        "timeout": 30
-      }
-    ]
-  }
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "allow|block",
+    "permissionDecisionReason": "string",
+    "updatedInput": {} // Updated tool input parameters
+  },
+  "systemMessage": "string" // Optional
 }
 ```
 
-## Hook Script Interface Compatibility
+## Script Execution Interface
 
 Both systems pass hook payloads to external scripts via stdin as JSON, maintaining compatibility for Claude Code style hooks.
 
 ### Script Requirements
-
 - Scripts receive JSON payload via stdin
 - Scripts can return exit codes or JSON responses
 - Scripts execute with application permissions
 - Security validation prevents directory traversal
-
-## MCP Tool Integration
-
-Both systems support MCP tools with the pattern `mcp__<server>__<tool>`, maintaining compatibility for Claude Code MCP integrations.
-
-## Security Model Compatibility
-
-Both systems implement equivalent security models:
-
-- Scripts execute with application permissions
-- Path validation prevents directory traversal
-- Input validation for security
-- Session-based execution contexts

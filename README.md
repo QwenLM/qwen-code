@@ -319,7 +319,7 @@ qwen
 > Find and remove all console.log statements
 ```
 
-### Hook System for Advanced Automation
+### 🪝 Hook System for Advanced Automation
 
 For more advanced automation, Qwen Code features a powerful hook system that allows you to execute custom scripts at key lifecycle events:
 

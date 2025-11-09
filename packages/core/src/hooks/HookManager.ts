@@ -73,6 +73,10 @@ export enum HookType {
   // Error hooks
   ERROR_OCCURRED = 'error.occurred',
   ERROR_HANDLED = 'error.handled',
+
+  // Additional hooks for Claude compatibility
+  BEFORE_COMPACT = 'before.compact',
+  SESSION_NOTIFICATION = 'session.notification',
 }
 
 export class HookManager {
