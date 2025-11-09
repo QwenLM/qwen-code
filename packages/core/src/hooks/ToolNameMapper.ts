@@ -22,7 +22,10 @@ export class ToolNameMapper {
   private readonly configPath: string;
 
   private constructor() {
-    this.configPath = path.join(__dirname, 'tool-name-mapping.json');
+    this.configPath = path.join(
+      __dirname,
+      '../../../config/tool-name-mapping.json',
+    );
     this.loadMappings();
   }
 
@@ -49,20 +52,8 @@ export class ToolNameMapper {
         `Could not load tool name mapping file at ${this.configPath}:`,
         error,
       );
-      // Fall back to default mappings
-      this.mappings = {
-        Write: 'write_file',
-        Edit: 'replace',
-        Bash: 'run_shell_command',
-        TodoWrite: 'todoWrite',
-        NotebookEdit: 'edit_notebook',
-        Read: 'read_file',
-        Grep: 'grep',
-        Glob: 'glob',
-        Ls: 'ls',
-        WebSearch: 'web_search',
-        WebFetch: 'web_fetch',
-      };
+      // No fallback defaults - require explicit configuration
+      this.mappings = {};
     }
   }
 

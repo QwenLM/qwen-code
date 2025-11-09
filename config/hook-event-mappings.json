@@ -1,0 +1,13 @@
+{
+  "hookEventMappings": {
+    "PreToolUse": "tool.before",
+    "Stop": "session.end",
+    "SubagentStop": "session.end",
+    "InputReceived": "input.received",
+    "BeforeResponse": "before.response",
+    "AfterResponse": "after.response",
+    "SessionStart": "session.start",
+    "AppStartup": "app.startup",
+    "AppShutdown": "app.shutdown"
+  }
+}

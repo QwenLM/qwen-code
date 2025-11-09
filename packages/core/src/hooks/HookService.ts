@@ -100,29 +100,51 @@ export class HookService {
   private convertClaudeEventToHookType(
     event: import('./HooksSettings.js').ClaudeHookEvent,
   ): import('./HookManager.js').HookType | null {
-    // Map Claude Code events to Qwen Code HookType
-    switch (event) {
-      case 'PreToolUse':
-        return HookType.BEFORE_TOOL_USE;
-      case 'Stop':
-        return HookType.SESSION_END;
-      case 'SubagentStop':
-        return HookType.SESSION_END;
-      case 'InputReceived':
-        return HookType.INPUT_RECEIVED;
-      case 'BeforeResponse':
-        return HookType.BEFORE_RESPONSE;
-      case 'AfterResponse':
-        return HookType.AFTER_RESPONSE;
-      case 'SessionStart':
-        return HookType.SESSION_START;
-      case 'AppStartup':
-        return HookType.APP_STARTUP;
-      case 'AppShutdown':
-        return HookType.APP_SHUTDOWN;
-      default:
-        return null;
+    // Load event mappings from configuration
+    const eventMappings = this.loadHookEventMappings();
+
+    // Look up the mapping for this Claude event
+    const qwenHookType = eventMappings[event];
+    if (qwenHookType) {
+      // Convert string to enum value
+      return this.normalizeHookType(
+        qwenHookType,
+      ) as import('./HookManager.js').HookType;
     }
+
+    return null;
+  }
+
+  private loadHookEventMappings(): Record<string, string> {
+    try {
+      // Try to load from a configuration file
+      const configPath = join(
+        __dirname,
+        '../../../config/hook-event-mappings.json',
+      );
+
+      // Use the fs module that's already imported
+      if (fs.existsSync(configPath)) {
+        const configContent = fs.readFileSync(configPath, 'utf-8');
+        const config = JSON.parse(configContent);
+        return config.hookEventMappings || {};
+      }
+    } catch (error) {
+      console.warn('Could not load hook event mappings:', error);
+    }
+
+    // Return default mappings as fallback
+    return {
+      PreToolUse: 'tool.before',
+      Stop: 'session.end',
+      SubagentStop: 'session.end',
+      InputReceived: 'input.received',
+      BeforeResponse: 'before.response',
+      AfterResponse: 'after.response',
+      SessionStart: 'session.start',
+      AppStartup: 'app.startup',
+      AppShutdown: 'app.shutdown',
+    };
   }
 
   private async createClaudeHandlerFromConfig(
