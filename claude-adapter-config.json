@@ -1,0 +1,43 @@
+{
+  "argumentMappings": {
+    "--print": ["-p"],
+    "--allowed-tools": ["--allowed-tools"],
+    "--system-prompt": ["--append-system-prompt"],
+    "--permission-mode": ["--approval-mode"],
+    "--model": ["-m"],
+    "--session-id": ["--session-id"],
+    "--settings": ["--settings"],
+    "--allowedTools": ["--allowed-tools"],
+    "--disallowedTools": ["--exclude-tools"],
+    "--include-partial-messages": ["--all-files"],
+    "--debug": ["--debug"],
+    "--verbose": ["--debug"],
+    "--yolo": ["--approval-mode", "yolo"],
+    "--allow-dangerously-skip-permissions": ["--dangerously-skip-permissions"],
+    "--dangerously-skip-permissions": ["--dangerously-skip-permissions"],
+    "--include-directories": ["--include-directories"],
+    "--continue": ["--continue"],
+    "--resume": ["--resume"],
+    "--output-format": ["--output-format"],
+    "--input-format": ["--input-format"],
+    "--mcp-config": ["--mcp-config"],
+    "--append-system-prompt": ["--append-system-prompt"],
+    "--replay-user-messages": ["--replay-user-messages"],
+    "--fork-session": ["--fork-session"],
+    "--fallback-model": ["--fallback-model"],
+    "--add-dir": ["--add-dir"]
+  },
+  "toolNameMappings": {
+    "Write": "write_file",
+    "Edit": "replace",
+    "Bash": "run_shell_command",
+    "Read": "read_file",
+    "Grep": "grep",
+    "Glob": "glob",
+    "Ls": "ls",
+    "WebSearch": "web_search",
+    "WebFetch": "web_fetch",
+    "TodoWrite": "todo_write",
+    "NotebookEdit": "edit_notebook"
+  }
+}

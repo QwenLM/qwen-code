@@ -11,6 +11,57 @@ import {
   type HookPayload,
   type HookContext,
 } from './HookManager.js';
+import type { Config } from '../config/config.js';
+
+// Create a minimal mock Config for testing purposes
+const createMockConfig = (): Config => ({
+    getTargetDir: () => '/tmp',
+    getProjectRoot: () => '/tmp',
+    getHooksSettings: () => undefined,
+    // Add minimal required properties only to satisfy the Config interface
+    getApprovalMode: () => undefined,
+    getShowMemoryUsage: () => false,
+    getDebugMode: () => false,
+    getFullContext: () => false,
+    getModel: () => 'test-model',
+    getCwd: () => process.cwd(),
+    getWorkingDir: () => process.cwd(),
+    getCheckpointingEnabled: () => false,
+    getUsageStatisticsEnabled: () => false,
+    getEnablePromptCompletion: () => false,
+    getSkipLoopDetection: () => false,
+    getSkipStartupContext: () => false,
+    getScreenReader: () => false,
+    getEnableToolOutputTruncation: () => false,
+    getTruncateToolOutputThreshold: () => Number.POSITIVE_INFINITY,
+    getTruncateToolOutputLines: () => Number.POSITIVE_INFINITY,
+    getUseSmartEdit: () => false,
+    getOutputFormat: () => 'text',
+    getIdeMode: () => false,
+    getFolderTrustFeature: () => false,
+    getFolderTrust: () => true,
+    isTrustedFolder: () => true,
+    getAuthType: () => undefined,
+    getCliVersion: () => 'test',
+    getFileSystemService: () =>
+      undefined as import('../services/fileSystemService.js').FileSystemService,
+    getChatCompression: () => undefined,
+    isInteractive: () => false,
+    getUseRipgrep: () => false,
+    getUseBuiltinRipgrep: () => false,
+    getShouldUseNodePtyShell: () => false,
+    getSkipNextSpeakerCheck: () => false,
+    getShellExecutionConfig: () => ({
+      terminalWidth: 80,
+      terminalHeight: 24,
+      showColor: false,
+      pager: 'cat',
+    }),
+    getVlmSwitchMode: () => undefined,
+    getSubagentManager: () =>
+      undefined as import('../subagents/subagent-manager.js').SubagentManager,
+    // Note: This is a minimal mock, expand as needed to satisfy Config interface
+  } as unknown as Config);
 
 describe('HookManager', () => {
   let hookManager: HookManager;
@@ -38,7 +89,7 @@ describe('HookManager', () => {
       timestamp: Date.now(),
       data: 'test',
     };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     hookManager.register({
       type: HookType.SESSION_START,
@@ -81,7 +132,7 @@ describe('HookManager', () => {
     });
 
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     await hookManager.executeHooks(HookType.SESSION_START, payload, context);
 
@@ -91,7 +142,7 @@ describe('HookManager', () => {
   it('should not execute disabled hooks', async () => {
     const handler = vi.fn();
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     const hookId = hookManager.register({
       type: HookType.SESSION_START,
@@ -112,7 +163,7 @@ describe('HookManager', () => {
   it('should allow unregistering hooks', async () => {
     const handler = vi.fn();
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     const hookId = hookManager.register({
       type: HookType.SESSION_START,
@@ -136,7 +187,7 @@ describe('HookManager', () => {
       return Promise.resolve();
     });
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     hookManager.register({
       type: HookType.SESSION_START,
@@ -154,7 +205,7 @@ describe('HookManager', () => {
       throw new Error('Hook error');
     });
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     hookManager.register({
       type: HookType.SESSION_START,
@@ -178,7 +229,10 @@ describe('HookManager', () => {
     const handler = vi.fn();
     const abortController = new AbortController();
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {}, signal: abortController.signal };
+    const context: HookContext = {
+      config: createMockConfig(),
+      signal: abortController.signal,
+    };
 
     hookManager.register({
       type: HookType.SESSION_START,
@@ -198,7 +252,7 @@ describe('HookManager', () => {
     const handler1 = vi.fn();
     const handler2 = vi.fn();
     const payload: HookPayload = { id: 'test', timestamp: Date.now() };
-    const context: HookContext = { config: {} };
+    const context: HookContext = { config: createMockConfig() };
 
     hookManager.register({
       type: HookType.SESSION_START,

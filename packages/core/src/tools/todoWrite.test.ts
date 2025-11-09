@@ -49,6 +49,79 @@ describe('TodoWriteTool', () => {
       expect(result).toBeNull();
     });
 
+    it('should accept todos with Claude-compatible timestamp fields', () => {
+      const params: TodoWriteParams = {
+        todos: [
+          {
+            id: '1',
+            content: 'Task 1',
+            status: 'pending',
+            created_at: new Date().toISOString(),
+            completed_at: null,
+          },
+          {
+            id: '2',
+            content: 'Task 2',
+            status: 'completed',
+            created_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          },
+        ],
+      };
+
+      const result = tool.validateToolParams(params);
+      expect(result).toBeNull();
+    });
+
+    it('should reject todos with invalid created_at timestamp', () => {
+      const params: TodoWriteParams = {
+        todos: [
+          {
+            id: '1',
+            content: 'Task 1',
+            status: 'pending',
+            created_at: 123 as unknown as string, // Invalid type
+          },
+        ],
+      };
+
+      const result = tool.validateToolParams(params);
+      expect(result).toContain('created_at" field must be a string');
+    });
+
+    it('should reject todos with invalid completed_at timestamp', () => {
+      const params: TodoWriteParams = {
+        todos: [
+          {
+            id: '1',
+            content: 'Task 1',
+            status: 'pending',
+            completed_at: 123 as unknown as string, // Invalid type
+          },
+        ],
+      };
+
+      const result = tool.validateToolParams(params);
+      expect(result).toContain('completed_at" field must be a string');
+    });
+
+    it('should accept todos with completed_at as null', () => {
+      const params: TodoWriteParams = {
+        todos: [
+          {
+            id: '1',
+            content: 'Task 1',
+            status: 'completed',
+            completed_at: null,
+            created_at: new Date().toISOString(),
+          },
+        ],
+      };
+
+      const result = tool.validateToolParams(params);
+      expect(result).toBeNull();
+    });
+
     it('should accept empty todos array', () => {
       const params: TodoWriteParams = {
         todos: [],
@@ -136,7 +209,9 @@ describe('TodoWriteTool', () => {
       // Mock file not existing
       mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      const writeFileSpy = vi
+        .spyOn(mockFs, 'writeFile')
+        .mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -154,11 +229,128 @@ describe('TodoWriteTool', () => {
           { id: '2', content: 'Task 2', status: 'in_progress' },
         ],
       });
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect(writeFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         expect.stringContaining('"todos"'),
         'utf-8',
       );
+      writeFileSpy.mockRestore();
+    });
+
+    it('should add Claude-compatible timestamps to todos when saving', async () => {
+      const params: TodoWriteParams = {
+        todos: [
+          { id: '1', content: 'Task 1', status: 'pending' },
+          { id: '2', content: 'Task 2', status: 'completed' },
+        ],
+      };
+
+      // Mock file not existing
+      mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
+      mockFs.mkdir.mockResolvedValue(undefined);
+
+      // Mock writeFile and capture the arguments
+      const writeFileSpy = vi.spyOn(mockFs, 'writeFile');
+
+      const invocation = tool.build(params);
+      await invocation.execute(mockAbortSignal);
+
+      // Verify that the timestamp fields were added
+      expect(writeFileSpy).toHaveBeenCalledTimes(1);
+      const [_filePath, content] = writeFileSpy.mock.calls[0];
+      const parsedContent = JSON.parse(content as string);
+      const todos = parsedContent.todos;
+
+      expect(todos).toHaveLength(2);
+
+      // Check the first todo (pending status)
+      expect(todos[0].id).toBe('1');
+      expect(todos[0].status).toBe('pending');
+      expect(todos[0].created_at).toBeDefined();
+      expect(new Date(todos[0].created_at).toISOString()).toBe(
+        todos[0].created_at,
+      ); // Valid ISO string
+      expect(todos[0].completed_at).toBeNull(); // Should be null for pending tasks
+
+      // Check the second todo (completed status)
+      expect(todos[1].id).toBe('2');
+      expect(todos[1].status).toBe('completed');
+      expect(todos[1].created_at).toBeDefined();
+      expect(new Date(todos[1].created_at).toISOString()).toBe(
+        todos[1].created_at,
+      ); // Valid ISO string
+      expect(todos[1].completed_at).toBeDefined(); // Should be set for completed tasks
+      expect(new Date(todos[1].completed_at).toISOString()).toBe(
+        todos[1].completed_at,
+      ); // Valid ISO string
+
+      writeFileSpy.mockRestore();
+    });
+
+    it('should preserve existing Claude-compatible timestamp fields when updating', async () => {
+      const existingTodos = [
+        {
+          id: '1',
+          content: 'Existing Task',
+          status: 'completed',
+          created_at: '2023-01-01T00:00:00.000Z',
+          completed_at: '2023-01-02T00:00:00.000Z',
+        },
+      ];
+
+      const params: TodoWriteParams = {
+        todos: [
+          {
+            id: '1',
+            content: 'Updated Task',
+            status: 'completed',
+            created_at: '2023-01-01T00:00:00.000Z',
+            completed_at: '2023-01-02T00:00:00.000Z',
+          },
+          {
+            id: '2',
+            content: 'New Task',
+            status: 'pending',
+          },
+        ],
+      };
+
+      // Mock existing file
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ todos: existingTodos }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+
+      // Mock writeFile and capture the arguments
+      const writeFileSpy = vi.spyOn(mockFs, 'writeFile');
+
+      const invocation = tool.build(params);
+      await invocation.execute(mockAbortSignal);
+
+      // Verify that the timestamp fields were preserved or appropriately set
+      expect(writeFileSpy).toHaveBeenCalledTimes(1);
+      const [_filePath, content] = writeFileSpy.mock.calls[0];
+      const parsedContent = JSON.parse(content as string);
+      const todos = parsedContent.todos;
+
+      expect(todos).toHaveLength(2);
+
+      // Check the first todo (existing, completed status)
+      expect(todos[0].id).toBe('1');
+      expect(todos[0].status).toBe('completed');
+      expect(todos[0].created_at).toBe('2023-01-01T00:00:00.000Z');
+      expect(todos[0].completed_at).toBe('2023-01-02T00:00:00.000Z'); // Should preserve existing completed_at
+
+      // Check the second todo (new, pending status)
+      expect(todos[1].id).toBe('2');
+      expect(todos[1].status).toBe('pending');
+      expect(todos[1].created_at).toBeDefined();
+      expect(new Date(todos[1].created_at).toISOString()).toBe(
+        todos[1].created_at,
+      ); // Valid ISO string
+      expect(todos[1].completed_at).toBeNull(); // Should be null for pending tasks
+
+      writeFileSpy.mockRestore();
     });
 
     it('should replace todos with new ones', async () => {
@@ -178,7 +370,9 @@ describe('TodoWriteTool', () => {
         JSON.stringify({ todos: existingTodos }),
       );
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      const writeFileSpy = vi
+        .spyOn(mockFs, 'writeFile')
+        .mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -196,11 +390,12 @@ describe('TodoWriteTool', () => {
           { id: '2', content: 'New Task', status: 'pending' },
         ],
       });
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect(writeFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         expect.stringMatching(/"Updated Task"/),
         'utf-8',
       );
+      writeFileSpy.mockRestore();
     });
 
     it('should handle file write errors', async () => {
@@ -213,7 +408,9 @@ describe('TodoWriteTool', () => {
 
       mockFs.readFile.mockRejectedValue({ code: 'ENOENT' });
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockRejectedValue(new Error('Write failed'));
+      const writeFileSpy = vi
+        .spyOn(mockFs, 'writeFile')
+        .mockRejectedValue(new Error('Write failed'));
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -223,6 +420,7 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('Todo list modification failed');
       expect(result.llmContent).toContain('Write failed');
       expect(result.returnDisplay).toContain('Error writing todos');
+      writeFileSpy.mockRestore();
     });
 
     it('should handle empty todos array', async () => {
@@ -231,7 +429,9 @@ describe('TodoWriteTool', () => {
       };
 
       mockFs.mkdir.mockResolvedValue(undefined);
-      mockFs.writeFile.mockResolvedValue(undefined);
+      const writeFileSpy = vi
+        .spyOn(mockFs, 'writeFile')
+        .mockResolvedValue(undefined);
 
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
@@ -244,11 +444,12 @@ describe('TodoWriteTool', () => {
         type: 'todo_list',
         todos: [],
       });
-      expect(mockFs.writeFile).toHaveBeenCalledWith(
+      expect(writeFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('test-session-123.json'),
         expect.stringContaining('"todos"'),
         'utf-8',
       );
+      writeFileSpy.mockRestore();
     });
   });
 
