@@ -12,6 +12,10 @@ export const DEFAULT_GEMINI_MODEL = 'coder-model';
 export const DEFAULT_GEMINI_FLASH_MODEL = 'gemini-2.5-flash';
 export const DEFAULT_GEMINI_FLASH_LITE_MODEL = 'gemini-2.5-flash-lite';
 
+// GPT-OSS-20B model constants
+export const DEFAULT_GPT_OSS_20B_MODEL = 'openai/gpt-4o';
+export const GPT_OSS_20B_MODEL_NAME = 'gpt-oss-20b';
+
 export const DEFAULT_GEMINI_MODEL_AUTO = 'auto';
 
 export const DEFAULT_GEMINI_EMBEDDING_MODEL = 'gemini-embedding-001';

@@ -180,6 +180,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // GPT-OSS / Llama & Mistral examples
   // -------------------
+  [/^gpt-oss-20b.*$/, LIMITS['128k']], // GPT-OSS-20B specific pattern
   [/^gpt-oss.*$/, LIMITS['128k']],
   [/^llama-4-scout.*$/, LIMITS['10m']],
   [/^mistral-large-2.*$/, LIMITS['128k']],
