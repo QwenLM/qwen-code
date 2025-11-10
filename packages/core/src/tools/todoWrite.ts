@@ -276,7 +276,7 @@ async function readTodosFromFile(sessionId?: string): Promise<TodoItem[]> {
     const todos = Array.isArray(data.todos) ? data.todos : [];
 
     // Ensure Claude-compatible timestamp fields exist for each todo
-    return todos.map((todo) => {
+    return todos.map((todo: TodoItem) => {
       // Ensure created_at exists (if not present, default to current timestamp for backward compatibility)
       if (!todo.created_at) {
         todo.created_at = new Date().toISOString();

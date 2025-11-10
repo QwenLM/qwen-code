@@ -14,7 +14,8 @@ import {
 import type { Config } from '../config/config.js';
 
 // Create a minimal mock Config for testing purposes
-const createMockConfig = (): Config => ({
+const createMockConfig = (): Config =>
+  ({
     getTargetDir: () => '/tmp',
     getProjectRoot: () => '/tmp',
     getHooksSettings: () => undefined,
@@ -44,7 +45,7 @@ const createMockConfig = (): Config => ({
     getAuthType: () => undefined,
     getCliVersion: () => 'test',
     getFileSystemService: () =>
-      undefined as import('../services/fileSystemService.js').FileSystemService,
+      undefined as unknown as import('../services/fileSystemService.js').FileSystemService,
     getChatCompression: () => undefined,
     isInteractive: () => false,
     getUseRipgrep: () => false,
@@ -59,9 +60,9 @@ const createMockConfig = (): Config => ({
     }),
     getVlmSwitchMode: () => undefined,
     getSubagentManager: () =>
-      undefined as import('../subagents/subagent-manager.js').SubagentManager,
+      undefined as unknown as import('../subagents/subagent-manager.js').SubagentManager,
     // Note: This is a minimal mock, expand as needed to satisfy Config interface
-  } as unknown as Config);
+  }) as unknown as Config;
 
 describe('HookManager', () => {
   let hookManager: HookManager;
