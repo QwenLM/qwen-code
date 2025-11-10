@@ -139,9 +139,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
 
-      // If explicitly marked as background and doesn't already end with &, add it
-      if (shouldRunInBackground && !finalCommand.trim().endsWith('&')) {
-        finalCommand = finalCommand.trim() + ' &';
+      // Handle background execution differently for Windows and Unix systems
+      if (shouldRunInBackground) {
+        if (isWindows) {
+          // Windows uses 'start /b' for background execution
+          // Check if command already starts with 'start /b' to avoid double wrapping
+          const trimmed = finalCommand.trim();
+          if (!trimmed.toLowerCase().startsWith('start /b')) {
+            finalCommand = `start /b ${trimmed}`;
+          }
+        } else {
+          // Unix systems use '&' for background execution
+          if (!finalCommand.trim().endsWith('&')) {
+            finalCommand = finalCommand.trim() + ' &';
+          }
+        }
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
