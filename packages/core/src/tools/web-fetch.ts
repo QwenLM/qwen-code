@@ -23,7 +23,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 const URL_FETCH_TIMEOUT_MS = 10000;
 const MAX_CONTENT_LENGTH = 100000;
@@ -196,7 +196,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
   constructor(private readonly config: Config) {
     super(
       WebFetchTool.Name,
-      'WebFetch',
+      ToolDisplayNames.WEB_FETCH,
       'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Fetches the URL content, converts HTML to markdown\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
       Kind.Fetch,
       {

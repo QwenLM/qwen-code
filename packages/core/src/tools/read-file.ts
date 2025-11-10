@@ -8,7 +8,7 @@ import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 import type { PartUnion } from '@google/genai';
 import {
@@ -131,7 +131,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
   constructor(private config: Config) {
     super(
       ReadFileTool.Name,
-      'ReadFile',
+      ToolDisplayNames.READ_FILE,
       `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, it can read specific line ranges.`,
       Kind.Read,
       {

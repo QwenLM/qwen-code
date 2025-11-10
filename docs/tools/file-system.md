@@ -4,12 +4,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 **Note:** All file system tools operate within a `rootDirectory` (usually the current working directory where you launched the CLI) for security. Paths that you provide to these tools are generally expected to be absolute or are resolved relative to this root directory.
 
-## 1. `list_directory` (ReadFolder)
+## 1. `list_directory` (ListFiles)
 
 `list_directory` lists the names of files and subdirectories directly within a specified directory path. It can optionally ignore entries matching provided glob patterns.
 
 - **Tool name:** `list_directory`
-- **Display name:** ReadFolder
+- **Display name:** ListFiles
 - **File:** `ls.ts`
 - **Parameters:**
   - `path` (string, required): The absolute path to the directory to list.
@@ -59,12 +59,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 - **Output (`llmContent`):** A success message, e.g., `Successfully overwrote file: /path/to/your/file.txt` or `Successfully created and wrote to new file: /path/to/new/file.txt`.
 - **Confirmation:** Yes. Shows a diff of changes and asks for user approval before writing.
 
-## 4. `glob` (FindFiles)
+## 4. `glob` (Glob)
 
 `glob` finds files matching specific glob patterns (e.g., `src/**/*.ts`, `*.md`), returning absolute paths sorted by modification time (newest first).
 
 - **Tool name:** `glob`
-- **Display name:** FindFiles
+- **Display name:** Glob
 - **File:** `glob.ts`
 - **Parameters:**
   - `pattern` (string, required): The glob pattern to match against (e.g., `"*.py"`, `"src/**/*.js"`).

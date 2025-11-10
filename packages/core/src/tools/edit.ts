@@ -22,7 +22,7 @@ import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
@@ -469,7 +469,7 @@ export class EditTool
   constructor(private readonly config: Config) {
     super(
       EditTool.Name,
-      'Edit',
+      ToolDisplayNames.EDIT,
       `Replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when \`expected_replacements\` is specified. This tool requires providing significant context around the change to ensure precise targeting. Always use the ${ReadFileTool.Name} tool to examine the file's current content before attempting a text replacement.
 
       The user has the ability to modify the \`new_string\` content. If modified, this will be stated in the response.
