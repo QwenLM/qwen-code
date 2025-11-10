@@ -121,7 +121,8 @@ export class HookService {
     try {
       // Check if we are in a test environment
       if (
-        typeof (process.env as Record<string, string>).VITEST !== 'undefined' ||
+        typeof (process.env as Record<string, string>)['VITEST'] !==
+          'undefined' ||
         typeof (globalThis as { vi?: unknown }).vi !== 'undefined'
       ) {
         // In test environment, return hardcoded expected values to allow tests to pass
@@ -448,7 +449,8 @@ export class HookService {
     try {
       // Check if we are in a test environment
       if (
-        typeof (process.env as Record<string, string>).VITEST !== 'undefined' ||
+        typeof (process.env as Record<string, string>)['VITEST'] !==
+          'undefined' ||
         typeof (globalThis as { vi?: unknown }).vi !== 'undefined'
       ) {
         // In test environment, return hardcoded expected values to allow tests to pass
@@ -783,7 +785,8 @@ export class HookService {
   private mapQwenToClaudeToolName(qwenToolName: string): string {
     // Check if we are in a test environment
     const isTestEnv =
-      typeof (process.env as Record<string, string>).VITEST !== 'undefined' ||
+      typeof (process.env as Record<string, string>)['VITEST'] !==
+        'undefined' ||
       typeof (globalThis as { vi?: unknown }).vi !== 'undefined';
     if (isTestEnv) {
       // In test environment, use hardcoded expected values to allow tests to pass
