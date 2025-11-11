@@ -27,7 +27,7 @@ import {
   getEffectiveValue,
 } from '../../utils/settingsUtils.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
-import { useConfig } from '../contexts/ConfigContext.js';
+import { type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import chalk from 'chalk';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
@@ -41,6 +41,7 @@ interface SettingsDialogProps {
   onSelect: (settingName: string | undefined, scope: SettingScope) => void;
   onRestartRequest?: () => void;
   availableTerminalHeight?: number;
+  config?: Config;
 }
 
 const maxItemsToShow = 8;
@@ -50,11 +51,10 @@ export function SettingsDialog({
   onSelect,
   onRestartRequest,
   availableTerminalHeight,
+  config,
 }: SettingsDialogProps): React.JSX.Element {
   // Get vim mode context to sync vim mode changes
   const { vimEnabled, toggleVimEnabled } = useVimMode();
-  // Get config context to sync approval mode changes
-  const config = useConfig();
 
   // Focus state: 'settings' or 'scope'
   const [focusSection, setFocusSection] = useState<'settings' | 'scope'>(
@@ -190,7 +190,7 @@ export function SettingsDialog({
               settings.merged.tools?.approvalMode
             ) {
               try {
-                config.setApprovalMode(settings.merged.tools.approvalMode);
+                config?.setApprovalMode(settings.merged.tools.approvalMode);
               } catch (error) {
                 console.error(
                   'Failed to apply approval mode to current session:',
@@ -692,7 +692,7 @@ export function SettingsDialog({
                 settings.merged.tools?.approvalMode
               ) {
                 try {
-                  config.setApprovalMode(settings.merged.tools.approvalMode);
+                  config?.setApprovalMode(settings.merged.tools.approvalMode);
                 } catch (error) {
                   console.error(
                     'Failed to apply approval mode to current session:',

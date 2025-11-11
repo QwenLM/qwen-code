@@ -181,6 +181,7 @@ export const DialogManager = ({
           onSelect={() => uiActions.closeSettingsDialog()}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={terminalHeight - staticExtraHeight}
+          config={config}
         />
       </Box>
     );
