@@ -6,12 +6,19 @@
 
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
 
 export interface DialogCloseOptions {
   // Theme dialog
   isThemeDialogOpen: boolean;
   handleThemeSelect: (theme: string | undefined, scope: SettingScope) => void;
+
+  // Approval mode dialog
+  isApprovalModeDialogOpen: boolean;
+  handleApprovalModeSelect: (
+    mode: ApprovalMode | undefined,
+    scope: SettingScope,
+  ) => void;
 
   // Auth dialog
   isAuthDialogOpen: boolean;
@@ -54,6 +61,12 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isThemeDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope) - keeps current theme
       options.handleThemeSelect(undefined, SettingScope.User);
+      return true;
+    }
+
+    if (options.isApprovalModeDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined, selectedScope) - keeps current mode
+      options.handleApprovalModeSelect(undefined, SettingScope.User);
       return true;
     }
 

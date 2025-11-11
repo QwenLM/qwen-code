@@ -8,7 +8,11 @@ import { createContext, useContext } from 'react';
 import { type Key } from '../hooks/useKeypress.js';
 import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
-import { type AuthType, type EditorType } from '@qwen-code/qwen-code-core';
+import {
+  type AuthType,
+  type EditorType,
+  type ApprovalMode,
+} from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthState } from '../types.js';
 import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
@@ -19,6 +23,10 @@ export interface UIActions {
     scope: SettingScope,
   ) => void;
   handleThemeHighlight: (themeName: string | undefined) => void;
+  handleApprovalModeSelect: (
+    mode: ApprovalMode | undefined,
+    scope: SettingScope,
+  ) => void;
   handleAuthSelect: (
     authType: AuthType | undefined,
     scope: SettingScope,
