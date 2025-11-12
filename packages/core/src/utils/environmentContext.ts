@@ -112,6 +112,10 @@ export async function getInitialChatHistory(
   config: Config,
   extraHistory?: Content[],
 ): Promise<Content[]> {
+  if (config.getSkipStartupContext()) {
+    return extraHistory ? [...extraHistory] : [];
+  }
+
   const envParts = await getEnvironmentContext(config);
   const envContextString = envParts.map((part) => part.text || '').join('\n\n');
 

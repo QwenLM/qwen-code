@@ -161,7 +161,7 @@ export interface ExtensionInstallMetadata {
   autoUpdate?: boolean;
 }
 
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 4_000_000;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
 
 export class MCPServerConfig {
@@ -289,6 +289,7 @@ export interface ConfigParameters {
   eventEmitter?: EventEmitter;
   useSmartEdit?: boolean;
   output?: OutputSettings;
+  skipStartupContext?: boolean;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
 }
@@ -402,6 +403,7 @@ export class Config {
   private readonly extensionManagement: boolean = true;
   private readonly enablePromptCompletion: boolean = false;
   private readonly skipLoopDetection: boolean;
+  private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
   readonly storage: Storage;
@@ -499,6 +501,7 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
+    this.skipStartupContext = params.skipStartupContext ?? false;
 
     // Web search
     this.webSearch = params.webSearch;
@@ -1076,6 +1079,10 @@ export class Config {
     return this.skipLoopDetection;
   }
 
+  getSkipStartupContext(): boolean {
+    return this.skipStartupContext;
+  }
+
   getVlmSwitchMode(): string | undefined {
     return this.vlmSwitchMode;
   }
@@ -1085,6 +1092,13 @@ export class Config {
   }
 
   getTruncateToolOutputThreshold(): number {
+    if (
+      !this.enableToolOutputTruncation ||
+      this.truncateToolOutputThreshold <= 0
+    ) {
+      return Number.POSITIVE_INFINITY;
+    }
+
     return Math.min(
       // Estimate remaining context window in characters (1 token ~= 4 chars).
       4 *
@@ -1095,6 +1109,10 @@ export class Config {
   }
 
   getTruncateToolOutputLines(): number {
+    if (!this.enableToolOutputTruncation || this.truncateToolOutputLines <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
     return this.truncateToolOutputLines;
   }
 

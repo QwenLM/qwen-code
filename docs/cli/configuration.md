@@ -160,8 +160,29 @@ Settings are organized into categories. All settings should be placed within the
   - **Default:** `undefined`
 
 - **`model.chatCompression.contextPercentageThreshold`** (number):
-  - **Description:** Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit.
+  - **Description:** Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely.
   - **Default:** `0.7`
+
+- **`model.generationConfig`** (object):
+  - **Description:** Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.
+  - **Default:** `undefined`
+  - **Example:**
+
+    ```json
+    {
+      "model": {
+        "generationConfig": {
+          "timeout": 60000,
+          "disableCacheControl": false,
+          "samplingParams": {
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_tokens": 1024
+          }
+        }
+      }
+    }
+    ```
 
 - **`model.skipNextSpeakerCheck`** (boolean):
   - **Description:** Skip the next speaker check.
@@ -169,6 +190,10 @@ Settings are organized into categories. All settings should be placed within the
 
 - **`model.skipLoopDetection`**(boolean):
   - **Description:** Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.
+  - **Default:** `false`
+
+- **`model.skipStartupContext`** (boolean):
+  - **Description:** Skips sending the startup workspace context (environment summary and acknowledgement) at the beginning of each session. Enable this if you prefer to provide context manually or want to save tokens on startup.
   - **Default:** `false`
 
 - **`model.enableOpenAILogging`** (boolean):
@@ -265,6 +290,21 @@ Settings are organized into categories. All settings should be placed within the
 - **`tools.useBuiltinRipgrep`** (boolean):
   - **Description:** Use the bundled ripgrep binary. When set to `false`, the system-level `rg` command will be used instead. This setting is only effective when `tools.useRipgrep` is `true`.
   - **Default:** `true`
+
+- **`tools.enableToolOutputTruncation`** (boolean):
+  - **Description:** Enable truncation of large tool outputs.
+  - **Default:** `true`
+  - **Requires restart:** Yes
+
+- **`tools.truncateToolOutputThreshold`** (number):
+  - **Description:** Truncate tool output if it is larger than this many characters. Applies to Shell, Grep, Glob, ReadFile and ReadManyFiles tools.
+  - **Default:** `25000`
+  - **Requires restart:** Yes
+
+- **`tools.truncateToolOutputLines`** (number):
+  - **Description:** Maximum lines or entries kept when truncating tool output. Applies to Shell, Grep, Glob, ReadFile and ReadManyFiles tools.
+  - **Default:** `1000`
+  - **Requires restart:** Yes
 
 #### `mcp`
 

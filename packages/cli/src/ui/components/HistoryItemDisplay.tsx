@@ -95,15 +95,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <ErrorMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
-        <AboutBox
-          cliVersion={itemForDisplay.cliVersion}
-          osVersion={itemForDisplay.osVersion}
-          sandboxEnv={itemForDisplay.sandboxEnv}
-          modelVersion={itemForDisplay.modelVersion}
-          selectedAuthType={itemForDisplay.selectedAuthType}
-          gcpProject={itemForDisplay.gcpProject}
-          ideClient={itemForDisplay.ideClient}
-        />
+        <AboutBox {...itemForDisplay.systemInfo} />
       )}
       {itemForDisplay.type === 'help' && commands && (
         <Help commands={commands} />

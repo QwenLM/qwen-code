@@ -41,6 +41,8 @@ describe('ReadFileTool', () => {
       storage: {
         getProjectTempDir: () => path.join(tempRootDir, '.temp'),
       },
+      getTruncateToolOutputThreshold: () => 2500,
+      getTruncateToolOutputLines: () => 500,
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -281,11 +283,9 @@ describe('ReadFileTool', () => {
       >;
 
       const result = await invocation.execute(abortSignal);
-      expect(result.llmContent).toContain(
-        'IMPORTANT: The file content has been truncated',
+      expect(result.returnDisplay).toContain(
+        'Read lines 1-2 of 3 from longlines.txt (truncated)',
       );
-      expect(result.llmContent).toContain('--- FILE CONTENT (truncated) ---');
-      expect(result.returnDisplay).toContain('some lines were shortened');
     });
 
     it('should handle image file and return appropriate content', async () => {
@@ -417,10 +417,7 @@ describe('ReadFileTool', () => {
 
       const result = await invocation.execute(abortSignal);
       expect(result.llmContent).toContain(
-        'IMPORTANT: The file content has been truncated',
-      );
-      expect(result.llmContent).toContain(
-        'Status: Showing lines 6-8 of 20 total lines',
+        'Showing lines 6-8 of 20 total lines',
       );
       expect(result.llmContent).toContain('Line 6');
       expect(result.llmContent).toContain('Line 7');

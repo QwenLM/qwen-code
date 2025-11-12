@@ -131,6 +131,7 @@ const MIGRATION_MAP: Record<string, string> = {
   sessionTokenLimit: 'model.sessionTokenLimit',
   contentGenerator: 'model.generationConfig',
   skipLoopDetection: 'model.skipLoopDetection',
+  skipStartupContext: 'model.skipStartupContext',
   enableOpenAILogging: 'model.enableOpenAILogging',
   tavilyApiKey: 'advanced.tavilyApiKey',
   vlmSwitchMode: 'experimental.vlmSwitchMode',

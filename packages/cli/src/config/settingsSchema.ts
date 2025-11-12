@@ -549,6 +549,16 @@ const SETTINGS_SCHEMA = {
         description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: true,
       },
+      skipStartupContext: {
+        type: 'boolean',
+        label: 'Skip Startup Context',
+        category: 'Model',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Avoid sending the workspace startup context at the beginning of each session.',
+        showInDialog: true,
+      },
       enableOpenAILogging: {
         type: 'boolean',
         label: 'Enable OpenAI Logging',

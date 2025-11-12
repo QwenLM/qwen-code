@@ -29,6 +29,8 @@ const createMockConfig = (
     getTargetDir: () => cwd,
     getFileSystemService: () => fileSystemService,
     getFileService: () => mockFileService,
+    getTruncateToolOutputThreshold: () => 2500,
+    getTruncateToolOutputLines: () => 500,
   } as unknown as Config;
 };
 

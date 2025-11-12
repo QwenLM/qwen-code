@@ -30,6 +30,7 @@ import type {
   WebSearchProviderConfig,
   DashScopeProviderConfig,
 } from './types.js';
+import { ToolNames } from '../tool-names.js';
 
 class WebSearchToolInvocation extends BaseToolInvocation<
   WebSearchToolParams,
@@ -274,7 +275,7 @@ export class WebSearchTool extends BaseDeclarativeTool<
   WebSearchToolParams,
   WebSearchToolResult
 > {
-  static readonly Name: string = 'web_search';
+  static readonly Name: string = ToolNames.WEB_SEARCH;
 
   constructor(private readonly config: Config) {
     super(

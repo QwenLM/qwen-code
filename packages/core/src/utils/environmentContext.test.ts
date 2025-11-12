@@ -13,9 +13,11 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import type { Content } from '@google/genai';
 import {
   getEnvironmentContext,
   getDirectoryContextString,
+  getInitialChatHistory,
 } from './environmentContext.js';
 import type { Config } from '../config/config.js';
 import { getFolderStructure } from './getFolderStructure.js';
@@ -211,5 +213,104 @@ describe('getEnvironmentContext', () => {
 
     expect(parts.length).toBe(2);
     expect(parts[1].text).toBe('\n--- Error reading full file context ---');
+  });
+});
+
+describe('getInitialChatHistory', () => {
+  let mockConfig: Partial<Config>;
+
+  beforeEach(() => {
+    vi.mocked(getFolderStructure).mockResolvedValue('Mock Folder Structure');
+    mockConfig = {
+      getSkipStartupContext: vi.fn().mockReturnValue(false),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue(['/test/dir']),
+      }),
+      getFileService: vi.fn(),
+      getFullContext: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
+    };
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.restoreAllMocks();
+  });
+
+  it('includes startup context when skipStartupContext is false', async () => {
+    const history = await getInitialChatHistory(mockConfig as Config);
+
+    expect(mockConfig.getSkipStartupContext).toHaveBeenCalled();
+    expect(history).toHaveLength(2);
+    expect(history).toEqual([
+      expect.objectContaining({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            text: expect.stringContaining(
+              "I'm currently working in the directory",
+            ),
+          }),
+        ],
+      }),
+      {
+        role: 'model',
+        parts: [{ text: 'Got it. Thanks for the context!' }],
+      },
+    ]);
+  });
+
+  it('returns only extra history when skipStartupContext is true', async () => {
+    mockConfig.getSkipStartupContext = vi.fn().mockReturnValue(true);
+    mockConfig.getWorkspaceContext = vi.fn(() => {
+      throw new Error(
+        'getWorkspaceContext should not be called when skipping startup context',
+      );
+    });
+    mockConfig.getFullContext = vi.fn(() => {
+      throw new Error(
+        'getFullContext should not be called when skipping startup context',
+      );
+    });
+    mockConfig.getToolRegistry = vi.fn(() => {
+      throw new Error(
+        'getToolRegistry should not be called when skipping startup context',
+      );
+    });
+    const extraHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'custom context' }] },
+    ];
+
+    const history = await getInitialChatHistory(
+      mockConfig as Config,
+      extraHistory,
+    );
+
+    expect(mockConfig.getSkipStartupContext).toHaveBeenCalled();
+    expect(history).toEqual(extraHistory);
+    expect(history).not.toBe(extraHistory);
+  });
+
+  it('returns empty history when skipping startup context without extras', async () => {
+    mockConfig.getSkipStartupContext = vi.fn().mockReturnValue(true);
+    mockConfig.getWorkspaceContext = vi.fn(() => {
+      throw new Error(
+        'getWorkspaceContext should not be called when skipping startup context',
+      );
+    });
+    mockConfig.getFullContext = vi.fn(() => {
+      throw new Error(
+        'getFullContext should not be called when skipping startup context',
+      );
+    });
+    mockConfig.getToolRegistry = vi.fn(() => {
+      throw new Error(
+        'getToolRegistry should not be called when skipping startup context',
+      );
+    });
+
+    const history = await getInitialChatHistory(mockConfig as Config);
+
+    expect(history).toEqual([]);
   });
 });

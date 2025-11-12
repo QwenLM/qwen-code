@@ -17,7 +17,6 @@ import {
   processSingleFileContent,
   DEFAULT_ENCODING,
   getSpecificMimeType,
-  DEFAULT_MAX_LINES_TEXT_FILE,
 } from '../utils/fileUtils.js';
 import type { PartListUnion } from '@google/genai';
 import {
@@ -278,8 +277,10 @@ ${finalExclusionPatternsForDescription
     }
 
     const sortedFiles = Array.from(filesToConsider).sort();
-    const file_line_limit =
-      DEFAULT_MAX_LINES_TEXT_FILE / Math.max(1, sortedFiles.length);
+    const truncateToolOutputLines = this.config.getTruncateToolOutputLines();
+    const file_line_limit = Number.isFinite(truncateToolOutputLines)
+      ? Math.floor(truncateToolOutputLines / Math.max(1, sortedFiles.length))
+      : undefined;
 
     const fileProcessingPromises = sortedFiles.map(
       async (filePath): Promise<FileProcessingResult> => {
@@ -316,8 +317,7 @@ ${finalExclusionPatternsForDescription
           // Use processSingleFileContent for all file types now
           const fileReadResult = await processSingleFileContent(
             filePath,
-            this.config.getTargetDir(),
-            this.config.getFileSystemService(),
+            this.config,
             0,
             file_line_limit,
           );
@@ -376,9 +376,12 @@ ${finalExclusionPatternsForDescription
             );
             let fileContentForLlm = '';
             if (fileReadResult.isTruncated) {
-              fileContentForLlm += `[WARNING: This file was truncated. To view the full content, use the 'read_file' tool on this specific file.]\n\n`;
+              const [start, end] = fileReadResult.linesShown!;
+              const total = fileReadResult.originalLineCount!;
+              fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
+            } else {
+              fileContentForLlm = fileReadResult.llmContent;
             }
-            fileContentForLlm += fileReadResult.llmContent;
             contentParts.push(`${separator}\n\n${fileContentForLlm}\n\n`);
           } else {
             // This is a Part for image/pdf, which we don't add the separator to.
