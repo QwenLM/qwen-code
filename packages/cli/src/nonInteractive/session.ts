@@ -16,7 +16,6 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
-import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -96,7 +95,6 @@ class SessionManager {
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
   private controlSystemEnabled: boolean | null = null;
-  private consolePatcher: ConsolePatcher;
   private debugMode: boolean;
   private shutdownHandler: (() => void) | null = null;
   private initialPrompt: CLIUserMessage | null = null;
@@ -112,11 +110,6 @@ class SessionManager {
     this.debugMode = config.getDebugMode();
     this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
-
-    this.consolePatcher = new ConsolePatcher({
-      stderr: true,
-      debugMode: this.debugMode,
-    });
 
     this.inputReader = new StreamJsonInputReader();
     this.outputAdapter = new StreamJsonOutputAdapter(
@@ -232,8 +225,6 @@ class SessionManager {
    */
   async run(): Promise<void> {
     try {
-      this.consolePatcher.patch();
-
       if (this.debugMode) {
         console.error('[SessionManager] Starting session', this.sessionId);
       }
@@ -264,7 +255,6 @@ class SessionManager {
       await this.shutdown();
       throw error;
     } finally {
-      this.consolePatcher.cleanup();
       // Ensure signal handlers are always cleaned up even if shutdown wasn't called
       this.cleanupSignalHandlers();
     }
