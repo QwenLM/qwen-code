@@ -40,6 +40,7 @@ import {
 } from './types.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
+import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
 
 const SESSION_STATE = {
   INITIALIZING: 'initializing',
@@ -695,21 +696,30 @@ export async function runNonInteractiveStreamJson(
   input: string,
   _promptId: string,
 ): Promise<void> {
-  // Create initial user message from prompt input if provided
-  let initialPrompt: CLIUserMessage | undefined = undefined;
-  if (input && input.trim().length > 0) {
-    const sessionId = config.getSessionId();
-    initialPrompt = {
-      type: 'user',
-      session_id: sessionId,
-      message: {
-        role: 'user',
-        content: input.trim(),
-      },
-      parent_tool_use_id: null,
-    };
-  }
+  const consolePatcher = new ConsolePatcher({
+    debugMode: config.getDebugMode(),
+  });
+  consolePatcher.patch();
 
-  const manager = new SessionManager(config, settings, initialPrompt);
-  await manager.run();
+  try {
+    // Create initial user message from prompt input if provided
+    let initialPrompt: CLIUserMessage | undefined = undefined;
+    if (input && input.trim().length > 0) {
+      const sessionId = config.getSessionId();
+      initialPrompt = {
+        type: 'user',
+        session_id: sessionId,
+        message: {
+          role: 'user',
+          content: input.trim(),
+        },
+        parent_tool_use_id: null,
+      };
+    }
+
+    const manager = new SessionManager(config, settings, initialPrompt);
+    await manager.run();
+  } finally {
+    consolePatcher.cleanup();
+  }
 }
