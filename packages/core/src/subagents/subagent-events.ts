@@ -74,6 +74,7 @@ export interface SubAgentToolResultEvent {
   success: boolean;
   error?: string;
   responseParts?: Part[];
+  resultDisplay?: string;
   durationMs?: number;
   timestamp: number;
 }
