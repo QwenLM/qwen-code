@@ -9,11 +9,14 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
-  CallToolResult,
+  CallToolResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import type { ToolDefinition } from '../types/config.js';
 import { formatToolResult, formatToolError } from './formatters.js';
 import { validateToolName } from './tool.js';
+import { z } from 'zod';
+
+type CallToolResult = z.infer<typeof CallToolResultSchema>;
 
 /**
  * Create an SDK-embedded MCP server with custom tools
