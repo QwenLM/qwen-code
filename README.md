@@ -59,6 +59,17 @@ For detailed setup instructions, see [Authorization](#authorization).
 - **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
 - **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
 
+## ✨ Awesome New Features
+
+Qwen Code now includes fun and powerful tools to enhance your development experience:
+
+- 🎨 **[ASCII Art Code Visualizer](./tools/ascii-art-visualizer/)** - Transform your code architecture into beautiful terminal art
+- 🎭 **[Code Mood Analyzer](./tools/code-mood-analyzer/)** - Give your code a personality check with AI-powered insights and humor
+- 📊 **[Interactive Code Health Dashboard](./tools/code-health-dashboard/)** - Real-time terminal dashboard with live metrics and trend charts
+- 🎉 **Easter Eggs & Animations** - Hidden surprises and delightful interactions throughout the CLI
+
+**[See all awesome features →](./AWESOME_FEATURES.md)**
+
 ## Installation
 
 ### Prerequisites

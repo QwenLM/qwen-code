@@ -1,0 +1,36 @@
+{
+  "name": "@qwen-code/code-health-dashboard",
+  "version": "1.0.0",
+  "description": "Real-time terminal dashboard for code health metrics",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "dashboard": "node dist/index.js"
+  },
+  "keywords": [
+    "dashboard",
+    "code-health",
+    "metrics",
+    "terminal-ui",
+    "developer-tools",
+    "qwen-code"
+  ],
+  "author": "Qwen Code Team",
+  "license": "Apache-2.0",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  }
+}

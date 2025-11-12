@@ -1,0 +1,35 @@
+{
+  "name": "@qwen-code/ascii-art-visualizer",
+  "version": "1.0.0",
+  "description": "Transform your code architecture into beautiful ASCII art visualizations",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "visualize": "node dist/index.js"
+  },
+  "keywords": [
+    "ascii-art",
+    "visualization",
+    "code-architecture",
+    "developer-tools",
+    "qwen-code"
+  ],
+  "author": "Qwen Code Team",
+  "license": "Apache-2.0",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  }
+}

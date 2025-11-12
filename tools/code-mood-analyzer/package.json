@@ -1,0 +1,36 @@
+{
+  "name": "@qwen-code/code-mood-analyzer",
+  "version": "1.0.0",
+  "description": "Give your code a personality check with AI-powered mood analysis",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "mood": "node dist/index.js"
+  },
+  "keywords": [
+    "code-analysis",
+    "code-quality",
+    "mood-analyzer",
+    "developer-tools",
+    "qwen-code",
+    "ai-insights"
+  ],
+  "author": "Qwen Code Team",
+  "license": "Apache-2.0",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3",
+    "vitest": "^3.2.4"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  }
+}
