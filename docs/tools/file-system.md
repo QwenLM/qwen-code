@@ -132,7 +132,7 @@ grep_search(pattern="function", glob="*.js", limit=10)
 
 ## 6. `edit` (Edit)
 
-`edit` replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when `expected_replacements` is specified. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
+`edit` replaces text within a file. By default it requires `old_string` to match a single unique location; set `replace_all` to `true` when you intentionally want to change every occurrence. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
 
 - **Tool name:** `edit`
 - **Display name:** Edit
@@ -144,12 +144,12 @@ grep_search(pattern="function", glob="*.js", limit=10)
     **CRITICAL:** This string must uniquely identify the single instance to change. It should include at least 3 lines of context _before_ and _after_ the target text, matching whitespace and indentation precisely. If `old_string` is empty, the tool attempts to create a new file at `file_path` with `new_string` as content.
 
   - `new_string` (string, required): The exact literal text to replace `old_string` with.
-  - `expected_replacements` (number, optional): The number of occurrences to replace. Defaults to `1`.
+  - `replace_all` (boolean, optional): Replace all occurrences of `old_string`. Defaults to `false`.
 
 - **Behavior:**
   - If `old_string` is empty and `file_path` does not exist, creates a new file with `new_string` as content.
-  - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence of `old_string`.
-  - If one occurrence is found, it replaces it with `new_string`.
+  - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence unless `replace_all` is true.
+  - If the match is unique (or `replace_all` is true), it replaces the text with `new_string`.
   - **Enhanced Reliability (Multi-Stage Edit Correction):** To significantly improve the success rate of edits, especially when the model-provided `old_string` might not be perfectly precise, the tool incorporates a multi-stage edit correction mechanism.
     - If the initial `old_string` isn't found or matches multiple locations, the tool can leverage the Qwen model to iteratively refine `old_string` (and potentially `new_string`).
     - This self-correction process attempts to identify the unique segment the model intended to modify, making the `edit` operation more robust even with slightly imperfect initial context.
@@ -158,10 +158,10 @@ grep_search(pattern="function", glob="*.js", limit=10)
   - `old_string` is not empty, but the `file_path` does not exist.
   - `old_string` is empty, but the `file_path` already exists.
   - `old_string` is not found in the file after attempts to correct it.
-  - `old_string` is found multiple times, and the self-correction mechanism cannot resolve it to a single, unambiguous match.
+  - `old_string` is found multiple times, `replace_all` is false, and the self-correction mechanism cannot resolve it to a single, unambiguous match.
 - **Output (`llmContent`):**
   - On success: `Successfully modified file: /path/to/file.txt (1 replacements).` or `Created new file: /path/to/new_file.txt with provided content.`
-  - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit, expected 1 occurrences but found 2...`).
+  - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit because the text matches multiple locations...`).
 - **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
 
 These file system tools provide a foundation for Qwen Code to understand and interact with your local project context.

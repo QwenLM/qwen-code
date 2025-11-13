@@ -485,7 +485,7 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return error if multiple occurrences of old_string are found', async () => {
+    it('should return error if multiple occurrences of old_string are found and replace_all is false', async () => {
       fs.writeFileSync(filePath, 'multiple old old strings', 'utf8');
       const params: EditToolParams = {
         file_path: filePath,
@@ -494,21 +494,19 @@ describe('EditTool', () => {
       };
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
-      expect(result.llmContent).toMatch(
-        /Expected 1 occurrence but found 2 for old_string in file/,
-      );
+      expect(result.llmContent).toMatch(/replace_all was not enabled/);
       expect(result.returnDisplay).toMatch(
-        /Failed to edit, expected 1 occurrence but found 2/,
+        /Failed to edit because the text matches multiple locations/,
       );
     });
 
-    it('should successfully replace multiple occurrences when expected_replacements specified', async () => {
+    it('should successfully replace multiple occurrences when replace_all is true', async () => {
       fs.writeFileSync(filePath, 'old text\nold text\nold text', 'utf8');
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'old',
         new_string: 'new',
-        expected_replacements: 3,
+        replace_all: true,
       };
 
       const invocation = tool.build(params);
@@ -533,24 +531,6 @@ describe('EditTool', () => {
         user_added_chars: 0,
         user_removed_chars: 0,
       });
-    });
-
-    it('should return error if expected_replacements does not match actual occurrences', async () => {
-      fs.writeFileSync(filePath, 'old text old text', 'utf8');
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-        expected_replacements: 3, // Expecting 3 but only 2 exist
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.llmContent).toMatch(
-        /Expected 3 occurrences but found 2 for old_string in file/,
-      );
-      expect(result.returnDisplay).toMatch(
-        /Failed to edit, expected 3 occurrences but found 2/,
-      );
     });
 
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
@@ -723,13 +703,12 @@ describe('EditTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
     });
 
-    it('should return EXPECTED_OCCURRENCE_MISMATCH error', async () => {
+    it('should return EXPECTED_OCCURRENCE_MISMATCH error when replace_all is false and text is not unique', async () => {
       fs.writeFileSync(filePath, 'one one two', 'utf8');
       const params: EditToolParams = {
         file_path: filePath,
         old_string: 'one',
         new_string: 'new',
-        expected_replacements: 3,
       };
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
