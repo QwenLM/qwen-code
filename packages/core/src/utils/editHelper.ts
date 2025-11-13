@@ -401,3 +401,100 @@ export function countOccurrences(source: string, substr: string): number {
   }
   return count;
 }
+
+/**
+ * Result from extracting a snippet showing the edited region.
+ */
+export interface EditSnippetResult {
+  /** Starting line number (1-indexed) of the snippet */
+  startLine: number;
+  /** Ending line number (1-indexed) of the snippet */
+  endLine: number;
+  /** Total number of lines in the new content */
+  totalLines: number;
+  /** The snippet content (subset of lines from newContent) */
+  content: string;
+}
+
+const SNIPPET_CONTEXT_LINES = 4;
+const SNIPPET_MAX_LINES = 1000;
+
+/**
+ * Extracts a snippet from the edited file showing the changed region with
+ * surrounding context. This compares the old and new content line-by-line
+ * from both ends to locate the changed region.
+ *
+ * @param oldContent The original file content before the edit (null for new files)
+ * @param newContent The new file content after the edit
+ * @param contextLines Number of context lines to show before and after the change
+ * @returns Snippet information, or null if no meaningful snippet can be extracted
+ */
+export function extractEditSnippet(
+  oldContent: string | null,
+  newContent: string,
+): EditSnippetResult | null {
+  const newLines = newContent.split('\n');
+  const totalLines = newLines.length;
+
+  if (oldContent === null) {
+    return {
+      startLine: 1,
+      endLine: totalLines,
+      totalLines,
+      content: newContent,
+    };
+  }
+
+  // No changes case
+  if (oldContent === newContent || !newContent) {
+    return null;
+  }
+
+  const oldLines = oldContent.split('\n');
+
+  // Find the first line that differs from the start
+  let firstDiffLine = 0;
+  const minLength = Math.min(oldLines.length, newLines.length);
+
+  while (firstDiffLine < minLength) {
+    if (oldLines[firstDiffLine] !== newLines[firstDiffLine]) {
+      break;
+    }
+    firstDiffLine++;
+  }
+
+  // Find the first line that differs from the end
+  let oldEndIndex = oldLines.length - 1;
+  let newEndIndex = newLines.length - 1;
+
+  while (oldEndIndex >= firstDiffLine && newEndIndex >= firstDiffLine) {
+    if (oldLines[oldEndIndex] !== newLines[newEndIndex]) {
+      break;
+    }
+    oldEndIndex--;
+    newEndIndex--;
+  }
+
+  // The changed region in the new content is from firstDiffLine to newEndIndex (inclusive)
+  // Convert to 1-indexed line numbers
+  const changeStart = firstDiffLine + 1;
+  const changeEnd = newEndIndex + 1;
+
+  // If the change region is too large, don't generate a snippet
+  if (changeEnd - changeStart > SNIPPET_MAX_LINES) {
+    return null;
+  }
+
+  // Calculate snippet bounds with context
+  const snippetStart = Math.max(1, changeStart - SNIPPET_CONTEXT_LINES);
+  const snippetEnd = Math.min(totalLines, changeEnd + SNIPPET_CONTEXT_LINES);
+
+  const snippetLines = newLines.slice(snippetStart - 1, snippetEnd);
+
+  return {
+    startLine: snippetStart,
+    endLine: snippetEnd,
+    totalLines,
+    content: snippetLines.join('\n'),
+  };
+}

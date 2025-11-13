@@ -36,6 +36,7 @@ import { IdeClient } from '../ide/ide-client.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
+  extractEditSnippet,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
@@ -421,12 +422,16 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       const llmSuccessMessageParts = [
         editData.isNewFile
           ? `Created new file: ${this.params.file_path} with provided content.`
-          : `Successfully modified file: ${this.params.file_path} (${editData.occurrences} replacements).`,
+          : `The file: ${this.params.file_path} has been updated.`,
       ];
-      if (this.params.modified_by_user) {
-        llmSuccessMessageParts.push(
-          `User modified the \`new_string\` content to be: ${this.params.new_string}.`,
-        );
+
+      const snippetResult = extractEditSnippet(
+        editData.currentContent,
+        editData.newContent,
+      );
+      if (snippetResult) {
+        const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
+        llmSuccessMessageParts.push(snippetText);
       }
 
       return {

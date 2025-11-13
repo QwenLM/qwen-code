@@ -425,7 +425,9 @@ describe('EditTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
 
-      expect(result.llmContent).toMatch(/Successfully modified file/);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
@@ -450,6 +452,9 @@ describe('EditTool', () => {
       const result = await invocation.execute(new AbortController().signal);
 
       expect(result.llmContent).toMatch(/Created new file/);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
       expect(fs.existsSync(newFilePath)).toBe(true);
       expect(fs.readFileSync(newFilePath, 'utf8')).toBe(fileContent);
 
@@ -512,7 +517,9 @@ describe('EditTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
 
-      expect(result.llmContent).toMatch(/Successfully modified file/);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file/,
+      );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(
         'new text\nnew text\nnew text',
       );
@@ -546,38 +553,6 @@ describe('EditTool', () => {
       expect(result.returnDisplay).toMatch(
         /Attempted to create a file that already exists/,
       );
-    });
-
-    it('should include modification message when proposed content is modified', async () => {
-      const initialContent = 'Line 1\nold line\nLine 3\nLine 4\nLine 5\n';
-      fs.writeFileSync(filePath, initialContent, 'utf8');
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-        modified_by_user: true,
-        ai_proposed_content: 'Line 1\nAI line\nLine 3\nLine 4\nLine 5\n',
-      };
-
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
-
-      expect(result.llmContent).toMatch(
-        /User modified the `new_string` content/,
-      );
-      expect((result.returnDisplay as FileDiff).diffStat).toStrictEqual({
-        model_added_lines: 1,
-        model_removed_lines: 1,
-        model_added_chars: 7,
-        model_removed_chars: 8,
-        user_added_lines: 1,
-        user_removed_lines: 1,
-        user_added_chars: 8,
-        user_removed_chars: 7,
-      });
     });
 
     it('should not include modification message when proposed content is not modified', async () => {
