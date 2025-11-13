@@ -106,7 +106,10 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 ---
 name: agent-name
 description: Brief description of when and how to use this agent
-tools: tool1, tool2, tool3 # Optional
+tools: 
+  - tool1
+  - tool2
+  - tool3 # Optional
 ---
 
 System prompt content goes here.
@@ -167,7 +170,11 @@ Perfect for comprehensive test creation and test-driven development.
 ---
 name: testing-expert
 description: Writes comprehensive unit tests, integration tests, and handles test automation with best practices
-tools: read_file, write_file, read_many_files, run_shell_command
+tools: 
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
 ---
 
 You are a testing specialist focused on creating high-quality, maintainable tests.
@@ -207,7 +214,11 @@ Specialized in creating clear, comprehensive documentation.
 ---
 name: documentation-writer
 description: Creates comprehensive documentation, README files, API docs, and user guides
-tools: read_file, write_file, read_many_files, web_search
+tools: 
+  - read_file
+  - write_file
+  - read_many_files
+  - web_search
 ---
 
 You are a technical documentation specialist for ${project_name}.
@@ -256,7 +267,9 @@ Focused on code quality, security, and best practices.
 ---
 name: code-reviewer
 description: Reviews code for best practices, security issues, performance, and maintainability
-tools: read_file, read_many_files
+tools: 
+  - read_file
+  - read_many_files
 ---
 
 You are an experienced code reviewer focused on quality, security, and maintainability.
@@ -298,7 +311,11 @@ Optimized for React development, hooks, and component patterns.
 ---
 name: react-specialist
 description: Expert in React development, hooks, component patterns, and modern React best practices
-tools: read_file, write_file, read_many_files, run_shell_command
+tools: 
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
 ---
 
 You are a React specialist with deep expertise in modern React development.
@@ -339,7 +356,11 @@ Specialized in Python development, frameworks, and best practices.
 ---
 name: python-expert
 description: Expert in Python development, frameworks, testing, and Python-specific best practices
-tools: read_file, write_file, read_many_files, run_shell_command
+tools:
+  - read_file
+  - write_file
+  - read_many_files
+  - run_shell_command
 ---
 
 You are a Python expert with deep knowledge of the Python ecosystem.
