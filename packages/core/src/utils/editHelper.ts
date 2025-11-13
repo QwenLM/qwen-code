@@ -79,7 +79,7 @@ function stripTrailingWhitespacePreserveNewlines(text: string): string {
     }
 
     if (i % 2 === 0) {
-      result += segment.replace(/\s+$/u, '');
+      result += segment.trimEnd();
     } else {
       result += segment;
     }
@@ -104,7 +104,7 @@ interface MatchedSliceResult {
  */
 const LINE_COMPARISON_PASSES: Array<(value: string) => string> = [
   (value) => value,
-  (value) => value.replace(/\s+$/u, ''),
+  (value) => value.trimEnd(),
   (value) => value.trim(),
 ];
 
