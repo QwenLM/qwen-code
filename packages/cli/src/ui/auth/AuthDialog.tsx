@@ -136,10 +136,11 @@ export function AuthDialog({
   );
   const getDefaultOpenAIConfig = () => {
     const fromSettings = settings.merged.security?.auth;
+    const modelSettings = settings.merged.model;
     return {
       apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
       baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
-      model: fromSettings?.model || process.env['OPENAI_MODEL'] || '',
+      model: modelSettings?.name || process.env['OPENAI_MODEL'] || '',
     };
   };
 

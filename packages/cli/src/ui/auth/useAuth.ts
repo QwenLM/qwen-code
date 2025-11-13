@@ -125,7 +125,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
             );
           }
           if (credentials.model) {
-            settings.setValue(scope, 'security.auth.model', credentials.model);
+            settings.setValue(scope, 'model.name', credentials.model);
           }
         }
 
