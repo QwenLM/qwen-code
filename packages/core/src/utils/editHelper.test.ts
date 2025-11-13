@@ -80,18 +80,6 @@ const two = 2;
     });
   });
 
-  it('matches even when extra surrounding whitespace is present', () => {
-    const result = normalizeEditStrings(
-      'return foo;\n',
-      '   return foo;   ',
-      '   return bar;   ',
-    );
-    expect(result).toEqual({
-      oldString: 'return foo;',
-      newString: '   return bar;',
-    });
-  });
-
   it('treats non-breaking spaces as regular spaces', () => {
     const result = normalizeEditStrings(
       'const label = "hello world";\n',

@@ -99,17 +99,16 @@ interface MatchedSliceResult {
 
 /**
  * Comparison passes become progressively more forgiving, making it possible to
- * match when only trailing whitespace differs or when the snippet was copied
- * without indentation.
+ * match when only trailing whitespace differs. Leading whitespace (indentation)
+ * is always preserved to avoid matching at incorrect scope levels.
  */
 const LINE_COMPARISON_PASSES: Array<(value: string) => string> = [
   (value) => value,
   (value) => value.trimEnd(),
-  (value) => value.trim(),
 ];
 
 function normalizeLineForComparison(value: string): string {
-  return normalizeBasicCharacters(value).trim();
+  return normalizeBasicCharacters(value).trimEnd();
 }
 
 /**
