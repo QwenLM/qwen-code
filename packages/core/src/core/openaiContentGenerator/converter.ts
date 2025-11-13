@@ -528,6 +528,19 @@ export class OpenAIContentConverter {
 
     const parts: Part[] = [];
 
+    // Handle reasoning content (GPT-OSS-20B specific feature)
+    // This provides insight into the model's thinking process
+    const messageWithReasoning = choice.message as typeof choice.message & {
+      reasoning_content?: string;
+    };
+    if (messageWithReasoning.reasoning_content) {
+      // Store reasoning content as a text part with a special prefix
+      // This can be filtered out or displayed separately in the UI
+      parts.push({
+        text: `[Reasoning: ${messageWithReasoning.reasoning_content}]`,
+      });
+    }
+
     // Handle text content
     if (choice.message.content) {
       parts.push({ text: choice.message.content });
@@ -617,6 +630,18 @@ export class OpenAIContentConverter {
 
     if (choice) {
       const parts: Part[] = [];
+
+      // Handle reasoning content (GPT-OSS-20B specific feature)
+      // In streaming mode, reasoning_content is sent incrementally before the main content
+      const deltaWithReasoning = choice.delta as typeof choice.delta & {
+        reasoning_content?: string;
+      };
+      if (deltaWithReasoning?.reasoning_content) {
+        // Prefix reasoning content to distinguish it from regular content
+        parts.push({
+          text: `[Reasoning: ${deltaWithReasoning.reasoning_content}]`,
+        });
+      }
 
       // Handle text content
       if (choice.delta?.content) {
