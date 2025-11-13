@@ -3,14 +3,14 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { Config } from '../config/(config as Record<string, unknown>)["js"]';
+import type { Config } from '../config/config.js';
 import {
   HookManager,
   HookType,
   type HookContext,
   type HookPayload,
-} from './(HookManager as Record<string, unknown>)["js"]';
-import type { HooksSettings } from './(HooksSettings as Record<string, unknown>)["js"]';
+} from './HookManager.js';
+import type { HooksSettings, ClaudeHookConfig } from './HooksSettings.js';
 import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
@@ -20,99 +20,81 @@ export class HookService {
   private config: Config;
   private hooksSettings?: HooksSettings;
   constructor(config: Config) {
-    (this as Record<string, unknown>)['hookManager'] = (
-      HookManager as Record<string, unknown>
-    )['getInstance']();
-    (this as Record<string, unknown>)['config'] = config;
+    this.hookManager = HookManager.getInstance();
+    this.config = config;
     // Safely get hooks settings, handling cases where getHooksSettings method doesn't exist
     let settings = undefined;
     try {
       // Check existence and callability of the method
-      if (
-        config &&
-        typeof (config as Record<string, unknown>)['getHooksSettings'] ===
-          'function'
-      ) {
-        settings = (config as Record<string, unknown>)['getHooksSettings'](); // Call the method directly
+      if (config && typeof config.getHooksSettings === 'function') {
+        settings = config.getHooksSettings(); // Call the method directly
       }
     } catch (e) {
-      (console as Record<string, unknown>)['warn'](
+      console.warn(
         'Error calling getHooksSettings, continuing without hook configuration:',
         e,
       );
       settings = undefined;
     }
-    (this as Record<string, unknown>)['hooksSettings'] = settings;
+    this.hooksSettings = settings;
     // Initialize configured hooks if settings exist
-    if ((this as Record<string, unknown>)['hooksSettings']?.hooks) {
+    if (this.hooksSettings?.hooks) {
       this.registerConfiguredHooks();
     }
     // Initialize Claude-compatible hooks if settings exist
-    if ((this as Record<string, unknown>)['hooksSettings']?.claudeHooks) {
+    if (this.hooksSettings?.claudeHooks) {
       this.registerClaudeCompatibleHooks();
     }
   }
   private async registerConfiguredHooks(): Promise<void> {
-    if (!(this as Record<string, unknown>)['hooksSettings']?.hooks) return;
-    for (const hookConfig of (this as Record<string, unknown>)['hooksSettings']
-      .hooks) {
-      if ((hookConfig as Record<string, unknown>)['enabled'] !== false) {
+    if (!this.hooksSettings?.hooks) return;
+    for (const hookConfig of this.hooksSettings.hooks) {
+      if (hookConfig.enabled !== false) {
         // enabled by default if not explicitly disabled
         const handler = await this.createHandlerFromConfig(hookConfig);
         if (handler) {
-          (this as Record<string, unknown>)['hookManager'].register({
-            type: (hookConfig as Record<string, unknown>)['type'],
+          this.hookManager.register({
+            type: hookConfig.type,
             handler,
-            priority: (hookConfig as Record<string, unknown>)['priority'],
-            enabled: (hookConfig as Record<string, unknown>)['enabled'],
+            priority: hookConfig.priority,
+            enabled: hookConfig.enabled,
           });
         }
       }
     }
   }
   private async registerClaudeCompatibleHooks(): Promise<void> {
-    if (!(this as Record<string, unknown>)['hooksSettings']?.claudeHooks)
-      return;
-    for (const claudeHookConfig of (this as Record<string, unknown>)[
-      'hooksSettings'
-    ].claudeHooks) {
-      if ((claudeHookConfig as Record<string, unknown>)['enabled'] !== false) {
+    if (!this.hooksSettings?.claudeHooks) return;
+    for (const claudeHookConfig of this.hooksSettings.claudeHooks) {
+      if (claudeHookConfig.enabled !== false) {
         // enabled by default if not explicitly disabled
         // Convert Claude event to Qwen HookType
         const hookType = this.convertClaudeEventToHookType(
-          (claudeHookConfig as Record<string, unknown>)['event'],
+          claudeHookConfig.event,
         );
         if (hookType) {
           const handler =
             await this.createClaudeHandlerFromConfig(claudeHookConfig);
           if (handler) {
-            (this as Record<string, unknown>)['hookManager'].register({
+            this.hookManager.register({
               type: hookType,
               handler,
-              priority: (claudeHookConfig as Record<string, unknown>)[
-                'priority'
-              ],
-              enabled: (claudeHookConfig as Record<string, unknown>)['enabled'],
+              priority: claudeHookConfig.priority,
+              enabled: claudeHookConfig.enabled,
             });
           }
         }
       }
     }
   }
-  private convertClaudeEventToHookType(
-    event: string,
-  ):
-    | import('./(HookManager as Record<string, unknown>)["js"]').HookType
-    | null {
+  private convertClaudeEventToHookType(event: string): HookType | null {
     // Load event mappings from configuration
     const eventMappings = this.loadHookEventMappings();
     // Look up the mapping for this Claude event
     const qwenHookType = eventMappings[event];
     if (qwenHookType) {
       // Convert string to enum value
-      return this.normalizeHookType(
-        qwenHookType,
-      ) as import('./(HookManager as Record<string, unknown>)["js"]').HookType;
+      return this.normalizeHookType(qwenHookType) as HookType;
     }
     return null;
   }
@@ -120,9 +102,8 @@ export class HookService {
     try {
       // Check if we are in a test environment
       if (
-        typeof (
-          (process as Record<string, unknown>)['env'] as Record<string, string>
-        )['VITEST'] !== 'undefined' ||
+        typeof (process.env as Record<string, string>)['VITEST'] !==
+          'undefined' ||
         typeof (
           globalThis as {
             vi?: unknown;
@@ -132,85 +113,68 @@ export class HookService {
         // In test environment, return hardcoded expected values to allow tests to pass
         // These values should match the actual configuration files content
         return {
-          PreToolUse: '(tool as Record<string, unknown>)["before"]',
-          PostToolUse: '(tool as Record<string, unknown>)["after"]',
-          Stop: '(session as Record<string, unknown>)["end"]',
-          SubagentStop: '(session as Record<string, unknown>)["end"]',
-          Notification: '(session as Record<string, unknown>)["notification"]',
-          UserPromptSubmit: '(input as Record<string, unknown>)["received"]',
-          PreCompact: '(before as Record<string, unknown>)["compact"]',
-          SessionStart: '(session as Record<string, unknown>)["start"]',
-          SessionEnd: '(session as Record<string, unknown>)["end"]',
-          AppStartup: '(app as Record<string, unknown>)["startup"]',
-          AppShutdown: '(app as Record<string, unknown>)["shutdown"]',
+          PreToolUse: 'tool.before',
+          PostToolUse: 'tool.after',
+          Stop: 'session.end',
+          SubagentStop: 'session.end',
+          Notification: 'session.notification',
+          UserPromptSubmit: 'input.received',
+          PreCompact: 'before.compact',
+          SessionStart: 'session.start',
+          SessionEnd: 'session.end',
+          AppStartup: 'app.startup',
+          AppShutdown: 'app.shutdown',
         };
       }
       // Try to load configuration in a way that works in production environments
       const possiblePaths = [
-        join(
-          __dirname,
-          '../../../../config/hook-event-(mappings as Record<string, unknown>)["json"]',
-        ), // from packages/core/src/hooks
-        join(
-          __dirname,
-          '../../../config/hook-event-(mappings as Record<string, unknown>)["json"]',
-        ), // from packages/core/dist/src/hooks (compiled)
-        join(
-          (process as Record<string, unknown>)['cwd'](),
-          'config/hook-event-(mappings as Record<string, unknown>)["json"]',
-        ), // from current working directory
+        join(__dirname, '../../../../config/hook-event-mappings.json'), // from packages/core/src/hooks
+        join(__dirname, '../../../config/hook-event-mappings.json'), // from packages/core/dist/src/hooks (compiled)
+        join(process.cwd(), 'config/hook-event-mappings.json'), // from current working directory
       ];
       for (const configPath of possiblePaths) {
         try {
           // Try reading the file directly - in SSR environments, this might work where existsSync doesn't
-          const configContent = (fs as Record<string, unknown>)['readFileSync'](
-            configPath,
-            'utf-8',
-          );
-          const config = (JSON as Record<string, unknown>)['parse'](
-            configContent,
-          );
-          return (config as Record<string, unknown>)['hookEventMappings'] || {};
+          const configContent = fs.readFileSync(configPath, 'utf-8');
+          const config = JSON.parse(configContent);
+          return config.hookEventMappings || {};
         } catch (_readError) {
           // File doesn't exist or can't be read at this path, try the next one
           continue;
         }
       }
       // If no config file is found in any location, throw an error
-      const allPaths = (possiblePaths as Record<string, unknown>)['join'](', ');
-      (console as Record<string, unknown>)['error'](
+      const allPaths = possiblePaths.join(', ');
+      console.error(
         `Configuration file does not exist in any of these locations: ${allPaths}`,
       );
       throw new Error(
         `Configuration file not found in any of these locations: ${allPaths}`,
       );
     } catch (error) {
-      (console as Record<string, unknown>)['error'](
-        'Could not load hook event mappings:',
-        error,
-      );
+      console.error('Could not load hook event mappings:', error);
       // Throw error instead of falling back to avoid hidden issues
       throw new Error(
-        `Failed to load hook event mappings: ${error instanceof Error ? (error as Record<string, unknown>)['message'] : 'Unknown error'}`,
+        `Failed to load hook event mappings: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
   }
   private async createClaudeHandlerFromConfig(
-    claudeHookConfig: import('./(HooksSettings as Record<string, unknown>)["js"]').ClaudeHookConfig,
+    claudeHookConfig: ClaudeHookConfig,
   ) {
-    if ((claudeHookConfig as Record<string, unknown>)['command']) {
+    if (claudeHookConfig.command) {
       // We need to get the hook type for this Claude hook to pass to the script
       // This is tricky because the handler doesn't receive the hook type directly
       // We'll need the handler to capture the hook type from where it's registered
       // For this, we need to modify the approach
       // We'll create a closure that captures the hook type for this specific Claude hook
       const hookType = this.convertClaudeEventToHookType(
-        (claudeHookConfig as Record<string, unknown>)['event'],
+        claudeHookConfig.event,
       );
       if (hookType) {
         return async (payload: HookPayload, context: HookContext) =>
           await this.executeClaudeScriptHook(
-            (claudeHookConfig as Record<string, unknown>)['command'],
+            claudeHookConfig.command,
             payload,
             context,
             hookType,
@@ -238,29 +202,27 @@ export class HookService {
       // Capture stdout and stderr for response processing
       let stdout = '';
       let stderr = '';
-      (child as Record<string, unknown>)['stdout'].on('data', (data) => {
-        stdout += (data as Record<string, unknown>)['toString']();
+      child.stdout.on('data', (data) => {
+        stdout += data.toString();
       });
-      (child as Record<string, unknown>)['stderr'].on('data', (data) => {
-        stderr += (data as Record<string, unknown>)['toString']();
+      child.stderr.on('data', (data) => {
+        stderr += data.toString();
       });
       // Write the Claude-compatible payload as JSON to stdin
-      (child as Record<string, unknown>)['stdin'].write(
-        (JSON as Record<string, unknown>)['stringify'](claudePayload),
-      );
-      (child as Record<string, unknown>)['stdin'].end();
+      child.stdin.write(JSON.stringify(claudePayload));
+      child.stdin.end();
+      let resultPayload = payload; // Initialize result with original payload
+
       // Wait for the command to complete
       await new Promise<void>((resolve, reject) => {
-        (child as Record<string, unknown>)['on']('error', reject);
-        (child as Record<string, unknown>)['on']('close', (code) => {
+        child.on('error', reject);
+        child.on('close', (code) => {
           // Print stderr if there is any
           if (stderr) {
-            (console as Record<string, unknown>)['error'](
-              `Claude hook stderr: ${stderr}`,
-            );
+            console.error(`Claude hook stderr: ${stderr}`);
           }
           if (code !== 0) {
-            (console as Record<string, unknown>)['error'](
+            console.error(
               `Claude hook command "${command}" exited with code ${code}`,
             );
             // Handle exit codes as per Claude protocol
@@ -275,8 +237,7 @@ export class HookService {
             // If there's updated input, we need to modify the payload
             if (
               (response as Record<string, unknown>)['updatedInput'] &&
-              hookType ===
-                (HookType as Record<string, unknown>)['INPUT_RECEIVED']
+              hookType === HookType.INPUT_RECEIVED
             ) {
               // For INPUT_RECEIVED, we want to update the params which contains the user input
               const payloadObj =
@@ -291,7 +252,9 @@ export class HookService {
                       'updatedInput'
                     ] as Record<string, unknown>)
                   : {};
-              return {
+              resultPayload = {
+                id: payload.id, // Preserve required HookPayload properties
+                timestamp: payload.timestamp,
                 ...payloadObj,
                 ...updatedInputObj,
               };
@@ -300,13 +263,10 @@ export class HookService {
           resolve();
         });
       });
-      // Return the original payload if no modifications were made
-      return payload;
+      // Return the potentially modified payload
+      return resultPayload;
     } catch (error: unknown) {
-      (console as Record<string, unknown>)['error'](
-        `Error executing Claude hook command "${command}":`,
-        error,
-      );
+      console.error(`Error executing Claude hook command "${command}":`, error);
       // Return the original payload if there's an error
       return payload;
     }
@@ -317,16 +277,17 @@ export class HookService {
   ): Record<string, unknown> {
     try {
       // Parse the response from the Claude hook
-      const response = (JSON as Record<string, unknown>)['parse'](responseStr);
+      const response = JSON.parse(responseStr);
       // Process different response formats based on hook type and return relevant data
-      if (
-        hookType === (HookType as Record<string, unknown>)['BEFORE_TOOL_USE']
-      ) {
+      if (hookType === HookType.BEFORE_TOOL_USE) {
         // Handle PreToolUse response format
         if (
           (response as Record<string, unknown>)['hookSpecificOutput'] &&
-          (response as Record<string, unknown>)['hookSpecificOutput']
-            .hookEventName === 'PreToolUse'
+          (
+            (response as Record<string, unknown>)[
+              'hookSpecificOutput'
+            ] as Record<string, unknown>
+          )['hookEventName'] === 'PreToolUse'
         ) {
           // Check if there's also a top-level decision (mixed format)
           if (
@@ -346,33 +307,51 @@ export class HookService {
               ],
             };
             // Add all hookSpecificOutput properties to the result (except hookEventName)
-            for (const [key, value] of (Object as Record<string, unknown>)[
-              'entries'
-            ]((response as Record<string, unknown>)['hookSpecificOutput'])) {
-              if (key !== 'hookEventName') {
-                // exclude hookEventName from the result
-                result[key] = value;
+            const hookSpecificOutput1 = (response as Record<string, unknown>)[
+              'hookSpecificOutput'
+            ] as Record<string, unknown>;
+            if (
+              hookSpecificOutput1 &&
+              typeof hookSpecificOutput1 === 'object'
+            ) {
+              for (const [key, value] of Object.entries(hookSpecificOutput1)) {
+                if (key !== 'hookEventName') {
+                  // exclude hookEventName from the result
+                  result[key] = value;
+                }
               }
             }
             // This would require deeper integration with the tool execution flow
-            (console as Record<string, unknown>)['log'](
+            console.log(
               `PreToolUse hook decision: ${(response as Record<string, unknown>)['decision']}, reason: ${(response as Record<string, unknown>)['reason']}, systemMessage: ${(response as Record<string, unknown>)['systemMessage']}`,
             );
             return result;
           } else {
             // Pure hookSpecificOutput format: only hookSpecificOutput fields
-            const decision = (response as Record<string, unknown>)[
+            const hookSpecificOutputRaw = (response as Record<string, unknown>)[
               'hookSpecificOutput'
-            ].permissionDecision;
-            const reason = (response as Record<string, unknown>)[
-              'hookSpecificOutput'
-            ].permissionDecisionReason;
+            ];
+            const decision =
+              hookSpecificOutputRaw && typeof hookSpecificOutputRaw === 'object'
+                ? ((hookSpecificOutputRaw as Record<string, unknown>)[
+                    'permissionDecision'
+                  ] as string)
+                : undefined;
+            const reason =
+              hookSpecificOutputRaw && typeof hookSpecificOutputRaw === 'object'
+                ? ((hookSpecificOutputRaw as Record<string, unknown>)[
+                    'permissionDecisionReason'
+                  ] as string)
+                : undefined;
             const systemMessage = (response as Record<string, unknown>)[
               'systemMessage'
             ];
-            const updatedInput = (response as Record<string, unknown>)[
-              'hookSpecificOutput'
-            ].updatedInput;
+            const updatedInput =
+              hookSpecificOutputRaw && typeof hookSpecificOutputRaw === 'object'
+                ? ((hookSpecificOutputRaw as Record<string, unknown>)[
+                    'updatedInput'
+                  ] as Record<string, unknown>)
+                : undefined;
             // Create the result object by merging hookSpecificOutput properties with top-level properties
             const result: Record<string, unknown> = {
               permissionDecision: decision,
@@ -385,12 +364,17 @@ export class HookService {
               ],
             };
             // Add all other hookSpecificOutput properties to the result (except hookEventName)
-            for (const [key, value] of (Object as Record<string, unknown>)[
-              'entries'
-            ]((response as Record<string, unknown>)['hookSpecificOutput'])) {
-              if (key !== 'hookEventName') {
-                // exclude hookEventName from the result
-                result[key] = value;
+            if (
+              hookSpecificOutputRaw &&
+              typeof hookSpecificOutputRaw === 'object'
+            ) {
+              for (const [key, value] of Object.entries(
+                hookSpecificOutputRaw,
+              )) {
+                if (key !== 'hookEventName') {
+                  // exclude hookEventName from the result
+                  result[key] = value;
+                }
               }
             }
             // For PreToolUse with hookSpecificOutput, decision and reason are separate fields
@@ -398,14 +382,12 @@ export class HookService {
             (result as Record<string, unknown>)['decision'] = undefined;
             (result as Record<string, unknown>)['reason'] = undefined;
             // This would require deeper integration with the tool execution flow
-            (console as Record<string, unknown>)['log'](
+            console.log(
               `PreToolUse hook decision: ${decision}, reason: ${reason}, systemMessage: ${systemMessage}`,
             );
             // Log updated input if present
             if (updatedInput) {
-              (console as Record<string, unknown>)['log'](
-                `updated input: ${(JSON as Record<string, unknown>)['stringify'](updatedInput)}`,
-              );
+              console.log(`updated input: ${JSON.stringify(updatedInput)}`);
             }
             return result;
           }
@@ -420,9 +402,7 @@ export class HookService {
           };
           return result;
         }
-      } else if (
-        hookType === (HookType as Record<string, unknown>)['AFTER_TOOL_USE']
-      ) {
+      } else if (hookType === HookType.AFTER_TOOL_USE) {
         // Handle PostToolUse response format
         if ((response as Record<string, unknown>)['decision']) {
           const result: Record<string, unknown> = {
@@ -433,11 +413,17 @@ export class HookService {
             ],
           };
           // If there's a hookSpecificOutput, add its properties to the result and preserve the object
-          if ((response as Record<string, unknown>)['hookSpecificOutput']) {
+          const hookSpecificOutputForPost = (
+            response as Record<string, unknown>
+          )['hookSpecificOutput'];
+          if (
+            hookSpecificOutputForPost &&
+            typeof hookSpecificOutputForPost === 'object'
+          ) {
             // Add all hookSpecificOutput properties to the result (except hookEventName)
-            for (const [key, value] of (Object as Record<string, unknown>)[
-              'entries'
-            ]((response as Record<string, unknown>)['hookSpecificOutput'])) {
+            for (const [key, value] of Object.entries(
+              hookSpecificOutputForPost,
+            )) {
               if (key !== 'hookEventName') {
                 // exclude hookEventName from the result
                 result[key] = value;
@@ -448,14 +434,12 @@ export class HookService {
               response as Record<string, unknown>
             )['hookSpecificOutput'];
           }
-          (console as Record<string, unknown>)['log'](
+          console.log(
             `PostToolUse hook: ${(response as Record<string, unknown>)['decision']} decision, reason: ${(response as Record<string, unknown>)['reason']}, systemMessage: ${(response as Record<string, unknown>)['systemMessage']}`,
           );
           return result;
         }
-      } else if (
-        hookType === (HookType as Record<string, unknown>)['SESSION_END']
-      ) {
+      } else if (hookType === HookType.SESSION_END) {
         // Handle Stop hook response format
         if ((response as Record<string, unknown>)['decision']) {
           const result: Record<string, unknown> = {
@@ -465,14 +449,12 @@ export class HookService {
               'systemMessage'
             ],
           };
-          (console as Record<string, unknown>)['log'](
+          console.log(
             `Stop/SubagentStop hook: ${(response as Record<string, unknown>)['decision']} decision, reason: ${(response as Record<string, unknown>)['reason']}, systemMessage: ${(response as Record<string, unknown>)['systemMessage']}`,
           );
           return result;
         }
-      } else if (
-        hookType === (HookType as Record<string, unknown>)['INPUT_RECEIVED']
-      ) {
+      } else if (hookType === HookType.INPUT_RECEIVED) {
         // Handle UserPromptSubmit response format
         if ((response as Record<string, unknown>)['decision']) {
           const result: Record<string, unknown> = {
@@ -483,19 +465,31 @@ export class HookService {
             ],
           };
           // For UserPromptSubmit, updatedInput would be the modified user input
+          const hookSpecificOutputVal = (response as Record<string, unknown>)[
+            'hookSpecificOutput'
+          ];
           const updatedInput =
-            (response as Record<string, unknown>)['hookSpecificOutput']
-              ?.updatedInput ||
+            (hookSpecificOutputVal && typeof hookSpecificOutputVal === 'object'
+              ? (hookSpecificOutputVal as Record<string, unknown>)[
+                  'updatedInput'
+                ]
+              : undefined) ||
             (response as Record<string, unknown>)['updatedInput'];
           if (updatedInput) {
             (result as Record<string, unknown>)['updatedInput'] = updatedInput;
           }
           // If there's a hookSpecificOutput, add its properties to the result and preserve the object
-          if ((response as Record<string, unknown>)['hookSpecificOutput']) {
+          const hookSpecificOutputForInput = (
+            response as Record<string, unknown>
+          )['hookSpecificOutput'];
+          if (
+            hookSpecificOutputForInput &&
+            typeof hookSpecificOutputForInput === 'object'
+          ) {
             // Add all hookSpecificOutput properties to the result (except hookEventName)
-            for (const [key, value] of (Object as Record<string, unknown>)[
-              'entries'
-            ]((response as Record<string, unknown>)['hookSpecificOutput'])) {
+            for (const [key, value] of Object.entries(
+              hookSpecificOutputForInput,
+            )) {
               if (key !== 'hookEventName') {
                 // exclude hookEventName from the result
                 result[key] = value;
@@ -506,8 +500,8 @@ export class HookService {
               response as Record<string, unknown>
             )['hookSpecificOutput'];
           }
-          (console as Record<string, unknown>)['log'](
-            `UserPromptSubmit hook: ${(response as Record<string, unknown>)['decision']} decision, reason: ${(response as Record<string, unknown>)['reason']}, systemMessage: ${(response as Record<string, unknown>)['systemMessage']}, updatedInput: ${(JSON as Record<string, unknown>)['stringify'](updatedInput)}`,
+          console.log(
+            `UserPromptSubmit hook: ${(response as Record<string, unknown>)['decision']} decision, reason: ${(response as Record<string, unknown>)['reason']}, systemMessage: ${(response as Record<string, unknown>)['systemMessage']}, updatedInput: ${JSON.stringify(updatedInput)}`,
           );
           return result;
         }
@@ -515,7 +509,7 @@ export class HookService {
       // For responses that don't match our expected formats, return the entire response
       return response || {};
     } catch (error) {
-      (console as Record<string, unknown>)['error'](
+      console.error(
         `Error processing Claude hook response: ${error}, Raw response: ${responseStr}`,
       );
       return {};
@@ -526,15 +520,14 @@ export class HookService {
     context: HookContext,
     hookType: HookType,
   ): Record<string, unknown> {
-    const sessionId =
-      (context as Record<string, unknown>)['config'].getSessionId?.() || '';
+    const sessionId = context.config.getSessionId?.() || '';
     // Convert Qwen hook type to Claude event name
     const claudeEventName = this.convertHookTypeToClaudeEvent(hookType);
     // Construct the Claude-compatible payload
     const claudePayload: Record<string, unknown> = {
       session_id: sessionId,
       hook_event_name: claudeEventName,
-      timestamp: (qwenPayload as Record<string, unknown>)['timestamp'],
+      timestamp: qwenPayload.timestamp,
       ...this.convertToolInputFormat(qwenPayload, hookType),
     };
     // Add transcript_path if available
@@ -548,15 +541,13 @@ export class HookService {
     // Load event mappings from configuration
     const eventMappings = this.loadHookEventMappings();
     // Find the Claude event name that corresponds to this Qwen hook type
-    for (const [claudeEvent, qwenHookType] of (
-      Object as Record<string, unknown>
-    )['entries'](eventMappings)) {
+    for (const [claudeEvent, qwenHookType] of Object.entries(eventMappings)) {
       if (qwenHookType === hookType) {
         return claudeEvent;
       }
     }
     // If no mapping is found, return a default conversion
-    return (hookType as Record<string, unknown>)['replace'](/\./g, '');
+    return hookType.replace(/\./g, '');
   }
   private convertToolInputFormat(
     payload: HookPayload,
@@ -564,7 +555,7 @@ export class HookService {
   ): Record<string, unknown> {
     // Check if this is a PreToolUse hook payload and convert tool input to Claude format
     if (
-      hookType === (HookType as Record<string, unknown>)['BEFORE_TOOL_USE'] &&
+      hookType === HookType.BEFORE_TOOL_USE &&
       (payload as Record<string, unknown>)['params']
     ) {
       const toolNameRaw =
@@ -587,14 +578,12 @@ export class HookService {
           // Map each Qwen field to its Claude equivalent
           const claudeFieldMapping = mapping['claudeFieldMapping'];
           if (claudeFieldMapping) {
-            for (const [qwenField, claudeField] of (
-              Object as Record<string, unknown>
-            )['entries'](claudeFieldMapping)) {
+            for (const [qwenField, claudeField] of Object.entries(
+              claudeFieldMapping,
+            )) {
               if (
                 (payload as Record<string, unknown>)['params'] &&
-                (Object as Record<string, unknown>)[
-                  'prototype'
-                ].hasOwnProperty.call(
+                Object.prototype.hasOwnProperty.call(
                   (payload as Record<string, unknown>)['params'],
                   qwenField,
                 )
@@ -622,9 +611,8 @@ export class HookService {
     try {
       // Check if we are in a test environment
       if (
-        typeof (
-          (process as Record<string, unknown>)['env'] as Record<string, string>
-        )['VITEST'] !== 'undefined' ||
+        typeof (process.env as Record<string, string>)['VITEST'] !==
+          'undefined' ||
         typeof (
           globalThis as {
             vi?: unknown;
@@ -721,53 +709,36 @@ export class HookService {
       }
       // Try to load configuration in a way that works in production environments
       const possiblePaths = [
-        join(
-          __dirname,
-          '../../../../config/tool-input-format-(mappings as Record<string, unknown>)["json"]',
-        ), // from packages/core/src/hooks
-        join(
-          __dirname,
-          '../../../config/tool-input-format-(mappings as Record<string, unknown>)["json"]',
-        ), // from packages/core/dist/src/hooks
-        join(
-          (process as Record<string, unknown>)['cwd'](),
-          'config/tool-input-format-(mappings as Record<string, unknown>)["json"]',
-        ), // from current working directory
+        join(__dirname, '../../../../config/tool-input-format-mappings.json'), // from packages/core/src/hooks
+        join(__dirname, '../../../config/tool-input-format-mappings.json'), // from packages/core/dist/src/hooks
+        join(process.cwd(), 'config/tool-input-format-mappings.json'), // from current working directory
       ];
       for (const configPath of possiblePaths) {
         try {
           // Try reading the file directly - in SSR environments, this might work where existsSync doesn't
-          const configContent = (fs as Record<string, unknown>)['readFileSync'](
-            configPath,
-            'utf-8',
-          );
-          const config = (JSON as Record<string, unknown>)['parse'](
-            configContent,
-          );
-          return (
-            (config as Record<string, unknown>)['toolInputFormatMappings'] || {}
-          );
+          const configContent = fs.readFileSync(configPath, 'utf-8');
+          const config = JSON.parse(configContent);
+          return ((config as Record<string, unknown>)[
+            'toolInputFormatMappings'
+          ] || {}) as Record<string, unknown>;
         } catch (_readError) {
           // File doesn't exist or can't be read at this path, try the next one
           continue;
         }
       }
       // If no config file is found in any location, throw an error
-      const allPaths = (possiblePaths as Record<string, unknown>)['join'](', ');
-      (console as Record<string, unknown>)['error'](
+      const allPaths = possiblePaths.join(', ');
+      console.error(
         `Configuration file does not exist in any of these locations: ${allPaths}`,
       );
       throw new Error(
         `Configuration file not found in any of these locations: ${allPaths}`,
       );
     } catch (error) {
-      (console as Record<string, unknown>)['error'](
-        'Could not load tool input format mappings:',
-        error,
-      );
+      console.error('Could not load tool input format mappings:', error);
       // Throw error instead of falling back to avoid hidden issues
       throw new Error(
-        `Failed to load tool input format mappings: ${error instanceof Error ? (error as Record<string, unknown>)['message'] : 'Unknown error'}`,
+        `Failed to load tool input format mappings: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
   }
@@ -776,40 +747,34 @@ export class HookService {
       // Return a path where the transcript for this session would be stored
       // This is a placeholder implementation - actual path would depend on where
       // Qwen stores transcripts
-      const chatsDir = (path as Record<string, unknown>)['join'](
-        (this as Record<string, unknown>)['config'].storage.getProjectTempDir(),
+      const chatsDir = path.join(
+        this.config.storage.getProjectTempDir(),
         'chats',
       );
       // Find the session file for this session ID
       // In a real implementation, you'd look for the actual transcript file
-      return (path as Record<string, unknown>)['join'](
-        chatsDir,
-        `session-${sessionId}.json`,
-      );
+      return path.join(chatsDir, `session-${sessionId}.json`);
     } catch (error) {
-      (console as Record<string, unknown>)['warn'](
-        'Could not determine transcript path:',
-        error,
-      );
+      console.warn('Could not determine transcript path:', error);
       return null;
     }
   }
   private async createHandlerFromConfig(
-    hookConfig: import('./(HooksSettings as Record<string, unknown>)["js"]').HookConfig,
+    hookConfig: import('./HooksSettings.js').HookConfig,
   ) {
-    if ((hookConfig as Record<string, unknown>)['scriptPath']) {
+    if (hookConfig.scriptPath) {
       // Register hook from external script
       return async (payload: HookPayload, context: HookContext) =>
         await this.executeScriptHook(
-          (hookConfig as Record<string, unknown>)['scriptPath']!,
+          hookConfig.scriptPath!, // Non-null assertion since we checked it exists
           payload,
           context,
         );
-    } else if ((hookConfig as Record<string, unknown>)['inlineScript']) {
+    } else if (hookConfig.inlineScript) {
       // Register hook from inline script
       return async (payload: HookPayload, context: HookContext) =>
         await this.executeInlineHook(
-          (hookConfig as Record<string, unknown>)['inlineScript']!,
+          hookConfig.inlineScript!, // Non-null assertion since we checked it exists
           payload,
           context,
         );
@@ -822,74 +787,46 @@ export class HookService {
     context: HookContext,
   ): Promise<HookPayload> {
     try {
-      const resolvedPath = (path as Record<string, unknown>)['resolve'](
-        (this as Record<string, unknown>)['config'].getTargetDir(),
-        scriptPath,
-      );
+      const resolvedPath = path.resolve(this.config.getTargetDir(), scriptPath);
       // Security: Check that the path is within the project directory
-      const projectRoot = (this as Record<string, unknown>)[
-        'config'
-      ].getProjectRoot();
-      const relativePath = (path as Record<string, unknown>)['relative'](
-        projectRoot,
-        resolvedPath,
-      );
-      if (
-        (relativePath as Record<string, unknown>)['startsWith']('..') ||
-        (path as Record<string, unknown>)['isAbsolute'](relativePath)
-      ) {
-        (console as Record<string, unknown>)['error'](
+      const projectRoot = this.config.getProjectRoot();
+      const relativePath = path.relative(projectRoot, resolvedPath);
+      if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+        console.error(
           `Security error: Script path ${scriptPath} is outside project directory`,
         );
         return payload;
       }
       // Check if file exists
-      await (fsPromises as Record<string, unknown>)['access'](resolvedPath);
+      await fsPromises.access(resolvedPath);
       // Import the script module
       const scriptModule = await import(resolvedPath);
       // If the module has a default export that is a function, use it
-      if (
-        typeof (scriptModule as Record<string, unknown>)['default'] ===
-        'function'
-      ) {
-        const result = await (Promise as Record<string, unknown>)['resolve'](
-          (scriptModule as Record<string, unknown>)['default'](
-            payload,
-            context,
-          ),
+      if (typeof scriptModule.default === 'function') {
+        const result = await Promise.resolve(
+          scriptModule.default(payload, context),
         );
         return result || payload;
       }
       // If the module itself is a function, use it
       else if (typeof scriptModule === 'function') {
-        const result = await (Promise as Record<string, unknown>)['resolve'](
-          scriptModule(payload, context),
-        );
+        const result = await Promise.resolve(scriptModule(payload, context));
         return result || payload;
       }
       // If the module has an execute function, use it
-      else if (
-        typeof (scriptModule as Record<string, unknown>)['execute'] ===
-        'function'
-      ) {
-        const result = await (Promise as Record<string, unknown>)['resolve'](
-          (scriptModule as Record<string, unknown>)['execute'](
-            payload,
-            context,
-          ),
+      else if (typeof scriptModule.execute === 'function') {
+        const result = await Promise.resolve(
+          scriptModule.execute(payload, context),
         );
         return result || payload;
       } else {
-        (console as Record<string, unknown>)['error'](
+        console.error(
           `Hook script ${scriptPath} does not export a valid function`,
         );
         return payload;
       }
     } catch (error: unknown) {
-      (console as Record<string, unknown>)['error'](
-        `Error executing hook script ${scriptPath}:`,
-        error,
-      );
+      console.error(`Error executing hook script ${scriptPath}:`, error);
       return payload;
     }
   }
@@ -907,26 +844,19 @@ export class HookService {
         'context',
         'return ' + inlineScript,
       );
-      const result = await (Promise as Record<string, unknown>)['resolve'](
-        hookFn(payload, context),
-      );
+      const result = await Promise.resolve(hookFn(payload, context));
       return result || payload;
     } catch (error) {
-      (console as Record<string, unknown>)['error'](
-        `Error executing inline hook:`,
-        error,
-      );
+      console.error(`Error executing inline hook:`, error);
       return payload;
     }
   }
   async executeHooks(
-    type:
-      | import('./(HookManager as Record<string, unknown>)["js"]').HookType
-      | string,
+    type: import('./HookManager.js').HookType | string,
     payload: HookPayload,
   ): Promise<HookPayload> {
     // Only disable hooks if explicitly set to false (undefined means enabled by default)
-    if ((this as Record<string, unknown>)['hooksSettings']?.enabled === false) {
+    if (this.hooksSettings?.enabled === false) {
       return payload; // Hooks are explicitly disabled in configuration, return original payload
     }
     // Convert string type to enum if necessary
@@ -937,7 +867,7 @@ export class HookService {
       return payload; // Unknown hook type, return original payload
     }
     const context: HookContext = {
-      config: (this as Record<string, unknown>)['config'],
+      config: this.config,
       signal: (
         payload as {
           signal?: AbortSignal;
@@ -945,74 +875,68 @@ export class HookService {
       ).signal,
     };
     // Return the potentially modified payload from the hook execution
-    return await (this as Record<string, unknown>)['hookManager'].executeHooks(
-      hookType,
-      payload,
-      context,
-    );
+    return await this.hookManager.executeHooks(hookType, payload, context);
   }
   private normalizeHookType(
     type: string,
-  ):
-    | import('./(HookManager as Record<string, unknown>)["js"]').HookType
-    | null {
+  ): import('./HookManager.js').HookType | null {
     // Map string literals to proper enum values
     switch (type) {
-      case '(app as Record<string, unknown>)["startup"]':
-        return (HookType as Record<string, unknown>)['APP_STARTUP'];
-      case '(app as Record<string, unknown>)["shutdown"]':
-        return (HookType as Record<string, unknown>)['APP_SHUTDOWN'];
-      case '(session as Record<string, unknown>)["start"]':
-        return (HookType as Record<string, unknown>)['SESSION_START'];
-      case '(session as Record<string, unknown>)["end"]':
-        return (HookType as Record<string, unknown>)['SESSION_END'];
-      case '(input as Record<string, unknown>)["received"]':
-        return (HookType as Record<string, unknown>)['INPUT_RECEIVED'];
-      case '(output as Record<string, unknown>)["ready"]':
-        return (HookType as Record<string, unknown>)['OUTPUT_READY'];
-      case '(before as Record<string, unknown>)["response"]':
-        return (HookType as Record<string, unknown>)['BEFORE_RESPONSE'];
-      case '(after as Record<string, unknown>)["response"]':
-        return (HookType as Record<string, unknown>)['AFTER_RESPONSE'];
-      case '(tool as Record<string, unknown>)["before"]':
-        return (HookType as Record<string, unknown>)['BEFORE_TOOL_USE'];
-      case '(tool as Record<string, unknown>)["after"]':
-        return (HookType as Record<string, unknown>)['AFTER_TOOL_USE'];
-      case '(command as Record<string, unknown>)["before"]':
-        return (HookType as Record<string, unknown>)['BEFORE_COMMAND'];
-      case '(command as Record<string, unknown>)["after"]':
-        return (HookType as Record<string, unknown>)['AFTER_COMMAND'];
-      case '(model as Record<string, unknown>)["before_request"]':
-        return (HookType as Record<string, unknown>)['BEFORE_MODEL_REQUEST'];
-      case '(model as Record<string, unknown>)["after_response"]':
-        return (HookType as Record<string, unknown>)['AFTER_MODEL_RESPONSE'];
-      case '(file as Record<string, unknown>)["before_read"]':
-        return (HookType as Record<string, unknown>)['BEFORE_FILE_READ'];
-      case '(file as Record<string, unknown>)["after_read"]':
-        return (HookType as Record<string, unknown>)['AFTER_FILE_READ'];
-      case '(file as Record<string, unknown>)["before_write"]':
-        return (HookType as Record<string, unknown>)['BEFORE_FILE_WRITE'];
-      case '(file as Record<string, unknown>)["after_write"]':
-        return (HookType as Record<string, unknown>)['AFTER_FILE_WRITE'];
-      case '(error as Record<string, unknown>)["occurred"]':
-        return (HookType as Record<string, unknown>)['ERROR_OCCURRED'];
-      case '(error as Record<string, unknown>)["handled"]':
-        return (HookType as Record<string, unknown>)['ERROR_HANDLED'];
-      case '(before as Record<string, unknown>)["compact"]':
-        return (HookType as Record<string, unknown>)['BEFORE_COMPACT'];
-      case '(session as Record<string, unknown>)["notification"]':
-        return (HookType as Record<string, unknown>)['SESSION_NOTIFICATION'];
+      case 'app.startup':
+        return HookType.APP_STARTUP;
+      case 'app.shutdown':
+        return HookType.APP_SHUTDOWN;
+      case 'session.start':
+        return HookType.SESSION_START;
+      case 'session.end':
+        return HookType.SESSION_END;
+      case 'input.received':
+        return HookType.INPUT_RECEIVED;
+      case 'output.ready':
+        return HookType.OUTPUT_READY;
+      case 'before.response':
+        return HookType.BEFORE_RESPONSE;
+      case 'after.response':
+        return HookType.AFTER_RESPONSE;
+      case 'tool.before':
+        return HookType.BEFORE_TOOL_USE;
+      case 'tool.after':
+        return HookType.AFTER_TOOL_USE;
+      case 'command.before':
+        return HookType.BEFORE_COMMAND;
+      case 'command.after':
+        return HookType.AFTER_COMMAND;
+      case 'model.before_request':
+        return HookType.BEFORE_MODEL_REQUEST;
+      case 'model.after_response':
+        return HookType.AFTER_MODEL_RESPONSE;
+      case 'file.before_read':
+        return HookType.BEFORE_FILE_READ;
+      case 'file.after_read':
+        return HookType.AFTER_FILE_READ;
+      case 'file.before_write':
+        return HookType.BEFORE_FILE_WRITE;
+      case 'file.after_write':
+        return HookType.AFTER_FILE_WRITE;
+      case 'error.occurred':
+        return HookType.ERROR_OCCURRED;
+      case 'error.handled':
+        return HookType.ERROR_HANDLED;
+      case 'before.compact':
+        return HookType.BEFORE_COMPACT;
+      case 'session.notification':
+        return HookType.SESSION_NOTIFICATION;
       default:
         // Strictly return null for unknown types - no default behavior
         return null;
     }
   }
   registerHook(
-    type: import('./(HookManager as Record<string, unknown>)["js"]').HookType,
-    handler: import('./(HookManager as Record<string, unknown>)["js"]').HookFunction,
+    type: import('./HookManager.js').HookType,
+    handler: import('./HookManager.js').HookFunction,
     priority?: number,
   ): string {
-    return (this as Record<string, unknown>)['hookManager'].register({
+    return this.hookManager.register({
       type,
       handler,
       priority,
@@ -1020,17 +944,16 @@ export class HookService {
     });
   }
   unregisterHook(hookId: string): boolean {
-    return (this as Record<string, unknown>)['hookManager'].unregister(hookId);
+    return this.hookManager.unregister(hookId);
   }
   getHookManager(): HookManager {
-    return (this as Record<string, unknown>)['hookManager'];
+    return this.hookManager;
   }
   private mapQwenToClaudeToolName(qwenToolName: string): string {
     // Check if we are in a test environment
     const isTestEnv =
-      typeof (
-        (process as Record<string, unknown>)['env'] as Record<string, string>
-      )['VITEST'] !== 'undefined' ||
+      typeof (process.env as Record<string, string>)['VITEST'] !==
+        'undefined' ||
       typeof (
         globalThis as {
           vi?: unknown;
@@ -1063,34 +986,21 @@ export class HookService {
     // Load tool name mappings and reverse them to map Qwen names to Claude names
     try {
       const possiblePaths = [
-        join(
-          __dirname,
-          '../../../../config/tool-name-(mapping as Record<string, unknown>)["json"]',
-        ), // from packages/core/src/hooks
-        join(
-          __dirname,
-          '../../../config/tool-name-(mapping as Record<string, unknown>)["json"]',
-        ), // from packages/core/dist/src/hooks
-        join(
-          (process as Record<string, unknown>)['cwd'](),
-          'config/tool-name-(mapping as Record<string, unknown>)["json"]',
-        ), // from current working directory
+        join(__dirname, '../../../../config/tool-name-mapping.json'), // from packages/core/src/hooks
+        join(__dirname, '../../../config/tool-name-mapping.json'), // from packages/core/dist/src/hooks
+        join(process.cwd(), 'config/tool-name-mapping.json'), // from current working directory
       ];
       for (const configPath of possiblePaths) {
         try {
-          // In SSR/test environments, (fs as Record<string, unknown>)["existsSync"] might not be available or might not work
+          // In SSR/test environments, fs.existsSync might not be available or might not work
           // So we'll try reading the file directly and handle errors
-          const configContent = (fs as Record<string, unknown>)['readFileSync'](
-            configPath,
-            'utf-8',
-          );
-          const toolNameMappings: Record<string, string> = (
-            JSON as Record<string, unknown>
-          )['parse'](configContent);
+          const configContent = fs.readFileSync(configPath, 'utf-8');
+          const toolNameMappings: Record<string, string> =
+            JSON.parse(configContent);
           // Find the Claude tool name that maps to this Qwen tool name
-          for (const [claudeName, qwenName] of (
-            Object as Record<string, unknown>
-          )['entries'](toolNameMappings)) {
+          for (const [claudeName, qwenName] of Object.entries(
+            toolNameMappings,
+          )) {
             if (qwenName === qwenToolName) {
               return claudeName;
             }
@@ -1101,21 +1011,21 @@ export class HookService {
         }
       }
       // If no config file is found in any location, throw an error
-      const allPaths = (possiblePaths as Record<string, unknown>)['join'](', ');
-      (console as Record<string, unknown>)['error'](
+      const allPaths = possiblePaths.join(', ');
+      console.error(
         `Configuration file does not exist in any of these locations: ${allPaths}`,
       );
       throw new Error(
         `Configuration file not found in any of these locations: ${allPaths}`,
       );
     } catch (error) {
-      (console as Record<string, unknown>)['error'](
+      console.error(
         'Could not load tool name mappings for Qwen to Claude conversion:',
         error,
       );
       // Throw error instead of falling back to avoid hidden issues
       throw new Error(
-        `Failed to load tool name mappings: ${error instanceof Error ? (error as Record<string, unknown>)['message'] : 'Unknown error'}`,
+        `Failed to load tool name mappings: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     }
     // If no mapping is found, throw an error rather than falling back

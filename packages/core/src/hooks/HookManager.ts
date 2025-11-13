@@ -242,7 +242,9 @@ export class HookManager {
           return obj;
         };
 
-        const restoredSafePayload = restoreSpecialValues(safePayload);
+        const restoredSafePayload = restoreSpecialValues(
+          safePayload,
+        ) as HookPayload;
 
         // Pass the restored payload to the handler to prevent direct mutations
         const result = await Promise.resolve(
