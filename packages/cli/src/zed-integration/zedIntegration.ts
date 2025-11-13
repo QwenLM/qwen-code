@@ -31,6 +31,7 @@ import {
   MCPServerConfig,
   ToolConfirmationOutcome,
   logToolCall,
+  logUserPrompt,
   getErrorStatus,
   isWithinRoot,
   isNodeError,
@@ -38,6 +39,7 @@ import {
   TaskTool,
   Kind,
   TodoWriteTool,
+  UserPromptEvent,
 } from '@qwen-code/qwen-code-core';
 import * as acp from './acp.js';
 import { AcpFileSystemService } from './fileSystemService.js';
@@ -53,6 +55,26 @@ import { ExtensionStorage, type Extension } from '../config/extension.js';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { ExtensionEnablementManager } from '../config/extensions/extensionEnablement.js';
+import {
+  handleSlashCommand,
+  getAvailableCommands,
+} from '../nonInteractiveCliCommands.js';
+import type { AvailableCommand, AvailableCommandsUpdate } from './schema.js';
+import { isSlashCommand } from '../ui/utils/commandUtils.js';
+
+/**
+ * Built-in commands that are allowed in ACP integration mode.
+ * Only these commands will be available when using handleSlashCommand
+ * or getAvailableCommands in ACP integration.
+ *
+ * Currently, only "init" is supported because `handleSlashCommand` in
+ * nonInteractiveCliCommands.ts only supports handling results where
+ * result.type is "submit_prompt". Other result types are either coupled
+ * to the UI or cannot send notifications to the client via ACP.
+ *
+ * If you have a good idea to add support for more commands, PRs are welcome!
+ */
+const ALLOWED_BUILTIN_COMMANDS_FOR_ACP = ['init'];
 
 /**
  * Resolves the model to use based on the current configuration.
@@ -151,7 +173,7 @@ class GeminiAgent {
     cwd,
     mcpServers,
   }: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
-    const sessionId = randomUUID();
+    const sessionId = this.config.getSessionId() || randomUUID();
     const config = await this.newSessionConfig(sessionId, cwd, mcpServers);
 
     let isAuthenticated = false;
@@ -182,8 +204,19 @@ class GeminiAgent {
 
     const geminiClient = config.getGeminiClient();
     const chat = await geminiClient.startChat();
-    const session = new Session(sessionId, chat, config, this.client);
+    const session = new Session(
+      sessionId,
+      chat,
+      config,
+      this.client,
+      this.settings,
+    );
     this.sessions.set(sessionId, session);
+
+    // Send available commands update as the first session update
+    setTimeout(async () => {
+      await session.sendAvailableCommandsUpdate();
+    }, 0);
 
     return {
       sessionId,
@@ -242,12 +275,14 @@ class GeminiAgent {
 
 class Session {
   private pendingPrompt: AbortController | null = null;
+  private turn: number = 0;
 
   constructor(
     private readonly id: string,
     private readonly chat: GeminiChat,
     private readonly config: Config,
     private readonly client: acp.Client,
+    private readonly settings: LoadedSettings,
   ) {}
 
   async cancelPendingPrompt(): Promise<void> {
@@ -264,10 +299,57 @@ class Session {
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
-    const promptId = Math.random().toString(16).slice(2);
-    const chat = this.chat;
+    // Increment turn counter for each user prompt
+    this.turn += 1;
 
-    const parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+    const chat = this.chat;
+    const promptId = this.config.getSessionId() + '########' + this.turn;
+
+    // Extract text from all text blocks to construct the full prompt text for logging
+    const promptText = params.prompt
+      .filter((block) => block.type === 'text')
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join(' ');
+
+    // Log user prompt
+    logUserPrompt(
+      this.config,
+      new UserPromptEvent(
+        promptText.length,
+        promptId,
+        this.config.getContentGeneratorConfig()?.authType,
+        promptText,
+      ),
+    );
+
+    // Check if the input contains a slash command
+    // Extract text from the first text block if present
+    const firstTextBlock = params.prompt.find((block) => block.type === 'text');
+    const inputText = firstTextBlock?.text || '';
+
+    let parts: Part[];
+
+    if (isSlashCommand(inputText)) {
+      // Handle slash command - allow specific built-in commands for ACP integration
+      const slashCommandResult = await handleSlashCommand(
+        inputText,
+        pendingSend,
+        this.config,
+        this.settings,
+        ALLOWED_BUILTIN_COMMANDS_FOR_ACP,
+      );
+
+      if (slashCommandResult) {
+        // Use the result from the slash command
+        parts = slashCommandResult as Part[];
+      } else {
+        // Slash command didn't return a prompt, continue with normal processing
+        parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+      }
+    } else {
+      // Normal processing for non-slash commands
+      parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+    }
 
     let nextMessage: Content | null = { role: 'user', parts };
 
@@ -359,6 +441,37 @@ class Session {
     };
 
     await this.client.sessionUpdate(params);
+  }
+
+  async sendAvailableCommandsUpdate(): Promise<void> {
+    const abortController = new AbortController();
+    try {
+      const slashCommands = await getAvailableCommands(
+        this.config,
+        this.settings,
+        abortController.signal,
+        ALLOWED_BUILTIN_COMMANDS_FOR_ACP,
+      );
+
+      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
+      const availableCommands: AvailableCommand[] = slashCommands.map(
+        (cmd) => ({
+          name: cmd.name,
+          description: cmd.description,
+          input: null,
+        }),
+      );
+
+      const update: AvailableCommandsUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+      };
+
+      await this.sendUpdate(update);
+    } catch (error) {
+      // Log error but don't fail session creation
+      console.error('Error sending available commands update:', error);
+    }
   }
 
   private async runTool(
