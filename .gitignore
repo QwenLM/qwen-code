@@ -57,3 +57,4 @@ gha-creds-*.json
 
 # Log files
 patch_output.log
+QWEN.md

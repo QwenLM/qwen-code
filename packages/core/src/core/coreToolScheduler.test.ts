@@ -371,6 +371,8 @@ describe('CoreToolScheduler', () => {
         getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null, // No client needed for these tests
+        getExcludeTools: () => undefined,
+        isInteractive: () => true,
       } as unknown as Config;
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
@@ -399,6 +401,241 @@ describe('CoreToolScheduler', () => {
       expect(suggestionMultiple).toBe(
         ' Did you mean one of: "list_files", "read_file", "write_file"?',
       );
+    });
+
+    it('should use Levenshtein suggestions for excluded tools (getToolSuggestion only handles non-excluded)', () => {
+      // Create mocked tool registry
+      const mockToolRegistry = {
+        getAllToolNames: () => ['list_files', 'read_file'],
+      } as unknown as ToolRegistry;
+
+      // Create mocked config with excluded tools
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseSmartEdit: () => false,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
+        isInteractive: () => false, // Value doesn't matter, but included for completeness
+      } as unknown as Config;
+
+      // Create scheduler
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // getToolSuggestion no longer handles excluded tools - it only handles truly missing tools
+      // So excluded tools will use Levenshtein distance to find similar registered tools
+      // @ts-expect-error accessing private method
+      const excludedTool = scheduler.getToolSuggestion('write_file');
+      expect(excludedTool).toContain('Did you mean');
+    });
+
+    it('should use Levenshtein suggestions for non-excluded tools', () => {
+      // Create mocked tool registry
+      const mockToolRegistry = {
+        getAllToolNames: () => ['list_files', 'read_file'],
+      } as unknown as ToolRegistry;
+
+      // Create mocked config with excluded tools
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseSmartEdit: () => false,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getExcludeTools: () => ['write_file', 'edit'],
+        isInteractive: () => false, // Value doesn't matter
+      } as unknown as Config;
+
+      // Create scheduler
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // Test that non-excluded tool (hallucinated) still uses Levenshtein suggestions
+      // @ts-expect-error accessing private method
+      const hallucinatedTool = scheduler.getToolSuggestion('list_fils');
+      expect(hallucinatedTool).toContain('Did you mean');
+      expect(hallucinatedTool).not.toContain(
+        'not available in the current environment',
+      );
+    });
+  });
+
+  describe('excluded tools handling', () => {
+    it('should return permission error for excluded tools instead of "not found" message', async () => {
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+
+      const mockToolRegistry = {
+        getTool: () => undefined, // Tool not in registry
+        getAllToolNames: () => ['list_files', 'read_file'],
+        getFunctionDeclarations: () => [],
+        tools: new Map(),
+        discovery: {},
+        registerTool: () => {},
+        getToolByName: () => undefined,
+        getToolByDisplayName: () => undefined,
+        getTools: () => [],
+        discoverTools: async () => {},
+        getAllTools: () => [],
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getAllowedTools: () => [],
+        getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'oauth-personal',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
+        },
+        getTruncateToolOutputThreshold: () =>
+          DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getToolRegistry: () => mockToolRegistry,
+        getUseSmartEdit: () => false,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const abortController = new AbortController();
+      const request = {
+        callId: '1',
+        name: 'write_file', // Excluded tool
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-excluded',
+      };
+
+      await scheduler.schedule([request], abortController.signal);
+
+      // Wait for completion
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(1);
+      const completedCall = completedCalls[0];
+      expect(completedCall.status).toBe('error');
+
+      if (completedCall.status === 'error') {
+        const errorMessage = completedCall.response.error?.message;
+        expect(errorMessage).toBe(
+          'Qwen Code requires permission to use write_file, but that permission was declined.',
+        );
+        // Should NOT contain "not found in registry"
+        expect(errorMessage).not.toContain('not found in registry');
+      }
+    });
+
+    it('should return "not found" message for truly missing tools (not excluded)', async () => {
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+
+      const mockToolRegistry = {
+        getTool: () => undefined, // Tool not in registry
+        getAllToolNames: () => ['list_files', 'read_file'],
+        getFunctionDeclarations: () => [],
+        tools: new Map(),
+        discovery: {},
+        registerTool: () => {},
+        getToolByName: () => undefined,
+        getToolByDisplayName: () => undefined,
+        getTools: () => [],
+        discoverTools: async () => {},
+        getAllTools: () => [],
+        getToolsByServer: () => [],
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => true,
+        getDebugMode: () => false,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getAllowedTools: () => [],
+        getExcludeTools: () => ['write_file', 'edit'], // Different excluded tools
+        getContentGeneratorConfig: () => ({
+          model: 'test-model',
+          authType: 'oauth-personal',
+        }),
+        getShellExecutionConfig: () => ({
+          terminalWidth: 90,
+          terminalHeight: 30,
+        }),
+        storage: {
+          getProjectTempDir: () => '/tmp',
+        },
+        getTruncateToolOutputThreshold: () =>
+          DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getToolRegistry: () => mockToolRegistry,
+        getUseSmartEdit: () => false,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const abortController = new AbortController();
+      const request = {
+        callId: '1',
+        name: 'nonexistent_tool', // Not excluded, just doesn't exist
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-missing',
+      };
+
+      await scheduler.schedule([request], abortController.signal);
+
+      // Wait for completion
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(1);
+      const completedCall = completedCalls[0];
+      expect(completedCall.status).toBe('error');
+
+      if (completedCall.status === 'error') {
+        const errorMessage = completedCall.response.error?.message;
+        // Should contain "not found in registry"
+        expect(errorMessage).toContain('not found in registry');
+        // Should NOT contain permission message
+        expect(errorMessage).not.toContain('requires permission');
+      }
     });
   });
 });
@@ -449,6 +686,9 @@ describe('CoreToolScheduler with payload', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      isInteractive: () => true, // Required to prevent auto-denial of tool calls
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -769,6 +1009,9 @@ describe('CoreToolScheduler edit cancellation', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      isInteractive: () => true, // Required to prevent auto-denial of tool calls
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1421,6 +1664,9 @@ describe('CoreToolScheduler request queueing', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      isInteractive: () => true, // Required to prevent auto-denial of tool calls
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
     } as unknown as Config;
 
     const testTool = new TestApprovalTool(mockConfig);
@@ -1450,7 +1696,10 @@ describe('CoreToolScheduler request queueing', () => {
     const onAllToolCallsComplete = vi.fn();
     const onToolCallsUpdate = vi.fn();
     const pendingConfirmations: Array<
-      (outcome: ToolConfirmationOutcome) => void
+      (
+        outcome: ToolConfirmationOutcome,
+        payload?: ToolConfirmationPayload,
+      ) => Promise<void>
     > = [];
 
     const scheduler = new CoreToolScheduler({
@@ -1521,7 +1770,7 @@ describe('CoreToolScheduler request queueing', () => {
 
     // Approve the first tool with ProceedAlways
     const firstConfirmation = pendingConfirmations[0];
-    firstConfirmation(ToolConfirmationOutcome.ProceedAlways);
+    await firstConfirmation(ToolConfirmationOutcome.ProceedAlways);
 
     // Wait for all tools to be completed
     await vi.waitFor(() => {

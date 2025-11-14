@@ -19,7 +19,7 @@ describe('JSON output', () => {
     await rig.cleanup();
   });
 
-  it('should return a valid JSON with response and stats', async () => {
+  it('should return a valid JSON array with result message containing response and stats', async () => {
     const result = await rig.run(
       'What is the capital of France?',
       '--output-format',
@@ -27,12 +27,30 @@ describe('JSON output', () => {
     );
     const parsed = JSON.parse(result);
 
-    expect(parsed).toHaveProperty('response');
-    expect(typeof parsed.response).toBe('string');
-    expect(parsed.response.toLowerCase()).toContain('paris');
+    // The output should be an array of messages
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
 
-    expect(parsed).toHaveProperty('stats');
-    expect(typeof parsed.stats).toBe('object');
+    // Find the result message (should be the last message)
+    const resultMessage = parsed.find(
+      (msg: unknown) =>
+        typeof msg === 'object' &&
+        msg !== null &&
+        'type' in msg &&
+        msg.type === 'result',
+    );
+
+    expect(resultMessage).toBeDefined();
+    expect(resultMessage).toHaveProperty('is_error');
+    expect(resultMessage.is_error).toBe(false);
+    expect(resultMessage).toHaveProperty('result');
+    expect(typeof resultMessage.result).toBe('string');
+    expect(resultMessage.result.toLowerCase()).toContain('paris');
+
+    // Stats may be present if available
+    if ('stats' in resultMessage) {
+      expect(typeof resultMessage.stats).toBe('object');
+    }
   });
 
   it('should return a JSON error for enforced auth mismatch before running', async () => {
@@ -56,6 +74,7 @@ describe('JSON output', () => {
     expect(thrown).toBeDefined();
     const message = (thrown as Error).message;
 
+    // The error JSON is written to stderr, so it should be in the error message
     // Use a regex to find the first complete JSON object in the string
     const jsonMatch = message.match(/{[\s\S]*}/);
 
@@ -76,6 +95,8 @@ describe('JSON output', () => {
       );
     }
 
+    // The JsonFormatter.formatError() outputs: { error: { type, message, code } }
+    expect(payload).toHaveProperty('error');
     expect(payload.error).toBeDefined();
     expect(payload.error.type).toBe('Error');
     expect(payload.error.code).toBe(1);

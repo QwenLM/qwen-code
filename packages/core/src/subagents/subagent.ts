@@ -619,6 +619,13 @@ export class SubAgentScope {
             name: toolName,
             success,
             error: errorMessage,
+            responseParts: call.response.responseParts,
+            /**
+             * Tools like todoWrite will add some extra contents to the result,
+             * making it unable to deserialize the `responseParts` to a JSON object.
+             * While `resultDisplay` is normally a string, if not we stringify it,
+             * so that we can deserialize it to a JSON object when needed.
+             */
             resultDisplay: call.response.resultDisplay
               ? typeof call.response.resultDisplay === 'string'
                 ? call.response.resultDisplay

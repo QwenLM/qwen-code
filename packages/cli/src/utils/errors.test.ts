@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, type MockInstance } from 'vitest';
+import { vi, type Mock, type MockInstance } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { OutputFormat, FatalInputError } from '@qwen-code/qwen-code-core';
 import {
@@ -83,6 +83,7 @@ describe('errors', () => {
     mockConfig = {
       getOutputFormat: vi.fn().mockReturnValue(OutputFormat.TEXT),
       getContentGeneratorConfig: vi.fn().mockReturnValue({ authType: 'test' }),
+      getDebugMode: vi.fn().mockReturnValue(true),
     } as unknown as Config;
   });
 
@@ -254,105 +255,81 @@ describe('errors', () => {
     const toolName = 'test-tool';
     const toolError = new Error('Tool failed');
 
-    describe('in text mode', () => {
+    describe('when debug mode is enabled', () => {
       beforeEach(() => {
-        (
-          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
-        ).mockReturnValue(OutputFormat.TEXT);
+        (mockConfig.getDebugMode as Mock).mockReturnValue(true);
       });
 
-      it('should log error message to stderr', () => {
-        handleToolError(toolName, toolError, mockConfig);
+      describe('in text mode', () => {
+        beforeEach(() => {
+          (
+            mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+          ).mockReturnValue(OutputFormat.TEXT);
+        });
 
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          'Error executing tool test-tool: Tool failed',
-        );
-      });
-
-      it('should use resultDisplay when provided', () => {
-        handleToolError(
-          toolName,
-          toolError,
-          mockConfig,
-          'CUSTOM_ERROR',
-          'Custom display message',
-        );
-
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          'Error executing tool test-tool: Custom display message',
-        );
-      });
-    });
-
-    describe('in JSON mode', () => {
-      beforeEach(() => {
-        (
-          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
-        ).mockReturnValue(OutputFormat.JSON);
-      });
-
-      it('should format error as JSON and exit with default code', () => {
-        expect(() => {
+        it('should log error message to stderr and not exit', () => {
           handleToolError(toolName, toolError, mockConfig);
-        }).toThrow('process.exit called with code: 54');
 
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Tool failed',
-                code: 54,
-              },
-            },
-            null,
-            2,
-          ),
-        );
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Tool failed',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
+
+        it('should use resultDisplay when provided and not exit', () => {
+          handleToolError(
+            toolName,
+            toolError,
+            mockConfig,
+            'CUSTOM_ERROR',
+            'Custom display message',
+          );
+
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Custom display message',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
       });
 
-      it('should use custom error code', () => {
-        expect(() => {
+      describe('in JSON mode', () => {
+        beforeEach(() => {
+          (
+            mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+          ).mockReturnValue(OutputFormat.JSON);
+        });
+
+        it('should log error message to stderr and not exit', () => {
+          handleToolError(toolName, toolError, mockConfig);
+
+          // In JSON mode, should not exit (just log to stderr when debug mode is on)
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Tool failed',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
+
+        it('should log error with custom error code and not exit', () => {
           handleToolError(toolName, toolError, mockConfig, 'CUSTOM_TOOL_ERROR');
-        }).toThrow('process.exit called with code: 54');
 
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Tool failed',
-                code: 'CUSTOM_TOOL_ERROR',
-              },
-            },
-            null,
-            2,
-          ),
-        );
-      });
+          // In JSON mode, should not exit (just log to stderr when debug mode is on)
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Tool failed',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
 
-      it('should use numeric error code and exit with that code', () => {
-        expect(() => {
+        it('should log error with numeric error code and not exit', () => {
           handleToolError(toolName, toolError, mockConfig, 500);
-        }).toThrow('process.exit called with code: 500');
 
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Tool failed',
-                code: 500,
-              },
-            },
-            null,
-            2,
-          ),
-        );
-      });
+          // In JSON mode, should not exit (just log to stderr when debug mode is on)
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Tool failed',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
 
-      it('should prefer resultDisplay over error message', () => {
-        expect(() => {
+        it('should prefer resultDisplay over error message and not exit', () => {
           handleToolError(
             toolName,
             toolError,
@@ -360,21 +337,99 @@ describe('errors', () => {
             'DISPLAY_ERROR',
             'Display message',
           );
-        }).toThrow('process.exit called with code: 54');
 
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          JSON.stringify(
-            {
-              error: {
-                type: 'FatalToolExecutionError',
-                message: 'Error executing tool test-tool: Display message',
-                code: 'DISPLAY_ERROR',
-              },
-            },
-            null,
-            2,
-          ),
-        );
+          // In JSON mode, should not exit (just log to stderr when debug mode is on)
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Display message',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      describe('in STREAM_JSON mode', () => {
+        beforeEach(() => {
+          (
+            mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+          ).mockReturnValue(OutputFormat.STREAM_JSON);
+        });
+
+        it('should log error message to stderr and not exit', () => {
+          handleToolError(toolName, toolError, mockConfig);
+
+          // Should not exit in STREAM_JSON mode (just log to stderr when debug mode is on)
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            'Error executing tool test-tool: Tool failed',
+          );
+          expect(processExitSpy).not.toHaveBeenCalled();
+        });
+      });
+    });
+
+    describe('when debug mode is disabled', () => {
+      beforeEach(() => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+      });
+
+      it('should not log and not exit in text mode', () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(toolName, toolError, mockConfig);
+
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not log and not exit in JSON mode', () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.JSON);
+
+        handleToolError(toolName, toolError, mockConfig);
+
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not log and not exit in STREAM_JSON mode', () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.STREAM_JSON);
+
+        handleToolError(toolName, toolError, mockConfig);
+
+        expect(consoleErrorSpy).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('process exit behavior', () => {
+      beforeEach(() => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(true);
+      });
+
+      it('should never exit regardless of output format', () => {
+        // Test in TEXT mode
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+        handleToolError(toolName, toolError, mockConfig);
+        expect(processExitSpy).not.toHaveBeenCalled();
+
+        // Test in JSON mode
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.JSON);
+        handleToolError(toolName, toolError, mockConfig);
+        expect(processExitSpy).not.toHaveBeenCalled();
+
+        // Test in STREAM_JSON mode
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.STREAM_JSON);
+        handleToolError(toolName, toolError, mockConfig);
+        expect(processExitSpy).not.toHaveBeenCalled();
       });
     });
   });

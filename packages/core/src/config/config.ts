@@ -62,7 +62,7 @@ import { WriteFileTool } from '../tools/write-file.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
-import { OutputFormat } from '../output/types.js';
+import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import {
@@ -215,6 +215,7 @@ export interface ConfigParameters {
   sandbox?: SandboxConfig;
   targetDir: string;
   debugMode: boolean;
+  includePartialMessages?: boolean;
   question?: string;
   fullContext?: boolean;
   coreTools?: string[];
@@ -290,6 +291,27 @@ export interface ConfigParameters {
   useSmartEdit?: boolean;
   output?: OutputSettings;
   skipStartupContext?: boolean;
+  inputFormat?: InputFormat;
+  outputFormat?: OutputFormat;
+}
+
+function normalizeConfigOutputFormat(
+  format: OutputFormat | undefined,
+): OutputFormat | undefined {
+  if (!format) {
+    return undefined;
+  }
+  switch (format) {
+    case 'stream-json':
+      return OutputFormat.STREAM_JSON;
+    case 'json':
+    case OutputFormat.JSON:
+      return OutputFormat.JSON;
+    case 'text':
+    case OutputFormat.TEXT:
+    default:
+      return OutputFormat.TEXT;
+  }
 }
 
 export class Config {
@@ -306,6 +328,9 @@ export class Config {
   private readonly targetDir: string;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
+  private readonly inputFormat: InputFormat;
+  private readonly outputFormat: OutputFormat;
+  private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
   private readonly fullContext: boolean;
   private readonly coreTools: string[] | undefined;
@@ -389,7 +414,6 @@ export class Config {
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
-  private readonly outputSettings: OutputSettings;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -402,6 +426,12 @@ export class Config {
       params.includeDirectories ?? [],
     );
     this.debugMode = params.debugMode;
+    this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
+    const normalizedOutputFormat = normalizeConfigOutputFormat(
+      params.outputFormat ?? params.output?.format,
+    );
+    this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
+    this.includePartialMessages = params.includePartialMessages ?? false;
     this.question = params.question;
     this.fullContext = params.fullContext ?? false;
     this.coreTools = params.coreTools;
@@ -497,12 +527,9 @@ export class Config {
     this.storage = new Storage(this.targetDir);
     this.enablePromptCompletion = params.enablePromptCompletion ?? false;
     this.vlmSwitchMode = params.vlmSwitchMode;
+    this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
-    this.outputSettings = {
-      format: params.output?.format ?? OutputFormat.TEXT,
-    };
-
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -785,6 +812,14 @@ export class Config {
 
   getShowMemoryUsage(): boolean {
     return this.showMemoryUsage;
+  }
+
+  getInputFormat(): 'text' | 'stream-json' {
+    return this.inputFormat;
+  }
+
+  getIncludePartialMessages(): boolean {
+    return this.includePartialMessages;
   }
 
   getAccessibility(): AccessibilitySettings {
@@ -1087,9 +1122,7 @@ export class Config {
   }
 
   getOutputFormat(): OutputFormat {
-    return this.outputSettings?.format
-      ? this.outputSettings.format
-      : OutputFormat.TEXT;
+    return this.outputFormat;
   }
 
   async getGitService(): Promise<GitService> {

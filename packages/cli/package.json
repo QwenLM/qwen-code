@@ -8,8 +8,19 @@
   },
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "qwen": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/src/types/protocol.d.ts",
+      "import": "./dist/src/types/protocol.js"
+    }
   },
   "scripts": {
     "build": "node ../../scripts/build_package.js",

@@ -548,12 +548,25 @@ Arguments passed directly when running the CLI can override other configurations
   - The prompt is processed within the interactive session, not before it.
   - Cannot be used when piping input from stdin.
   - Example: `qwen -i "explain this code"`
-- **`--output-format <format>`**:
+- **`--output-format <format>`** (**`-o <format>`**):
   - **Description:** Specifies the format of the CLI output for non-interactive mode.
   - **Values:**
     - `text`: (Default) The standard human-readable output.
-    - `json`: A machine-readable JSON output.
-  - **Note:** For structured output and scripting, use the `--output-format json` flag.
+    - `json`: A machine-readable JSON output emitted at the end of execution.
+    - `stream-json`: Streaming JSON messages emitted as they occur during execution.
+  - **Note:** For structured output and scripting, use the `--output-format json` or `--output-format stream-json` flag. See [Headless Mode](../features/headless.md) for detailed information.
+- **`--input-format <format>`**:
+  - **Description:** Specifies the format consumed from standard input.
+  - **Values:**
+    - `text`: (Default) Standard text input from stdin or command-line arguments.
+    - `stream-json`: JSON message protocol via stdin for bidirectional communication.
+  - **Requirement:** `--input-format stream-json` requires `--output-format stream-json` to be set.
+  - **Note:** When using `stream-json`, stdin is reserved for protocol messages. See [Headless Mode](../features/headless.md) for detailed information.
+- **`--include-partial-messages`**:
+  - **Description:** Include partial assistant messages when using `stream-json` output format. When enabled, emits stream events (message_start, content_block_delta, etc.) as they occur during streaming.
+  - **Default:** `false`
+  - **Requirement:** Requires `--output-format stream-json` to be set.
+  - **Note:** See [Headless Mode](../features/headless.md) for detailed information about stream events.
 - **`--sandbox`** (**`-s`**):
   - Enables sandbox mode for this session.
 - **`--sandbox-image`**:
