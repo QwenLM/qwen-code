@@ -33,9 +33,10 @@ export type {
   CreateQueryOptions,
   PermissionMode,
   PermissionCallback,
-  ExternalMcpServerConfig,
   TransportOptions,
 } from './types/config.js';
+
+export type { ExternalMcpServerConfig } from './types/queryOptionsSchema.js';
 
 export type { QueryOptions } from './query/createQuery.js';
 

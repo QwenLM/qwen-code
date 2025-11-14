@@ -4,6 +4,7 @@
 
 import type { ToolDefinition as ToolDef } from './mcp.js';
 import type { PermissionMode } from './protocol.js';
+import type { ExternalMcpServerConfig } from './queryOptionsSchema.js';
 
 export type { ToolDef as ToolDefinition };
 export type { PermissionMode };
@@ -54,18 +55,6 @@ export interface HookMatcher {
  */
 export type HookConfig = {
   [event: string]: HookMatcher[];
-};
-
-/**
- * External MCP server configuration (spawned by CLI)
- */
-export type ExternalMcpServerConfig = {
-  /** Command to execute (e.g., 'mcp-server-filesystem') */
-  command: string;
-  /** Command-line arguments */
-  args?: string[];
-  /** Environment variables */
-  env?: Record<string, string>;
 };
 
 /**

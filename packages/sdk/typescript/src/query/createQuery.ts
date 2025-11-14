@@ -4,35 +4,16 @@
 
 import type { CLIUserMessage } from '../types/protocol.js';
 import { serializeJsonLine } from '../utils/jsonLines.js';
-import type {
-  CreateQueryOptions,
-  PermissionMode,
-  PermissionCallback,
-  ExternalMcpServerConfig,
-} from '../types/config.js';
+import type { CreateQueryOptions } from '../types/config.js';
 import { ProcessTransport } from '../transport/ProcessTransport.js';
 import { parseExecutableSpec } from '../utils/cliPath.js';
 import { Query } from './Query.js';
+import {
+  QueryOptionsSchema,
+  type QueryOptions,
+} from '../types/queryOptionsSchema.js';
 
-/**
- * Configuration options for creating a Query.
- */
-export type QueryOptions = {
-  cwd?: string;
-  model?: string;
-  pathToQwenExecutable?: string;
-  env?: Record<string, string>;
-  permissionMode?: PermissionMode;
-  canUseTool?: PermissionCallback;
-  mcpServers?: Record<string, ExternalMcpServerConfig>;
-  sdkMcpServers?: Record<
-    string,
-    { connect: (transport: unknown) => Promise<void> }
-  >;
-  abortController?: AbortController;
-  debug?: boolean;
-  stderr?: (message: string) => void;
-};
+export type { QueryOptions };
 
 /**
  * Create a Query instance for interacting with the Qwen CLI.
@@ -146,8 +127,8 @@ export const createQuery = query;
 /**
  * Validate query configuration options and normalize CLI executable details.
  *
- * Performs strict validation for each supported option, including
- * permission mode, callbacks, AbortController usage, and executable spec.
+ * Performs strict validation for each supported option using Zod schema,
+ * including permission mode, callbacks, AbortController usage, and executable spec.
  * Returns the parsed executable description so callers can retain
  * explicit runtime directives (e.g., `bun:/path/to/cli.js`) while still
  * benefiting from early validation and auto-detection fallbacks when the
@@ -156,32 +137,17 @@ export const createQuery = query;
 function validateOptions(
   options: QueryOptions,
 ): ReturnType<typeof parseExecutableSpec> {
-  let parsedExecutable: ReturnType<typeof parseExecutableSpec>;
-
-  // Validate permission mode if provided
-  if (options.permissionMode) {
-    const validModes = ['default', 'plan', 'auto-edit', 'yolo'];
-    if (!validModes.includes(options.permissionMode)) {
-      throw new Error(
-        `Invalid permissionMode: ${options.permissionMode}. Valid values are: ${validModes.join(', ')}`,
-      );
-    }
-  }
-
-  // Validate canUseTool is a function if provided
-  if (options.canUseTool && typeof options.canUseTool !== 'function') {
-    throw new Error('canUseTool must be a function');
-  }
-
-  // Validate abortController is AbortController if provided
-  if (
-    options.abortController &&
-    !(options.abortController instanceof AbortController)
-  ) {
-    throw new Error('abortController must be an AbortController instance');
+  // Validate options using Zod schema
+  const validationResult = QueryOptionsSchema.safeParse(options);
+  if (!validationResult.success) {
+    const errors = validationResult.error.errors
+      .map((err) => `${err.path.join('.')}: ${err.message}`)
+      .join('; ');
+    throw new Error(`Invalid QueryOptions: ${errors}`);
   }
 
   // Validate executable path early to provide clear error messages
+  let parsedExecutable: ReturnType<typeof parseExecutableSpec>;
   try {
     parsedExecutable = parseExecutableSpec(options.pathToQwenExecutable);
   } catch (error) {
@@ -189,7 +155,7 @@ function validateOptions(
     throw new Error(`Invalid pathToQwenExecutable: ${errorMessage}`);
   }
 
-  // Validate no MCP server name conflicts
+  // Validate no MCP server name conflicts (cross-field validation not easily expressible in Zod)
   if (options.mcpServers && options.sdkMcpServers) {
     const externalNames = Object.keys(options.mcpServers);
     const sdkNames = Object.keys(options.sdkMcpServers);
