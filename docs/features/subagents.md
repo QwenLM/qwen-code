@@ -106,7 +106,7 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 ---
 name: agent-name
 description: Brief description of when and how to use this agent
-tools: 
+tools:
   - tool1
   - tool2
   - tool3 # Optional
@@ -170,7 +170,7 @@ Perfect for comprehensive test creation and test-driven development.
 ---
 name: testing-expert
 description: Writes comprehensive unit tests, integration tests, and handles test automation with best practices
-tools: 
+tools:
   - read_file
   - write_file
   - read_many_files
@@ -214,7 +214,7 @@ Specialized in creating clear, comprehensive documentation.
 ---
 name: documentation-writer
 description: Creates comprehensive documentation, README files, API docs, and user guides
-tools: 
+tools:
   - read_file
   - write_file
   - read_many_files
@@ -267,7 +267,7 @@ Focused on code quality, security, and best practices.
 ---
 name: code-reviewer
 description: Reviews code for best practices, security issues, performance, and maintainability
-tools: 
+tools:
   - read_file
   - read_many_files
 ---
@@ -311,7 +311,7 @@ Optimized for React development, hooks, and component patterns.
 ---
 name: react-specialist
 description: Expert in React development, hooks, component patterns, and modern React best practices
-tools: 
+tools:
   - read_file
   - write_file
   - read_many_files

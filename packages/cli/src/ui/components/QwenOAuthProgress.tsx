@@ -11,13 +11,13 @@ import Spinner from 'ink-spinner';
 import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
-import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { DeviceAuthorizationData } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 
 interface QwenOAuthProgressProps {
   onTimeout: () => void;
   onCancel: () => void;
-  deviceAuth?: DeviceAuthorizationInfo;
+  deviceAuth?: DeviceAuthorizationData;
   authStatus?:
     | 'idle'
     | 'polling'

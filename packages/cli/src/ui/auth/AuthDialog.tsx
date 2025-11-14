@@ -9,25 +9,14 @@ import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
 import { validateAuthMethod } from '../../config/auth.js';
-import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { SettingScope } from '../../config/settings.js';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { OpenAIKeyPrompt } from '../components/OpenAIKeyPrompt.js';
 import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
-
-interface AuthDialogProps {
-  onSelect: (
-    authMethod: AuthType | undefined,
-    scope: SettingScope,
-    credentials?: {
-      apiKey?: string;
-      baseUrl?: string;
-      model?: string;
-    },
-  ) => void;
-  settings: LoadedSettings;
-  initialErrorMessage?: string | null;
-}
+import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 
 function parseDefaultAuthType(
   defaultAuthType: string | undefined,
@@ -41,13 +30,13 @@ function parseDefaultAuthType(
   return null;
 }
 
-export function AuthDialog({
-  onSelect,
-  settings,
-  initialErrorMessage,
-}: AuthDialogProps): React.JSX.Element {
+export function AuthDialog(): React.JSX.Element {
+  const { authError, pendingAuthType } = useUIState();
+  const { handleAuthSelect: onAuthSelect } = useUIActions();
+  const settings = useSettings();
+
   const [errorMessage, setErrorMessage] = useState<string | null>(
-    initialErrorMessage || null,
+    authError || null,
   );
   const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
   const items = [
@@ -62,10 +51,17 @@ export function AuthDialog({
   const initialAuthIndex = Math.max(
     0,
     items.findIndex((item) => {
+      // Priority 1: pendingAuthType
+      if (pendingAuthType) {
+        return item.value === pendingAuthType;
+      }
+
+      // Priority 2: settings.merged.security?.auth?.selectedType
       if (settings.merged.security?.auth?.selectedType) {
         return item.value === settings.merged.security?.auth?.selectedType;
       }
 
+      // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
       const defaultAuthType = parseDefaultAuthType(
         process.env['QWEN_DEFAULT_AUTH_TYPE'],
       );
@@ -73,11 +69,12 @@ export function AuthDialog({
         return item.value === defaultAuthType;
       }
 
+      // Priority 4: default to QWEN_OAUTH
       return item.value === AuthType.QWEN_OAUTH;
     }),
   );
 
-  const handleAuthSelect = (authMethod: AuthType) => {
+  const handleAuthSelect = async (authMethod: AuthType) => {
     const error = validateAuthMethod(authMethod);
     if (error) {
       if (
@@ -91,21 +88,21 @@ export function AuthDialog({
       }
     } else {
       setErrorMessage(null);
-      onSelect(authMethod, SettingScope.User);
+      await onAuthSelect(authMethod, SettingScope.User);
     }
   };
 
-  const handleOpenAIKeySubmit = (
+  const handleOpenAIKeySubmit = async (
     apiKey: string,
     baseUrl: string,
     model: string,
   ) => {
-    setShowOpenAIKeyPrompt(false);
-    onSelect(AuthType.USE_OPENAI, SettingScope.User, {
+    await onAuthSelect(AuthType.USE_OPENAI, SettingScope.User, {
       apiKey,
       baseUrl,
       model,
     });
+    setShowOpenAIKeyPrompt(false);
   };
 
   const handleOpenAIKeyCancel = () => {
@@ -132,7 +129,7 @@ export function AuthDialog({
           );
           return;
         }
-        onSelect(undefined, SettingScope.User);
+        onAuthSelect(undefined, SettingScope.User);
       }
     },
     { isActive: true },

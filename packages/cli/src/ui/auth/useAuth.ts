@@ -6,13 +6,17 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
-import type { AuthType, Config } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   clearCachedCredentialFile,
   getErrorMessage,
 } from '@qwen-code/qwen-code-core';
 import { AuthState } from '../types.js';
 import { validateAuthMethod } from '../../config/auth.js';
+import { useQwenAuth } from '../hooks/useQwenAuth.js';
+
+export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
 export function validateAuthMethodWithSettings(
   authType: AuthType,
@@ -40,6 +44,14 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
 
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(unAuthenticated);
+  const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
+    undefined,
+  );
+
+  const { qwenAuthState, cancelQwenAuth } = useQwenAuth(
+    pendingAuthType,
+    isAuthenticating,
+  );
 
   const onAuthError = useCallback(
     (error: string | null) => {
@@ -52,7 +64,6 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     [setAuthError, setAuthState],
   );
 
-  // Authentication flow
   useEffect(() => {
     const authFlow = async () => {
       const authType = settings.merged.security?.auth?.selectedType;
@@ -85,7 +96,65 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     void authFlow();
   }, [isAuthDialogOpen, settings, config, onAuthError]);
 
-  // Handle auth selection from dialog
+  const handleAuthSuccess = useCallback(
+    (
+      authType: AuthType,
+      scope: SettingScope,
+      credentials?: {
+        apiKey?: string;
+        baseUrl?: string;
+        model?: string;
+      },
+    ) => {
+      if (credentials?.apiKey) {
+        settings.setValue(scope, 'security.auth.apiKey', credentials.apiKey);
+      }
+      if (credentials?.baseUrl) {
+        settings.setValue(scope, 'security.auth.baseUrl', credentials.baseUrl);
+      }
+      if (credentials?.model) {
+        settings.setValue(scope, 'model.name', credentials.model);
+      }
+      settings.setValue(scope, 'security.auth.selectedType', authType);
+
+      setAuthError(null);
+      setAuthState(AuthState.Authenticated);
+      setPendingAuthType(undefined);
+      setIsAuthDialogOpen(false);
+    },
+    [settings],
+  );
+
+  const handleAuthFailure = useCallback(
+    (error: unknown) => {
+      onAuthError(`Failed to login. Message: ${getErrorMessage(error)}`);
+    },
+    [onAuthError],
+  );
+
+  const performAuth = useCallback(
+    async (
+      authType: AuthType,
+      scope: SettingScope,
+      credentials?: {
+        apiKey?: string;
+        baseUrl?: string;
+        model?: string;
+      },
+    ) => {
+      try {
+        setIsAuthenticating(true);
+        await config.refreshAuth(authType);
+        handleAuthSuccess(authType, scope, credentials);
+      } catch (e) {
+        handleAuthFailure(e);
+      } finally {
+        setIsAuthenticating(false);
+      }
+    },
+    [config, handleAuthSuccess, handleAuthFailure],
+  );
+
   const handleAuthSelect = useCallback(
     async (
       authType: AuthType | undefined,
@@ -96,46 +165,33 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
         model?: string;
       },
     ) => {
-      if (authType) {
-        await clearCachedCredentialFile();
+      if (!authType) {
+        setIsAuthDialogOpen(false);
+        setAuthError(null);
+        return;
+      }
 
-        // Save OpenAI credentials if provided
+      await clearCachedCredentialFile();
+
+      setPendingAuthType(authType);
+      setAuthError(null);
+
+      if (authType === AuthType.USE_OPENAI) {
         if (credentials) {
-          // Update Config's internal generationConfig before calling refreshAuth
-          // This ensures refreshAuth has access to the new credentials
           config.updateCredentials({
             apiKey: credentials.apiKey,
             baseUrl: credentials.baseUrl,
             model: credentials.model,
           });
-
-          // Also set environment variables for compatibility with other parts of the code
-          if (credentials.apiKey) {
-            settings.setValue(
-              scope,
-              'security.auth.apiKey',
-              credentials.apiKey,
-            );
-          }
-          if (credentials.baseUrl) {
-            settings.setValue(
-              scope,
-              'security.auth.baseUrl',
-              credentials.baseUrl,
-            );
-          }
-          if (credentials.model) {
-            settings.setValue(scope, 'model.name', credentials.model);
-          }
         }
 
-        settings.setValue(scope, 'security.auth.selectedType', authType);
+        await performAuth(authType, scope, credentials);
+        return;
       }
 
-      setIsAuthDialogOpen(false);
-      setAuthError(null);
+      await performAuth(authType, scope);
     },
-    [settings, config],
+    [config, performAuth],
   );
 
   const openAuthDialog = useCallback(() => {
@@ -143,8 +199,22 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
   }, []);
 
   const cancelAuthentication = useCallback(() => {
+    // If authenticating with Qwen OAuth, cancel Qwen auth
+    if (
+      isAuthenticating &&
+      (pendingAuthType === AuthType.QWEN_OAUTH ||
+        settings.merged.security?.auth?.selectedType === AuthType.QWEN_OAUTH)
+    ) {
+      cancelQwenAuth();
+    }
+
     setIsAuthenticating(false);
-  }, []);
+  }, [
+    isAuthenticating,
+    pendingAuthType,
+    settings.merged.security?.auth?.selectedType,
+    cancelQwenAuth,
+  ]);
 
   return {
     authState,
@@ -153,6 +223,8 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     onAuthError,
     isAuthDialogOpen,
     isAuthenticating,
+    pendingAuthType,
+    qwenAuthState,
     handleAuthSelect,
     openAuthDialog,
     cancelAuthentication,

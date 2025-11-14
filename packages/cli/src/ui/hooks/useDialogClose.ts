@@ -25,8 +25,13 @@ export interface DialogCloseOptions {
   handleAuthSelect: (
     authType: AuthType | undefined,
     scope: SettingScope,
+    credentials?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+    },
   ) => Promise<void>;
-  selectedAuthType: AuthType | undefined;
+  pendingAuthType: AuthType | undefined;
 
   // Editor dialog
   isEditorDialogOpen: boolean;

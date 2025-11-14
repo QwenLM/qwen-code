@@ -26,6 +26,8 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { AuthState } from '../types.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
@@ -209,14 +211,28 @@ export const DialogManager = ({
   }
   if (uiState.isAuthenticating) {
     // Show Qwen OAuth progress if it's Qwen auth and OAuth is active
-    if (uiState.isQwenAuth && uiState.isQwenAuthenticating) {
+    const isQwenAuth =
+      uiState.pendingAuthType === AuthType.QWEN_OAUTH ||
+      settings.merged.security?.auth?.selectedType === AuthType.QWEN_OAUTH;
+
+    if (isQwenAuth && uiState.qwenAuthState.authStatus !== 'idle') {
       return (
         <QwenOAuthProgress
-          deviceAuth={uiState.deviceAuth || undefined}
-          authStatus={uiState.authStatus}
-          authMessage={uiState.authMessage}
-          onTimeout={uiActions.handleQwenAuthTimeout}
-          onCancel={uiActions.handleQwenAuthCancel}
+          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
+          authStatus={uiState.qwenAuthState.authStatus}
+          authMessage={uiState.qwenAuthState.authMessage}
+          onTimeout={() => {
+            uiActions.onAuthError(
+              'Qwen OAuth authentication timed out. Please try again.',
+            );
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
+          onCancel={() => {
+            uiActions.onAuthError('Qwen OAuth authentication cancelled.');
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
         />
       );
     }
@@ -233,11 +249,7 @@ export const DialogManager = ({
   if (uiState.isAuthDialogOpen) {
     return (
       <Box flexDirection="column">
-        <AuthDialog
-          onSelect={uiActions.handleAuthSelect}
-          settings={settings}
-          initialErrorMessage={uiState.authError}
-        />
+        <AuthDialog />
       </Box>
     );
   }

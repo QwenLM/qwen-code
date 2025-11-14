@@ -30,12 +30,15 @@ export interface UIActions {
   handleAuthSelect: (
     authType: AuthType | undefined,
     scope: SettingScope,
-  ) => void;
+    credentials?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+    },
+  ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string) => void;
-  // Qwen OAuth handlers
-  handleQwenAuthTimeout: () => void;
-  handleQwenAuthCancel: () => void;
+  cancelAuthentication: () => void;
   handleEditorSelect: (
     editorType: EditorType | undefined,
     scope: SettingScope,
