@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useIsScreenReaderEnabled } from 'ink';
+import { Box, useIsScreenReaderEnabled } from 'ink';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { lerp } from '../utils/math.js';
 import { useUIState } from './contexts/UIStateContext.js';
@@ -12,6 +12,7 @@ import { StreamingContext } from './contexts/StreamingContext.js';
 import { QuittingDisplay } from './components/QuittingDisplay.js';
 import { ScreenReaderAppLayout } from './layouts/ScreenReaderAppLayout.js';
 import { DefaultAppLayout } from './layouts/DefaultAppLayout.js';
+import { SubagentFullscreenPanel } from './components/subagents/runtime/SubagentFullscreenPanel.js';
 
 const getContainerWidth = (terminalWidth: number): string => {
   if (terminalWidth <= 80) {
@@ -38,12 +39,18 @@ export const App = () => {
     return <QuittingDisplay />;
   }
 
+  const showFullscreen = Boolean(uiState.subagentFullscreenPanel);
+  const mainLayout = isScreenReaderEnabled ? (
+    <ScreenReaderAppLayout />
+  ) : (
+    <DefaultAppLayout width={containerWidth} />
+  );
+
   return (
     <StreamingContext.Provider value={uiState.streamingState}>
-      {isScreenReaderEnabled ? (
-        <ScreenReaderAppLayout />
-      ) : (
-        <DefaultAppLayout width={containerWidth} />
+      <Box display={showFullscreen ? 'none' : 'flex'}>{mainLayout}</Box>
+      {showFullscreen && uiState.subagentFullscreenPanel && (
+        <SubagentFullscreenPanel panel={uiState.subagentFullscreenPanel} />
       )}
     </StreamingContext.Provider>
   );

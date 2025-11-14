@@ -124,6 +124,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     errorCount: 0,
     nightly: false,
     isTrustedFolder: true,
+    subagentFullscreenPanel: null,
     ...overrides,
   }) as UIState;
 
@@ -134,6 +135,9 @@ const createMockUIActions = (): UIActions =>
     setShellModeActive: vi.fn(),
     onEscapePromptChange: vi.fn(),
     vimHandleInput: vi.fn(),
+    openSubagentFullscreenPanel: vi.fn(),
+    closeSubagentFullscreenPanel: vi.fn(),
+    updateSubagentFullscreenPanel: vi.fn(),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   }) as any;
 

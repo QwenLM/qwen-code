@@ -634,6 +634,34 @@ describe('AppContainer State Management', () => {
       capturedUIActions.handleProQuotaChoice('auth');
       expect(mockHandler).toHaveBeenCalledWith('auth');
     });
+
+    it('disables the input prompt when subagent fullscreen panel is open', async () => {
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.isInputActive).toBe(true);
+
+      capturedUIActions.openSubagentFullscreenPanel({
+        panelId: 'test-panel',
+        subagentName: 'Agent',
+        status: 'running',
+        content: [],
+        getSnapshot: () => [],
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(capturedUIState.isInputActive).toBe(false);
+
+      capturedUIActions.closeSubagentFullscreenPanel('test-panel');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(capturedUIState.isInputActive).toBe(true);
+    });
   });
 
   describe('Terminal Title Update Feature', () => {
