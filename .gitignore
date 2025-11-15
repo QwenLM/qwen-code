@@ -64,3 +64,4 @@ patch_output.log
 
 # Qwen documentation
 QWEN.md
+scripts/log/
