@@ -12,6 +12,7 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
 
 /**
  * Parameters for the LS tool
@@ -252,12 +253,12 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
  * Implementation of the LS tool logic
  */
 export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
-  static readonly Name = 'list_directory';
+  static readonly Name = ToolNames.LS;
 
   constructor(private config: Config) {
     super(
       LSTool.Name,
-      'ReadFolder',
+      ToolDisplayNames.LS,
       'Lists the names of files and subdirectories directly within a specified directory path. Can optionally ignore entries matching provided glob patterns.',
       Kind.Search,
       {

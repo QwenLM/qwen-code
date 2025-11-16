@@ -78,20 +78,17 @@ export function AuthDialog({
   );
 
   const handleAuthSelect = (authMethod: AuthType) => {
-    const error = validateAuthMethod(authMethod);
-    if (error) {
-      if (
-        authMethod === AuthType.USE_OPENAI &&
-        !process.env['OPENAI_API_KEY']
-      ) {
-        setShowOpenAIKeyPrompt(true);
-        setErrorMessage(null);
-      } else {
-        setErrorMessage(error);
-      }
-    } else {
+    if (authMethod === AuthType.USE_OPENAI) {
+      setShowOpenAIKeyPrompt(true);
       setErrorMessage(null);
-      onSelect(authMethod, SettingScope.User);
+    } else {
+      const error = validateAuthMethod(authMethod);
+      if (error) {
+        setErrorMessage(error);
+      } else {
+        setErrorMessage(null);
+        onSelect(authMethod, SettingScope.User);
+      }
     }
   };
 
@@ -137,10 +134,23 @@ export function AuthDialog({
     },
     { isActive: true },
   );
+  const getDefaultOpenAIConfig = () => {
+    const fromSettings = settings.merged.security?.auth;
+    const modelSettings = settings.merged.model;
+    return {
+      apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
+      baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
+      model: modelSettings?.name || process.env['OPENAI_MODEL'] || '',
+    };
+  };
 
   if (showOpenAIKeyPrompt) {
+    const defaults = getDefaultOpenAIConfig();
     return (
       <OpenAIKeyPrompt
+        defaultApiKey={defaults.apiKey}
+        defaultBaseUrl={defaults.baseUrl}
+        defaultModel={defaults.model}
         onSubmit={handleOpenAIKeySubmit}
         onCancel={handleOpenAIKeyCancel}
       />

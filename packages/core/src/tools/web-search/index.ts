@@ -30,7 +30,7 @@ import type {
   WebSearchProviderConfig,
   DashScopeProviderConfig,
 } from './types.js';
-import { ToolNames } from '../tool-names.js';
+import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 
 class WebSearchToolInvocation extends BaseToolInvocation<
   WebSearchToolParams,
@@ -280,7 +280,7 @@ export class WebSearchTool extends BaseDeclarativeTool<
   constructor(private readonly config: Config) {
     super(
       WebSearchTool.Name,
-      'WebSearch',
+      ToolDisplayNames.WEB_SEARCH,
       'Allows searching the web and using results to inform responses. Provides up-to-date information for current events and recent data beyond the training data cutoff. Returns search results formatted with concise answers and source links. Use this tool when accessing information that may be outdated or beyond the knowledge cutoff.',
       Kind.Search,
       {

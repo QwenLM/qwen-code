@@ -9,7 +9,7 @@ import path from 'node:path';
 import os, { EOL } from 'node:os';
 import crypto from 'node:crypto';
 import type { Config } from '../config/config.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   ToolInvocation,
@@ -429,7 +429,7 @@ export class ShellTool extends BaseDeclarativeTool<
   constructor(private readonly config: Config) {
     super(
       ShellTool.Name,
-      'Shell',
+      ToolDisplayNames.SHELL,
       getShellToolDescription(),
       Kind.Execute,
       {

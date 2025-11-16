@@ -6,7 +6,6 @@ exports[`ThemeDialog Snapshots > should render correctly in scope selector mode 
 │ > Apply To                                                                                       │
 │ ● 1. User Settings                                                                               │
 │   2. Workspace Settings                                                                          │
-│   3. System Settings                                                                             │
 │                                                                                                  │
 │ (Use Enter to apply scope, Tab to select theme)                                                  │
 │                                                                                                  │

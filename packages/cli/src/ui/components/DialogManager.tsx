@@ -20,6 +20,7 @@ import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
 import { ProQuotaDialog } from './ProQuotaDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { ApprovalModeDialog } from './ApprovalModeDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -180,6 +181,22 @@ export const DialogManager = ({
           onSelect={() => uiActions.closeSettingsDialog()}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={terminalHeight - staticExtraHeight}
+          config={config}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isApprovalModeDialogOpen) {
+    const currentMode = config.getApprovalMode();
+    return (
+      <Box flexDirection="column">
+        <ApprovalModeDialog
+          settings={settings}
+          currentMode={currentMode}
+          onSelect={uiActions.handleApprovalModeSelect}
+          availableTerminalHeight={
+            constrainHeight ? terminalHeight - staticExtraHeight : undefined
+          }
         />
       </Box>
     );

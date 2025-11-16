@@ -165,9 +165,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
-  [/^deepseek$/, LIMITS['128k']],
-  [/^deepseek-r1(?:-.*)?$/, LIMITS['128k']],
-  [/^deepseek-v3(?:\.\d+)?(?:-.*)?$/, LIMITS['128k']],
+  [/^deepseek(?:-.*)?$/, LIMITS['128k']],
 
   // -------------------
   // Moonshot / Kimi
@@ -211,6 +209,12 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // Qwen3-VL-Plus: 32K max output tokens
   [/^qwen3-vl-plus$/, LIMITS['32k']],
+
+  // Deepseek-chat: 8k max tokens
+  [/^deepseek-chat$/, LIMITS['8k']],
+
+  // Deepseek-reasoner: 64k max tokens
+  [/^deepseek-reasoner$/, LIMITS['64k']],
 ];
 
 /**
