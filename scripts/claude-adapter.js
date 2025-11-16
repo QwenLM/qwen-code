@@ -47,7 +47,6 @@ async function loadAdapterConfig(configPath) {
         argumentMappings: {
           '--print': ['-p'],
           '--allowed-tools': ['--allowed-tools'],
-          '--system-prompt': ['--append-system-prompt'],
           '--permission-mode': ['--approval-mode'],
           '--model': ['-m'],
           '--session-id': ['--session-id'],
