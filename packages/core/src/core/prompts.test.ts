@@ -47,7 +47,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('should return the base prompt when no userMemory is provided', () => {
     vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
     expect(prompt).not.toContain('---\n\n'); // Separator should not be present
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Check for core content
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
@@ -55,7 +55,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('should return the base prompt when userMemory is empty string', () => {
     vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt('');
+    const prompt = getCoreSystemPrompt('', undefined, undefined);
     expect(prompt).not.toContain('---\n\n');
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent');
     expect(prompt).toMatchSnapshot();
@@ -63,7 +63,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('should return the base prompt when userMemory is whitespace only', () => {
     vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt('   \n  \t ');
+    const prompt = getCoreSystemPrompt('   \n  \t ', undefined, undefined);
     expect(prompt).not.toContain('---\n\n');
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent');
     expect(prompt).toMatchSnapshot();
@@ -73,7 +73,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.stubEnv('SANDBOX', undefined);
     const memory = 'This is custom user memory.\nBe extra polite.';
     const expectedSuffix = `\n\n---\n\n${memory}`;
-    const prompt = getCoreSystemPrompt(memory);
+    const prompt = getCoreSystemPrompt(memory, undefined, undefined);
 
     expect(prompt.endsWith(expectedSuffix)).toBe(true);
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Ensure base prompt follows
@@ -82,7 +82,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {
     vi.stubEnv('SANDBOX', 'true'); // Generic sandbox value
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
     expect(prompt).toContain('# Sandbox');
     expect(prompt).not.toContain('# macOS Seatbelt');
     expect(prompt).not.toContain('# Outside of Sandbox');
@@ -91,7 +91,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('should include seatbelt-specific instructions when SANDBOX env var is "sandbox-exec"', () => {
     vi.stubEnv('SANDBOX', 'sandbox-exec');
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
     expect(prompt).toContain('# macOS Seatbelt');
     expect(prompt).not.toContain('# Sandbox');
     expect(prompt).not.toContain('# Outside of Sandbox');
@@ -100,7 +100,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   it('should include non-sandbox instructions when SANDBOX env var is not set', () => {
     vi.stubEnv('SANDBOX', undefined); // Ensure it's not set
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
     expect(prompt).toContain('# Outside of Sandbox');
     expect(prompt).not.toContain('# Sandbox');
     expect(prompt).not.toContain('# macOS Seatbelt');
@@ -110,7 +110,7 @@ describe('Core System Prompt (prompts.ts)', () => {
   it('should include git instructions when in a git repo', () => {
     vi.stubEnv('SANDBOX', undefined);
     vi.mocked(isGitRepository).mockReturnValue(true);
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
     expect(prompt).toContain('# Git Repository');
     expect(prompt).toMatchSnapshot();
   });
@@ -118,7 +118,7 @@ describe('Core System Prompt (prompts.ts)', () => {
   it('should not include git instructions when not in a git repo', () => {
     vi.stubEnv('SANDBOX', undefined);
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
     expect(prompt).not.toContain('# Git Repository');
     expect(prompt).toMatchSnapshot();
   });
@@ -126,14 +126,14 @@ describe('Core System Prompt (prompts.ts)', () => {
   describe('QWEN_SYSTEM_MD environment variable', () => {
     it('should use default prompt when QWEN_SYSTEM_MD is "false"', () => {
       vi.stubEnv('QWEN_SYSTEM_MD', 'false');
-      const prompt = getCoreSystemPrompt();
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.readFileSync).not.toHaveBeenCalled();
       expect(prompt).not.toContain('custom system prompt');
     });
 
     it('should use default prompt when QWEN_SYSTEM_MD is "0"', () => {
       vi.stubEnv('QWEN_SYSTEM_MD', '0');
-      const prompt = getCoreSystemPrompt();
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.readFileSync).not.toHaveBeenCalled();
       expect(prompt).not.toContain('custom system prompt');
     });
@@ -142,9 +142,9 @@ describe('Core System Prompt (prompts.ts)', () => {
       const customPath = '/non/existent/path/system.md';
       vi.stubEnv('QWEN_SYSTEM_MD', customPath);
       vi.mocked(fs.existsSync).mockReturnValue(false);
-      expect(() => getCoreSystemPrompt()).toThrow(
-        `missing system prompt file '${path.resolve(customPath)}'`,
-      );
+      expect(() =>
+        getCoreSystemPrompt(undefined, undefined, undefined),
+      ).toThrow(`missing system prompt file '${path.resolve(customPath)}'`);
     });
 
     it('should read from default path when QWEN_SYSTEM_MD is "true"', () => {
@@ -153,7 +153,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
 
-      const prompt = getCoreSystemPrompt();
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.readFileSync).toHaveBeenCalledWith(defaultPath, 'utf8');
       expect(prompt).toBe('custom system prompt');
     });
@@ -164,7 +164,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
 
-      const prompt = getCoreSystemPrompt();
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.readFileSync).toHaveBeenCalledWith(defaultPath, 'utf8');
       expect(prompt).toBe('custom system prompt');
     });
@@ -175,7 +175,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
 
-      const prompt = getCoreSystemPrompt();
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.readFileSync).toHaveBeenCalledWith(customPath, 'utf8');
       expect(prompt).toBe('custom system prompt');
     });
@@ -189,7 +189,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
 
-      const prompt = getCoreSystemPrompt();
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.readFileSync).toHaveBeenCalledWith(
         path.resolve(expectedPath),
         'utf8',
@@ -201,20 +201,20 @@ describe('Core System Prompt (prompts.ts)', () => {
   describe('QWEN_WRITE_SYSTEM_MD environment variable', () => {
     it('should not write to file when QWEN_WRITE_SYSTEM_MD is "false"', () => {
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'false');
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it('should not write to file when QWEN_WRITE_SYSTEM_MD is "0"', () => {
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', '0');
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it('should write to default path when QWEN_WRITE_SYSTEM_MD is "true"', () => {
       const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'true');
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         defaultPath,
         expect.any(String),
@@ -224,7 +224,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     it('should write to default path when QWEN_WRITE_SYSTEM_MD is "1"', () => {
       const defaultPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', '1');
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         defaultPath,
         expect.any(String),
@@ -234,7 +234,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     it('should write to custom path when QWEN_WRITE_SYSTEM_MD provides one', () => {
       const customPath = path.resolve('/custom/path/system.md');
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', customPath);
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         customPath,
         expect.any(String),
@@ -247,7 +247,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       const customPath = '~/custom/system.md';
       const expectedPath = path.join(homeDir, 'custom/system.md');
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', customPath);
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         path.resolve(expectedPath),
         expect.any(String),
@@ -260,7 +260,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       const customPath = '~';
       const expectedPath = homeDir;
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', customPath);
-      getCoreSystemPrompt();
+      getCoreSystemPrompt(undefined, undefined, undefined);
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         path.resolve(expectedPath),
         expect.any(String),
@@ -277,7 +277,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use XML format for qwen3-coder model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'qwen3-coder-7b');
+    const prompt = getCoreSystemPrompt(undefined, 'qwen3-coder-7b', undefined);
 
     // Should contain XML-style tool calls
     expect(prompt).toContain('<tool_call>');
@@ -297,7 +297,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use JSON format for qwen-vl model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-max');
+    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-max', undefined);
 
     // Should contain JSON-style tool calls
     expect(prompt).toContain('<tool_call>');
@@ -317,7 +317,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use bracket format for generic models', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4', undefined);
 
     // Should contain bracket-style tool calls
     expect(prompt).toContain('[tool_call: run_shell_command for');
@@ -335,7 +335,7 @@ describe('Model-specific tool call formats', () => {
 
   it('should use bracket format when no model is specified', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt();
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
 
     // Should contain bracket-style tool calls (default behavior)
     expect(prompt).toContain('[tool_call: run_shell_command for');
@@ -351,7 +351,11 @@ describe('Model-specific tool call formats', () => {
   it('should preserve model-specific formats with user memory', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
     const userMemory = 'User prefers concise responses.';
-    const prompt = getCoreSystemPrompt(userMemory, 'qwen3-coder-14b');
+    const prompt = getCoreSystemPrompt(
+      userMemory,
+      'qwen3-coder-14b',
+      undefined,
+    );
 
     // Should contain XML-style tool calls
     expect(prompt).toContain('<tool_call>');
@@ -367,7 +371,7 @@ describe('Model-specific tool call formats', () => {
   it('should preserve model-specific formats with sandbox environment', () => {
     vi.stubEnv('SANDBOX', 'true');
     vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-plus');
+    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-plus', undefined);
 
     // Should contain JSON-style tool calls
     expect(prompt).toContain('{"name": "run_shell_command"');
@@ -376,6 +380,65 @@ describe('Model-specific tool call formats', () => {
     expect(prompt).toContain('# Sandbox');
 
     expect(prompt).toMatchSnapshot();
+  });
+});
+
+describe('Core System Prompt - Additional Prompt Functionality (prompts.ts)', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+  });
+
+  it('should append additional system prompt when provided', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const additionalPrompt = 'This is an additional system instruction.';
+    const prompt = getCoreSystemPrompt(undefined, undefined, additionalPrompt);
+
+    expect(prompt).toContain('Qwen Code, an interactive CLI agent');
+    expect(prompt).toContain(additionalPrompt);
+  });
+
+  it('should append additional system prompt after user memory when both are provided', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const userMemory = 'Remember to be concise.';
+    const additionalPrompt = 'This is an additional system instruction.';
+    const prompt = getCoreSystemPrompt(userMemory, undefined, additionalPrompt);
+
+    // Find the positions of each component
+    const userMemoryIndex = prompt.indexOf('---');
+    const additionalPromptIndex = prompt.indexOf(additionalPrompt);
+
+    expect(prompt).toContain('Qwen Code, an interactive CLI agent');
+    expect(prompt).toContain('Remember to be concise.');
+    expect(prompt).toContain(additionalPrompt);
+    // The additional prompt should come after the user memory section
+    expect(additionalPromptIndex).toBeGreaterThan(userMemoryIndex);
+  });
+
+  it('should not include additional prompt when not provided', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt(undefined, undefined, undefined);
+
+    expect(prompt).toContain('Qwen Code, an interactive CLI agent');
+    // No specific additional prompt should be in the base prompt
+    expect(prompt).not.toContain('undefined');
+  });
+
+  it('should handle empty additional system prompt as empty string', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt(undefined, undefined, '');
+
+    expect(prompt).toContain('Qwen Code, an interactive CLI agent');
+    // Should not have an extra separator or blank line from empty additional prompt
+  });
+
+  it('should handle whitespace-only additional system prompt', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt(undefined, undefined, '   \n  \t ');
+
+    expect(prompt).toContain('Qwen Code, an interactive CLI agent');
+    // Should treat whitespace-only as no additional prompt
   });
 });
 

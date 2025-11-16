@@ -348,6 +348,23 @@ describe('Server Config (config.ts)', () => {
     expect(config.getFileFilteringRespectGitIgnore()).toBe(false);
   });
 
+  it('Config constructor should store additionalSystemPrompt correctly', () => {
+    const additionalPrompt = 'Custom system prompt';
+    const paramsWithAdditionalPrompt: ConfigParameters = {
+      ...baseParams,
+      additionalSystemPrompt: additionalPrompt,
+    };
+    const config = new Config(paramsWithAdditionalPrompt);
+
+    expect(config.getAdditionalSystemPrompt()).toBe(additionalPrompt);
+  });
+
+  it('Config constructor should default additionalSystemPrompt to undefined if not provided', () => {
+    const config = new Config(baseParams);
+
+    expect(config.getAdditionalSystemPrompt()).toBeUndefined();
+  });
+
   it('should initialize WorkspaceContext with includeDirectories', () => {
     const includeDirectories = ['/path/to/dir1', '/path/to/dir2'];
     const paramsWithIncludeDirs: ConfigParameters = {

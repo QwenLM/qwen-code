@@ -2,16 +2,15 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { HooksSettings } from './HooksSettings.js';
 import { HookService } from './HookService.js';
-import type { HookPayload } from './HookManager.js';
+import type { HookPayload, HookType } from './HookManager.js';
 
 // Create a basic mock config object
 const baseMockConfig = {
   getTargetDir: () => '/tmp/test-project',
   getProjectRoot: () => '/tmp/test-project',
-  getHooksSettings: () => 
+  getHooksSettings: () =>
     // Default empty settings for basic functionality
-     ({} as HooksSettings)
-  ,
+    ({}) as HooksSettings,
   storage: {
     getProjectTempDir: () => '/tmp/test-temp',
   },

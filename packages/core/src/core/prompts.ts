@@ -108,6 +108,7 @@ export function getCustomSystemPrompt(
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
+  additionalSystemPrompt?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -335,7 +336,13 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
       ? `\n\n---\n\n${userMemory.trim()}`
       : '';
 
-  return `${basePrompt}${memorySuffix}`;
+  // Append the additional system prompt if provided
+  const additionalPromptSuffix =
+    additionalSystemPrompt && additionalSystemPrompt.trim().length > 0
+      ? `\n\n${additionalSystemPrompt.trim()}`
+      : '';
+
+  return `${basePrompt}${memorySuffix}${additionalPromptSuffix}`;
 }
 
 /**

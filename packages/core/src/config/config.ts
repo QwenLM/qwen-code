@@ -293,6 +293,7 @@ export interface ConfigParameters {
   output?: OutputSettings;
   skipStartupContext?: boolean;
   hooks?: HooksSettings;
+  additionalSystemPrompt?: string;
 }
 
 export class Config {
@@ -394,6 +395,7 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
   private readonly outputSettings: OutputSettings;
+  private readonly additionalSystemPrompt: string | undefined;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -507,6 +509,7 @@ export class Config {
     this.outputSettings = {
       format: params.output?.format ?? OutputFormat.TEXT,
     };
+    this.additionalSystemPrompt = params.additionalSystemPrompt;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -761,6 +764,10 @@ export class Config {
 
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
+  }
+
+  getAdditionalSystemPrompt(): string | undefined {
+    return this.additionalSystemPrompt;
   }
 
   getGeminiMdFileCount(): number {

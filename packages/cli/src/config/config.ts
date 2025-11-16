@@ -125,6 +125,7 @@ export interface CliArgs {
   vlmSwitchMode: string | undefined;
   useSmartEdit: boolean | undefined;
   outputFormat: string | undefined;
+  appendSystemPrompt: string | undefined;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -364,6 +365,10 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'string',
           description: 'The format of the CLI output.',
           choices: ['text', 'json'],
+        })
+        .option('append-system-prompt', {
+          type: 'string',
+          description: 'Append a system prompt to the default system prompt',
         })
         .deprecateOption(
           'show-memory-usage',
@@ -801,6 +806,7 @@ export async function loadCliConfig(
     output: {
       format: (argv.outputFormat ?? settings.output?.format) as OutputFormat,
     },
+    additionalSystemPrompt: argv.appendSystemPrompt,
   });
 }
 
