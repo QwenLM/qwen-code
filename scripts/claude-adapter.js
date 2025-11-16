@@ -188,37 +188,33 @@ async function main() {
 
 // Display Claude-compatible help information
 function displayHelp() {
-  console.log(`Qwen CLI - Claude Code Compatible Interface
+  console.log(`Usage: qwen-alt [options] [command] [prompt]
 
-Provides Claude Code CLI compatibility for Qwen Code.
+Claude-Compatible CLI for Qwen Code - starts an interactive session by default, use -p/--print for non-interactive output
 
-USAGE:
-    qwen-alt [OPTIONS] [query...]
+Arguments:
+  prompt                                            Your prompt
 
-OPTIONS:
-    -h, --help                  Show this help message
-    -p, --print                 Non-interactive printing mode (equivalent to Qwen's -p)
-    -m, --model MODEL           Use specified model (equivalent to Qwen's -m, --model)
-    --allowed-tools TOOLS       Allow specific tools (equivalent to Qwen's --allowed-tools)
-    --system-prompt PROMPT      Add system prompt (mapped to Qwen's --append-system-prompt)
-    --permission-mode MODE      Set permission mode (mapped to Qwen's --approval-mode)
-    --settings PATH             Use settings file (mapped via configuration)
-    --allowedTools TOOLS        Allow specific tools (equivalent to Qwen's --allowed-tools)
-    --disallowedTools TOOLS     Disallow tools (mapped to exclusion in Qwen)
-    --include-partial-messages  Include all files in context (mapped to Qwen's --all-files)
-    --debug                     Enable debug mode (equivalent to Qwen's --debug)
-    --verbose                   Enable verbose logging (mapped to Qwen's --debug)
-    -y, --yolo                  Enable YOLO mode (equivalent to Qwen's -y, --yolo)
-    --dangerously-skip-permissions Skip permissions checks (mapped to Qwen's approval modes)
-    --output-format FORMAT      Set output format (equivalent to Qwen's --output-format)
-    --append-system-prompt PROMPT Append system prompt (equivalent to Qwen's --append-system-prompt)
-    --add-dir DIR               Add directory to context (mapped to Qwen's --include-directories)
-    
-PLANNED FEATURES (coming soon):
-    --continue                  Continue the most recent conversation [PLANNED]
-    --resume [sessionId]        Resume a specific conversation [PLANNED]
-    --fork-session              Fork a session from an existing one [PLANNED]
-    --session-id UUID           Use a specific session ID [PLANNED]
+Options:
+  -d, --debug [filter]                              Enable debug mode with optional category filtering (e.g., "api,hooks" or "!statsig,!file")
+  --verbose                                         Override verbose mode setting from config
+  -p, --print                                       Print response and exit (useful for pipes). Note: The workspace trust dialog is skipped when Claude is run with the -p mode. Only use this flag in directories you trust.
+  --output-format <format>                          Output format (only works with --print): "text" (default), "json" (single result), or "stream-json" (realtime streaming) (choices: "text", "json", "stream-json")
+  --include-partial-messages                        Include partial message chunks as they arrive (only works with --print and --output-format=stream-json)
+  --input-format <format>                           Input format (only works with --print): "text" (default), or "stream-json" (realtime streaming input) (choices: "text", "stream-json")
+  --dangerously-skip-permissions                    Bypass all permission checks. Recommended only for sandboxes with no internet access.
+  --allowedTools, --allowed-tools <tools...>        Comma or space-separated list of tool names to allow (e.g. "Bash(git:*) Edit")
+  --disallowedTools, --disallowed-tools <tools...>  Comma or space-separated list of tool names to deny (e.g. "Bash(git:*) Edit")
+  --append-system-prompt <prompt>                   Append a system prompt to the default system prompt
+  --permission-mode <mode>                          Permission mode to use for the session (choices: "acceptEdits", "bypassPermissions", "default", "plan")
+  --model <model>                                   Model for the current session. Provide an alias for the latest model (e.g. 'sonnet' or 'opus') or a model's full name (e.g. 'claude-sonnet-4-5-20250929').
+  --settings <file-or-json>                         Path to a settings JSON file or a JSON string to load additional settings from
+  --add-dir <directories...>                        Additional directories to allow tool access to
+  -v, --version                                     Output the version number
+  -h, --help                                        Display help for command
+
+Commands:
+  mcp                                               Configure and manage MCP servers
 
 Examples:
     qwen-alt -p "Explain this codebase"

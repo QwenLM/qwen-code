@@ -118,6 +118,7 @@ describe('runNonInteractive', () => {
       getOutputFormat: vi.fn().mockReturnValue('text'),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
     } as unknown as Config;
 
     mockSettings = {
@@ -872,5 +873,278 @@ describe('runNonInteractive', () => {
     expect(mockAction).toHaveBeenCalledWith(expect.any(Object), 'arg1 arg2');
 
     expect(processStdoutSpy).toHaveBeenCalledWith('Acknowledged');
+  });
+
+  it('should output events in stream-json format for content', async () => {
+    const events: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Hello' },
+      { type: GeminiEventType.Content, value: ' World' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: 'stop_turn', usageMetadata: { totalTokenCount: 10 } },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    const promptId = 'prompt-id-stream';
+
+    await runNonInteractive(mockConfig, mockSettings, 'Test input', promptId);
+
+    // Check that a message_start event was sent first
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: 'message_start',
+        message: { id: promptId, model: 'test-model' },
+      }) + '\n',
+    );
+    // Check content events
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({ type: 'content_block_delta', text: 'Hello' }) + '\n',
+    );
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      3,
+      JSON.stringify({ type: 'content_block_delta', text: ' World' }) + '\n',
+    );
+    // Check finish event
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      4,
+      JSON.stringify({
+        type: 'message_delta',
+        delta: { stop_reason: 'stop_turn' },
+        usage: { totalTokenCount: 10 },
+      }) + '\n',
+    );
+    // Check final message_stop event - it should match the actual output format
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      5,
+      JSON.stringify({ type: 'message_stop', stop_reason: 'end_turn' }) + '\n',
+    );
+  });
+
+  it('should output tool call events in stream-json format', async () => {
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'testTool',
+        args: { arg1: 'value1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-tool-stream',
+      },
+    };
+    const mockMetrics: SessionMetrics = {
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        totalDecisions: {
+          accept: 0,
+          reject: 0,
+          modify: 0,
+          auto_accept: 0,
+        },
+        byName: {},
+      },
+      files: {
+        totalLinesAdded: 0,
+        totalLinesRemoved: 0,
+      },
+    };
+    vi.mocked(uiTelemetryService.getMetrics).mockReturnValue(mockMetrics);
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([toolCallEvent]),
+    );
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+
+    // Mock tool response to return empty response parts to complete the cycle
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [],
+      error: undefined,
+    });
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-tool-stream',
+    );
+
+    // Check that a message_start event was sent first
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: 'message_start',
+        message: { id: 'prompt-id-tool-stream', model: 'test-model' },
+      }) + '\n',
+    );
+    // Check tool call event
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({
+        type: 'tool_call',
+        name: 'testTool',
+        arguments: { arg1: 'value1' },
+      }) + '\n',
+    );
+    // Check turn complete event (since we have a tool call, it loops)
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      3,
+      JSON.stringify({ type: 'turn_complete' }) + '\n',
+    );
+  });
+
+  it('should output error events in stream-json format', async () => {
+    const errorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: { message: 'Something went wrong', status: 500 },
+    };
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([errorEvent]),
+    );
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-id-error-stream',
+    );
+
+    // Check that a message_start event was sent first
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: 'message_start',
+        message: { id: 'prompt-id-error-stream', model: 'test-model' },
+      }) + '\n',
+    );
+    // Check error event
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({
+        type: 'error',
+        error: { message: 'Something went wrong', status: 500 },
+      }) + '\n',
+    );
+  });
+
+  it('should output thought events in stream-json format', async () => {
+    const thoughtEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Thought,
+      value: { summary: 'Thinking about the problem' },
+    };
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([thoughtEvent]),
+    );
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-id-thought-stream',
+    );
+
+    // Check that a message_start event was sent first
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: 'message_start',
+        message: { id: 'prompt-id-thought-stream', model: 'test-model' },
+      }) + '\n',
+    );
+    // Check thought event
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({
+        type: 'thought',
+        content: { summary: 'Thinking about the problem' },
+      }) + '\n',
+    );
+  });
+
+  it('should output loop detected events in stream-json format', async () => {
+    const loopEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.LoopDetected,
+    };
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([loopEvent]),
+    );
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-id-loop-stream',
+    );
+
+    // Check that a message_start event was sent first
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: 'message_start',
+        message: { id: 'prompt-id-loop-stream', model: 'test-model' },
+      }) + '\n',
+    );
+    // Check loop detected event
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({
+        type: 'error',
+        error: 'Loop detected in conversation',
+      }) + '\n',
+    );
+  });
+
+  it('should handle errors during stream-json processing correctly', async () => {
+    // Mock the sendMessageStream to throw an error after sending a message_start event
+    const errorStream = async function* () {
+      // This simulates an error happening during streaming
+      yield { type: GeminiEventType.Error, value: { message: 'API Error' } };
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(errorStream());
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Test input',
+      'prompt-id-error-handling',
+    );
+
+    // Check that a message_start event was sent first
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      1,
+      JSON.stringify({
+        type: 'message_start',
+        message: { id: 'prompt-id-error-handling', model: 'test-model' },
+      }) + '\n',
+    );
+    // Then the error event should be output in stream-json format
+    expect(processStdoutSpy).toHaveBeenNthCalledWith(
+      2,
+      JSON.stringify({ type: 'error', error: { message: 'API Error' } }) + '\n',
+    );
   });
 });

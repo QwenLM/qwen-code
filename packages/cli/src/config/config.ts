@@ -364,7 +364,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           alias: 'o',
           type: 'string',
           description: 'The format of the CLI output.',
-          choices: ['text', 'json'],
+          choices: ['text', 'json', 'stream-json'],
         })
         .option('append-system-prompt', {
           type: 'string',
