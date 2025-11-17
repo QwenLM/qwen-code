@@ -10,6 +10,7 @@ import { MessageType } from '../types.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadServerHierarchicalMemory } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 export function expandHomeDir(p: string): string {
   if (!p) {
@@ -27,13 +28,18 @@ export function expandHomeDir(p: string): string {
 export const directoryCommand: SlashCommand = {
   name: 'directory',
   altNames: ['dir'],
-  description: 'Manage workspace directories',
+  get description() {
+    return t('Manage workspace directories');
+  },
   kind: CommandKind.BUILT_IN,
   subCommands: [
     {
       name: 'add',
-      description:
-        'Add directories to the workspace. Use comma to separate multiple paths',
+      get description() {
+        return t(
+          'Add directories to the workspace. Use comma to separate multiple paths',
+        );
+      },
       kind: CommandKind.BUILT_IN,
       action: async (context: CommandContext, args: string) => {
         const {
@@ -150,7 +156,9 @@ export const directoryCommand: SlashCommand = {
     },
     {
       name: 'show',
-      description: 'Show all directories in the workspace',
+      get description() {
+        return t('Show all directories in the workspace');
+      },
       kind: CommandKind.BUILT_IN,
       action: async (context: CommandContext) => {
         const {

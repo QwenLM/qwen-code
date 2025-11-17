@@ -6,10 +6,13 @@
 
 import type { OpenDialogActionReturn, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
+import { t } from '../../i18n/index.js';
 
 export const permissionsCommand: SlashCommand = {
   name: 'permissions',
-  description: 'Manage folder trust settings',
+  get description() {
+    return t('Manage folder trust settings');
+  },
   kind: CommandKind.BUILT_IN,
   action: (): OpenDialogActionReturn => ({
     type: 'dialog',

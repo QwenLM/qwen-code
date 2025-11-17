@@ -115,10 +115,18 @@ async function setUiLanguage(
   // Reload commands to update their descriptions with the new language
   context.ui.reloadCommands();
 
+  // Map language codes to friendly display names
+  const langDisplayNames: Record<SupportedLanguage, string> = {
+    zh: '中文（zh-CN）',
+    en: 'English（en-US）',
+  };
+
   return {
     type: 'message',
     messageType: 'info',
-    content: t('UI language changed to {{lang}}', { lang }),
+    content: t('UI language changed to {{lang}}', {
+      lang: langDisplayNames[lang],
+    }),
   };
 }
 

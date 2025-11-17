@@ -15,10 +15,13 @@ import { getCurrentGeminiMdFilename } from '@qwen-code/qwen-code-core';
 import { CommandKind } from './types.js';
 import { Text } from 'ink';
 import React from 'react';
+import { t } from '../../i18n/index.js';
 
 export const initCommand: SlashCommand = {
   name: 'init',
-  description: 'Analyzes the project and creates a tailored QWEN.md file.',
+  get description() {
+    return t('Analyzes the project and creates a tailored QWEN.md file.');
+  },
   kind: CommandKind.BUILT_IN,
   action: async (
     context: CommandContext,
@@ -28,7 +31,7 @@ export const initCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Configuration not available.',
+        content: t('Configuration not available.'),
       };
     }
     const targetDir = context.services.config.getTargetDir();

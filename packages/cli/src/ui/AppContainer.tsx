@@ -91,6 +91,7 @@ import { useGitBranchName } from './hooks/useGitBranchName.js';
 import { useExtensionUpdates } from './hooks/useExtensionUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useQuitConfirmation } from './hooks/useQuitConfirmation.js';
+import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { type VisionSwitchOutcome } from './components/ModelSwitchDialog.js';
@@ -372,14 +373,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Handle Qwen OAuth timeout
   const handleQwenAuthTimeout = useCallback(() => {
-    onAuthError('Qwen OAuth authentication timed out. Please try again.');
+    onAuthError(t('Qwen OAuth authentication timed out. Please try again.'));
     cancelQwenAuth();
     setAuthState(AuthState.Updating);
   }, [onAuthError, cancelQwenAuth, setAuthState]);
 
   // Handle Qwen OAuth cancel
   const handleQwenAuthCancel = useCallback(() => {
-    onAuthError('Qwen OAuth authentication cancelled.');
+    onAuthError(t('Qwen OAuth authentication cancelled.'));
     cancelQwenAuth();
     setAuthState(AuthState.Updating);
   }, [onAuthError, cancelQwenAuth, setAuthState]);
@@ -401,7 +402,13 @@ export const AppContainer = (props: AppContainerProps) => {
         settings.merged.security?.auth.selectedType
     ) {
       onAuthError(
-        `Authentication is enforced to be ${settings.merged.security?.auth.enforcedType}, but you are currently using ${settings.merged.security?.auth.selectedType}.`,
+        t(
+          'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
+          {
+            enforcedType: settings.merged.security?.auth.enforcedType,
+            currentType: settings.merged.security?.auth.selectedType,
+          },
+        ),
       );
     } else if (
       settings.merged.security?.auth?.selectedType &&

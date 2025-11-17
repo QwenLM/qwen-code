@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { AuthState } from '../types.js';
 import { validateAuthMethod } from '../../config/auth.js';
+import { t } from '../../i18n/index.js';
 
 export function validateAuthMethodWithSettings(
   authType: AuthType,
@@ -20,7 +21,13 @@ export function validateAuthMethodWithSettings(
 ): string | null {
   const enforcedType = settings.merged.security?.auth?.enforcedType;
   if (enforcedType && enforcedType !== authType) {
-    return `Authentication is enforced to be ${enforcedType}, but you are currently using ${authType}.`;
+    return t(
+      'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
+      {
+        enforcedType,
+        currentType: authType,
+      },
+    );
   }
   if (settings.merged.security?.auth?.useExternal) {
     return null;
@@ -76,7 +83,11 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
         setAuthError(null);
         setAuthState(AuthState.Authenticated);
       } catch (e) {
-        onAuthError(`Failed to login. Message: ${getErrorMessage(e)}`);
+        onAuthError(
+          t('Failed to login. Message: {{message}}', {
+            message: getErrorMessage(e),
+          }),
+        );
       } finally {
         setIsAuthenticating(false);
       }

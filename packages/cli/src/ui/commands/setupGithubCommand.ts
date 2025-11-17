@@ -20,6 +20,7 @@ import {
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { getUrlOpenCommand } from '../../ui/utils/commandUtils.js';
+import { t } from '../../i18n/index.js';
 
 export const GITHUB_WORKFLOW_PATHS = [
   'gemini-dispatch/gemini-dispatch.yml',
@@ -91,7 +92,9 @@ export async function updateGitignore(gitRepoRoot: string): Promise<void> {
 
 export const setupGithubCommand: SlashCommand = {
   name: 'setup-github',
-  description: 'Set up GitHub Actions',
+  get description() {
+    return t('Set up GitHub Actions');
+  },
   kind: CommandKind.BUILT_IN,
   action: async (
     context: CommandContext,
