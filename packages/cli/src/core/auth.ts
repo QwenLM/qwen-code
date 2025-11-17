@@ -9,6 +9,7 @@ import {
   type Config,
   getErrorMessage,
 } from '@qwen-code/qwen-code-core';
+import { t } from '../i18n/index.js';
 
 /**
  * Handles the initial authentication flow.
@@ -29,7 +30,9 @@ export async function performInitialAuth(
     // The console.log is intentionally left out here.
     // We can add a dedicated startup message later if needed.
   } catch (e) {
-    return `Failed to login. Message: ${getErrorMessage(e)}`;
+    return t('Failed to login. Message: {{message}}', {
+      message: getErrorMessage(e),
+    });
   }
 
   return null;

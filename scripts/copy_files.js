@@ -41,8 +41,16 @@ function copyFilesRecursive(source, target) {
 
     if (item.isDirectory()) {
       copyFilesRecursive(sourcePath, targetPath);
-    } else if (extensionsToCopy.includes(path.extname(item.name))) {
-      fs.copyFileSync(sourcePath, targetPath);
+    } else {
+      const ext = path.extname(item.name);
+      // Copy standard extensions, or .js files in i18n/locales directory
+      const isLocaleJs =
+        ext === '.js' &&
+        (sourcePath.includes('i18n/locales') ||
+          sourcePath.includes(path.join('i18n', 'locales')));
+      if (extensionsToCopy.includes(ext) || isLocaleJs) {
+        fs.copyFileSync(sourcePath, targetPath);
+      }
     }
   }
 }
