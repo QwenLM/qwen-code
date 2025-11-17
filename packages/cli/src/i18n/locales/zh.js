@@ -106,8 +106,37 @@ export default {
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
     '您当前环境不支持 IDE 集成。要使用此功能，请在以下支持的 IDE 之一中运行 Qwen Code：VS Code 或 VS Code 分支版本。',
   'Set up GitHub Actions': '设置 GitHub Actions',
-  'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)':
-    '配置终端按键绑定以支持多行输入（VS Code、Cursor、Windsurf）',
+  'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
+    '配置终端按键绑定以支持多行输入（VS Code、Cursor、Windsurf、Trae）',
+  'Please restart your terminal for the changes to take effect.':
+    '请重启终端以使更改生效。',
+  'Failed to configure terminal: {{error}}': '配置终端失败：{{error}}',
+  'Could not determine {{terminalName}} config path on Windows: APPDATA environment variable is not set.':
+    '无法确定 {{terminalName}} 在 Windows 上的配置路径：未设置 APPDATA 环境变量。',
+  '{{terminalName}} keybindings.json exists but is not a valid JSON array. Please fix the file manually or delete it to allow automatic configuration.':
+    '{{terminalName}} keybindings.json 存在但不是有效的 JSON 数组。请手动修复文件或删除它以允许自动配置。',
+  'File: {{file}}': '文件：{{file}}',
+  'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
+    '解析 {{terminalName}} keybindings.json 失败。文件包含无效的 JSON。请手动修复文件或删除它以允许自动配置。',
+  'Error: {{error}}': '错误：{{error}}',
+  'Shift+Enter binding already exists': 'Shift+Enter 绑定已存在',
+  'Ctrl+Enter binding already exists': 'Ctrl+Enter 绑定已存在',
+  'Existing keybindings detected. Will not modify to avoid conflicts.':
+    '检测到现有按键绑定。为避免冲突，不会修改。',
+  'Please check and modify manually if needed: {{file}}':
+    '如有需要，请手动检查并修改：{{file}}',
+  'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
+    '已为 {{terminalName}} 添加 Shift+Enter 和 Ctrl+Enter 按键绑定。',
+  'Modified: {{file}}': '已修改：{{file}}',
+  '{{terminalName}} keybindings already configured.':
+    '{{terminalName}} 按键绑定已配置。',
+  'Failed to configure {{terminalName}}.': '配置 {{terminalName}} 失败。',
+  'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
+    '您的终端已配置为支持多行输入（Shift+Enter 和 Ctrl+Enter）的最佳体验。',
+  'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
+    '无法检测终端类型。支持的终端：VS Code、Cursor、Windsurf 和 Trae。',
+  'Terminal "{{terminal}}" is not supported yet.':
+    '终端 "{{terminal}}" 尚未支持。',
 
   // ============================================================================
   // Commands - Language

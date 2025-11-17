@@ -30,6 +30,7 @@ import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isKittyProtocolEnabled } from './kittyProtocolDetector.js';
 import { VSCODE_SHIFT_ENTER_SEQUENCE } from './platformConstants.js';
+import { t } from '../../i18n/index.js';
 
 const execAsync = promisify(exec);
 
@@ -146,7 +147,10 @@ async function configureVSCodeStyle(
   if (!configDir) {
     return {
       success: false,
-      message: `Could not determine ${terminalName} config path on Windows: APPDATA environment variable is not set.`,
+      message: t(
+        'Could not determine {{terminalName}} config path on Windows: APPDATA environment variable is not set.',
+        { terminalName },
+      ),
     };
   }
 
@@ -166,9 +170,12 @@ async function configureVSCodeStyle(
           return {
             success: false,
             message:
-              `${terminalName} keybindings.json exists but is not a valid JSON array. ` +
-              `Please fix the file manually or delete it to allow automatic configuration.\n` +
-              `File: ${keybindingsFile}`,
+              t(
+                '{{terminalName}} keybindings.json exists but is not a valid JSON array. Please fix the file manually or delete it to allow automatic configuration.',
+                { terminalName },
+              ) +
+              '\n' +
+              t('File: {{file}}', { file: keybindingsFile }),
           };
         }
         keybindings = parsedContent;
@@ -176,10 +183,14 @@ async function configureVSCodeStyle(
         return {
           success: false,
           message:
-            `Failed to parse ${terminalName} keybindings.json. The file contains invalid JSON.\n` +
-            `Please fix the file manually or delete it to allow automatic configuration.\n` +
-            `File: ${keybindingsFile}\n` +
-            `Error: ${parseError}`,
+            t(
+              'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.',
+              { terminalName },
+            ) +
+            '\n' +
+            t('File: {{file}}', { file: keybindingsFile }) +
+            '\n' +
+            t('Error: {{error}}', { error: String(parseError) }),
         };
       }
     } catch {
@@ -214,18 +225,23 @@ async function configureVSCodeStyle(
     if (existingShiftEnter || existingCtrlEnter) {
       const messages: string[] = [];
       if (existingShiftEnter) {
-        messages.push(`- Shift+Enter binding already exists`);
+        messages.push('- ' + t('Shift+Enter binding already exists'));
       }
       if (existingCtrlEnter) {
-        messages.push(`- Ctrl+Enter binding already exists`);
+        messages.push('- ' + t('Ctrl+Enter binding already exists'));
       }
       return {
         success: false,
         message:
-          `Existing keybindings detected. Will not modify to avoid conflicts.\n` +
+          t(
+            'Existing keybindings detected. Will not modify to avoid conflicts.',
+          ) +
+          '\n' +
           messages.join('\n') +
           '\n' +
-          `Please check and modify manually if needed: ${keybindingsFile}`,
+          t('Please check and modify manually if needed: {{file}}', {
+            file: keybindingsFile,
+          }),
       };
     }
 
@@ -263,19 +279,34 @@ async function configureVSCodeStyle(
       await fs.writeFile(keybindingsFile, JSON.stringify(keybindings, null, 4));
       return {
         success: true,
-        message: `Added Shift+Enter and Ctrl+Enter keybindings to ${terminalName}.\nModified: ${keybindingsFile}`,
+        message:
+          t(
+            'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.',
+            {
+              terminalName,
+            },
+          ) +
+          '\n' +
+          t('Modified: {{file}}', { file: keybindingsFile }),
         requiresRestart: true,
       };
     } else {
       return {
         success: true,
-        message: `${terminalName} keybindings already configured.`,
+        message: t('{{terminalName}} keybindings already configured.', {
+          terminalName,
+        }),
       };
     }
   } catch (error) {
     return {
       success: false,
-      message: `Failed to configure ${terminalName}.\nFile: ${keybindingsFile}\nError: ${error}`,
+      message:
+        t('Failed to configure {{terminalName}}.', { terminalName }) +
+        '\n' +
+        t('File: {{file}}', { file: keybindingsFile }) +
+        '\n' +
+        t('Error: {{error}}', { error: String(error) }),
     };
   }
 }
@@ -322,8 +353,9 @@ export async function terminalSetup(): Promise<TerminalSetupResult> {
   if (isKittyProtocolEnabled()) {
     return {
       success: true,
-      message:
+      message: t(
         'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).',
+      ),
     };
   }
 
@@ -332,8 +364,9 @@ export async function terminalSetup(): Promise<TerminalSetupResult> {
   if (!terminal) {
     return {
       success: false,
-      message:
-        'Could not detect terminal type. Supported terminals: VS Code, Cursor, and Windsurf.',
+      message: t(
+        'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.',
+      ),
     };
   }
 
@@ -349,7 +382,9 @@ export async function terminalSetup(): Promise<TerminalSetupResult> {
     default:
       return {
         success: false,
-        message: `Terminal "${terminal}" is not supported yet.`,
+        message: t('Terminal "{{terminal}}" is not supported yet.', {
+          terminal,
+        }),
       };
   }
 }

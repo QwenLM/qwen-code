@@ -112,8 +112,39 @@ export default {
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
     'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.',
   'Set up GitHub Actions': 'Set up GitHub Actions',
-  'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)':
-    'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)',
+  'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
+    'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)',
+  'Please restart your terminal for the changes to take effect.':
+    'Please restart your terminal for the changes to take effect.',
+  'Failed to configure terminal: {{error}}':
+    'Failed to configure terminal: {{error}}',
+  'Could not determine {{terminalName}} config path on Windows: APPDATA environment variable is not set.':
+    'Could not determine {{terminalName}} config path on Windows: APPDATA environment variable is not set.',
+  '{{terminalName}} keybindings.json exists but is not a valid JSON array. Please fix the file manually or delete it to allow automatic configuration.':
+    '{{terminalName}} keybindings.json exists but is not a valid JSON array. Please fix the file manually or delete it to allow automatic configuration.',
+  'File: {{file}}': 'File: {{file}}',
+  'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
+    'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.',
+  'Error: {{error}}': 'Error: {{error}}',
+  'Shift+Enter binding already exists': 'Shift+Enter binding already exists',
+  'Ctrl+Enter binding already exists': 'Ctrl+Enter binding already exists',
+  'Existing keybindings detected. Will not modify to avoid conflicts.':
+    'Existing keybindings detected. Will not modify to avoid conflicts.',
+  'Please check and modify manually if needed: {{file}}':
+    'Please check and modify manually if needed: {{file}}',
+  'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.':
+    'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.',
+  'Modified: {{file}}': 'Modified: {{file}}',
+  '{{terminalName}} keybindings already configured.':
+    '{{terminalName}} keybindings already configured.',
+  'Failed to configure {{terminalName}}.':
+    'Failed to configure {{terminalName}}.',
+  'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
+    'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).',
+  'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
+    'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.',
+  'Terminal "{{terminal}}" is not supported yet.':
+    'Terminal "{{terminal}}" is not supported yet.',
 
   // ============================================================================
   // Commands - Language
