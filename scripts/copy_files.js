@@ -28,7 +28,7 @@ const targetDir = path.join('dist', 'src');
 
 const extensionsToCopy = ['.md', '.json', '.sb'];
 
-function copyFilesRecursive(source, target) {
+function copyFilesRecursive(source, target, rootSourceDir) {
   if (!fs.existsSync(target)) {
     fs.mkdirSync(target, { recursive: true });
   }
@@ -40,14 +40,15 @@ function copyFilesRecursive(source, target) {
     const targetPath = path.join(target, item.name);
 
     if (item.isDirectory()) {
-      copyFilesRecursive(sourcePath, targetPath);
+      copyFilesRecursive(sourcePath, targetPath, rootSourceDir);
     } else {
       const ext = path.extname(item.name);
       // Copy standard extensions, or .js files in i18n/locales directory
+      // Use path.relative for precise matching to avoid false positives
+      const relativePath = path.relative(rootSourceDir, sourcePath);
+      const normalizedPath = relativePath.replace(/\\/g, '/');
       const isLocaleJs =
-        ext === '.js' &&
-        (sourcePath.includes('i18n/locales') ||
-          sourcePath.includes(path.join('i18n', 'locales')));
+        ext === '.js' && normalizedPath.startsWith('i18n/locales/');
       if (extensionsToCopy.includes(ext) || isLocaleJs) {
         fs.copyFileSync(sourcePath, targetPath);
       }
@@ -60,7 +61,7 @@ if (!fs.existsSync(sourceDir)) {
   process.exit(1);
 }
 
-copyFilesRecursive(sourceDir, targetDir);
+copyFilesRecursive(sourceDir, targetDir, sourceDir);
 
 // Copy example extensions into the bundle.
 const packageName = path.basename(process.cwd());

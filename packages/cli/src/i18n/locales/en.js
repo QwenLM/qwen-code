@@ -109,6 +109,8 @@ export default {
     'install required IDE companion for {{ideName}}',
   'enable IDE integration': 'enable IDE integration',
   'disable IDE integration': 'disable IDE integration',
+  'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
+    'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.',
   'Set up GitHub Actions': 'Set up GitHub Actions',
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)':
     'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)',
@@ -220,6 +222,12 @@ export default {
   'Project memory is currently empty.': 'Project memory is currently empty.',
   'Refreshing memory from source files...':
     'Refreshing memory from source files...',
+  'Add content to the memory. Use --global for global memory or --project for project memory.':
+    'Add content to the memory. Use --global for global memory or --project for project memory.',
+  'Usage: /memory add [--global|--project] <text to remember>':
+    'Usage: /memory add [--global|--project] <text to remember>',
+  'Attempting to save to memory {{scope}}: "{{fact}}"':
+    'Attempting to save to memory {{scope}}: "{{fact}}"',
 
   // ============================================================================
   // Commands - MCP
@@ -287,6 +295,8 @@ export default {
     'Error sharing conversation: {{error}}',
   'Conversation shared to {{filePath}}': 'Conversation shared to {{filePath}}',
   'No conversation found to share.': 'No conversation found to share.',
+  'Share the current conversation to a markdown or json file. Usage: /chat share <file>':
+    'Share the current conversation to a markdown or json file. Usage: /chat share <file>',
 
   // ============================================================================
   // Commands - Summary
@@ -344,6 +354,27 @@ export default {
   No: 'No',
   'No (esc)': 'No (esc)',
   'Yes, allow always for this session': 'Yes, allow always for this session',
+  'Modify in progress:': 'Modify in progress:',
+  'Save and close external editor to continue':
+    'Save and close external editor to continue',
+  'Apply this change?': 'Apply this change?',
+  'Yes, allow always': 'Yes, allow always',
+  'Modify with external editor': 'Modify with external editor',
+  'No, suggest changes (esc)': 'No, suggest changes (esc)',
+  "Allow execution of: '{{command}}'?": "Allow execution of: '{{command}}'?",
+  'Yes, allow always ...': 'Yes, allow always ...',
+  'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
+  'Yes, and manually approve edits': 'Yes, and manually approve edits',
+  'No, keep planning (esc)': 'No, keep planning (esc)',
+  'URLs to fetch:': 'URLs to fetch:',
+  'MCP Server: {{server}}': 'MCP Server: {{server}}',
+  'Tool: {{tool}}': 'Tool: {{tool}}',
+  'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
+    'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?',
+  'Yes, always allow tool "{{tool}}" from server "{{server}}"':
+    'Yes, always allow tool "{{tool}}" from server "{{server}}"',
+  'Yes, always allow all tools from server "{{server}}"':
+    'Yes, always allow all tools from server "{{server}}"',
 
   // ============================================================================
   // Dialogs - Shell Confirmation
@@ -428,6 +459,16 @@ export default {
     'Waiting for Qwen OAuth authentication...',
 
   // ============================================================================
+  // Dialogs - Model
+  // ============================================================================
+  'Select Model': 'Select Model',
+  '(Press Esc to close)': '(Press Esc to close)',
+  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
+    'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
+  'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
+    'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
+
+  // ============================================================================
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': 'Manage folder trust settings',
@@ -471,6 +512,29 @@ export default {
   '{{count}} prompt': '{{count}} prompt',
   '{{count}} prompts': '{{count}} prompts',
   '(from {{extensionName}})': '(from {{extensionName}})',
+  OAuth: 'OAuth',
+  'OAuth expired': 'OAuth expired',
+  'OAuth not authenticated': 'OAuth not authenticated',
+  'tools and prompts will appear when ready':
+    'tools and prompts will appear when ready',
+  '{{count}} tools cached': '{{count}} tools cached',
+  'Tools:': 'Tools:',
+  'Parameters:': 'Parameters:',
+  'Prompts:': 'Prompts:',
+  Blocked: 'Blocked',
+  '💡 Tips:': '💡 Tips:',
+  Use: 'Use',
+  'to show server and tool descriptions':
+    'to show server and tool descriptions',
+  'to show tool parameter schemas': 'to show tool parameter schemas',
+  'to hide descriptions': 'to hide descriptions',
+  'to authenticate with OAuth-enabled servers':
+    'to authenticate with OAuth-enabled servers',
+  Press: 'Press',
+  'to toggle tool descriptions on/off': 'to toggle tool descriptions on/off',
+  "Starting OAuth authentication for MCP server '{{name}}'...":
+    "Starting OAuth authentication for MCP server '{{name}}'...",
+  'Restarting MCP servers...': 'Restarting MCP servers...',
 
   // ============================================================================
   // Startup Tips

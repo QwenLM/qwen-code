@@ -103,6 +103,8 @@ export default {
     '安装 {{ideName}} 所需的 IDE 配套工具',
   'enable IDE integration': '启用 IDE 集成',
   'disable IDE integration': '禁用 IDE 集成',
+  'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
+    '您当前环境不支持 IDE 集成。要使用此功能，请在以下支持的 IDE 之一中运行 Qwen Code：VS Code 或 VS Code 分支版本。',
   'Set up GitHub Actions': '设置 GitHub Actions',
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)':
     '配置终端按键绑定以支持多行输入（VS Code、Cursor、Windsurf）',
@@ -204,6 +206,12 @@ export default {
     '项目记忆内容来自 {{path}}：\n\n---\n{{content}}\n---',
   'Project memory is currently empty.': '项目记忆当前为空',
   'Refreshing memory from source files...': '正在从源文件刷新记忆...',
+  'Add content to the memory. Use --global for global memory or --project for project memory.':
+    '添加内容到记忆。使用 --global 表示全局记忆，使用 --project 表示项目记忆',
+  'Usage: /memory add [--global|--project] <text to remember>':
+    '用法：/memory add [--global|--project] <要记住的文本>',
+  'Attempting to save to memory {{scope}}: "{{fact}}"':
+    '正在尝试保存到记忆 {{scope}}："{{fact}}"',
 
   // ============================================================================
   // Commands - MCP
@@ -266,6 +274,8 @@ export default {
   'Error sharing conversation: {{error}}': '分享对话时出错：{{error}}',
   'Conversation shared to {{filePath}}': '对话已分享到 {{filePath}}',
   'No conversation found to share.': '未找到要分享的对话',
+  'Share the current conversation to a markdown or json file. Usage: /chat share <file>':
+    '将当前对话分享到 markdown 或 json 文件。用法：/chat share <file>',
 
   // ============================================================================
   // Commands - Summary
@@ -320,6 +330,26 @@ export default {
   No: '否',
   'No (esc)': '否 (esc)',
   'Yes, allow always for this session': '是，本次会话总是允许',
+  'Modify in progress:': '正在修改：',
+  'Save and close external editor to continue': '保存并关闭外部编辑器以继续',
+  'Apply this change?': '是否应用此更改？',
+  'Yes, allow always': '是，总是允许',
+  'Modify with external editor': '使用外部编辑器修改',
+  'No, suggest changes (esc)': '否，建议更改 (esc)',
+  "Allow execution of: '{{command}}'?": "允许执行：'{{command}}'？",
+  'Yes, allow always ...': '是，总是允许 ...',
+  'Yes, and auto-accept edits': '是，并自动接受编辑',
+  'Yes, and manually approve edits': '是，并手动批准编辑',
+  'No, keep planning (esc)': '否，继续规划 (esc)',
+  'URLs to fetch:': '要获取的 URL：',
+  'MCP Server: {{server}}': 'MCP 服务器：{{server}}',
+  'Tool: {{tool}}': '工具：{{tool}}',
+  'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?':
+    '允许执行来自服务器 "{{server}}" 的 MCP 工具 "{{tool}}"？',
+  'Yes, always allow tool "{{tool}}" from server "{{server}}"':
+    '是，总是允许来自服务器 "{{server}}" 的工具 "{{tool}}"',
+  'Yes, always allow all tools from server "{{server}}"':
+    '是，总是允许来自服务器 "{{server}}" 的所有工具',
 
   // ============================================================================
   // Dialogs - Shell Confirmation
@@ -395,6 +425,16 @@ export default {
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 认证...',
 
   // ============================================================================
+  // Dialogs - Model
+  // ============================================================================
+  'Select Model': '选择模型',
+  '(Press Esc to close)': '（按 Esc 关闭）',
+  'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
+    '来自阿里云 ModelStudio 的最新 Qwen Coder 模型（版本：qwen3-coder-plus-2025-09-23）',
+  'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
+    '来自阿里云 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
+
+  // ============================================================================
   // Dialogs - Permissions
   // ============================================================================
   'Manage folder trust settings': '管理文件夹信任设置',
@@ -438,6 +478,27 @@ export default {
   '{{count}} prompt': '{{count}} 个提示',
   '{{count}} prompts': '{{count}} 个提示',
   '(from {{extensionName}})': '（来自 {{extensionName}}）',
+  OAuth: 'OAuth',
+  'OAuth expired': 'OAuth 已过期',
+  'OAuth not authenticated': 'OAuth 未认证',
+  'tools and prompts will appear when ready': '工具和提示将在就绪时显示',
+  '{{count}} tools cached': '{{count}} 个工具已缓存',
+  'Tools:': '工具：',
+  'Parameters:': '参数：',
+  'Prompts:': '提示：',
+  Blocked: '已阻止',
+  '💡 Tips:': '💡 提示：',
+  Use: '使用',
+  'to show server and tool descriptions': '显示服务器和工具描述',
+  'to show tool parameter schemas': '显示工具参数架构',
+  'to hide descriptions': '隐藏描述',
+  'to authenticate with OAuth-enabled servers':
+    '使用支持 OAuth 的服务器进行认证',
+  Press: '按',
+  'to toggle tool descriptions on/off': '切换工具描述开关',
+  "Starting OAuth authentication for MCP server '{{name}}'...":
+    "正在为 MCP 服务器 '{{name}}' 启动 OAuth 认证...",
+  'Restarting MCP servers...': '正在重启 MCP 服务器...',
 
   // ============================================================================
   // Startup Tips

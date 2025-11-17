@@ -92,7 +92,12 @@ const authCommand: SlashCommand = {
       context.ui.addItem(
         {
           type: 'info',
-          text: `Starting OAuth authentication for MCP server '${serverName}'...`,
+          text: t(
+            "Starting OAuth authentication for MCP server '{{name}}'...",
+            {
+              name: serverName,
+            },
+          ),
         },
         Date.now(),
       );
@@ -208,7 +213,7 @@ const listCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Could not retrieve tool registry.',
+        content: t('Could not retrieve tool registry.'),
       };
     }
 
@@ -320,14 +325,14 @@ const refreshCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: 'Could not retrieve tool registry.',
+        content: t('Could not retrieve tool registry.'),
       };
     }
 
     context.ui.addItem(
       {
         type: 'info',
-        text: 'Restarting MCP servers...',
+        text: t('Restarting MCP servers...'),
       },
       Date.now(),
     );
