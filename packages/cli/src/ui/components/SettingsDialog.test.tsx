@@ -487,8 +487,11 @@ describe('SettingsDialog', () => {
       it('loops back when reaching the end of an enum', async () => {
         vi.mocked(saveModifiedSettings).mockClear();
         vi.mocked(getSettingsSchema).mockReturnValue(FAKE_SCHEMA);
-        const settings = createMockSettings();
-        settings.setValue(SettingScope.User, 'ui.theme', StringEnum.BAZ);
+        const settings = createMockSettings({
+          ui: {
+            theme: StringEnum.BAZ,
+          },
+        });
         const onSelect = vi.fn();
         const component = (
           <KeypressProvider kittyProtocolEnabled={false}>

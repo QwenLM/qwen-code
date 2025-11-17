@@ -8,11 +8,9 @@ import type React from 'react';
 import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
-import { validateAuthMethod } from '../../config/auth.js';
 import { SettingScope } from '../../config/settings.js';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { OpenAIKeyPrompt } from '../components/OpenAIKeyPrompt.js';
 import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -31,14 +29,13 @@ function parseDefaultAuthType(
 }
 
 export function AuthDialog(): React.JSX.Element {
-  const { authError, pendingAuthType } = useUIState();
+  const { pendingAuthType, authError } = useUIState();
   const { handleAuthSelect: onAuthSelect } = useUIActions();
   const settings = useSettings();
 
-  const [errorMessage, setErrorMessage] = useState<string | null>(
-    authError || null,
-  );
-  const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
   const items = [
     {
       key: AuthType.QWEN_OAUTH,
@@ -74,48 +71,24 @@ export function AuthDialog(): React.JSX.Element {
     }),
   );
 
+  const hasApiKey = Boolean(settings.merged.security?.auth?.apiKey);
+  const currentSelectedAuthType =
+    selectedIndex !== null
+      ? items[selectedIndex]?.value
+      : items[initialAuthIndex]?.value;
+
   const handleAuthSelect = async (authMethod: AuthType) => {
-    const error = validateAuthMethod(authMethod);
-    if (error) {
-      if (
-        authMethod === AuthType.USE_OPENAI &&
-        !process.env['OPENAI_API_KEY']
-      ) {
-        setShowOpenAIKeyPrompt(true);
-        setErrorMessage(null);
-      } else {
-        setErrorMessage(error);
-      }
-    } else {
-      setErrorMessage(null);
-      await onAuthSelect(authMethod, SettingScope.User);
-    }
+    setErrorMessage(null);
+    await onAuthSelect(authMethod, SettingScope.User);
   };
 
-  const handleOpenAIKeySubmit = async (
-    apiKey: string,
-    baseUrl: string,
-    model: string,
-  ) => {
-    await onAuthSelect(AuthType.USE_OPENAI, SettingScope.User, {
-      apiKey,
-      baseUrl,
-      model,
-    });
-    setShowOpenAIKeyPrompt(false);
-  };
-
-  const handleOpenAIKeyCancel = () => {
-    setShowOpenAIKeyPrompt(false);
-    setErrorMessage('OpenAI API key is required to use OpenAI authentication.');
+  const handleHighlight = (authMethod: AuthType) => {
+    const index = items.findIndex((item) => item.value === authMethod);
+    setSelectedIndex(index);
   };
 
   useKeypress(
     (key) => {
-      if (showOpenAIKeyPrompt) {
-        return;
-      }
-
       if (key.name === 'escape') {
         // Prevent exit if there is an error message.
         // This means they user is not authenticated yet.
@@ -135,15 +108,6 @@ export function AuthDialog(): React.JSX.Element {
     { isActive: true },
   );
 
-  if (showOpenAIKeyPrompt) {
-    return (
-      <OpenAIKeyPrompt
-        onSubmit={handleOpenAIKeySubmit}
-        onCancel={handleOpenAIKeyCancel}
-      />
-    );
-  }
-
   return (
     <Box
       borderStyle="round"
@@ -161,16 +125,26 @@ export function AuthDialog(): React.JSX.Element {
           items={items}
           initialIndex={initialAuthIndex}
           onSelect={handleAuthSelect}
+          onHighlight={handleHighlight}
         />
       </Box>
-      {errorMessage && (
+      {(authError || errorMessage) && (
         <Box marginTop={1}>
-          <Text color={Colors.AccentRed}>{errorMessage}</Text>
+          <Text color={Colors.AccentRed}>{authError || errorMessage}</Text>
         </Box>
       )}
       <Box marginTop={1}>
         <Text color={Colors.AccentPurple}>(Use Enter to Set Auth)</Text>
       </Box>
+      {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
+        <Box marginTop={1}>
+          <Text color={Colors.Gray}>
+            Note: Your existing API key in settings.json will not be cleared
+            when using Qwen OAuth. You can switch back to OpenAI authentication
+            later if needed.
+          </Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Text>Terms of Services and Privacy Notice for Qwen Code</Text>
       </Box>

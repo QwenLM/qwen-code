@@ -13,24 +13,9 @@ import {
   getErrorMessage,
 } from '@qwen-code/qwen-code-core';
 import { AuthState } from '../types.js';
-import { validateAuthMethod } from '../../config/auth.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
-
-export function validateAuthMethodWithSettings(
-  authType: AuthType,
-  settings: LoadedSettings,
-): string | null {
-  const enforcedType = settings.merged.security?.auth?.enforcedType;
-  if (enforcedType && enforcedType !== authType) {
-    return `Authentication is enforced to be ${enforcedType}, but you are currently using ${authType}.`;
-  }
-  if (settings.merged.security?.auth?.useExternal) {
-    return null;
-  }
-  return validateAuthMethod(authType);
-}
 
 export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
   const unAuthenticated =
@@ -64,40 +49,16 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     [setAuthError, setAuthState],
   );
 
-  useEffect(() => {
-    const authFlow = async () => {
-      const authType = settings.merged.security?.auth?.selectedType;
-      if (isAuthDialogOpen || !authType) {
-        return;
-      }
-
-      const validationError = validateAuthMethodWithSettings(
-        authType,
-        settings,
-      );
-      if (validationError) {
-        onAuthError(validationError);
-        return;
-      }
-
-      try {
-        setIsAuthenticating(true);
-        await config.refreshAuth(authType);
-        console.log(`Authenticated via "${authType}".`);
-        setAuthError(null);
-        setAuthState(AuthState.Authenticated);
-      } catch (e) {
-        onAuthError(`Failed to login. Message: ${getErrorMessage(e)}`);
-      } finally {
-        setIsAuthenticating(false);
-      }
-    };
-
-    void authFlow();
-  }, [isAuthDialogOpen, settings, config, onAuthError]);
+  const handleAuthFailure = useCallback(
+    (error: unknown) => {
+      setIsAuthenticating(false);
+      onAuthError(`Failed to authenticate. Message: ${getErrorMessage(error)}`);
+    },
+    [onAuthError],
+  );
 
   const handleAuthSuccess = useCallback(
-    (
+    async (
       authType: AuthType,
       scope: SettingScope,
       credentials?: {
@@ -106,30 +67,43 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
         model?: string;
       },
     ) => {
-      if (credentials?.apiKey) {
-        settings.setValue(scope, 'security.auth.apiKey', credentials.apiKey);
+      try {
+        settings.setValue(scope, 'security.auth.selectedType', authType);
+
+        // Only update credentials if not switching to QWEN_OAUTH,
+        // so that OpenAI credentials are preserved when switching to QWEN_OAUTH.
+        if (authType !== AuthType.QWEN_OAUTH && credentials) {
+          if (credentials?.apiKey != null) {
+            settings.setValue(
+              scope,
+              'security.auth.apiKey',
+              credentials.apiKey,
+            );
+          }
+          if (credentials?.baseUrl != null) {
+            settings.setValue(
+              scope,
+              'security.auth.baseUrl',
+              credentials.baseUrl,
+            );
+          }
+          if (credentials?.model != null) {
+            settings.setValue(scope, 'model.name', credentials.model);
+          }
+          await clearCachedCredentialFile();
+        }
+      } catch (error) {
+        handleAuthFailure(error);
+        return;
       }
-      if (credentials?.baseUrl) {
-        settings.setValue(scope, 'security.auth.baseUrl', credentials.baseUrl);
-      }
-      if (credentials?.model) {
-        settings.setValue(scope, 'model.name', credentials.model);
-      }
-      settings.setValue(scope, 'security.auth.selectedType', authType);
 
       setAuthError(null);
       setAuthState(AuthState.Authenticated);
       setPendingAuthType(undefined);
       setIsAuthDialogOpen(false);
+      setIsAuthenticating(false);
     },
-    [settings],
-  );
-
-  const handleAuthFailure = useCallback(
-    (error: unknown) => {
-      onAuthError(`Failed to login. Message: ${getErrorMessage(error)}`);
-    },
-    [onAuthError],
+    [settings, handleAuthFailure],
   );
 
   const performAuth = useCallback(
@@ -143,13 +117,10 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       },
     ) => {
       try {
-        setIsAuthenticating(true);
         await config.refreshAuth(authType);
         handleAuthSuccess(authType, scope, credentials);
       } catch (e) {
         handleAuthFailure(e);
-      } finally {
-        setIsAuthenticating(false);
       }
     },
     [config, handleAuthSuccess, handleAuthFailure],
@@ -171,12 +142,17 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
         return;
       }
 
-      await clearCachedCredentialFile();
-
       setPendingAuthType(authType);
       setAuthError(null);
+      setIsAuthDialogOpen(false);
+      setIsAuthenticating(true);
 
       if (authType === AuthType.USE_OPENAI) {
+        const hasApiKey =
+          credentials?.apiKey ||
+          settings.merged.security?.auth?.apiKey ||
+          process.env['OPENAI_API_KEY'];
+
         if (credentials) {
           config.updateCredentials({
             apiKey: credentials.apiKey,
@@ -185,13 +161,17 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
           });
         }
 
-        await performAuth(authType, scope, credentials);
+        // Only perform auth if we have an API key
+        // Otherwise, wait for user to input via OpenAIKeyPrompt in DialogManager
+        if (hasApiKey) {
+          await performAuth(authType, scope, credentials);
+        }
         return;
       }
 
       await performAuth(authType, scope);
     },
-    [config, performAuth],
+    [config, performAuth, settings.merged.security?.auth?.apiKey],
   );
 
   const openAuthDialog = useCallback(() => {
@@ -199,22 +179,39 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
   }, []);
 
   const cancelAuthentication = useCallback(() => {
-    // If authenticating with Qwen OAuth, cancel Qwen auth
-    if (
-      isAuthenticating &&
-      (pendingAuthType === AuthType.QWEN_OAUTH ||
-        settings.merged.security?.auth?.selectedType === AuthType.QWEN_OAUTH)
-    ) {
+    if (isAuthenticating && pendingAuthType === AuthType.QWEN_OAUTH) {
       cancelQwenAuth();
     }
 
+    // Do not reset pendingAuthType here, persist the previously selected type.
     setIsAuthenticating(false);
-  }, [
-    isAuthenticating,
-    pendingAuthType,
-    settings.merged.security?.auth?.selectedType,
-    cancelQwenAuth,
-  ]);
+    setIsAuthDialogOpen(true);
+    setAuthError(null);
+  }, [isAuthenticating, pendingAuthType, cancelQwenAuth]);
+
+  /**
+   /**
+    * We previously used a useEffect to trigger authentication automatically when
+    * settings.security.auth.selectedType changed. This caused problems: if authentication failed,
+    * the UI could get stuck, since settings.json would update before success. Now, we
+    * update selectedType in settings only when authentication fully succeeds.
+    * Authentication is triggered explicitly—either during initial app startup or when the
+    * user switches methods—not reactively through settings changes. This avoids repeated
+    * or broken authentication cycles.
+    */
+  useEffect(() => {
+    const defaultAuthType = process.env['QWEN_DEFAULT_AUTH_TYPE'];
+    if (
+      defaultAuthType &&
+      ![AuthType.QWEN_OAUTH, AuthType.USE_OPENAI].includes(
+        defaultAuthType as AuthType,
+      )
+    ) {
+      onAuthError(
+        `Invalid QWEN_DEFAULT_AUTH_TYPE value: "${defaultAuthType}". Valid values are: ${[AuthType.QWEN_OAUTH, AuthType.USE_OPENAI].join(', ')}`,
+      );
+    }
+  }, [onAuthError]);
 
   return {
     authState,

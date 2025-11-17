@@ -825,7 +825,7 @@ describe('getQwenOAuthClient', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -983,7 +983,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1032,7 +1032,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication timed out');
+    ).rejects.toThrow('Authorization timeout, please restart the process.');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1082,7 +1082,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
         module.getQwenOAuthClient(mockConfig),
       ),
     ).rejects.toThrow(
-      'Too many request for Qwen OAuth authentication, please try again later.',
+      'Too many requests. The server is rate limiting our requests. Please select a different authentication method or try again later.',
     );
 
     SharedTokenManager.getInstance = originalGetInstance;
@@ -1119,7 +1119,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1177,7 +1177,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow('Device authorization flow failed');
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1264,7 +1264,9 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
       import('./qwenOAuth2.js').then((module) =>
         module.getQwenOAuthClient(mockConfig),
       ),
-    ).rejects.toThrow('Qwen OAuth authentication failed');
+    ).rejects.toThrow(
+      'Device code expired or invalid, please restart the authorization process.',
+    );
 
     SharedTokenManager.getInstance = originalGetInstance;
   });

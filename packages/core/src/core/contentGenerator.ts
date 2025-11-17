@@ -197,7 +197,7 @@ export async function createContentGenerator(
       return new QwenContentGenerator(qwenClient, config, gcConfig);
     } catch (error) {
       throw new Error(
-        `Failed to initialize Qwen: ${error instanceof Error ? error.message : String(error)}`,
+        `${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
