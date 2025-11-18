@@ -220,12 +220,6 @@ export async function main() {
   }
 
   const isDebugMode = cliConfig.isDebugMode(argv);
-  const consolePatcher = new ConsolePatcher({
-    stderr: true,
-    debugMode: isDebugMode,
-  });
-  consolePatcher.patch();
-  registerCleanup(consolePatcher.cleanup);
 
   dns.setDefaultResultOrder(
     validateDnsResolutionOrder(settings.merged.advanced?.dnsResolutionOrder),
@@ -350,6 +344,15 @@ export async function main() {
       process.exit(0);
     }
 
+    // Setup unified ConsolePatcher based on interactive mode
+    const isInteractive = config.isInteractive();
+    const consolePatcher = new ConsolePatcher({
+      stderr: isInteractive,
+      debugMode: isDebugMode,
+    });
+    consolePatcher.patch();
+    registerCleanup(consolePatcher.cleanup);
+
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
@@ -443,9 +446,7 @@ export async function main() {
 
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
-        settings,
         trimmedInput.length > 0 ? trimmedInput : '',
-        prompt_id,
       );
       await runExitCleanup();
       process.exit(0);

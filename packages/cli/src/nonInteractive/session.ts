@@ -16,7 +16,6 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
-import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -39,8 +38,9 @@ import {
   isControlResponse,
   isControlCancel,
 } from './types.js';
-import type { LoadedSettings } from '../config/settings.js';
+import { createMinimalSettings } from '../config/settings.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
+import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
 
 const SESSION_STATE = {
   INITIALIZING: 'initializing',
@@ -87,7 +87,6 @@ class SessionManager {
   private userMessageQueue: CLIUserMessage[] = [];
   private abortController: AbortController;
   private config: Config;
-  private settings: LoadedSettings;
   private sessionId: string;
   private promptIdCounter: number = 0;
   private inputReader: StreamJsonInputReader;
@@ -96,27 +95,16 @@ class SessionManager {
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
   private controlSystemEnabled: boolean | null = null;
-  private consolePatcher: ConsolePatcher;
   private debugMode: boolean;
   private shutdownHandler: (() => void) | null = null;
   private initialPrompt: CLIUserMessage | null = null;
 
-  constructor(
-    config: Config,
-    settings: LoadedSettings,
-    initialPrompt?: CLIUserMessage,
-  ) {
+  constructor(config: Config, initialPrompt?: CLIUserMessage) {
     this.config = config;
-    this.settings = settings;
     this.sessionId = config.getSessionId();
     this.debugMode = config.getDebugMode();
     this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
-
-    this.consolePatcher = new ConsolePatcher({
-      stderr: true,
-      debugMode: this.debugMode,
-    });
 
     this.inputReader = new StreamJsonInputReader();
     this.outputAdapter = new StreamJsonOutputAdapter(
@@ -232,8 +220,6 @@ class SessionManager {
    */
   async run(): Promise<void> {
     try {
-      this.consolePatcher.patch();
-
       if (this.debugMode) {
         console.error('[SessionManager] Starting session', this.sessionId);
       }
@@ -264,7 +250,6 @@ class SessionManager {
       await this.shutdown();
       throw error;
     } finally {
-      this.consolePatcher.cleanup();
       // Ensure signal handlers are always cleaned up even if shutdown wasn't called
       this.cleanupSignalHandlers();
     }
@@ -578,11 +563,17 @@ class SessionManager {
     const promptId = this.getNextPromptId();
 
     try {
-      await runNonInteractive(this.config, this.settings, input, promptId, {
-        abortController: this.abortController,
-        adapter: this.outputAdapter,
-        controlService: this.controlService ?? undefined,
-      });
+      await runNonInteractive(
+        this.config,
+        createMinimalSettings(),
+        input,
+        promptId,
+        {
+          abortController: this.abortController,
+          adapter: this.outputAdapter,
+          controlService: this.controlService ?? undefined,
+        },
+      );
     } catch (error) {
       // Error already handled by runNonInteractive via adapter.emitResult
       if (this.debugMode) {
@@ -695,31 +686,36 @@ function extractUserMessageText(message: CLIUserMessage): string | null {
  * Entry point for stream-json mode
  *
  * @param config - Configuration object
- * @param settings - Loaded settings
  * @param input - Optional initial prompt input to process before reading from stream
- * @param promptId - Prompt ID (not used in stream-json mode but kept for API compatibility)
  */
 export async function runNonInteractiveStreamJson(
   config: Config,
-  settings: LoadedSettings,
   input: string,
-  _promptId: string,
 ): Promise<void> {
-  // Create initial user message from prompt input if provided
-  let initialPrompt: CLIUserMessage | undefined = undefined;
-  if (input && input.trim().length > 0) {
-    const sessionId = config.getSessionId();
-    initialPrompt = {
-      type: 'user',
-      session_id: sessionId,
-      message: {
-        role: 'user',
-        content: input.trim(),
-      },
-      parent_tool_use_id: null,
-    };
-  }
+  const consolePatcher = new ConsolePatcher({
+    debugMode: config.getDebugMode(),
+  });
+  consolePatcher.patch();
 
-  const manager = new SessionManager(config, settings, initialPrompt);
-  await manager.run();
+  try {
+    // Create initial user message from prompt input if provided
+    let initialPrompt: CLIUserMessage | undefined = undefined;
+    if (input && input.trim().length > 0) {
+      const sessionId = config.getSessionId();
+      initialPrompt = {
+        type: 'user',
+        session_id: sessionId,
+        message: {
+          role: 'user',
+          content: input.trim(),
+        },
+        parent_tool_use_id: null,
+      };
+    }
+
+    const manager = new SessionManager(config, initialPrompt);
+    await manager.run();
+  } finally {
+    consolePatcher.cleanup();
+  }
 }

@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { LoadedSettings } from '../config/settings.js';
 import { runNonInteractiveStreamJson } from './session.js';
 import type {
   CLIUserMessage,
@@ -74,14 +73,6 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
   return { ...base, ...overrides } as unknown as Config;
 }
 
-function createSettings(): LoadedSettings {
-  return {
-    merged: {
-      security: { auth: {} },
-    },
-  } as unknown as LoadedSettings;
-}
-
 function createUserMessage(content: string): CLIUserMessage {
   return {
     type: 'user',
@@ -145,7 +136,6 @@ function createControlCancel(requestId: string): ControlCancelRequest {
 
 describe('runNonInteractiveStreamJson', () => {
   let config: Config;
-  let settings: LoadedSettings;
   let mockInputReader: {
     read: () => AsyncGenerator<
       | CLIUserMessage
@@ -170,7 +160,6 @@ describe('runNonInteractiveStreamJson', () => {
 
   beforeEach(() => {
     config = createConfig();
-    settings = createSettings();
     runNonInteractiveMock.mockReset();
 
     // Setup mocks
@@ -232,7 +221,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield initRequest;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockConsolePatcher.patch).toHaveBeenCalledTimes(1);
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
@@ -246,7 +235,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
     const runCall = runNonInteractiveMock.mock.calls[0];
@@ -272,7 +261,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage2;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
   });
@@ -293,7 +282,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage2;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     // Both messages should be processed
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
@@ -308,7 +297,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield controlRequest;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledTimes(2);
     expect(mockDispatcher.dispatch).toHaveBeenNthCalledWith(1, initRequest);
@@ -324,7 +313,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield controlResponse;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.handleControlResponse).toHaveBeenCalledWith(
       controlResponse,
@@ -340,7 +329,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield cancelRequest;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.handleCancel).toHaveBeenCalledWith('req-2');
   });
@@ -360,7 +349,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield controlRequest;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(controlRequest);
   });
@@ -380,7 +369,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield controlResponse;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.handleControlResponse).toHaveBeenCalledWith(
       controlResponse,
@@ -394,12 +383,12 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
     expect(runNonInteractiveMock).toHaveBeenCalledWith(
       config,
-      settings,
+      expect.objectContaining({ merged: expect.any(Object) }),
       'Test message',
       expect.stringContaining('test-session'),
       expect.objectContaining({
@@ -427,12 +416,12 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
     expect(runNonInteractiveMock).toHaveBeenCalledWith(
       config,
-      settings,
+      expect.objectContaining({ merged: expect.any(Object) }),
       'First part\nSecond part',
       expect.stringContaining('test-session'),
       expect.objectContaining({
@@ -457,7 +446,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).not.toHaveBeenCalled();
   });
@@ -472,7 +461,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     // Error should be caught and handled gracefully
   });
@@ -484,9 +473,9 @@ describe('runNonInteractiveStreamJson', () => {
       throw streamError;
     } as typeof mockInputReader.read;
 
-    await expect(
-      runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id'),
-    ).rejects.toThrow('Stream error');
+    await expect(runNonInteractiveStreamJson(config, '')).rejects.toThrow(
+      'Stream error',
+    );
 
     expect(mockConsolePatcher.cleanup).toHaveBeenCalled();
   });
@@ -517,7 +506,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     // Verify initialization happened
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
@@ -536,7 +525,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield userMessage2;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
     const promptId1 = runNonInteractiveMock.mock.calls[0][3] as string;
@@ -553,7 +542,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield controlRequest;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     // Should not transition to idle since it's not an initialize request
     expect(mockDispatcher.dispatch).not.toHaveBeenCalled();
@@ -564,7 +553,7 @@ describe('runNonInteractiveStreamJson', () => {
       // Empty stream - should complete immediately
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockConsolePatcher.patch).toHaveBeenCalledTimes(1);
     expect(mockConsolePatcher.cleanup).toHaveBeenCalledTimes(1);
@@ -575,7 +564,7 @@ describe('runNonInteractiveStreamJson', () => {
       // Empty stream
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
   });
 
   it('calls dispatcher shutdown on completion', async () => {
@@ -585,7 +574,7 @@ describe('runNonInteractiveStreamJson', () => {
       yield initRequest;
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.shutdown).toHaveBeenCalledTimes(1);
   });
@@ -595,7 +584,7 @@ describe('runNonInteractiveStreamJson', () => {
       // Empty stream
     };
 
-    await runNonInteractiveStreamJson(config, settings, '', 'test-prompt-id');
+    await runNonInteractiveStreamJson(config, '');
 
     expect(mockConsolePatcher.cleanup).toHaveBeenCalled();
   });

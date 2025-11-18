@@ -73,7 +73,16 @@
       "request": "launch",
       "name": "Launch CLI Non-Interactive",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "start", "--", "-p", "${input:prompt}", "-y"],
+      "runtimeArgs": [
+        "run",
+        "start",
+        "--",
+        "-p",
+        "${input:prompt}",
+        "-y",
+        "--output-format",
+        "stream-json"
+      ],
       "skipFiles": ["<node_internals>/**"],
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",

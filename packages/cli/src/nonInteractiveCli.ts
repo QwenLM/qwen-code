@@ -25,7 +25,6 @@ import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAda
 import type { ControlService } from './nonInteractive/control/ControlService.js';
 
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
-import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { handleAtCommand } from './ui/hooks/atCommandProcessor.js';
 import {
   handleError,
@@ -67,11 +66,6 @@ export async function runNonInteractive(
   options: RunNonInteractiveOptions = {},
 ): Promise<void> {
   return promptIdContext.run(prompt_id, async () => {
-    const consolePatcher = new ConsolePatcher({
-      stderr: true,
-      debugMode: config.getDebugMode(),
-    });
-
     // Create output adapter based on format
     let adapter: JsonOutputAdapterInterface | undefined;
     const outputFormat = config.getOutputFormat();
@@ -102,12 +96,22 @@ export async function runNonInteractive(
       }
     };
 
+    const geminiClient = config.getGeminiClient();
+    const abortController = options.abortController ?? new AbortController();
+
+    // Setup signal handlers for graceful shutdown
+    const shutdownHandler = () => {
+      if (config.getDebugMode()) {
+        console.error('[runNonInteractive] Shutdown signal received');
+      }
+      abortController.abort();
+    };
+
     try {
-      consolePatcher.patch();
       process.stdout.on('error', stdoutErrorHandler);
 
-      const geminiClient = config.getGeminiClient();
-      const abortController = options.abortController ?? new AbortController();
+      process.on('SIGINT', shutdownHandler);
+      process.on('SIGTERM', shutdownHandler);
 
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
@@ -362,7 +366,9 @@ export async function runNonInteractive(
       handleError(error, config);
     } finally {
       process.stdout.removeListener('error', stdoutErrorHandler);
-      consolePatcher.cleanup();
+      // Cleanup signal handlers
+      process.removeListener('SIGINT', shutdownHandler);
+      process.removeListener('SIGTERM', shutdownHandler);
       if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry(config);
       }

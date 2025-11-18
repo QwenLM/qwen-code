@@ -340,7 +340,8 @@ export class TestRig {
           // as it would corrupt the JSON
           const isJsonOutput =
             commandArgs.includes('--output-format') &&
-            commandArgs.includes('json');
+            (commandArgs.includes('json') ||
+              commandArgs.includes('stream-json'));
 
           // If we have stderr output and it's not a JSON test, include that also
           if (stderr && !isJsonOutput) {
@@ -349,7 +350,23 @@ export class TestRig {
 
           resolve(result);
         } else {
-          reject(new Error(`Process exited with code ${code}:\n${stderr}`));
+          // Check if this is a JSON output test - for JSON errors, the error is in stdout
+          const isJsonOutputOnError =
+            commandArgs.includes('--output-format') &&
+            (commandArgs.includes('json') ||
+              commandArgs.includes('stream-json'));
+
+          // For JSON output tests, include stdout in the error message
+          // as the error JSON is written to stdout
+          if (isJsonOutputOnError && stdout) {
+            reject(
+              new Error(
+                `Process exited with code ${code}:\nStdout:\n${stdout}\n\nStderr:\n${stderr}`,
+              ),
+            );
+          } else {
+            reject(new Error(`Process exited with code ${code}:\n${stderr}`));
+          }
         }
       });
     });
