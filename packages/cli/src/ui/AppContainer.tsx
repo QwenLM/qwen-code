@@ -91,6 +91,7 @@ import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useQuitConfirmation } from './hooks/useQuitConfirmation.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
+import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
 import { type VisionSwitchOutcome } from './components/ModelSwitchDialog.js';
 import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
@@ -361,6 +362,8 @@ export const AppContainer = (props: AppContainerProps) => {
     setModelSwitchedFromQuotaError,
   });
 
+  useInitializationAuthError(initializationResult.authError, onAuthError);
+
   // Sync user tier from config when authentication changes
   // TODO: Implement getUserTier() method on Config if needed
   // useEffect(() => {
@@ -372,10 +375,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Check for enforced auth type mismatch
   useEffect(() => {
     // Check for initialization error first
-    if (initializationResult.authError) {
-      onAuthError(initializationResult.authError);
-      return;
-    }
 
     if (
       settings.merged.security?.auth?.enforcedType &&
@@ -398,7 +397,6 @@ export const AppContainer = (props: AppContainerProps) => {
       }
     }
   }, [
-    initializationResult.authError,
     settings.merged.security?.auth?.selectedType,
     settings.merged.security?.auth?.enforcedType,
     settings.merged.security?.auth?.useExternal,

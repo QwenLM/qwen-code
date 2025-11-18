@@ -11,6 +11,8 @@ import {
   AuthType,
   clearCachedCredentialFile,
   getErrorMessage,
+  logAuth,
+  AuthEvent,
 } from '@qwen-code/qwen-code-core';
 import { AuthState } from '../types.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
@@ -53,9 +55,21 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
   const handleAuthFailure = useCallback(
     (error: unknown) => {
       setIsAuthenticating(false);
-      onAuthError(`Failed to authenticate. Message: ${getErrorMessage(error)}`);
+      const errorMessage = `Failed to authenticate. Message: ${getErrorMessage(error)}`;
+      onAuthError(errorMessage);
+
+      // Log authentication failure
+      if (pendingAuthType) {
+        const authEvent = new AuthEvent(
+          pendingAuthType,
+          'manual',
+          'error',
+          errorMessage,
+        );
+        logAuth(config, authEvent);
+      }
     },
-    [onAuthError],
+    [onAuthError, pendingAuthType, config],
   );
 
   const handleAuthSuccess = useCallback(
@@ -99,8 +113,12 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       setPendingAuthType(undefined);
       setIsAuthDialogOpen(false);
       setIsAuthenticating(false);
+
+      // Log authentication success
+      const authEvent = new AuthEvent(authType, 'manual', 'success');
+      logAuth(config, authEvent);
     },
-    [settings, handleAuthFailure],
+    [settings, handleAuthFailure, config],
   );
 
   const performAuth = useCallback(
@@ -162,11 +180,17 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       cancelQwenAuth();
     }
 
+    // Log authentication cancellation
+    if (isAuthenticating && pendingAuthType) {
+      const authEvent = new AuthEvent(pendingAuthType, 'manual', 'cancelled');
+      logAuth(config, authEvent);
+    }
+
     // Do not reset pendingAuthType here, persist the previously selected type.
     setIsAuthenticating(false);
     setIsAuthDialogOpen(true);
     setAuthError(null);
-  }, [isAuthenticating, pendingAuthType, cancelQwenAuth]);
+  }, [isAuthenticating, pendingAuthType, cancelQwenAuth, config]);
 
   /**
    /**

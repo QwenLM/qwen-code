@@ -30,6 +30,7 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logExtensionDisable,
+  logAuth,
 } from './src/telemetry/loggers.js';
 
 export {
@@ -40,6 +41,7 @@ export {
   ExtensionEnableEvent,
   ExtensionUninstallEvent,
   ModelSlashCommandEvent,
+  AuthEvent,
 } from './src/telemetry/types.js';
 export { makeFakeConfig } from './src/test-utils/config.js';
 export * from './src/utils/pathReader.js';
