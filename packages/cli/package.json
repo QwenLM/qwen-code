@@ -16,10 +16,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./protocol": {
-      "types": "./dist/src/types/protocol.d.ts",
-      "import": "./dist/src/types/protocol.js"
     }
   },
   "scripts": {
