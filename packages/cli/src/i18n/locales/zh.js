@@ -93,11 +93,139 @@ export default {
   'Show quit confirmation dialog': '显示退出确认对话框',
   'Copy the last result or code snippet to clipboard':
     '将最后的结果或代码片段复制到剪贴板',
+
+  // ============================================================================
+  // Commands - Agents
+  // ============================================================================
   'Manage subagents for specialized task delegation.':
     '管理用于专门任务委派的子代理',
   'Manage existing subagents (view, edit, delete).':
     '管理现有子代理（查看、编辑、删除）',
   'Create a new subagent with guided setup.': '通过引导式设置创建新的子代理',
+
+  // ============================================================================
+  // Agents - Management Dialog
+  // ============================================================================
+  Agents: '代理',
+  'Choose Action': '选择操作',
+  'Edit {{name}}': '编辑 {{name}}',
+  'Edit Tools: {{name}}': '编辑工具: {{name}}',
+  'Edit Color: {{name}}': '编辑颜色: {{name}}',
+  'Delete {{name}}': '删除 {{name}}',
+  'Unknown Step': '未知步骤',
+  'Esc to close': '按 Esc 关闭',
+  'Enter to select, ↑↓ to navigate, Esc to close':
+    'Enter 选择，↑↓ 导航，Esc 关闭',
+  'Esc to go back': '按 Esc 返回',
+  'Enter to confirm, Esc to cancel': 'Enter 确认，Esc 取消',
+  'Enter to select, ↑↓ to navigate, Esc to go back':
+    'Enter 选择，↑↓ 导航，Esc 返回',
+  'Invalid step: {{step}}': '无效步骤: {{step}}',
+  'No subagents found.': '未找到子代理。',
+  "Use '/agents create' to create your first subagent.":
+    "使用 '/agents create' 创建您的第一个子代理。",
+  '(built-in)': '（内置）',
+  '(overridden by project level agent)': '（已被项目级代理覆盖）',
+  'Project Level ({{path}})': '项目级 ({{path}})',
+  'User Level ({{path}})': '用户级 ({{path}})',
+  'Built-in Agents': '内置代理',
+  'Using: {{count}} agents': '使用中: {{count}} 个代理',
+  'View Agent': '查看代理',
+  'Edit Agent': '编辑代理',
+  'Delete Agent': '删除代理',
+  Back: '返回',
+  'No agent selected': '未选择代理',
+  'File Path: ': '文件路径: ',
+  'Tools: ': '工具: ',
+  'Color: ': '颜色: ',
+  'Description:': '描述:',
+  'System Prompt:': '系统提示:',
+  'Open in editor': '在编辑器中打开',
+  'Edit tools': '编辑工具',
+  'Edit color': '编辑颜色',
+  '❌ Error:': '❌ 错误:',
+  'Are you sure you want to delete agent "{{name}}"?':
+    '您确定要删除代理 "{{name}}" 吗？',
+  // ============================================================================
+  // Agents - Creation Wizard
+  // ============================================================================
+  'Project Level (.qwen/agents/)': '项目级 (.qwen/agents/)',
+  'User Level (~/.qwen/agents/)': '用户级 (~/.qwen/agents/)',
+  '✅ Subagent Created Successfully!': '✅ 子代理创建成功！',
+  'Subagent "{{name}}" has been saved to {{level}} level.':
+    '子代理 "{{name}}" 已保存到 {{level}} 级别。',
+  'Name: ': '名称: ',
+  'Location: ': '位置: ',
+  '❌ Error saving subagent:': '❌ 保存子代理时出错:',
+  'Warnings:': '警告:',
+  'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
+    '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有子代理',
+  'Name "{{name}}" exists at user level - project level will take precedence':
+    '名称 "{{name}}" 在用户级别存在 - 项目级别将优先',
+  'Name "{{name}}" exists at project level - existing subagent will take precedence':
+    '名称 "{{name}}" 在项目级别存在 - 现有子代理将优先',
+  'Description is over {{length}} characters': '描述超过 {{length}} 个字符',
+  'System prompt is over {{length}} characters':
+    '系统提示超过 {{length}} 个字符',
+  // Agents - Creation Wizard Steps
+  'Step {{n}}: Choose Location': '步骤 {{n}}: 选择位置',
+  'Step {{n}}: Choose Generation Method': '步骤 {{n}}: 选择生成方式',
+  'Generate with Qwen Code (Recommended)': '使用 Qwen Code 生成（推荐）',
+  'Manual Creation': '手动创建',
+  'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
+    '描述此子代理应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
+  'e.g., Expert code reviewer that reviews code based on best practices...':
+    '例如：专业的代码审查员，根据最佳实践审查代码...',
+  'Generating subagent configuration...': '正在生成子代理配置...',
+  'Failed to generate subagent: {{error}}': '生成子代理失败: {{error}}',
+  'Step {{n}}: Describe Your Subagent': '步骤 {{n}}: 描述您的子代理',
+  'Step {{n}}: Enter Subagent Name': '步骤 {{n}}: 输入子代理名称',
+  'Step {{n}}: Enter System Prompt': '步骤 {{n}}: 输入系统提示',
+  'Step {{n}}: Enter Description': '步骤 {{n}}: 输入描述',
+  // Agents - Tool Selection
+  'Step {{n}}: Select Tools': '步骤 {{n}}: 选择工具',
+  'All Tools (Default)': '所有工具（默认）',
+  'All Tools': '所有工具',
+  'Read-only Tools': '只读工具',
+  'Read & Edit Tools': '读取和编辑工具',
+  'Read & Edit & Execution Tools': '读取、编辑和执行工具',
+  'All tools selected, including MCP tools': '已选择所有工具，包括 MCP 工具',
+  'Selected tools:': '已选择的工具:',
+  'Read-only tools:': '只读工具:',
+  'Edit tools:': '编辑工具:',
+  'Execution tools:': '执行工具:',
+  'Step {{n}}: Choose Background Color': '步骤 {{n}}: 选择背景颜色',
+  'Step {{n}}: Confirm and Save': '步骤 {{n}}: 确认并保存',
+  // Agents - Navigation & Instructions
+  'Esc to cancel': '按 Esc 取消',
+  'Press Enter to save, e to save and edit, Esc to go back':
+    '按 Enter 保存，e 保存并编辑，Esc 返回',
+  'Press Enter to continue, {{navigation}}Esc to {{action}}':
+    '按 Enter 继续，{{navigation}}Esc {{action}}',
+  cancel: '取消',
+  'go back': '返回',
+  '↑↓ to navigate, ': '↑↓ 导航，',
+  'Enter a clear, unique name for this subagent.':
+    '为此子代理输入一个清晰、唯一的名称。',
+  'e.g., Code Reviewer': '例如：代码审查员',
+  'Name cannot be empty.': '名称不能为空。',
+  "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
+    '编写定义此子代理行为的系统提示。为了获得最佳效果，请全面描述。',
+  'e.g., You are an expert code reviewer...':
+    '例如：您是一位专业的代码审查员...',
+  'System prompt cannot be empty.': '系统提示不能为空。',
+  'Describe when and how this subagent should be used.':
+    '描述何时以及如何使用此子代理。',
+  'e.g., Reviews code for best practices and potential bugs.':
+    '例如：审查代码以查找最佳实践和潜在错误。',
+  'Description cannot be empty.': '描述不能为空。',
+  'Failed to launch editor: {{error}}': '启动编辑器失败: {{error}}',
+  'Failed to save and edit subagent: {{error}}':
+    '保存并编辑子代理失败: {{error}}',
+
+  // ============================================================================
+  // Commands - General (continued)
+  // ============================================================================
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   'toggle vim mode on/off': '切换 vim 模式开关',
   'check session stats. Usage: /stats [model|tools]':
@@ -232,6 +360,9 @@ export default {
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
   '(Use Enter to select, Tab to change focus)':
     '（使用 Enter 选择，Tab 切换焦点）',
+  'Apply To': '应用于',
+  'User Settings': '用户设置',
+  'Workspace Settings': '工作区设置',
 
   // ============================================================================
   // Commands - Memory
@@ -454,7 +585,7 @@ export default {
   // ============================================================================
   'Get started': '开始使用',
   'How would you like to authenticate for this project?':
-    '您想如何为此项目进行认证？',
+    '您希望如何为此项目进行身份验证？',
   'OpenAI API key is required to use OpenAI authentication.':
     '使用 OpenAI 认证需要 OpenAI API 密钥',
   'You must select an auth method to proceed. Press Ctrl+C again to exit.':
@@ -462,8 +593,8 @@ export default {
   '(Use Enter to Set Auth)': '（使用 Enter 设置认证）',
   'Terms of Services and Privacy Notice for Qwen Code':
     'Qwen Code 的服务条款和隐私声明',
-  'Qwen OAuth': 'Qwen OAuth',
-  OpenAI: 'OpenAI',
+  'Qwen OAuth': 'Qwen OAuth (推荐)',
+  OpenAI: 'OpenAI (兼容 API)',
   'Failed to login. Message: {{message}}': '登录失败。消息：{{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     '认证方式被强制设置为 {{enforcedType}}，但您当前使用的是 {{currentType}}',

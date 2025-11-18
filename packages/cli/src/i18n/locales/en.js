@@ -95,12 +95,146 @@ export default {
   'Show quit confirmation dialog': 'Show quit confirmation dialog',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
+
+  // ============================================================================
+  // Commands - Agents
+  // ============================================================================
   'Manage subagents for specialized task delegation.':
     'Manage subagents for specialized task delegation.',
   'Manage existing subagents (view, edit, delete).':
     'Manage existing subagents (view, edit, delete).',
   'Create a new subagent with guided setup.':
     'Create a new subagent with guided setup.',
+
+  // ============================================================================
+  // Agents - Management Dialog
+  // ============================================================================
+  Agents: 'Agents',
+  'Choose Action': 'Choose Action',
+  'Edit {{name}}': 'Edit {{name}}',
+  'Edit Tools: {{name}}': 'Edit Tools: {{name}}',
+  'Edit Color: {{name}}': 'Edit Color: {{name}}',
+  'Delete {{name}}': 'Delete {{name}}',
+  'Unknown Step': 'Unknown Step',
+  'Esc to close': 'Esc to close',
+  'Enter to select, ↑↓ to navigate, Esc to close':
+    'Enter to select, ↑↓ to navigate, Esc to close',
+  'Esc to go back': 'Esc to go back',
+  'Enter to confirm, Esc to cancel': 'Enter to confirm, Esc to cancel',
+  'Enter to select, ↑↓ to navigate, Esc to go back':
+    'Enter to select, ↑↓ to navigate, Esc to go back',
+  'Invalid step: {{step}}': 'Invalid step: {{step}}',
+  'No subagents found.': 'No subagents found.',
+  "Use '/agents create' to create your first subagent.":
+    "Use '/agents create' to create your first subagent.",
+  '(built-in)': '(built-in)',
+  '(overridden by project level agent)': '(overridden by project level agent)',
+  'Project Level ({{path}})': 'Project Level ({{path}})',
+  'User Level ({{path}})': 'User Level ({{path}})',
+  'Built-in Agents': 'Built-in Agents',
+  'Using: {{count}} agents': 'Using: {{count}} agents',
+  'View Agent': 'View Agent',
+  'Edit Agent': 'Edit Agent',
+  'Delete Agent': 'Delete Agent',
+  Back: 'Back',
+  'No agent selected': 'No agent selected',
+  'File Path: ': 'File Path: ',
+  'Tools: ': 'Tools: ',
+  'Color: ': 'Color: ',
+  'Description:': 'Description:',
+  'System Prompt:': 'System Prompt:',
+  'Open in editor': 'Open in editor',
+  'Edit tools': 'Edit tools',
+  'Edit color': 'Edit color',
+  '❌ Error:': '❌ Error:',
+  'Are you sure you want to delete agent "{{name}}"?':
+    'Are you sure you want to delete agent "{{name}}"?',
+  // ============================================================================
+  // Agents - Creation Wizard
+  // ============================================================================
+  'Project Level (.qwen/agents/)': 'Project Level (.qwen/agents/)',
+  'User Level (~/.qwen/agents/)': 'User Level (~/.qwen/agents/)',
+  '✅ Subagent Created Successfully!': '✅ Subagent Created Successfully!',
+  'Subagent "{{name}}" has been saved to {{level}} level.':
+    'Subagent "{{name}}" has been saved to {{level}} level.',
+  'Name: ': 'Name: ',
+  'Location: ': 'Location: ',
+  '❌ Error saving subagent:': '❌ Error saving subagent:',
+  'Warnings:': 'Warnings:',
+  'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
+    'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent',
+  'Name "{{name}}" exists at user level - project level will take precedence':
+    'Name "{{name}}" exists at user level - project level will take precedence',
+  'Name "{{name}}" exists at project level - existing subagent will take precedence':
+    'Name "{{name}}" exists at project level - existing subagent will take precedence',
+  'Description is over {{length}} characters':
+    'Description is over {{length}} characters',
+  'System prompt is over {{length}} characters':
+    'System prompt is over {{length}} characters',
+  // Agents - Creation Wizard Steps
+  'Step {{n}}: Choose Location': 'Step {{n}}: Choose Location',
+  'Step {{n}}: Choose Generation Method':
+    'Step {{n}}: Choose Generation Method',
+  'Generate with Qwen Code (Recommended)':
+    'Generate with Qwen Code (Recommended)',
+  'Manual Creation': 'Manual Creation',
+  'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
+    'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)',
+  'e.g., Expert code reviewer that reviews code based on best practices...':
+    'e.g., Expert code reviewer that reviews code based on best practices...',
+  'Generating subagent configuration...':
+    'Generating subagent configuration...',
+  'Failed to generate subagent: {{error}}':
+    'Failed to generate subagent: {{error}}',
+  'Step {{n}}: Describe Your Subagent': 'Step {{n}}: Describe Your Subagent',
+  'Step {{n}}: Enter Subagent Name': 'Step {{n}}: Enter Subagent Name',
+  'Step {{n}}: Enter System Prompt': 'Step {{n}}: Enter System Prompt',
+  'Step {{n}}: Enter Description': 'Step {{n}}: Enter Description',
+  // Agents - Tool Selection
+  'Step {{n}}: Select Tools': 'Step {{n}}: Select Tools',
+  'All Tools (Default)': 'All Tools (Default)',
+  'All Tools': 'All Tools',
+  'Read-only Tools': 'Read-only Tools',
+  'Read & Edit Tools': 'Read & Edit Tools',
+  'Read & Edit & Execution Tools': 'Read & Edit & Execution Tools',
+  'All tools selected, including MCP tools':
+    'All tools selected, including MCP tools',
+  'Selected tools:': 'Selected tools:',
+  'Read-only tools:': 'Read-only tools:',
+  'Edit tools:': 'Edit tools:',
+  'Execution tools:': 'Execution tools:',
+  'Step {{n}}: Choose Background Color': 'Step {{n}}: Choose Background Color',
+  'Step {{n}}: Confirm and Save': 'Step {{n}}: Confirm and Save',
+  // Agents - Navigation & Instructions
+  'Esc to cancel': 'Esc to cancel',
+  'Press Enter to save, e to save and edit, Esc to go back':
+    'Press Enter to save, e to save and edit, Esc to go back',
+  'Press Enter to continue, {{navigation}}Esc to {{action}}':
+    'Press Enter to continue, {{navigation}}Esc to {{action}}',
+  cancel: 'cancel',
+  'go back': 'go back',
+  '↑↓ to navigate, ': '↑↓ to navigate, ',
+  'Enter a clear, unique name for this subagent.':
+    'Enter a clear, unique name for this subagent.',
+  'e.g., Code Reviewer': 'e.g., Code Reviewer',
+  'Name cannot be empty.': 'Name cannot be empty.',
+  "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
+    "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.",
+  'e.g., You are an expert code reviewer...':
+    'e.g., You are an expert code reviewer...',
+  'System prompt cannot be empty.': 'System prompt cannot be empty.',
+  'Describe when and how this subagent should be used.':
+    'Describe when and how this subagent should be used.',
+  'e.g., Reviews code for best practices and potential bugs.':
+    'e.g., Reviews code for best practices and potential bugs.',
+  'Description cannot be empty.': 'Description cannot be empty.',
+  'Failed to launch editor: {{error}}': 'Failed to launch editor: {{error}}',
+  'Failed to save and edit subagent: {{error}}':
+    'Failed to save and edit subagent: {{error}}',
+
+  // ============================================================================
+  // Commands - General (continued)
+  // ============================================================================
   'View and edit Qwen Code settings': 'View and edit Qwen Code settings',
   'toggle vim mode on/off': 'toggle vim mode on/off',
   'check session stats. Usage: /stats [model|tools]':
@@ -247,6 +381,9 @@ export default {
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
   '(Use Enter to select, Tab to change focus)':
     '(Use Enter to select, Tab to change focus)',
+  'Apply To': 'Apply To',
+  'User Settings': 'User Settings',
+  'Workspace Settings': 'Workspace Settings',
 
   // ============================================================================
   // Commands - Memory

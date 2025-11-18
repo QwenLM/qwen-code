@@ -9,6 +9,7 @@ import { type SubagentConfig } from '@qwen-code/qwen-code-core';
 import type { StepNavigationProps } from '../types.js';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { t } from '../../../../i18n/index.js';
 
 interface AgentDeleteStepProps extends StepNavigationProps {
   selectedAgent: SubagentConfig | null;
@@ -41,7 +42,7 @@ export function AgentDeleteStep({
   if (!selectedAgent) {
     return (
       <Box>
-        <Text color={theme.status.error}>No agent selected</Text>
+        <Text color={theme.status.error}>{t('No agent selected')}</Text>
       </Box>
     );
   }
@@ -49,8 +50,9 @@ export function AgentDeleteStep({
   return (
     <Box flexDirection="column" gap={1}>
       <Text color={theme.status.error}>
-        Are you sure you want to delete agent &ldquo;{selectedAgent.name}
-        &rdquo;?
+        {t('Are you sure you want to delete agent "{{name}}"?', {
+          name: selectedAgent.name,
+        })}
       </Text>
     </Box>
   );
