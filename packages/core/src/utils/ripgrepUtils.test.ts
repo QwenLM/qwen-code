@@ -7,8 +7,8 @@
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import {
   canUseRipgrep,
-  ensureRipgrepPath,
-  getBuiltinRipgrepPath,
+  getRipgrepCommand,
+  getBuiltinRipgrep,
 } from './ripgrepUtils.js';
 import { fileExists } from './fileUtils.js';
 import path from 'node:path';
@@ -36,7 +36,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       Object.defineProperty(process, 'arch', { value: 'x64' });
 
-      const rgPath = getBuiltinRipgrepPath();
+      const rgPath = getBuiltinRipgrep();
 
       expect(rgPath).toContain('x64-win32');
       expect(rgPath).toContain('rg.exe');
@@ -55,7 +55,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       Object.defineProperty(process, 'arch', { value: 'arm64' });
 
-      const rgPath = getBuiltinRipgrepPath();
+      const rgPath = getBuiltinRipgrep();
 
       expect(rgPath).toContain('arm64-darwin');
       expect(rgPath).toContain('rg');
@@ -75,7 +75,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       Object.defineProperty(process, 'arch', { value: 'x64' });
 
-      const rgPath = getBuiltinRipgrepPath();
+      const rgPath = getBuiltinRipgrep();
 
       expect(rgPath).toContain('x64-linux');
       expect(rgPath).toContain('rg');
@@ -87,7 +87,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
-    it('should throw error for unsupported platform', () => {
+    it('should return null for unsupported platform', () => {
       const originalPlatform = process.platform;
       const originalArch = process.arch;
 
@@ -95,14 +95,14 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'freebsd' });
       Object.defineProperty(process, 'arch', { value: 'x64' });
 
-      expect(getBuiltinRipgrepPath()).toBe('');
+      expect(getBuiltinRipgrep()).toBeNull();
 
       // Restore original values
       Object.defineProperty(process, 'platform', { value: originalPlatform });
       Object.defineProperty(process, 'arch', { value: originalArch });
     });
 
-    it('should throw error for unsupported architecture', () => {
+    it('should return null for unsupported architecture', () => {
       const originalPlatform = process.platform;
       const originalArch = process.arch;
 
@@ -110,7 +110,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       Object.defineProperty(process, 'arch', { value: 'ia32' });
 
-      expect(getBuiltinRipgrepPath()).toBe('');
+      expect(getBuiltinRipgrep()).toBeNull();
 
       // Restore original values
       Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -136,7 +136,7 @@ describe('ripgrepUtils', () => {
         Object.defineProperty(process, 'platform', { value: platform });
         Object.defineProperty(process, 'arch', { value: arch });
 
-        const rgPath = getBuiltinRipgrepPath();
+        const rgPath = getBuiltinRipgrep();
         const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
         const expectedPathSegment = path.join(
           `${arch}-${platform}`,
@@ -175,7 +175,7 @@ describe('ripgrepUtils', () => {
     it('should return bundled ripgrep path if binary exists (useBuiltin=true)', async () => {
       (fileExists as Mock).mockResolvedValue(true);
 
-      const rgPath = await ensureRipgrepPath(true);
+      const rgPath = await getRipgrepCommand(true);
 
       expect(rgPath).toBeDefined();
       expect(rgPath).toContain('rg');
@@ -187,7 +187,7 @@ describe('ripgrepUtils', () => {
     it('should return bundled ripgrep path if binary exists (default)', async () => {
       (fileExists as Mock).mockResolvedValue(true);
 
-      const rgPath = await ensureRipgrepPath();
+      const rgPath = await getRipgrepCommand();
 
       expect(rgPath).toBeDefined();
       expect(rgPath).toContain('rg');
@@ -200,7 +200,7 @@ describe('ripgrepUtils', () => {
       // it should fall back to checking system rg
       // The test result depends on whether system rg is actually available
 
-      const rgPath = await ensureRipgrepPath(true);
+      const rgPath = await getRipgrepCommand(true);
 
       expect(fileExists).toHaveBeenCalledOnce();
       // If system rg is available, it should return 'rg' (or 'rg.exe' on Windows)
@@ -210,7 +210,7 @@ describe('ripgrepUtils', () => {
 
     it('should use system rg when useBuiltin=false', async () => {
       // When useBuiltin is false, should skip bundled check and go straight to system rg
-      const rgPath = await ensureRipgrepPath(false);
+      const rgPath = await getRipgrepCommand(false);
 
       // Should not check for bundled binary
       expect(fileExists).not.toHaveBeenCalled();
@@ -228,7 +228,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'freebsd' });
 
       try {
-        await ensureRipgrepPath();
+        await getRipgrepCommand();
         // If we get here without error, system rg was available, which is fine
       } catch (error) {
         expect(error).toBeInstanceOf(Error);

@@ -13,7 +13,7 @@ import { ToolNames } from './tool-names.js';
 import { resolveAndValidatePath } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { ensureRipgrepPath } from '../utils/ripgrepUtils.js';
+import { getRipgrepCommand } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -158,7 +158,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: displayMessage,
       };
     } catch (error) {
-      console.error(`Error during GrepLogic execution: ${error}`);
+      console.error(`Error during ripgrep search operation: ${error}`);
       const errorMessage = getErrorMessage(error);
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
@@ -209,17 +209,15 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push(absolutePath);
 
     try {
-      const rgPath = await ensureRipgrepPath(
+      const rgCommand = await getRipgrepCommand(
         this.config.getUseBuiltinRipgrep(),
       );
-      if (!rgPath) {
-        throw new Error(
-          'ripgrep binary not found, please install ripgrep globally and try again.',
-        );
+      if (!rgCommand) {
+        throw new Error('ripgrep binary not found.');
       }
 
       const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(rgPath, rgArgs, {
+        const child = spawn(rgCommand, rgArgs, {
           windowsHide: true,
         });
 

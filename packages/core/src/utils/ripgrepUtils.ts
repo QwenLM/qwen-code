@@ -44,13 +44,14 @@ function getArchitectureString(arch: string): Architecture | undefined {
 
 /**
  * Returns the path to the bundled ripgrep binary for the current platform
+ * @returns The path to the bundled ripgrep binary, or null if not available
  */
-export function getBuiltinRipgrepPath(): string {
+export function getBuiltinRipgrep(): string | null {
   const platform = getPlatformString(process.platform);
   const arch = getArchitectureString(process.arch);
 
   if (!platform || !arch) {
-    return '';
+    return null;
   }
 
   // Binary name includes .exe on Windows
@@ -89,10 +90,9 @@ export function getBuiltinRipgrepPath(): string {
 
 /**
  * Checks if system ripgrep is available and returns the command to use
- * Extracted for easier testing
- * @returns The ripgrep command ('rg' or 'rg.exe') if available, or empty string if not found
+ * @returns The ripgrep command ('rg' or 'rg.exe') if available, or null if not found
  */
-export async function getSystemRipgrepCommand(): Promise<string> {
+export async function getSystemRipgrep(): Promise<string | null> {
   try {
     const { spawn } = await import('node:child_process');
     const rgCommand = process.platform === 'win32' ? 'rg.exe' : 'rg';
@@ -101,25 +101,25 @@ export async function getSystemRipgrepCommand(): Promise<string> {
       proc.on('error', () => resolve(false));
       proc.on('exit', (code) => resolve(code === 0));
     });
-    return isAvailable ? rgCommand : '';
+    return isAvailable ? rgCommand : null;
   } catch (_error) {
-    return '';
+    return null;
   }
 }
 
 /**
- * Ensures ripgrep binary exists and returns its path
+ * Checks if ripgrep binary exists and returns its path
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
- * @returns The path to ripgrep binary ('rg' or 'rg.exe' for system ripgrep, or full path for bundled), or empty string if not available
+ * @returns The path to ripgrep binary ('rg' or 'rg.exe' for system ripgrep, or full path for bundled), or null if not available
  */
-export async function ensureRipgrepPath(
+export async function getRipgrepCommand(
   useBuiltin: boolean = true,
-): Promise<string> {
+): Promise<string | null> {
   try {
     if (useBuiltin) {
       // Try bundled ripgrep first
-      const rgPath = getBuiltinRipgrepPath();
+      const rgPath = getBuiltinRipgrep();
       if (rgPath && (await fileExists(rgPath))) {
         return rgPath;
       }
@@ -127,9 +127,9 @@ export async function ensureRipgrepPath(
     }
 
     // Check for system ripgrep
-    return await getSystemRipgrepCommand();
+    return await getSystemRipgrep();
   } catch (_error) {
-    return '';
+    return null;
   }
 }
 
@@ -141,6 +141,6 @@ export async function ensureRipgrepPath(
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
 ): Promise<boolean> {
-  const rgPath = await ensureRipgrepPath(useBuiltin);
-  return rgPath.length > 0;
+  const rgPath = await getRipgrepCommand(useBuiltin);
+  return rgPath !== null;
 }
