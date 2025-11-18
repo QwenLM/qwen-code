@@ -29,6 +29,7 @@ import { SubagentValidator } from './validation.js';
 import { SubAgentScope } from './subagent.js';
 import type { Config } from '../config/config.js';
 import { BuiltinAgentRegistry } from './builtin-agents.js';
+import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
 
 const QWEN_CONFIG_DIR = '.qwen';
 const AGENT_CONFIG_DIR = 'agents';
@@ -632,7 +633,12 @@ export class SubagentManager {
 
       // If no exact name match, try to find by display name
       const displayNameMatch = allTools.find(
-        (tool) => tool.displayName === toolIdentifier,
+        (tool) =>
+          tool.displayName === toolIdentifier ||
+          tool.displayName ===
+            (ToolDisplayNamesMigration[
+              toolIdentifier as keyof typeof ToolDisplayNamesMigration
+            ] as string | undefined),
       );
       if (displayNameMatch) {
         result.push(displayNameMatch.name);

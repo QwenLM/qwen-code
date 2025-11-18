@@ -80,6 +80,8 @@ describe('handleAtCommand', () => {
         getReadManyFilesExcludes: () => [],
       }),
       getUsageStatisticsEnabled: () => false,
+      getTruncateToolOutputThreshold: () => 2500,
+      getTruncateToolOutputLines: () => 500,
     } as unknown as Config;
 
     const registry = new ToolRegistry(mockConfig);

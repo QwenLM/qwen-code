@@ -11,15 +11,13 @@ import { spawn } from 'node:child_process';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { makeRelative, shortenPath } from '../utils/paths.js';
-import { getErrorMessage, isNodeError } from '../utils/errors.js';
+import { resolveAndValidatePath } from '../utils/paths.js';
+import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ensureRipgrepPath } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
-
-const MAX_LLM_CONTENT_LENGTH = 20_000;
 
 /**
  * Parameters for the GrepTool (Simplified)
@@ -57,50 +55,13 @@ class GrepToolInvocation extends BaseToolInvocation<
     super(params);
   }
 
-  /**
-   * Checks if a path is within the root directory and resolves it.
-   * @param relativePath Path relative to the root directory (or undefined for root).
-   * @returns The absolute path to search within.
-   * @throws {Error} If path is outside root, doesn't exist, or isn't a directory.
-   */
-  private resolveAndValidatePath(relativePath?: string): string {
-    const targetDir = this.config.getTargetDir();
-    const targetPath = relativePath
-      ? path.resolve(targetDir, relativePath)
-      : targetDir;
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(targetPath)) {
-      const directories = workspaceContext.getDirectories();
-      throw new Error(
-        `Path validation failed: Attempted path "${relativePath}" resolves outside the allowed workspace directories: ${directories.join(', ')}`,
-      );
-    }
-
-    return this.ensureDirectory(targetPath);
-  }
-
-  private ensureDirectory(targetPath: string): string {
-    try {
-      const stats = fs.statSync(targetPath);
-      if (!stats.isDirectory()) {
-        throw new Error(`Path is not a directory: ${targetPath}`);
-      }
-    } catch (error: unknown) {
-      if (isNodeError(error) && error.code !== 'ENOENT') {
-        throw new Error(`Path does not exist: ${targetPath}`);
-      }
-      throw new Error(
-        `Failed to access path stats for ${targetPath}: ${error}`,
-      );
-    }
-
-    return targetPath;
-  }
-
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      const searchDirAbs = this.resolveAndValidatePath(this.params.path);
+      const searchDirAbs = resolveAndValidatePath(
+        this.config,
+        this.params.path,
+        { allowFiles: true },
+      );
       const searchDirDisplay = this.params.path || '.';
 
       // Get raw ripgrep output
@@ -133,34 +94,50 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build header early to calculate available space
       const header = `Found ${totalMatches} ${matchTerm} for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}:\n---\n`;
-      const maxTruncationNoticeLength = 100; // "[... N more matches truncated]"
-      const maxGrepOutputLength =
-        MAX_LLM_CONTENT_LENGTH - header.length - maxTruncationNoticeLength;
+
+      const charLimit = this.config.getTruncateToolOutputThreshold();
+      const lineLimit = Math.min(
+        this.config.getTruncateToolOutputLines(),
+        this.params.limit ?? Number.POSITIVE_INFINITY,
+      );
 
       // Apply line limit first (if specified)
       let truncatedByLineLimit = false;
       let linesToInclude = allLines;
-      if (
-        this.params.limit !== undefined &&
-        allLines.length > this.params.limit
-      ) {
-        linesToInclude = allLines.slice(0, this.params.limit);
+      if (allLines.length > lineLimit) {
+        linesToInclude = allLines.slice(0, lineLimit);
         truncatedByLineLimit = true;
       }
 
-      // Join lines back into grep output
-      let grepOutput = linesToInclude.join(EOL);
-
-      // Apply character limit as safety net
+      // Build output and track how many lines we include, respecting character limit
+      let grepOutput = '';
       let truncatedByCharLimit = false;
-      if (grepOutput.length > maxGrepOutputLength) {
-        grepOutput = grepOutput.slice(0, maxGrepOutputLength) + '...';
-        truncatedByCharLimit = true;
-      }
+      let includedLines = 0;
+      if (Number.isFinite(charLimit)) {
+        const parts: string[] = [];
+        let currentLength = 0;
 
-      // Count how many lines we actually included after character truncation
-      const finalLines = grepOutput.split(EOL).filter((line) => line.trim());
-      const includedLines = finalLines.length;
+        for (const line of linesToInclude) {
+          const sep = includedLines > 0 ? 1 : 0;
+          includedLines++;
+
+          const projectedLength = currentLength + line.length + sep;
+          if (projectedLength <= charLimit) {
+            parts.push(line);
+            currentLength = projectedLength;
+          } else {
+            const remaining = Math.max(charLimit - currentLength - sep, 10);
+            parts.push(line.slice(0, remaining) + '...');
+            truncatedByCharLimit = true;
+            break;
+          }
+        }
+
+        grepOutput = parts.join('\n');
+      } else {
+        grepOutput = linesToInclude.join('\n');
+        includedLines = linesToInclude.length;
+      }
 
       // Build result
       let llmContent = header + grepOutput;
@@ -168,7 +145,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {
         const omittedMatches = totalMatches - includedLines;
-        llmContent += ` [${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
+        llmContent += `\n---\n[${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
 
       // Build display message (show real count, not truncated)
@@ -193,7 +170,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
   private async performRipgrepSearch(options: {
     pattern: string;
-    path: string;
+    path: string; // Can be a file or directory
     glob?: string;
     signal: AbortSignal;
   }): Promise<string> {
@@ -302,34 +279,13 @@ class GrepToolInvocation extends BaseToolInvocation<
    */
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
-    if (this.params.glob) {
-      description += ` in ${this.params.glob}`;
-    }
     if (this.params.path) {
-      const resolvedPath = path.resolve(
-        this.config.getTargetDir(),
-        this.params.path,
-      );
-      if (
-        resolvedPath === this.config.getTargetDir() ||
-        this.params.path === '.'
-      ) {
-        description += ` within ./`;
-      } else {
-        const relativePath = makeRelative(
-          resolvedPath,
-          this.config.getTargetDir(),
-        );
-        description += ` within ${shortenPath(relativePath)}`;
-      }
-    } else {
-      // When no path is specified, indicate searching all workspace directories
-      const workspaceContext = this.config.getWorkspaceContext();
-      const directories = workspaceContext.getDirectories();
-      if (directories.length > 1) {
-        description += ` across all workspace directories`;
-      }
+      description += ` in path '${this.params.path}'`;
     }
+    if (this.params.glob) {
+      description += ` (filter: '${this.params.glob}')`;
+    }
+
     return description;
   }
 }
@@ -379,47 +335,6 @@ export class RipGrepTool extends BaseDeclarativeTool<
   }
 
   /**
-   * Checks if a path is within the root directory and resolves it.
-   * @param relativePath Path relative to the root directory (or undefined for root).
-   * @returns The absolute path to search within.
-   * @throws {Error} If path is outside root, doesn't exist, or isn't a directory.
-   */
-  private resolveAndValidatePath(relativePath?: string): string {
-    // If no path specified, search within the workspace root directory
-    if (!relativePath) {
-      return this.config.getTargetDir();
-    }
-
-    const targetPath = path.resolve(this.config.getTargetDir(), relativePath);
-
-    // Security Check: Ensure the resolved path is within workspace boundaries
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(targetPath)) {
-      const directories = workspaceContext.getDirectories();
-      throw new Error(
-        `Path validation failed: Attempted path "${relativePath}" resolves outside the allowed workspace directories: ${directories.join(', ')}`,
-      );
-    }
-
-    // Check existence and type after resolving
-    try {
-      const stats = fs.statSync(targetPath);
-      if (!stats.isDirectory()) {
-        throw new Error(`Path is not a directory: ${targetPath}`);
-      }
-    } catch (error: unknown) {
-      if (isNodeError(error) && error.code !== 'ENOENT') {
-        throw new Error(`Path does not exist: ${targetPath}`);
-      }
-      throw new Error(
-        `Failed to access path stats for ${targetPath}: ${error}`,
-      );
-    }
-
-    return targetPath;
-  }
-
-  /**
    * Validates the parameters for the tool
    * @param params Parameters to validate
    * @returns An error message string if invalid, null otherwise
@@ -445,7 +360,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
     // Only validate path if one is provided
     if (params.path) {
       try {
-        this.resolveAndValidatePath(params.path);
+        resolveAndValidatePath(this.config, params.path, { allowFiles: true });
       } catch (error) {
         return getErrorMessage(error);
       }

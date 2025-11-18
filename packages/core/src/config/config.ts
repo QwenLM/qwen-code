@@ -81,6 +81,7 @@ import {
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
+import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -161,7 +162,7 @@ export interface ExtensionInstallMetadata {
   autoUpdate?: boolean;
 }
 
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 4_000_000;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
 
 export class MCPServerConfig {
@@ -291,6 +292,7 @@ export interface ConfigParameters {
   output?: OutputSettings;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
+  skipStartupContext?: boolean;
 }
 
 function normalizeConfigOutputFormat(
@@ -402,6 +404,7 @@ export class Config {
   private readonly extensionManagement: boolean = true;
   private readonly enablePromptCompletion: boolean = false;
   private readonly skipLoopDetection: boolean;
+  private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
   private initialized: boolean = false;
   readonly storage: Storage;
@@ -499,6 +502,7 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
+    this.skipStartupContext = params.skipStartupContext ?? false;
 
     // Web search
     this.webSearch = params.webSearch;
@@ -1076,6 +1080,10 @@ export class Config {
     return this.skipLoopDetection;
   }
 
+  getSkipStartupContext(): boolean {
+    return this.skipStartupContext;
+  }
+
   getVlmSwitchMode(): string | undefined {
     return this.vlmSwitchMode;
   }
@@ -1085,6 +1093,13 @@ export class Config {
   }
 
   getTruncateToolOutputThreshold(): number {
+    if (
+      !this.enableToolOutputTruncation ||
+      this.truncateToolOutputThreshold <= 0
+    ) {
+      return Number.POSITIVE_INFINITY;
+    }
+
     return Math.min(
       // Estimate remaining context window in characters (1 token ~= 4 chars).
       4 *
@@ -1095,6 +1110,10 @@ export class Config {
   }
 
   getTruncateToolOutputLines(): number {
+    if (!this.enableToolOutputTruncation || this.truncateToolOutputLines <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+
     return this.truncateToolOutputLines;
   }
 
@@ -1125,37 +1144,35 @@ export class Config {
   async createToolRegistry(): Promise<ToolRegistry> {
     const registry = new ToolRegistry(this, this.eventEmitter);
 
-    // helper to create & register core tools that are enabled
+    const coreToolsConfig = this.getCoreTools();
+    const excludeToolsConfig = this.getExcludeTools();
+
+    // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
-      const className = ToolClass.name;
-      const toolName = ToolClass.Name || className;
-      const coreTools = this.getCoreTools();
-      const excludeTools = this.getExcludeTools() || [];
-      // On some platforms, the className can be minified to _ClassName.
-      const normalizedClassName = className.replace(/^_+/, '');
+      const toolName = ToolClass?.Name as ToolName | undefined;
+      const className = ToolClass?.name ?? 'UnknownTool';
 
-      let isEnabled = true; // Enabled by default if coreTools is not set.
-      if (coreTools) {
-        isEnabled = coreTools.some(
-          (tool) =>
-            tool === toolName ||
-            tool === normalizedClassName ||
-            tool.startsWith(`${toolName}(`) ||
-            tool.startsWith(`${normalizedClassName}(`),
+      if (!toolName) {
+        // Log warning and skip this tool instead of crashing
+        console.warn(
+          `[Config] Skipping tool registration: ${className} is missing static Name property. ` +
+            `Tools must define a static Name property to be registered. ` +
+            `Location: config.ts:registerCoreTool`,
         );
+        return;
       }
 
-      const isExcluded = excludeTools.some(
-        (tool) => tool === toolName || tool === normalizedClassName,
-      );
-
-      if (isExcluded) {
-        isEnabled = false;
-      }
-
-      if (isEnabled) {
-        registry.registerTool(new ToolClass(...args));
+      if (isToolEnabled(toolName, coreToolsConfig, excludeToolsConfig)) {
+        try {
+          registry.registerTool(new ToolClass(...args));
+        } catch (error) {
+          console.error(
+            `[Config] Failed to register tool ${className} (${toolName}):`,
+            error,
+          );
+          throw error; // Re-throw after logging context
+        }
       }
     };
 

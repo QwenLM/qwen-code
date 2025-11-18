@@ -872,6 +872,7 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     enablePromptCompletion: settings.general?.enablePromptCompletion ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? false,
+    skipStartupContext: settings.model?.skipStartupContext ?? false,
     vlmSwitchMode,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,

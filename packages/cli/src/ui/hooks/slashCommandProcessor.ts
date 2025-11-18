@@ -48,6 +48,7 @@ interface SlashCommandProcessorActions {
   openSettingsDialog: () => void;
   openModelDialog: () => void;
   openPermissionsDialog: () => void;
+  openApprovalModeDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   toggleCorgiMode: () => void;
@@ -138,13 +139,7 @@ export const useSlashCommandProcessor = (
       if (message.type === MessageType.ABOUT) {
         historyItemContent = {
           type: 'about',
-          cliVersion: message.cliVersion,
-          osVersion: message.osVersion,
-          sandboxEnv: message.sandboxEnv,
-          modelVersion: message.modelVersion,
-          selectedAuthType: message.selectedAuthType,
-          gcpProject: message.gcpProject,
-          ideClient: message.ideClient,
+          systemInfo: message.systemInfo,
         };
       } else if (message.type === MessageType.HELP) {
         historyItemContent = {
@@ -401,6 +396,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'subagent_list':
                       actions.openAgentsManagerDialog();
+                      return { type: 'handled' };
+                    case 'approval-mode':
+                      actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };

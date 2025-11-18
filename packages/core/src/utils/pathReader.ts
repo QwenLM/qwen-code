@@ -83,11 +83,7 @@ export async function readPathFromWorkspace(
     for (const filePath of finalFiles) {
       const relativePathForDisplay = path.relative(absolutePath, filePath);
       allParts.push({ text: `--- ${relativePathForDisplay} ---\n` });
-      const result = await processSingleFileContent(
-        filePath,
-        config.getTargetDir(),
-        config.getFileSystemService(),
-      );
+      const result = await processSingleFileContent(filePath, config);
       allParts.push(result.llmContent);
       allParts.push({ text: '\n' }); // Add a newline for separation
     }
@@ -108,11 +104,7 @@ export async function readPathFromWorkspace(
     }
 
     // It's a single file, process it directly.
-    const result = await processSingleFileContent(
-      absolutePath,
-      config.getTargetDir(),
-      config.getFileSystemService(),
-    );
+    const result = await processSingleFileContent(absolutePath, config);
     return [result.llmContent];
   }
 }

@@ -181,6 +181,56 @@ describe('ChatCompressionService', () => {
     expect(result.newHistory).toBeNull();
   });
 
+  it('should return NOOP when contextPercentageThreshold is 0', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      contextPercentageThreshold: 0,
+    });
+
+    const mockGenerateContent = vi.fn();
+    vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+      generateContent: mockGenerateContent,
+    } as unknown as ContentGenerator);
+
+    const result = await service.compress(
+      mockChat,
+      mockPromptId,
+      false,
+      mockModel,
+      mockConfig,
+      false,
+    );
+
+    expect(result.info).toMatchObject({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 0,
+      newTokenCount: 0,
+    });
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(tokenLimit).not.toHaveBeenCalled();
+
+    const forcedResult = await service.compress(
+      mockChat,
+      mockPromptId,
+      true,
+      mockModel,
+      mockConfig,
+      false,
+    );
+    expect(forcedResult.info).toMatchObject({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 0,
+      newTokenCount: 0,
+    });
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(tokenLimit).not.toHaveBeenCalled();
+  });
+
   it('should compress if over token threshold', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },

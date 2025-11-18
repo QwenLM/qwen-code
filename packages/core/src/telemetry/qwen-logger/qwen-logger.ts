@@ -6,6 +6,7 @@
 
 import { Buffer } from 'buffer';
 import * as https from 'https';
+import * as os from 'node:os';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 import type {
@@ -45,10 +46,10 @@ import type {
   RumResourceEvent,
   RumExceptionEvent,
   RumPayload,
+  RumOS,
 } from './event-types.js';
 import type { Config } from '../../config/config.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
-import { type HttpError, retryWithBackoff } from '../../utils/retry.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -215,9 +216,17 @@ export class QwenLogger {
     return this.createRumEvent('exception', type, name, properties);
   }
 
+  private getOsMetadata(): RumOS {
+    return {
+      type: os.platform(),
+      version: os.release(),
+    };
+  }
+
   async createRumPayload(): Promise<RumPayload> {
     const authType = this.config?.getAuthType();
     const version = this.config?.getCliVersion() || 'unknown';
+    const osMetadata = this.getOsMetadata();
 
     return {
       app: {
@@ -236,6 +245,7 @@ export class QwenLogger {
         id: this.sessionId,
         name: 'qwen-code-cli',
       },
+      os: osMetadata,
 
       events: this.events.toArray() as RumEvent[],
       properties: {
@@ -288,8 +298,8 @@ export class QwenLogger {
     const rumPayload = await this.createRumPayload();
     // Override events with the ones we're sending
     rumPayload.events = eventsToSend;
-    const flushFn = () =>
-      new Promise<Buffer>((resolve, reject) => {
+    try {
+      await new Promise<Buffer>((resolve, reject) => {
         const body = safeJsonStringify(rumPayload);
         const options = {
           hostname: USAGE_STATS_HOSTNAME,
@@ -311,10 +321,9 @@ export class QwenLogger {
               res.statusCode &&
               (res.statusCode < 200 || res.statusCode >= 300)
             ) {
-              const err: HttpError = new Error(
+              const err = new Error(
                 `Request failed with status ${res.statusCode}`,
               );
-              err.status = res.statusCode;
               res.resume();
               return reject(err);
             }
@@ -326,26 +335,11 @@ export class QwenLogger {
         req.end(body);
       });
 
-    try {
-      await retryWithBackoff(flushFn, {
-        maxAttempts: 3,
-        initialDelayMs: 200,
-        shouldRetryOnError: (err: unknown) => {
-          if (!(err instanceof Error)) return false;
-          const status = (err as HttpError).status as number | undefined;
-          // If status is not available, it's likely a network error
-          if (status === undefined) return true;
-
-          // Retry on 429 (Too many Requests) and 5xx server errors.
-          return status === 429 || (status >= 500 && status < 600);
-        },
-      });
-
       this.lastFlushTime = Date.now();
       return {};
     } catch (error) {
       if (this.config?.getDebugMode()) {
-        console.error('RUM flush failed after multiple retries.', error);
+        console.error('RUM flush failed.', error);
       }
 
       // Re-queue failed events for retry

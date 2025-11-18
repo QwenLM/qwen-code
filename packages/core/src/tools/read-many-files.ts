@@ -6,7 +6,7 @@
 
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getErrorMessage } from '../utils/errors.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -17,7 +17,6 @@ import {
   processSingleFileContent,
   DEFAULT_ENCODING,
   getSpecificMimeType,
-  DEFAULT_MAX_LINES_TEXT_FILE,
 } from '../utils/fileUtils.js';
 import type { PartListUnion } from '@google/genai';
 import {
@@ -278,8 +277,10 @@ ${finalExclusionPatternsForDescription
     }
 
     const sortedFiles = Array.from(filesToConsider).sort();
-    const file_line_limit =
-      DEFAULT_MAX_LINES_TEXT_FILE / Math.max(1, sortedFiles.length);
+    const truncateToolOutputLines = this.config.getTruncateToolOutputLines();
+    const file_line_limit = Number.isFinite(truncateToolOutputLines)
+      ? Math.floor(truncateToolOutputLines / Math.max(1, sortedFiles.length))
+      : undefined;
 
     const fileProcessingPromises = sortedFiles.map(
       async (filePath): Promise<FileProcessingResult> => {
@@ -316,8 +317,7 @@ ${finalExclusionPatternsForDescription
           // Use processSingleFileContent for all file types now
           const fileReadResult = await processSingleFileContent(
             filePath,
-            this.config.getTargetDir(),
-            this.config.getFileSystemService(),
+            this.config,
             0,
             file_line_limit,
           );
@@ -376,9 +376,12 @@ ${finalExclusionPatternsForDescription
             );
             let fileContentForLlm = '';
             if (fileReadResult.isTruncated) {
-              fileContentForLlm += `[WARNING: This file was truncated. To view the full content, use the 'read_file' tool on this specific file.]\n\n`;
+              const [start, end] = fileReadResult.linesShown!;
+              const total = fileReadResult.originalLineCount!;
+              fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
+            } else {
+              fileContentForLlm = fileReadResult.llmContent;
             }
-            fileContentForLlm += fileReadResult.llmContent;
             contentParts.push(`${separator}\n\n${fileContentForLlm}\n\n`);
           } else {
             // This is a Part for image/pdf, which we don't add the separator to.
@@ -551,7 +554,7 @@ export class ReadManyFilesTool extends BaseDeclarativeTool<
 
     super(
       ReadManyFilesTool.Name,
-      'ReadManyFiles',
+      ToolDisplayNames.READ_MANY_FILES,
       `Reads content from multiple files specified by paths or glob patterns within a configured target directory. For text files, it concatenates their content into a single string. It is primarily designed for text-based files. However, it can also process image (e.g., .png, .jpg) and PDF (.pdf) files if their file names or extensions are explicitly included in the 'paths' argument. For these explicitly requested non-text files, their data is read and included in a format suitable for model consumption (e.g., base64 encoded).
 
 This tool is useful when you need to understand or analyze a collection of files, such as:

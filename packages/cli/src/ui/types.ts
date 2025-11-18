@@ -120,13 +120,22 @@ export type HistoryItemWarning = HistoryItemBase & {
 
 export type HistoryItemAbout = HistoryItemBase & {
   type: 'about';
-  cliVersion: string;
-  osVersion: string;
-  sandboxEnv: string;
-  modelVersion: string;
-  selectedAuthType: string;
-  gcpProject: string;
-  ideClient: string;
+  systemInfo: {
+    cliVersion: string;
+    osPlatform: string;
+    osArch: string;
+    osRelease: string;
+    nodeVersion: string;
+    npmVersion: string;
+    sandboxEnv: string;
+    modelVersion: string;
+    selectedAuthType: string;
+    ideClient: string;
+    sessionId: string;
+    memoryUsage: string;
+    baseUrl?: string;
+    gitCommit?: string;
+  };
 };
 
 export type HistoryItemHelp = HistoryItemBase & {
@@ -288,13 +297,22 @@ export type Message =
   | {
       type: MessageType.ABOUT;
       timestamp: Date;
-      cliVersion: string;
-      osVersion: string;
-      sandboxEnv: string;
-      modelVersion: string;
-      selectedAuthType: string;
-      gcpProject: string;
-      ideClient: string;
+      systemInfo: {
+        cliVersion: string;
+        osPlatform: string;
+        osArch: string;
+        osRelease: string;
+        nodeVersion: string;
+        npmVersion: string;
+        sandboxEnv: string;
+        modelVersion: string;
+        selectedAuthType: string;
+        ideClient: string;
+        sessionId: string;
+        memoryUsage: string;
+        baseUrl?: string;
+        gitCommit?: string;
+      };
       content?: string; // Optional content, not really used for ABOUT
     }
   | {

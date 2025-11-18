@@ -9,13 +9,9 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import type { PartUnion } from '@google/genai';
 import mime from 'mime/lite';
-import type { FileSystemService } from '../services/fileSystemService.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
-
-// Constants for text file processing
-export const DEFAULT_MAX_LINES_TEXT_FILE = 2000;
-const MAX_LINE_LENGTH_TEXT_FILE = 2000;
+import type { Config } from '../config/config.js';
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
@@ -306,18 +302,18 @@ export interface ProcessedFileReadResult {
 /**
  * Reads and processes a single file, handling text, images, and PDFs.
  * @param filePath Absolute path to the file.
- * @param rootDirectory Absolute path to the project root for relative path display.
+ * @param config Config instance for truncation settings.
  * @param offset Optional offset for text files (0-based line number).
  * @param limit Optional limit for text files (number of lines to read).
  * @returns ProcessedFileReadResult object.
  */
 export async function processSingleFileContent(
   filePath: string,
-  rootDirectory: string,
-  fileSystemService: FileSystemService,
+  config: Config,
   offset?: number,
   limit?: number,
 ): Promise<ProcessedFileReadResult> {
+  const rootDirectory = config.getTargetDir();
   try {
     if (!fs.existsSync(filePath)) {
       // Sync check is acceptable before async read
@@ -379,45 +375,76 @@ export async function processSingleFileContent(
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
         const content = await readFileWithEncoding(filePath);
-        const lines = content.split('\n');
+        const lines = content.split('\n').map((line) => line.trimEnd());
         const originalLineCount = lines.length;
 
         const startLine = offset || 0;
-        const effectiveLimit =
-          limit === undefined ? DEFAULT_MAX_LINES_TEXT_FILE : limit;
+        const configLineLimit = config.getTruncateToolOutputLines();
+        const configCharLimit = config.getTruncateToolOutputThreshold();
+        const effectiveLimit = limit === undefined ? configLineLimit : limit;
+
         // Ensure endLine does not exceed originalLineCount
         const endLine = Math.min(startLine + effectiveLimit, originalLineCount);
         // Ensure selectedLines doesn't try to slice beyond array bounds if startLine is too high
         const actualStartLine = Math.min(startLine, originalLineCount);
         const selectedLines = lines.slice(actualStartLine, endLine);
 
-        let linesWereTruncatedInLength = false;
-        const formattedLines = selectedLines.map((line) => {
-          if (line.length > MAX_LINE_LENGTH_TEXT_FILE) {
-            linesWereTruncatedInLength = true;
-            return (
-              line.substring(0, MAX_LINE_LENGTH_TEXT_FILE) + '... [truncated]'
-            );
+        // Apply character limit truncation
+        let llmContent = '';
+        let contentLengthTruncated = false;
+        let linesIncluded = 0;
+
+        if (Number.isFinite(configCharLimit)) {
+          const formattedLines: string[] = [];
+          let currentLength = 0;
+
+          for (const line of selectedLines) {
+            const sep = linesIncluded > 0 ? 1 : 0; // newline separator
+            linesIncluded++;
+
+            const projectedLength = currentLength + line.length + sep;
+            if (projectedLength <= configCharLimit) {
+              formattedLines.push(line);
+              currentLength = projectedLength;
+            } else {
+              // Truncate the current line to fit
+              const remaining = Math.max(
+                configCharLimit - currentLength - sep,
+                10,
+              );
+              formattedLines.push(
+                line.substring(0, remaining) + '... [truncated]',
+              );
+              contentLengthTruncated = true;
+              break;
+            }
           }
-          return line;
-        });
+
+          llmContent = formattedLines.join('\n');
+        } else {
+          // No character limit, use all selected lines
+          llmContent = selectedLines.join('\n');
+          linesIncluded = selectedLines.length;
+        }
+
+        // Calculate actual end line shown
+        const actualEndLine = contentLengthTruncated
+          ? actualStartLine + linesIncluded
+          : endLine;
 
         const contentRangeTruncated =
-          startLine > 0 || endLine < originalLineCount;
-        const isTruncated = contentRangeTruncated || linesWereTruncatedInLength;
-        const llmContent = formattedLines.join('\n');
+          startLine > 0 || actualEndLine < originalLineCount;
+        const isTruncated = contentRangeTruncated || contentLengthTruncated;
 
         // By default, return nothing to streamline the common case of a successful read_file.
         let returnDisplay = '';
-        if (contentRangeTruncated) {
+        if (isTruncated) {
           returnDisplay = `Read lines ${
             actualStartLine + 1
-          }-${endLine} of ${originalLineCount} from ${relativePathForDisplay}`;
-          if (linesWereTruncatedInLength) {
-            returnDisplay += ' (some lines were shortened)';
+          }-${actualEndLine} of ${originalLineCount} from ${relativePathForDisplay}`;
+          if (contentLengthTruncated) {
+            returnDisplay += ' (truncated)';
           }
-        } else if (linesWereTruncatedInLength) {
-          returnDisplay = `Read all ${originalLineCount} lines from ${relativePathForDisplay} (some lines were shortened)`;
         }
 
         return {
@@ -425,7 +452,7 @@ export async function processSingleFileContent(
           returnDisplay,
           isTruncated,
           originalLineCount,
-          linesShown: [actualStartLine + 1, endLine],
+          linesShown: [actualStartLine + 1, actualEndLine],
         };
       }
       case 'image':

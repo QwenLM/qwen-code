@@ -8,7 +8,7 @@ import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 import type { PartUnion } from '@google/genai';
 import {
@@ -67,8 +67,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   async execute(): Promise<ToolResult> {
     const result = await processSingleFileContent(
       this.params.absolute_path,
-      this.config.getTargetDir(),
-      this.config.getFileSystemService(),
+      this.config,
       this.params.offset,
       this.params.limit,
     );
@@ -88,16 +87,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (result.isTruncated) {
       const [start, end] = result.linesShown!;
       const total = result.originalLineCount!;
-      const nextOffset = this.params.offset
-        ? this.params.offset + end - start + 1
-        : end;
-      llmContent = `
-IMPORTANT: The file content has been truncated.
-Status: Showing lines ${start}-${end} of ${total} total lines.
-Action: To read more of the file, you can use the 'offset' and 'limit' parameters in a subsequent 'read_file' call. For example, to read the next section of the file, use offset: ${nextOffset}.
-
---- FILE CONTENT (truncated) ---
-${result.llmContent}`;
+      llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
     } else {
       llmContent = result.llmContent || '';
     }
@@ -141,7 +131,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
   constructor(private config: Config) {
     super(
       ReadFileTool.Name,
-      'ReadFile',
+      ToolDisplayNames.READ_FILE,
       `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, it can read specific line ranges.`,
       Kind.Read,
       {
