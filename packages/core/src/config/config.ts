@@ -81,6 +81,7 @@ import {
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
+import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -1110,37 +1111,35 @@ export class Config {
   async createToolRegistry(): Promise<ToolRegistry> {
     const registry = new ToolRegistry(this, this.eventEmitter);
 
-    // helper to create & register core tools that are enabled
+    const coreToolsConfig = this.getCoreTools();
+    const excludeToolsConfig = this.getExcludeTools();
+
+    // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
-      const className = ToolClass.name;
-      const toolName = ToolClass.Name || className;
-      const coreTools = this.getCoreTools();
-      const excludeTools = this.getExcludeTools() || [];
-      // On some platforms, the className can be minified to _ClassName.
-      const normalizedClassName = className.replace(/^_+/, '');
+      const toolName = ToolClass?.Name as ToolName | undefined;
+      const className = ToolClass?.name ?? 'UnknownTool';
 
-      let isEnabled = true; // Enabled by default if coreTools is not set.
-      if (coreTools) {
-        isEnabled = coreTools.some(
-          (tool) =>
-            tool === toolName ||
-            tool === normalizedClassName ||
-            tool.startsWith(`${toolName}(`) ||
-            tool.startsWith(`${normalizedClassName}(`),
+      if (!toolName) {
+        // Log warning and skip this tool instead of crashing
+        console.warn(
+          `[Config] Skipping tool registration: ${className} is missing static Name property. ` +
+            `Tools must define a static Name property to be registered. ` +
+            `Location: config.ts:registerCoreTool`,
         );
+        return;
       }
 
-      const isExcluded = excludeTools.some(
-        (tool) => tool === toolName || tool === normalizedClassName,
-      );
-
-      if (isExcluded) {
-        isEnabled = false;
-      }
-
-      if (isEnabled) {
-        registry.registerTool(new ToolClass(...args));
+      if (isToolEnabled(toolName, coreToolsConfig, excludeToolsConfig)) {
+        try {
+          registry.registerTool(new ToolClass(...args));
+        } catch (error) {
+          console.error(
+            `[Config] Failed to register tool ${className} (${toolName}):`,
+            error,
+          );
+          throw error; // Re-throw after logging context
+        }
       }
     };
 

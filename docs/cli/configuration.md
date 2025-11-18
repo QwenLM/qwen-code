@@ -578,7 +578,7 @@ Arguments passed directly when running the CLI can override other configurations
   - Example: `qwen --approval-mode auto-edit`
 - **`--allowed-tools <tool1,tool2,...>`**:
   - A comma-separated list of tool names that will bypass the confirmation dialog.
-  - Example: `qwen --allowed-tools "ShellTool(git status)"`
+  - Example: `qwen --allowed-tools "Shell(git status)"`
 - **`--telemetry`**:
   - Enables [telemetry](../telemetry.md).
 - **`--telemetry-target`**:

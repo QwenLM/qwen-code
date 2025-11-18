@@ -48,6 +48,7 @@ interface SlashCommandProcessorActions {
   openSettingsDialog: () => void;
   openModelDialog: () => void;
   openPermissionsDialog: () => void;
+  openApprovalModeDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   toggleCorgiMode: () => void;
@@ -395,6 +396,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'subagent_list':
                       actions.openAgentsManagerDialog();
+                      return { type: 'handled' };
+                    case 'approval-mode':
+                      actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
