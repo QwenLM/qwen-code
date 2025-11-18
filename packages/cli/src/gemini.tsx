@@ -446,9 +446,7 @@ export async function main() {
 
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
-        settings,
         trimmedInput.length > 0 ? trimmedInput : '',
-        prompt_id,
       );
       await runExitCleanup();
       process.exit(0);

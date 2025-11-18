@@ -357,12 +357,9 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(runStreamJsonSpy).toHaveBeenCalledTimes(1);
-    const [configArg, settingsArg, promptArg] = runStreamJsonSpy.mock.calls[0];
+    const [configArg, inputArg] = runStreamJsonSpy.mock.calls[0];
     expect(configArg).toBe(validatedConfig);
-    expect(settingsArg).toMatchObject({
-      merged: expect.objectContaining({ security: expect.any(Object) }),
-    });
-    expect(promptArg).toBe('hello stream');
+    expect(inputArg).toBe('hello stream');
 
     expect(validateAuthSpy).toHaveBeenCalledWith(
       undefined,
