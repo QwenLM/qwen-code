@@ -28,27 +28,38 @@ const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
  * Generates the LLM output language rule template based on the language name.
  */
 function generateLlmOutputLanguageRule(language: string): string {
-  return `# ${language} Response Rules
+  return `# ⚠️ CRITICAL: ${language} Output Language Rule - HIGHEST PRIORITY ⚠️
 
-## Core Rules
+## 🚨 MANDATORY RULE - NO EXCEPTIONS 🚨
 
-**ALL OUTPUTS MUST USE ${language.toUpperCase()}, WITHOUT EXCEPTION.** This includes: conversation replies, tool call results, generated files, documentation, comments, and error messages. Even if the user asks in English, you MUST respond in ${language}.
+**YOU MUST RESPOND IN ${language.toUpperCase()} FOR EVERY SINGLE OUTPUT, REGARDLESS OF THE USER'S INPUT LANGUAGE.**
 
-## Tool Call Outputs
+This is a **NON-NEGOTIABLE** requirement. Even if the user writes in English, says "hi", asks a simple question, or explicitly requests another language, **YOU MUST ALWAYS RESPOND IN ${language.toUpperCase()}.**
 
-All tool execution result descriptions, success/failure messages, and summary explanations must use ${language}:
+## What Must Be in ${language}
 
-- File operations: \`read_file\`, \`write_file\`, \`edit_file\`, etc.
-- Code search: \`codebase_search\`, \`grep\`, etc.
-- Terminal commands: \`run_terminal_cmd\` execution result descriptions
-- Other tools: \`todo_write\`, \`web_search\`, etc.
+**EVERYTHING** you output: conversation replies, tool call descriptions, success/error messages, generated file content (comments, documentation), and all explanatory text.
 
-**Examples:**
+**Tool outputs**: All descriptive text from \`read_file\`, \`write_file\`, \`codebase_search\`, \`run_terminal_cmd\`, \`todo_write\`, \`web_search\`, etc. MUST be in ${language}.
 
-- ✅ "Successfully read file config.json, contains 15 lines" (translated to ${language})
-- ❌ "Successfully read file config.json, contains 15 lines" (in English when ${language} is required)
+## Examples
 
-**Note:** Variable names and function names in code can remain in English, but comments, documentation, and all explanatory text must be in ${language}.
+### ✅ CORRECT:
+- User says "hi" → Respond in ${language} (e.g., "Bonjour" if ${language} is French)
+- Tool result → "已成功读取文件 config.json" (if ${language} is Chinese)
+- Error → "无法找到指定的文件" (if ${language} is Chinese)
+
+### ❌ WRONG:
+- User says "hi" → "Hello" in English
+- Tool result → "Successfully read file" in English
+- Error → "File not found" in English
+
+## Notes
+
+- Code elements (variable/function names, syntax) can remain in English
+- Comments, documentation, and all other text MUST be in ${language}
+
+**THIS RULE IS ACTIVE NOW. ALL OUTPUTS MUST BE IN ${language.toUpperCase()}. NO EXCEPTIONS.**
 `;
 }
 
