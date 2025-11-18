@@ -23,6 +23,7 @@ import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
+import { CommandKind } from './ui/commands/types.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
@@ -728,6 +729,7 @@ describe('runNonInteractive', () => {
     const mockCommand = {
       name: 'testcommand',
       description: 'a test command',
+      kind: CommandKind.FILE,
       action: vi.fn().mockResolvedValue({
         type: 'submit_prompt',
         content: [{ text: 'Prompt from command' }],
@@ -767,6 +769,7 @@ describe('runNonInteractive', () => {
     const mockCommand = {
       name: 'confirm',
       description: 'a command that needs confirmation',
+      kind: CommandKind.FILE,
       action: vi.fn().mockResolvedValue({
         type: 'confirm_shell_commands',
         commands: ['rm -rf /'],
@@ -822,6 +825,7 @@ describe('runNonInteractive', () => {
     const mockCommand = {
       name: 'noaction',
       description: 'unhandled type',
+      kind: CommandKind.FILE,
       action: vi.fn().mockResolvedValue({
         type: 'unhandled',
       }),
@@ -848,6 +852,7 @@ describe('runNonInteractive', () => {
     const mockCommand = {
       name: 'testargs',
       description: 'a test command',
+      kind: CommandKind.FILE,
       action: mockAction,
     };
     mockGetCommands.mockReturnValue([mockCommand]);

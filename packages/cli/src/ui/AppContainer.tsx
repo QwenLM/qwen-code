@@ -97,6 +97,7 @@ import { type VisionSwitchOutcome } from './components/ModelSwitchDialog.js';
 import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
+import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -943,6 +944,12 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     settings.merged.ui?.customWittyPhrases,
   );
+
+  useAttentionNotifications({
+    isFocused,
+    streamingState,
+    elapsedTime,
+  });
 
   // Dialog close functionality
   const { closeAnyOpenDialog } = useDialogClose({
