@@ -12,6 +12,7 @@ import type {
   ChatCompressionSettings,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
@@ -830,14 +831,20 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.UNION,
       },
       approvalMode: {
-        type: 'string',
-        label: 'Default Approval Mode',
+        type: 'enum',
+        label: 'Approval Mode',
         category: 'Tools',
         requiresRestart: false,
-        default: 'default',
+        default: ApprovalMode.DEFAULT,
         description:
-          'Default approval mode for tool usage. Valid values: plan, default, auto-edit, yolo.',
+          'Approval mode for tool usage. Controls how tools are approved before execution.',
         showInDialog: true,
+        options: [
+          { value: ApprovalMode.PLAN, label: 'Plan' },
+          { value: ApprovalMode.DEFAULT, label: 'Default' },
+          { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
+          { value: ApprovalMode.YOLO, label: 'YOLO' },
+        ],
       },
       discoveryCommand: {
         type: 'string',

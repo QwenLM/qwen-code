@@ -27,7 +27,7 @@ import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
@@ -361,7 +361,7 @@ export class WriteFileTool
   constructor(private readonly config: Config) {
     super(
       WriteFileTool.Name,
-      'WriteFile',
+      ToolDisplayNames.WRITE_FILE,
       `Writes content to a specified file in the local filesystem.
 
       The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,

@@ -53,6 +53,7 @@ import { useQuotaAndFallback } from './hooks/useQuotaAndFallback.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
+import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
@@ -336,6 +337,12 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const {
+    isApprovalModeDialogOpen,
+    openApprovalModeDialog,
+    handleApprovalModeSelect,
+  } = useApprovalModeCommand(settings, config);
+
+  const {
     setAuthState,
     authError,
     onAuthError,
@@ -470,6 +477,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       openModelDialog,
       openPermissionsDialog,
+      openApprovalModeDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         setTimeout(async () => {
@@ -495,6 +503,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setCorgiMode,
       dispatchExtensionStateUpdate,
       openPermissionsDialog,
+      openApprovalModeDialog,
       addConfirmUpdateExtensionRequest,
       showQuitConfirmation,
       openSubagentCreateDialog,
@@ -939,6 +948,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const { closeAnyOpenDialog } = useDialogClose({
     isThemeDialogOpen,
     handleThemeSelect,
+    isApprovalModeDialogOpen,
+    handleApprovalModeSelect,
     isAuthDialogOpen,
     handleAuthSelect,
     selectedAuthType: settings.merged.security?.auth?.selectedType,
@@ -1188,7 +1199,8 @@ export const AppContainer = (props: AppContainerProps) => {
     showIdeRestartPrompt ||
     !!proQuotaRequest ||
     isSubagentCreateDialogOpen ||
-    isAgentsManagerDialogOpen;
+    isAgentsManagerDialogOpen ||
+    isApprovalModeDialogOpen;
 
   const pendingHistoryItems = useMemo(
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
@@ -1219,6 +1231,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isSettingsDialogOpen,
       isModelDialogOpen,
       isPermissionsDialogOpen,
+      isApprovalModeDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1313,6 +1326,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isSettingsDialogOpen,
       isModelDialogOpen,
       isPermissionsDialogOpen,
+      isApprovalModeDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1393,6 +1407,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({
       handleThemeSelect,
       handleThemeHighlight,
+      handleApprovalModeSelect,
       handleAuthSelect,
       setAuthState,
       onAuthError,
@@ -1428,6 +1443,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       handleThemeSelect,
       handleThemeHighlight,
+      handleApprovalModeSelect,
       handleAuthSelect,
       setAuthState,
       onAuthError,

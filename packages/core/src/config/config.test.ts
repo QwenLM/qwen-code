@@ -45,6 +45,15 @@ import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 
+function createToolMock(toolName: string) {
+  const ToolMock = vi.fn();
+  Object.defineProperty(ToolMock, 'Name', {
+    value: toolName,
+    writable: true,
+  });
+  return ToolMock;
+}
+
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
   return {
@@ -73,23 +82,41 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
-vi.mock('../tools/ls');
-vi.mock('../tools/read-file');
-vi.mock('../tools/grep.js');
+vi.mock('../tools/ls', () => ({
+  LSTool: createToolMock('list_directory'),
+}));
+vi.mock('../tools/read-file', () => ({
+  ReadFileTool: createToolMock('read_file'),
+}));
+vi.mock('../tools/grep.js', () => ({
+  GrepTool: createToolMock('grep_search'),
+}));
 vi.mock('../tools/ripGrep.js', () => ({
-  RipGrepTool: class MockRipGrepTool {},
+  RipGrepTool: createToolMock('grep_search'),
 }));
 vi.mock('../utils/ripgrepUtils.js', () => ({
   canUseRipgrep: vi.fn(),
 }));
-vi.mock('../tools/glob');
-vi.mock('../tools/edit');
-vi.mock('../tools/shell');
-vi.mock('../tools/write-file');
-vi.mock('../tools/web-fetch');
-vi.mock('../tools/read-many-files');
+vi.mock('../tools/glob', () => ({
+  GlobTool: createToolMock('glob'),
+}));
+vi.mock('../tools/edit', () => ({
+  EditTool: createToolMock('edit'),
+}));
+vi.mock('../tools/shell', () => ({
+  ShellTool: createToolMock('run_shell_command'),
+}));
+vi.mock('../tools/write-file', () => ({
+  WriteFileTool: createToolMock('write_file'),
+}));
+vi.mock('../tools/web-fetch', () => ({
+  WebFetchTool: createToolMock('web_fetch'),
+}));
+vi.mock('../tools/read-many-files', () => ({
+  ReadManyFilesTool: createToolMock('read_many_files'),
+}));
 vi.mock('../tools/memoryTool', () => ({
-  MemoryTool: vi.fn(),
+  MemoryTool: createToolMock('save_memory'),
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
@@ -621,7 +648,7 @@ describe('Server Config (config.ts)', () => {
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,
-        coreTools: ['ShellTool(git status)'],
+        coreTools: ['Shell(git status)'], // Use display name instead of class name
       };
       const config = new Config(params);
       await config.initialize();
@@ -644,6 +671,89 @@ describe('Server Config (config.ts)', () => {
         registerToolMock as Mock
       ).mock.calls.some((call) => call[0] instanceof vi.mocked(ReadFileTool));
       expect(wasReadFileToolRegistered).toBe(false);
+    });
+
+    it('should register a tool if coreTools contains the displayName', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        coreTools: ['Shell'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(ShellTool),
+      );
+      expect(wasShellToolRegistered).toBe(true);
+    });
+
+    it('should register a tool if coreTools contains the displayName with argument-specific pattern', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        coreTools: ['Shell(git status)'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(ShellTool),
+      );
+      expect(wasShellToolRegistered).toBe(true);
+    });
+
+    it('should register a tool if coreTools contains a legacy tool name alias', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: ['search_file_content'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasGrepToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+      expect(wasGrepToolRegistered).toBe(true);
+    });
+
+    it('should not register a tool if excludeTools contains a legacy display name alias', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        excludeTools: ['SearchFiles'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasGrepToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+      expect(wasGrepToolRegistered).toBe(false);
     });
 
     describe('with minified tool class names', () => {
@@ -671,7 +781,27 @@ describe('Server Config (config.ts)', () => {
       it('should register a tool if coreTools contains the non-minified class name', async () => {
         const params: ConfigParameters = {
           ...baseParams,
-          coreTools: ['ShellTool'],
+          coreTools: ['Shell'], // Use display name instead of class name
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(true);
+      });
+
+      it('should register a tool if coreTools contains the displayName', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: ['Shell'],
         };
         const config = new Config(params);
         await config.initialize();
@@ -692,7 +822,28 @@ describe('Server Config (config.ts)', () => {
         const params: ConfigParameters = {
           ...baseParams,
           coreTools: undefined, // all tools enabled by default
-          excludeTools: ['ShellTool'],
+          excludeTools: ['Shell'], // Use display name instead of class name
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(false);
+      });
+
+      it('should not register a tool if excludeTools contains the displayName', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: undefined, // all tools enabled by default
+          excludeTools: ['Shell'],
         };
         const config = new Config(params);
         await config.initialize();
@@ -712,7 +863,27 @@ describe('Server Config (config.ts)', () => {
       it('should register a tool if coreTools contains an argument-specific pattern with the non-minified class name', async () => {
         const params: ConfigParameters = {
           ...baseParams,
-          coreTools: ['ShellTool(git status)'],
+          coreTools: ['Shell(git status)'], // Use display name instead of class name
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(true);
+      });
+
+      it('should register a tool if coreTools contains an argument-specific pattern with the displayName', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: ['Shell(git status)'],
         };
         const config = new Config(params);
         await config.initialize();

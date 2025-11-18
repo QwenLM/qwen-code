@@ -18,6 +18,7 @@ import { Storage } from '../config/storage.js';
 import * as Diff from 'diff';
 import { DEFAULT_DIFF_OPTIONS } from './diffOptions.js';
 import { tildeifyPath } from '../utils/paths.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
@@ -380,11 +381,11 @@ export class MemoryTool
   extends BaseDeclarativeTool<SaveMemoryParams, ToolResult>
   implements ModifiableDeclarativeTool<SaveMemoryParams>
 {
-  static readonly Name: string = memoryToolSchemaData.name!;
+  static readonly Name: string = ToolNames.MEMORY;
   constructor() {
     super(
       MemoryTool.Name,
-      'SaveMemory',
+      ToolDisplayNames.MEMORY,
       memoryToolDescription,
       Kind.Think,
       memoryToolSchemaData.parametersJsonSchema as Record<string, unknown>,

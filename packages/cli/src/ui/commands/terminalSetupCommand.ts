@@ -17,7 +17,7 @@ import { terminalSetup } from '../utils/terminalSetup.js';
 export const terminalSetupCommand: SlashCommand = {
   name: 'terminal-setup',
   description:
-    'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf)',
+    'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)',
   kind: CommandKind.BUILT_IN,
 
   action: async (): Promise<MessageActionReturn> => {

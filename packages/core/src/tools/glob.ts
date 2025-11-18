@@ -9,7 +9,7 @@ import path from 'node:path';
 import { glob, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { resolveAndValidatePath } from '../utils/paths.js';
 import { type Config } from '../config/config.js';
 import {
@@ -229,7 +229,7 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
   constructor(private config: Config) {
     super(
       GlobTool.Name,
-      'FindFiles',
+      ToolDisplayNames.GLOB,
       'Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead\n- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.',
       Kind.Search,
       {

@@ -13,15 +13,21 @@ import { useKeypress } from '../hooks/useKeypress.js';
 interface OpenAIKeyPromptProps {
   onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
   onCancel: () => void;
+  defaultApiKey?: string;
+  defaultBaseUrl?: string;
+  defaultModel?: string;
 }
 
 export function OpenAIKeyPrompt({
   onSubmit,
   onCancel,
+  defaultApiKey,
+  defaultBaseUrl,
+  defaultModel,
 }: OpenAIKeyPromptProps): React.JSX.Element {
-  const [apiKey, setApiKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState('');
-  const [model, setModel] = useState('');
+  const [apiKey, setApiKey] = useState(defaultApiKey || '');
+  const [baseUrl, setBaseUrl] = useState(defaultBaseUrl || '');
+  const [model, setModel] = useState(defaultModel || '');
   const [currentField, setCurrentField] = useState<
     'apiKey' | 'baseUrl' | 'model'
   >('apiKey');
