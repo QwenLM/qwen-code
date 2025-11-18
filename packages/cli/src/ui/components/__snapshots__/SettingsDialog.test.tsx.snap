@@ -14,13 +14,13 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -48,13 +48,13 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -82,13 +82,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -116,13 +116,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │                                                                                                  │
 │   Debug Keystroke Logging                              false*                                    │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false*                                    │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false*                                    │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -150,13 +150,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -184,13 +184,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │                                                                                                  │
 │   Debug Keystroke Logging (Modified in Workspace)      false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -218,13 +218,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -252,13 +252,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false*                                    │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -286,13 +286,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            false                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -320,13 +320,13 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │                                                                                                  │
 │   Debug Keystroke Logging                              true*                                     │
 │                                                                                                  │
+│   Language                                             Auto (detect from system)                 │
+│                                                                                                  │
 │   Output Format                                        Text                                      │
 │                                                                                                  │
 │   Hide Window Title                                    true*                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
-│                                                                                                  │
-│   Hide Tips                                            true*                                     │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │

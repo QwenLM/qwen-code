@@ -215,6 +215,7 @@ describe('InputPrompt', () => {
       inputWidth: 80,
       suggestionsWidth: 80,
       focus: true,
+      placeholder: '  Type your message or @path/to/file',
     };
   });
 
