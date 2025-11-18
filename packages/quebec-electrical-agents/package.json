@@ -1,0 +1,53 @@
+{
+  "name": "@qwen-code/quebec-electrical-agents",
+  "version": "0.1.0",
+  "description": "Système d'agents IA spécialisés pour l'industrie électrique québécoise",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "electrical",
+    "quebec",
+    "CEQ",
+    "RBQ",
+    "RSST",
+    "agents",
+    "AI",
+    "plan-analysis",
+    "FAISS"
+  ],
+  "dependencies": {
+    "express": "^4.21.2",
+    "mongoose": "^8.9.3",
+    "socket.io": "^4.8.1",
+    "multer": "^1.4.5-lts.1",
+    "faiss-node": "^0.5.1",
+    "@google-cloud/aiplatform": "^3.33.0",
+    "pdf-parse": "^1.1.1",
+    "canvas": "^2.11.2",
+    "tesseract.js": "^5.1.1",
+    "sharp": "^0.33.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "joi": "^17.14.0",
+    "winston": "^3.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/cors": "^2.8.17",
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.3",
+    "tsx": "^4.20.3",
+    "vitest": "^3.2.4"
+  }
+}
