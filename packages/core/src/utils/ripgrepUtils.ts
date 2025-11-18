@@ -45,7 +45,7 @@ function getArchitectureString(arch: string): Architecture | undefined {
 /**
  * Returns the path to the bundled ripgrep binary for the current platform
  */
-export function getBulltinRipgrepPath(): string {
+export function getBuiltinRipgrepPath(): string {
   const platform = getPlatformString(process.platform);
   const arch = getArchitectureString(process.arch);
 
@@ -119,7 +119,7 @@ export async function ensureRipgrepPath(
   try {
     if (useBuiltin) {
       // Try bundled ripgrep first
-      const rgPath = getBulltinRipgrepPath();
+      const rgPath = getBuiltinRipgrepPath();
       if (rgPath && (await fileExists(rgPath))) {
         return rgPath;
       }

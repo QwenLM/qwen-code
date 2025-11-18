@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import {
   canUseRipgrep,
   ensureRipgrepPath,
-  getBulltinRipgrepPath,
+  getBuiltinRipgrepPath,
 } from './ripgrepUtils.js';
 import { fileExists } from './fileUtils.js';
 import path from 'node:path';
@@ -36,7 +36,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'win32' });
       Object.defineProperty(process, 'arch', { value: 'x64' });
 
-      const rgPath = getBulltinRipgrepPath();
+      const rgPath = getBuiltinRipgrepPath();
 
       expect(rgPath).toContain('x64-win32');
       expect(rgPath).toContain('rg.exe');
@@ -55,7 +55,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       Object.defineProperty(process, 'arch', { value: 'arm64' });
 
-      const rgPath = getBulltinRipgrepPath();
+      const rgPath = getBuiltinRipgrepPath();
 
       expect(rgPath).toContain('arm64-darwin');
       expect(rgPath).toContain('rg');
@@ -75,7 +75,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
       Object.defineProperty(process, 'arch', { value: 'x64' });
 
-      const rgPath = getBulltinRipgrepPath();
+      const rgPath = getBuiltinRipgrepPath();
 
       expect(rgPath).toContain('x64-linux');
       expect(rgPath).toContain('rg');
@@ -95,7 +95,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'freebsd' });
       Object.defineProperty(process, 'arch', { value: 'x64' });
 
-      expect(getBulltinRipgrepPath()).toBe('');
+      expect(getBuiltinRipgrepPath()).toBe('');
 
       // Restore original values
       Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -110,7 +110,7 @@ describe('ripgrepUtils', () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       Object.defineProperty(process, 'arch', { value: 'ia32' });
 
-      expect(getBulltinRipgrepPath()).toBe('');
+      expect(getBuiltinRipgrepPath()).toBe('');
 
       // Restore original values
       Object.defineProperty(process, 'platform', { value: originalPlatform });
@@ -136,7 +136,7 @@ describe('ripgrepUtils', () => {
         Object.defineProperty(process, 'platform', { value: platform });
         Object.defineProperty(process, 'arch', { value: arch });
 
-        const rgPath = getBulltinRipgrepPath();
+        const rgPath = getBuiltinRipgrepPath();
         const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
         const expectedPathSegment = path.join(
           `${arch}-${platform}`,
