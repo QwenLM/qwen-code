@@ -213,7 +213,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       const rgPath = await ensureRipgrepPath(
         this.config.getUseBuiltinRipgrep(),
       );
-      if (rgPath === null) {
+      if (!rgPath) {
         throw new Error(
           'ripgrep binary not found, please install ripgrep globally and try again.',
         );
