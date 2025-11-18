@@ -6,7 +6,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -88,7 +87,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Split into lines and count total matches
-      const allLines = rawOutput.split(EOL).filter((line) => line.trim());
+      const allLines = rawOutput.split('\n').filter((line) => line.trim());
       const totalMatches = allLines.length;
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
