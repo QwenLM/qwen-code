@@ -14,6 +14,7 @@ import { GeminiRespondingSpinner } from './GeminiRespondingSpinner.js';
 import { formatDuration } from '../utils/formatters.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
+import { t } from '../../i18n/index.js';
 
 interface LoadingIndicatorProps {
   currentLoadingPhrase?: string;
@@ -40,7 +41,12 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
 
   const cancelAndTimerContent =
     streamingState !== StreamingState.WaitingForConfirmation
-      ? `(esc to cancel, ${elapsedTime < 60 ? `${elapsedTime}s` : formatDuration(elapsedTime * 1000)})`
+      ? t('(esc to cancel, {{time}})', {
+          time:
+            elapsedTime < 60
+              ? `${elapsedTime}s`
+              : formatDuration(elapsedTime * 1000),
+        })
       : null;
 
   return (

@@ -13,6 +13,7 @@ import {
   getFieldValue,
   type SystemInfoField,
 } from '../../utils/systemInfoFields.js';
+import { t } from '../../i18n/index.js';
 
 type AboutBoxProps = ExtendedSystemInfo;
 
@@ -30,7 +31,7 @@ export const AboutBox: React.FC<AboutBoxProps> = (props) => {
     >
       <Box marginBottom={1}>
         <Text bold color={theme.text.accent}>
-          About Qwen Code
+          {t('About Qwen Code')}
         </Text>
       </Box>
       {fields.map((field: SystemInfoField) => (
