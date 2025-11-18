@@ -84,6 +84,43 @@ export function getRipgrepPath(): string {
 }
 
 /**
+ * Ensures ripgrep binary exists and returns its path
+ * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
+ *                   If false, only checks for system ripgrep.
+ * @returns The path to ripgrep binary ('rg' for system ripgrep, or full path for bundled), or null if not available
+ */
+export async function ensureRipgrepPath(
+  useBuiltin: boolean = true,
+): Promise<string | null> {
+  try {
+    if (useBuiltin) {
+      // Try bundled ripgrep first
+      const rgPath = getRipgrepPath();
+      if (await fileExists(rgPath)) {
+        return rgPath;
+      }
+      // Fallback to system rg if bundled binary is not available
+    }
+
+    // Check for system ripgrep by trying to spawn 'rg --version'
+    const { spawn } = await import('node:child_process');
+    const systemRgAvailable = await new Promise<boolean>((resolve) => {
+      const proc = spawn('rg', ['--version']);
+      proc.on('error', () => resolve(false));
+      proc.on('exit', (code) => resolve(code === 0));
+    });
+
+    if (systemRgAvailable) {
+      return 'rg'; // Use system ripgrep
+    }
+
+    return null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+/**
  * Checks if ripgrep binary is available
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
@@ -91,42 +128,6 @@ export function getRipgrepPath(): string {
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
 ): Promise<boolean> {
-  try {
-    if (useBuiltin) {
-      // Try bundled ripgrep first
-      const rgPath = getRipgrepPath();
-      if (await fileExists(rgPath)) {
-        return true;
-      }
-      // Fallback to system rg if bundled binary is not available
-    }
-
-    // Check for system ripgrep by trying to spawn 'rg --version'
-    const { spawn } = await import('node:child_process');
-    return await new Promise<boolean>((resolve) => {
-      const proc = spawn('rg', ['--version']);
-      proc.on('error', () => resolve(false));
-      proc.on('exit', (code) => resolve(code === 0));
-    });
-  } catch (_error) {
-    // Unsupported platform/arch or other error
-    return false;
-  }
-}
-
-/**
- * Ensures ripgrep binary exists and returns its path
- * @throws Error if ripgrep binary is not available
- */
-export async function ensureRipgrepPath(): Promise<string> {
-  const rgPath = getRipgrepPath();
-
-  if (!(await fileExists(rgPath))) {
-    throw new Error(
-      `Ripgrep binary not found at ${rgPath}. ` +
-        `Platform: ${process.platform}, Architecture: ${process.arch}`,
-    );
-  }
-
-  return rgPath;
+  const rgPath = await ensureRipgrepPath(useBuiltin);
+  return rgPath !== null;
 }

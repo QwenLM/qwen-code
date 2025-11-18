@@ -210,9 +210,15 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push(absolutePath);
 
     try {
-      const rgPath = this.config.getUseBuiltinRipgrep()
-        ? await ensureRipgrepPath()
-        : 'rg';
+      const rgPath = await ensureRipgrepPath(
+        this.config.getUseBuiltinRipgrep(),
+      );
+      if (rgPath === null) {
+        throw new Error(
+          'ripgrep binary not found, please install ripgrep globally and try again.',
+        );
+      }
+
       const output = await new Promise<string>((resolve, reject) => {
         const child = spawn(rgPath, rgArgs, {
           windowsHide: true,
@@ -234,7 +240,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         child.on('error', (err) => {
           options.signal.removeEventListener('abort', cleanup);
-          reject(new Error(`Failed to start ripgrep: ${err.message}.`));
+          reject(new Error(`failed to start ripgrep: ${err.message}.`));
         });
 
         child.on('close', (code) => {
@@ -256,7 +262,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       return output;
     } catch (error: unknown) {
-      console.error(`GrepLogic: ripgrep failed: ${getErrorMessage(error)}`);
+      console.error(`Ripgrep failed: ${getErrorMessage(error)}`);
       throw error;
     }
   }
