@@ -428,10 +428,7 @@ export default {
     'Approval mode changed to: {{mode}} (saved to {{scope}} settings{{location}})',
   'Usage: /approval-mode <mode> [--session|--user|--project]':
     'Usage: /approval-mode <mode> [--session|--user|--project]',
-  'Invalid approval mode: {{mode}}': 'Invalid approval mode: {{mode}}',
-  'Multiple scope flags provided': 'Multiple scope flags provided',
-  'Invalid arguments provided': 'Invalid arguments provided',
-  'Missing approval mode': 'Missing approval mode',
+
   'Scope subcommands do not accept additional arguments.':
     'Scope subcommands do not accept additional arguments.',
   'Plan mode - Analyze only, do not modify files or execute commands':
@@ -1076,5 +1073,4 @@ export default {
   'Have you tried turning it off and on again? (The loading screen, not me.)':
     'Have you tried turning it off and on again? (The loading screen, not me.)',
   'Constructing additional pylons...': 'Constructing additional pylons...',
-  "New line? That's Ctrl+J.": "New line? That's Ctrl+J.",
 };

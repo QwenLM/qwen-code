@@ -8,11 +8,13 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Get __dirname for ESM modules
+// @ts-expect-error - import.meta is supported in NodeNext module system at runtime
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 interface CheckResult {
   success: boolean;
@@ -22,6 +24,7 @@ interface CheckResult {
     totalKeys: number;
     translatedKeys: number;
     unusedKeys: string[];
+    unusedKeysOnlyInLocales?: string[]; // 新增：只在 locales 中存在的未使用键
   };
 }
 
@@ -112,29 +115,34 @@ async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
 
   for (const file of files) {
     const filePath = path.join(sourceDir, file);
-    const content = fs.readFileSync(filePath, 'utf-8');
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
 
-    // Find all t( calls
-    const tCallRegex = /t\s*\(/g;
-    let match;
-    while ((match = tCallRegex.exec(content)) !== null) {
-      const startPos = match.index + match[0].length;
-      let pos = startPos;
+      // Find all t( calls
+      const tCallRegex = /t\s*\(/g;
+      let match;
+      while ((match = tCallRegex.exec(content)) !== null) {
+        const startPos = match.index + match[0].length;
+        let pos = startPos;
 
-      // Skip whitespace
-      while (pos < content.length && /\s/.test(content[pos])) {
-        pos++;
-      }
+        // Skip whitespace
+        while (pos < content.length && /\s/.test(content[pos])) {
+          pos++;
+        }
 
-      if (pos >= content.length) continue;
+        if (pos >= content.length) continue;
 
-      const char = content[pos];
-      if (char === "'" || char === '"') {
-        const result = extractStringLiteral(content, pos, char);
-        if (result) {
-          usedKeys.add(result.value);
+        const char = content[pos];
+        if (char === "'" || char === '"') {
+          const result = extractStringLiteral(content, pos, char);
+          if (result) {
+            usedKeys.add(result.value);
+          }
         }
       }
+    } catch {
+      // Skip files that can't be read
+      continue;
     }
   }
 
@@ -190,15 +198,93 @@ function checkKeyMatching(
  * Find unused translation keys
  */
 function findUnusedKeys(allKeys: Set<string>, usedKeys: Set<string>): string[] {
-  const unused: string[] = [];
+  return Array.from(allKeys)
+    .filter((key) => !usedKeys.has(key))
+    .sort();
+}
 
-  for (const key of allKeys) {
-    if (!usedKeys.has(key)) {
-      unused.push(key);
+/**
+ * Save keys that exist only in locale files to a JSON file
+ * @param keysOnlyInLocales Array of keys that exist only in locale files
+ * @param outputPath Path to save the JSON file
+ */
+function saveKeysOnlyInLocalesToJson(
+  keysOnlyInLocales: string[],
+  outputPath: string,
+): void {
+  try {
+    const data = {
+      generatedAt: new Date().toISOString(),
+      keys: keysOnlyInLocales,
+      count: keysOnlyInLocales.length,
+    };
+    fs.writeFileSync(outputPath, JSON.stringify(data, null, 2));
+    console.log(`Keys that exist only in locale files saved to: ${outputPath}`);
+  } catch (error) {
+    console.error(`Failed to save keys to JSON file: ${error}`);
+  }
+}
+
+/**
+ * Check if unused keys exist only in locale files and nowhere else in the codebase
+ * Optimized to search all keys in a single pass instead of multiple grep calls
+ * @param unusedKeys The list of unused keys to check
+ * @param sourceDir The source directory to search in
+ * @param localesDir The locales directory to exclude from search
+ * @returns Array of keys that exist only in locale files
+ */
+async function findKeysOnlyInLocales(
+  unusedKeys: string[],
+  sourceDir: string,
+  localesDir: string,
+): Promise<string[]> {
+  if (unusedKeys.length === 0) {
+    return [];
+  }
+
+  const keysOnlyInLocales: string[] = [];
+  const localesDirName = path.basename(localesDir);
+
+  // Find all TypeScript/TSX files (excluding locales, node_modules, dist, and test files)
+  const files = await glob('**/*.{ts,tsx}', {
+    cwd: sourceDir,
+    ignore: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/*.test.ts',
+      '**/*.test.tsx',
+      `**/${localesDirName}/**`,
+    ],
+  });
+
+  // Read all files and check for key usage
+  const foundKeys = new Set<string>();
+
+  for (const file of files) {
+    const filePath = path.join(sourceDir, file);
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+
+      // Check each unused key in the file content
+      for (const key of unusedKeys) {
+        if (!foundKeys.has(key) && content.includes(key)) {
+          foundKeys.add(key);
+        }
+      }
+    } catch {
+      // Skip files that can't be read
+      continue;
     }
   }
 
-  return unused.sort();
+  // Keys that were not found in any source files exist only in locales
+  for (const key of unusedKeys) {
+    if (!foundKeys.has(key)) {
+      keysOnlyInLocales.push(key);
+    }
+  }
+
+  return keysOnlyInLocales;
 }
 
 /**
@@ -261,6 +347,12 @@ async function checkI18n(): Promise<CheckResult> {
   const enKeys = new Set(Object.keys(enTranslations));
   const unusedKeys = findUnusedKeys(enKeys, usedKeys);
 
+  // Find keys that exist only in locales (and nowhere else in the codebase)
+  const unusedKeysOnlyInLocales =
+    unusedKeys.length > 0
+      ? await findKeysOnlyInLocales(unusedKeys, sourceDir, localesDir)
+      : [];
+
   if (unusedKeys.length > 0) {
     warnings.push(`Found ${unusedKeys.length} unused translation keys`);
   }
@@ -276,54 +368,90 @@ async function checkI18n(): Promise<CheckResult> {
       totalKeys,
       translatedKeys,
       unusedKeys,
+      unusedKeysOnlyInLocales,
     },
   };
 }
 
 // Run checks
-checkI18n()
-  .then((result) => {
-    console.log('\n=== i18n Check Results ===\n');
+async function main() {
+  const result = await checkI18n();
 
-    console.log(`Total keys: ${result.stats.totalKeys}`);
-    console.log(`Translated keys: ${result.stats.translatedKeys}`);
-    console.log(
-      `Translation coverage: ${((result.stats.translatedKeys / result.stats.totalKeys) * 100).toFixed(1)}%\n`,
-    );
+  console.log('\n=== i18n Check Results ===\n');
 
-    if (result.warnings.length > 0) {
-      console.log('⚠️  Warnings:');
-      result.warnings.forEach((warning) => console.log(`  - ${warning}`));
-      if (
-        result.stats.unusedKeys.length > 0 &&
-        result.stats.unusedKeys.length <= 10
-      ) {
-        console.log('\nUnused keys:');
-        result.stats.unusedKeys.forEach((key) => console.log(`  - "${key}"`));
-      } else if (result.stats.unusedKeys.length > 10) {
-        console.log(
-          `\nUnused keys (showing first 10 of ${result.stats.unusedKeys.length}):`,
-        );
-        result.stats.unusedKeys
-          .slice(0, 10)
-          .forEach((key) => console.log(`  - "${key}"`));
-      }
-      console.log();
+  console.log(`Total keys: ${result.stats.totalKeys}`);
+  console.log(`Translated keys: ${result.stats.translatedKeys}`);
+  const coverage =
+    result.stats.totalKeys > 0
+      ? ((result.stats.translatedKeys / result.stats.totalKeys) * 100).toFixed(
+          1,
+        )
+      : '0.0';
+  console.log(`Translation coverage: ${coverage}%\n`);
+
+  if (result.warnings.length > 0) {
+    console.log('⚠️  Warnings:');
+    result.warnings.forEach((warning) => console.log(`  - ${warning}`));
+
+    // Show unused keys
+    if (
+      result.stats.unusedKeys.length > 0 &&
+      result.stats.unusedKeys.length <= 10
+    ) {
+      console.log('\nUnused keys:');
+      result.stats.unusedKeys.forEach((key) => console.log(`  - "${key}"`));
+    } else if (result.stats.unusedKeys.length > 10) {
+      console.log(
+        `\nUnused keys (showing first 10 of ${result.stats.unusedKeys.length}):`,
+      );
+      result.stats.unusedKeys
+        .slice(0, 10)
+        .forEach((key) => console.log(`  - "${key}"`));
     }
 
-    if (result.errors.length > 0) {
-      console.log('❌ Errors:');
-      result.errors.forEach((error) => console.log(`  - ${error}`));
-      console.log();
-      process.exit(1);
+    // Show keys that exist only in locales files
+    if (
+      result.stats.unusedKeysOnlyInLocales &&
+      result.stats.unusedKeysOnlyInLocales.length > 0
+    ) {
+      console.log(
+        '\n⚠️  The following keys exist ONLY in locale files and nowhere else in the codebase:',
+      );
+      console.log(
+        '   Please review these keys - they might be safe to remove.',
+      );
+      result.stats.unusedKeysOnlyInLocales.forEach((key) =>
+        console.log(`  - "${key}"`),
+      );
+
+      // Save these keys to a JSON file
+      const outputPath = path.join(
+        __dirname,
+        'unused-keys-only-in-locales.json',
+      );
+      saveKeysOnlyInLocalesToJson(
+        result.stats.unusedKeysOnlyInLocales,
+        outputPath,
+      );
     }
 
-    if (result.success) {
-      console.log('✅ All checks passed!\n');
-      process.exit(0);
-    }
-  })
-  .catch((error) => {
-    console.error('❌ Fatal error:', error);
+    console.log();
+  }
+
+  if (result.errors.length > 0) {
+    console.log('❌ Errors:');
+    result.errors.forEach((error) => console.log(`  - ${error}`));
+    console.log();
     process.exit(1);
-  });
+  }
+
+  if (result.success) {
+    console.log('✅ All checks passed!\n');
+    process.exit(0);
+  }
+}
+
+main().catch((error) => {
+  console.error('❌ Fatal error:', error);
+  process.exit(1);
+});

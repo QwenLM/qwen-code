@@ -411,10 +411,7 @@ export default {
     '审批模式已更改为：{{mode}}（已保存到{{scope}}设置{{location}}）',
   'Usage: /approval-mode <mode> [--session|--user|--project]':
     '用法：/approval-mode <mode> [--session|--user|--project]',
-  'Invalid approval mode: {{mode}}': '无效的审批模式：{{mode}}',
-  'Multiple scope flags provided': '提供了多个作用域标志',
-  'Invalid arguments provided': '提供了无效的参数',
-  'Missing approval mode': '缺少审批模式',
+
   'Scope subcommands do not accept additional arguments.':
     '作用域子命令不接受额外参数',
   'Plan mode - Analyze only, do not modify files or execute commands':
@@ -1002,5 +999,4 @@ export default {
   'Have you tried turning it off and on again? (The loading screen, not me.)':
     '你试过把它关掉再打开吗？（加载屏幕，不是我。）',
   'Constructing additional pylons...': '正在建造额外的能量塔...',
-  "New line? That's Ctrl+J.": '新行？那是 Ctrl+J。',
 };
