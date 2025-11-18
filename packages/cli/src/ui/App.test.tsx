@@ -49,6 +49,7 @@ describe('App', () => {
     quittingMessages: null,
     dialogsVisible: false,
     mainControlsRef: { current: null },
+    subagentFullscreenPanel: null,
     historyManager: {
       addItem: vi.fn(),
       history: [],

@@ -11,6 +11,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolResultDisplay,
+  TaskResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -170,6 +171,15 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   type: 'tool_group';
   tools: IndividualToolCallDisplay[];
 };
+
+export interface SubagentFullscreenPanelState {
+  panelId: string;
+  subagentName: string;
+  status: TaskResultDisplay['status'];
+  content: string[];
+  getSnapshot?: () => string[];
+  onClose?: () => void;
+}
 
 export type HistoryItemUserShell = HistoryItemBase & {
   type: 'user_shell';

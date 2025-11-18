@@ -14,7 +14,7 @@ import {
   type ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
-import type { AuthState } from '../types.js';
+import type { AuthState, SubagentFullscreenPanelState } from '../types.js';
 import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
 
 export interface UIActions {
@@ -64,6 +64,14 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  openSubagentFullscreenPanel: (panel: SubagentFullscreenPanelState) => void;
+  closeSubagentFullscreenPanel: (panelId: string) => void;
+  updateSubagentFullscreenPanel: (
+    panelId: string,
+    updates: Partial<
+      Pick<SubagentFullscreenPanelState, 'content' | 'status' | 'subagentName'>
+    >,
+  ) => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

@@ -52,6 +52,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
       lastPromptTokenCount: 100,
     },
     branchName: defaultProps.branchName,
+    subagentFullscreenPanel: null,
     ...overrides,
   }) as UIState;
 
