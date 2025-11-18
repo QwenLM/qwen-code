@@ -193,6 +193,7 @@ export default {
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
+  'Approval Mode': '审批模式',
   'Current approval mode: {{mode}}': '当前审批模式：{{mode}}',
   'Available approval modes:': '可用的审批模式：',
   'Approval mode changed to: {{mode}}': '审批模式已更改为：{{mode}}',
@@ -221,6 +222,16 @@ export default {
   'Apply to current session only (temporary)': '仅应用于当前会话（临时）',
   'Persist for this project/workspace': '持久化到此项目/工作区',
   'Persist for this user on this machine': '持久化到此机器上的此用户',
+  'Analyze only, do not modify files or execute commands':
+    '仅分析，不修改文件或执行命令',
+  'Require approval for file edits or shell commands':
+    '需要批准文件编辑或 shell 命令',
+  'Automatically approve file edits': '自动批准文件编辑',
+  'Automatically approve all tools': '自动批准所有工具',
+  'Workspace approval mode exists and takes priority. User-level change will have no effect.':
+    '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
+  '(Use Enter to select, Tab to change focus)':
+    '（使用 Enter 选择，Tab 切换焦点）',
 
   // ============================================================================
   // Commands - Memory

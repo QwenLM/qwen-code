@@ -203,6 +203,7 @@ export default {
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
+  'Approval Mode': 'Approval Mode',
   'Current approval mode: {{mode}}': 'Current approval mode: {{mode}}',
   'Available approval modes:': 'Available approval modes:',
   'Approval mode changed to: {{mode}}': 'Approval mode changed to: {{mode}}',
@@ -236,6 +237,16 @@ export default {
   'Persist for this project/workspace': 'Persist for this project/workspace',
   'Persist for this user on this machine':
     'Persist for this user on this machine',
+  'Analyze only, do not modify files or execute commands':
+    'Analyze only, do not modify files or execute commands',
+  'Require approval for file edits or shell commands':
+    'Require approval for file edits or shell commands',
+  'Automatically approve file edits': 'Automatically approve file edits',
+  'Automatically approve all tools': 'Automatically approve all tools',
+  'Workspace approval mode exists and takes priority. User-level change will have no effect.':
+    'Workspace approval mode exists and takes priority. User-level change will have no effect.',
+  '(Use Enter to select, Tab to change focus)':
+    '(Use Enter to select, Tab to change focus)',
 
   // ============================================================================
   // Commands - Memory
