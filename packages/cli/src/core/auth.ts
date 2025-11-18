@@ -25,7 +25,7 @@ export async function performInitialAuth(
   }
 
   try {
-    await config.refreshAuth(authType);
+    await config.refreshAuth(authType, true);
     // The console.log is intentionally left out here.
     // We can add a dedicated startup message later if needed.
   } catch (e) {

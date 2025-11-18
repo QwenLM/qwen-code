@@ -120,6 +120,7 @@ export async function createContentGenerator(
   config: ContentGeneratorConfig,
   gcConfig: Config,
   sessionId?: string,
+  isInitialAuth?: boolean,
 ): Promise<ContentGenerator> {
   const version = process.env['CLI_VERSION'] || process.version;
   const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
@@ -191,7 +192,11 @@ export async function createContentGenerator(
 
     try {
       // Get the Qwen OAuth client (now includes integrated token management)
-      const qwenClient = await getQwenOauthClient(gcConfig);
+      // If this is initial auth, require cached credentials to detect missing credentials
+      const qwenClient = await getQwenOauthClient(
+        gcConfig,
+        isInitialAuth ? { requireCachedCredentials: true } : undefined,
+      );
 
       // Create the content generator with dynamic token management
       return new QwenContentGenerator(qwenClient, config, gcConfig);

@@ -477,6 +477,7 @@ export const qwenOAuth2Events = new EventEmitter();
 
 export async function getQwenOAuthClient(
   config: Config,
+  options?: { requireCachedCredentials?: boolean },
 ): Promise<QwenOAuth2Client> {
   const client = new QwenOAuth2Client();
 
@@ -522,6 +523,11 @@ export async function getQwenOAuthClient(
         throw new Error(errorMessage);
       }
       return client;
+    }
+
+    // No cached credentials
+    if (options?.requireCachedCredentials) {
+      throw new Error('No cached credentials found. Please re-authenticate.');
     }
 
     // No cached credentials, use device authorization flow for authentication

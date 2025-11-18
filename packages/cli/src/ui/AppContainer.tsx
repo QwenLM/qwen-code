@@ -371,6 +371,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Check for enforced auth type mismatch
   useEffect(() => {
+    // Check for initialization error first
+    if (initializationResult.authError) {
+      onAuthError(initializationResult.authError);
+      return;
+    }
+
     if (
       settings.merged.security?.auth?.enforcedType &&
       settings.merged.security?.auth.selectedType &&
@@ -392,6 +398,7 @@ export const AppContainer = (props: AppContainerProps) => {
       }
     }
   }, [
+    initializationResult.authError,
     settings.merged.security?.auth?.selectedType,
     settings.merged.security?.auth?.enforcedType,
     settings.merged.security?.auth?.useExternal,
