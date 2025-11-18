@@ -17,6 +17,11 @@ export default {
   '@': '@',
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell 模式',
+  'YOLO mode': 'YOLO 模式',
+  'plan mode': '规划模式',
+  'auto-accept edits': '自动接受编辑',
+  'Accepting edits': '接受编辑',
+  '(shift + tab to cycle)': '(shift + tab 切换)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     '通过 {{symbol}} 执行 shell 命令（例如，{{example1}}）或使用自然语言（例如，{{example2}}）',
   '!': '!',
@@ -79,10 +84,23 @@ export default {
     '分析项目并创建定制的 QWEN.md 文件',
   'list available Qwen Code tools. Usage: /tools [desc]':
     '列出可用的 Qwen Code 工具。用法：/tools [desc]',
+  'Available Qwen Code CLI tools:': '可用的 Qwen Code CLI 工具：',
+  'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
     '查看或更改工具使用的审批模式',
   'View or change the language setting': '查看或更改语言设置',
   'change the theme': '更改主题',
+  'Select Theme': '选择主题',
+  Preview: '预览',
+  '(Use Enter to select, Tab to configure scope)':
+    '（使用 Enter 选择，Tab 配置作用域）',
+  '(Use Enter to apply scope, Tab to select theme)':
+    '（使用 Enter 应用作用域，Tab 选择主题）',
+  'Theme configuration unavailable due to NO_COLOR env variable.':
+    '由于 NO_COLOR 环境变量，主题配置不可用。',
+  'Theme "{{themeName}}" not found.': '未找到主题 "{{themeName}}"。',
+  'Theme "{{themeName}}" not found in selected scope.':
+    '在所选作用域中未找到主题 "{{themeName}}"。',
   'clear the screen and conversation history': '清屏并清除对话历史',
   'Compresses the context by replacing it with a summary.':
     '通过用摘要替换来压缩上下文',
@@ -227,6 +245,70 @@ export default {
   // Commands - General (continued)
   // ============================================================================
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
+  Settings: '设置',
+  '(Use Enter to select{{tabText}})': '（使用 Enter 选择{{tabText}}）',
+  ', Tab to change focus': '，Tab 切换焦点',
+  'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
+    '要查看更改，必须重启 Qwen Code。按 r 退出并立即应用更改。',
+  // ============================================================================
+  // Settings Labels
+  // ============================================================================
+  'Vim Mode': 'Vim 模式',
+  'Disable Auto Update': '禁用自动更新',
+  'Enable Prompt Completion': '启用提示补全',
+  'Debug Keystroke Logging': '调试按键记录',
+  Language: '语言',
+  'Output Format': '输出格式',
+  'Hide Window Title': '隐藏窗口标题',
+  'Show Status in Title': '在标题中显示状态',
+  'Hide Tips': '隐藏提示',
+  'Hide Banner': '隐藏横幅',
+  'Hide Context Summary': '隐藏上下文摘要',
+  'Hide CWD': '隐藏当前工作目录',
+  'Hide Sandbox Status': '隐藏沙箱状态',
+  'Hide Model Info': '隐藏模型信息',
+  'Hide Footer': '隐藏页脚',
+  'Show Memory Usage': '显示内存使用',
+  'Show Line Numbers': '显示行号',
+  'Show Citations': '显示引用',
+  'Custom Witty Phrases': '自定义诙谐短语',
+  'Enable Welcome Back': '启用欢迎回来',
+  'Disable Loading Phrases': '禁用加载短语',
+  'Screen Reader Mode': '屏幕阅读器模式',
+  'IDE Mode': 'IDE 模式',
+  'Max Session Turns': '最大会话轮次',
+  'Skip Next Speaker Check': '跳过下一个说话者检查',
+  'Skip Loop Detection': '跳过循环检测',
+  'Skip Startup Context': '跳过启动上下文',
+  'Enable OpenAI Logging': '启用 OpenAI 日志',
+  'OpenAI Logging Directory': 'OpenAI 日志目录',
+  Timeout: '超时',
+  'Max Retries': '最大重试次数',
+  'Disable Cache Control': '禁用缓存控制',
+  'Memory Discovery Max Dirs': '内存发现最大目录数',
+  'Load Memory From Include Directories': '从包含目录加载内存',
+  'Respect .gitignore': '遵守 .gitignore',
+  'Respect .qwenignore': '遵守 .qwenignore',
+  'Enable Recursive File Search': '启用递归文件搜索',
+  'Disable Fuzzy Search': '禁用模糊搜索',
+  'Enable Interactive Shell': '启用交互式 Shell',
+  'Show Color': '显示颜色',
+  'Auto Accept': '自动接受',
+  'Use Ripgrep': '使用 Ripgrep',
+  'Use Builtin Ripgrep': '使用内置 Ripgrep',
+  'Enable Tool Output Truncation': '启用工具输出截断',
+  'Tool Output Truncation Threshold': '工具输出截断阈值',
+  'Tool Output Truncation Lines': '工具输出截断行数',
+  'Folder Trust': '文件夹信任',
+  'Vision Model Preview': '视觉模型预览',
+  // Settings enum options
+  'Auto (detect from system)': '自动（从系统检测）',
+  Text: '文本',
+  JSON: 'JSON',
+  Plan: '规划',
+  Default: '默认',
+  'Auto Edit': '自动编辑',
+  YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
   'check session stats. Usage: /stats [model|tools]':
     '检查会话统计信息。用法：/stats [model|tools]',
@@ -336,7 +418,7 @@ export default {
   'Scope subcommands do not accept additional arguments.':
     '作用域子命令不接受额外参数',
   'Plan mode - Analyze only, do not modify files or execute commands':
-    '计划模式 - 仅分析，不修改文件或执行命令',
+    '规划模式 - 仅分析，不修改文件或执行命令',
   'Default mode - Require approval for file edits or shell commands':
     '默认模式 - 需要批准文件编辑或 shell 命令',
   'Auto-edit mode - Automatically approve file edits':
@@ -502,6 +584,32 @@ export default {
     '正在压缩中，请等待上一个请求完成',
   'Failed to compress chat history.': '压缩聊天历史失败',
   'Failed to compress chat history: {{error}}': '压缩聊天历史失败：{{error}}',
+  'Compressing chat history': '正在压缩聊天历史',
+  'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
+    '聊天历史已从 {{originalTokens}} 个 token 压缩到 {{newTokens}} 个 token。',
+  'Compression was not beneficial for this history size.':
+    '对于此历史记录大小，压缩没有益处。',
+  'Chat history compression did not reduce size. This may indicate issues with the compression prompt.':
+    '聊天历史压缩未能减小大小。这可能表明压缩提示存在问题。',
+  'Could not compress chat history due to a token counting error.':
+    '由于 token 计数错误，无法压缩聊天历史。',
+  'Chat history is already compressed.': '聊天历史已经压缩。',
+
+  // ============================================================================
+  // Commands - Directory
+  // ============================================================================
+  'Configuration is not available.': '配置不可用。',
+  'Please provide at least one path to add.': '请提供至少一个要添加的路径。',
+  'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
+    '/directory add 命令在限制性沙箱配置文件中不受支持。请改为在启动会话时使用 --include-directories。',
+  "Error adding '{{path}}': {{error}}": "添加 '{{path}}' 时出错：{{error}}",
+  'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}':
+    '如果存在，已成功从以下目录添加 GEMINI.md 文件：\n- {{directories}}',
+  'Error refreshing memory: {{error}}': '刷新内存时出错：{{error}}',
+  'Successfully added directories:\n- {{directories}}':
+    '成功添加目录：\n- {{directories}}',
+  'Current workspace directories:\n{{directories}}':
+    '当前工作区目录：\n{{directories}}',
 
   // ============================================================================
   // Commands - Docs
@@ -593,8 +701,8 @@ export default {
   '(Use Enter to Set Auth)': '（使用 Enter 设置认证）',
   'Terms of Services and Privacy Notice for Qwen Code':
     'Qwen Code 的服务条款和隐私声明',
-  'Qwen OAuth': 'Qwen OAuth (推荐)',
-  OpenAI: 'OpenAI (兼容 API)',
+  'Qwen OAuth': 'Qwen OAuth (免费)',
+  OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}': '登录失败。消息：{{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
     '认证方式被强制设置为 {{enforcedType}}，但您当前使用的是 {{currentType}}',

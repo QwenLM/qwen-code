@@ -11,6 +11,7 @@ import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
+import { t } from '../../i18n/index.js';
 import {
   getDialogSettingKeys,
   setPendingSettingValue,
@@ -124,7 +125,9 @@ export function SettingsDialog({
       const definition = getSettingDefinition(key);
 
       return {
-        label: definition?.label || key,
+        label: definition?.label
+          ? t(definition.label) || definition.label
+          : key,
         value: key,
         type: definition?.type,
         toggle: () => {
@@ -779,7 +782,8 @@ export function SettingsDialog({
     >
       <Box flexDirection="column" flexGrow={1}>
         <Text bold={focusSection === 'settings'} wrap="truncate">
-          {focusSection === 'settings' ? '> ' : '  '}Settings
+          {focusSection === 'settings' ? '> ' : '  '}
+          {t('Settings')}
         </Text>
         <Box height={1} />
         {showScrollUp && <Text color={theme.text.secondary}>▲</Text>}
@@ -916,13 +920,15 @@ export function SettingsDialog({
 
         <Box height={1} />
         <Text color={theme.text.secondary}>
-          (Use Enter to select
-          {showScopeSelection ? ', Tab to change focus' : ''})
+          {t('(Use Enter to select{{tabText}})', {
+            tabText: showScopeSelection ? t(', Tab to change focus') : '',
+          })}
         </Text>
         {showRestartPrompt && (
           <Text color={theme.status.warning}>
-            To see changes, Qwen Code must be restarted. Press r to exit and
-            apply changes now.
+            {t(
+              'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+            )}
           </Text>
         )}
       </Box>

@@ -18,6 +18,11 @@ export default {
   '@': '@',
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'Shell mode',
+  'YOLO mode': 'YOLO mode',
+  'plan mode': 'plan mode',
+  'auto-accept edits': 'auto-accept edits',
+  'Accepting edits': 'Accepting edits',
+  '(shift + tab to cycle)': '(shift + tab to cycle)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).',
   '!': '!',
@@ -80,10 +85,23 @@ export default {
     'Analyzes the project and creates a tailored QWEN.md file.',
   'list available Qwen Code tools. Usage: /tools [desc]':
     'list available Qwen Code tools. Usage: /tools [desc]',
+  'Available Qwen Code CLI tools:': 'Available Qwen Code CLI tools:',
+  'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
     'View or change the approval mode for tool usage',
   'View or change the language setting': 'View or change the language setting',
   'change the theme': 'change the theme',
+  'Select Theme': 'Select Theme',
+  Preview: 'Preview',
+  '(Use Enter to select, Tab to configure scope)':
+    '(Use Enter to select, Tab to configure scope)',
+  '(Use Enter to apply scope, Tab to select theme)':
+    '(Use Enter to apply scope, Tab to select theme)',
+  'Theme configuration unavailable due to NO_COLOR env variable.':
+    'Theme configuration unavailable due to NO_COLOR env variable.',
+  'Theme "{{themeName}}" not found.': 'Theme "{{themeName}}" not found.',
+  'Theme "{{themeName}}" not found in selected scope.':
+    'Theme "{{themeName}}" not found in selected scope.',
   'clear the screen and conversation history':
     'clear the screen and conversation history',
   'Compresses the context by replacing it with a summary.':
@@ -236,6 +254,71 @@ export default {
   // Commands - General (continued)
   // ============================================================================
   'View and edit Qwen Code settings': 'View and edit Qwen Code settings',
+  Settings: 'Settings',
+  '(Use Enter to select{{tabText}})': '(Use Enter to select{{tabText}})',
+  ', Tab to change focus': ', Tab to change focus',
+  'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
+    'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+  // ============================================================================
+  // Settings Labels
+  // ============================================================================
+  'Vim Mode': 'Vim Mode',
+  'Disable Auto Update': 'Disable Auto Update',
+  'Enable Prompt Completion': 'Enable Prompt Completion',
+  'Debug Keystroke Logging': 'Debug Keystroke Logging',
+  Language: 'Language',
+  'Output Format': 'Output Format',
+  'Hide Window Title': 'Hide Window Title',
+  'Show Status in Title': 'Show Status in Title',
+  'Hide Tips': 'Hide Tips',
+  'Hide Banner': 'Hide Banner',
+  'Hide Context Summary': 'Hide Context Summary',
+  'Hide CWD': 'Hide CWD',
+  'Hide Sandbox Status': 'Hide Sandbox Status',
+  'Hide Model Info': 'Hide Model Info',
+  'Hide Footer': 'Hide Footer',
+  'Show Memory Usage': 'Show Memory Usage',
+  'Show Line Numbers': 'Show Line Numbers',
+  'Show Citations': 'Show Citations',
+  'Custom Witty Phrases': 'Custom Witty Phrases',
+  'Enable Welcome Back': 'Enable Welcome Back',
+  'Disable Loading Phrases': 'Disable Loading Phrases',
+  'Screen Reader Mode': 'Screen Reader Mode',
+  'IDE Mode': 'IDE Mode',
+  'Max Session Turns': 'Max Session Turns',
+  'Skip Next Speaker Check': 'Skip Next Speaker Check',
+  'Skip Loop Detection': 'Skip Loop Detection',
+  'Skip Startup Context': 'Skip Startup Context',
+  'Enable OpenAI Logging': 'Enable OpenAI Logging',
+  'OpenAI Logging Directory': 'OpenAI Logging Directory',
+  Timeout: 'Timeout',
+  'Max Retries': 'Max Retries',
+  'Disable Cache Control': 'Disable Cache Control',
+  'Memory Discovery Max Dirs': 'Memory Discovery Max Dirs',
+  'Load Memory From Include Directories':
+    'Load Memory From Include Directories',
+  'Respect .gitignore': 'Respect .gitignore',
+  'Respect .qwenignore': 'Respect .qwenignore',
+  'Enable Recursive File Search': 'Enable Recursive File Search',
+  'Disable Fuzzy Search': 'Disable Fuzzy Search',
+  'Enable Interactive Shell': 'Enable Interactive Shell',
+  'Show Color': 'Show Color',
+  'Auto Accept': 'Auto Accept',
+  'Use Ripgrep': 'Use Ripgrep',
+  'Use Builtin Ripgrep': 'Use Builtin Ripgrep',
+  'Enable Tool Output Truncation': 'Enable Tool Output Truncation',
+  'Tool Output Truncation Threshold': 'Tool Output Truncation Threshold',
+  'Tool Output Truncation Lines': 'Tool Output Truncation Lines',
+  'Folder Trust': 'Folder Trust',
+  'Vision Model Preview': 'Vision Model Preview',
+  // Settings enum options
+  'Auto (detect from system)': 'Auto (detect from system)',
+  Text: 'Text',
+  JSON: 'JSON',
+  Plan: 'Plan',
+  Default: 'Default',
+  'Auto Edit': 'Auto Edit',
+  YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
   'check session stats. Usage: /stats [model|tools]':
     'check session stats. Usage: /stats [model|tools]',
@@ -534,6 +617,33 @@ export default {
   'Failed to compress chat history.': 'Failed to compress chat history.',
   'Failed to compress chat history: {{error}}':
     'Failed to compress chat history: {{error}}',
+  'Compressing chat history': 'Compressing chat history',
+  'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
+    'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
+  'Compression was not beneficial for this history size.':
+    'Compression was not beneficial for this history size.',
+  'Chat history compression did not reduce size. This may indicate issues with the compression prompt.':
+    'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
+  'Could not compress chat history due to a token counting error.':
+    'Could not compress chat history due to a token counting error.',
+  'Chat history is already compressed.': 'Chat history is already compressed.',
+
+  // ============================================================================
+  // Commands - Directory
+  // ============================================================================
+  'Configuration is not available.': 'Configuration is not available.',
+  'Please provide at least one path to add.':
+    'Please provide at least one path to add.',
+  'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
+    'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.',
+  "Error adding '{{path}}': {{error}}": "Error adding '{{path}}': {{error}}",
+  'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}':
+    'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}',
+  'Error refreshing memory: {{error}}': 'Error refreshing memory: {{error}}',
+  'Successfully added directories:\n- {{directories}}':
+    'Successfully added directories:\n- {{directories}}',
+  'Current workspace directories:\n{{directories}}':
+    'Current workspace directories:\n{{directories}}',
 
   // ============================================================================
   // Commands - Docs

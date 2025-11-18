@@ -9,6 +9,7 @@ import { themeManager } from '../themes/theme-manager.js';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js'; // Import LoadedSettings, AppSettings, MergedSetting
 import { type HistoryItem, MessageType } from '../types.js';
 import process from 'node:process';
+import { t } from '../../i18n/index.js';
 
 interface UseThemeCommandReturn {
   isThemeDialogOpen: boolean;
@@ -34,7 +35,9 @@ export const useThemeCommand = (
       addItem(
         {
           type: MessageType.INFO,
-          text: 'Theme configuration unavailable due to NO_COLOR env variable.',
+          text: t(
+            'Theme configuration unavailable due to NO_COLOR env variable.',
+          ),
         },
         Date.now(),
       );
@@ -48,7 +51,11 @@ export const useThemeCommand = (
       if (!themeManager.setActiveTheme(themeName)) {
         // If theme is not found, open the theme selection dialog and set error message
         setIsThemeDialogOpen(true);
-        setThemeError(`Theme "${themeName}" not found.`);
+        setThemeError(
+          t('Theme "{{themeName}}" not found.', {
+            themeName: themeName ?? '',
+          }),
+        );
       } else {
         setThemeError(null); // Clear any previous theme error on success
       }
@@ -75,7 +82,11 @@ export const useThemeCommand = (
         const isBuiltIn = themeManager.findThemeByName(themeName);
         const isCustom = themeName && mergedCustomThemes[themeName];
         if (!isBuiltIn && !isCustom) {
-          setThemeError(`Theme "${themeName}" not found in selected scope.`);
+          setThemeError(
+            t('Theme "{{themeName}}" not found in selected scope.', {
+              themeName: themeName ?? '',
+            }),
+          );
           setIsThemeDialogOpen(true);
           return;
         }

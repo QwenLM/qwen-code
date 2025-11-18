@@ -52,7 +52,7 @@ export const directoryCommand: SlashCommand = {
           addItem(
             {
               type: MessageType.ERROR,
-              text: 'Configuration is not available.',
+              text: t('Configuration is not available.'),
             },
             Date.now(),
           );
@@ -69,7 +69,7 @@ export const directoryCommand: SlashCommand = {
           addItem(
             {
               type: MessageType.ERROR,
-              text: 'Please provide at least one path to add.',
+              text: t('Please provide at least one path to add.'),
             },
             Date.now(),
           );
@@ -80,8 +80,9 @@ export const directoryCommand: SlashCommand = {
           return {
             type: 'message' as const,
             messageType: 'error' as const,
-            content:
+            content: t(
               'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.',
+            ),
           };
         }
 
@@ -94,7 +95,12 @@ export const directoryCommand: SlashCommand = {
             added.push(pathToAdd.trim());
           } catch (e) {
             const error = e as Error;
-            errors.push(`Error adding '${pathToAdd.trim()}': ${error.message}`);
+            errors.push(
+              t("Error adding '{{path}}': {{error}}", {
+                path: pathToAdd.trim(),
+                error: error.message,
+              }),
+            );
           }
         }
 
@@ -123,12 +129,21 @@ export const directoryCommand: SlashCommand = {
           addItem(
             {
               type: MessageType.INFO,
-              text: `Successfully added GEMINI.md files from the following directories if there are:\n- ${added.join('\n- ')}`,
+              text: t(
+                'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}',
+                {
+                  directories: added.join('\n- '),
+                },
+              ),
             },
             Date.now(),
           );
         } catch (error) {
-          errors.push(`Error refreshing memory: ${(error as Error).message}`);
+          errors.push(
+            t('Error refreshing memory: {{error}}', {
+              error: (error as Error).message,
+            }),
+          );
         }
 
         if (added.length > 0) {
@@ -139,7 +154,9 @@ export const directoryCommand: SlashCommand = {
           addItem(
             {
               type: MessageType.INFO,
-              text: `Successfully added directories:\n- ${added.join('\n- ')}`,
+              text: t('Successfully added directories:\n- {{directories}}', {
+                directories: added.join('\n- '),
+              }),
             },
             Date.now(),
           );
@@ -169,7 +186,7 @@ export const directoryCommand: SlashCommand = {
           addItem(
             {
               type: MessageType.ERROR,
-              text: 'Configuration is not available.',
+              text: t('Configuration is not available.'),
             },
             Date.now(),
           );
@@ -181,7 +198,9 @@ export const directoryCommand: SlashCommand = {
         addItem(
           {
             type: MessageType.INFO,
-            text: `Current workspace directories:\n${directoryList}`,
+            text: t('Current workspace directories:\n{{directories}}', {
+              directories: directoryList,
+            }),
           },
           Date.now(),
         );
