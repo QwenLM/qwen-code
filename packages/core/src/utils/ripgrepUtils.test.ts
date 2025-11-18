@@ -253,7 +253,7 @@ describe('ripgrepUtils', () => {
       const rgPath = await ensureRipgrepPath(true);
 
       expect(fileExists).toHaveBeenCalledOnce();
-      // If system rg is available, it should return 'rg'
+      // If system rg is available, it should return 'rg' (or 'rg.exe' on Windows)
       // This test will pass if system ripgrep is installed
       expect(rgPath).toBeDefined();
     });
@@ -264,7 +264,7 @@ describe('ripgrepUtils', () => {
 
       // Should not check for bundled binary
       expect(fileExists).not.toHaveBeenCalled();
-      // If system rg is available, it should return 'rg'
+      // If system rg is available, it should return 'rg' (or 'rg.exe' on Windows)
       expect(rgPath).toBeDefined();
     });
 
