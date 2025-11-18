@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Système d'agents IA spécialisés pour l'industrie électrique québécoise",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "electron/main/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
@@ -36,7 +36,10 @@
       "target": "nsis"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Utility"
     }
   },
@@ -82,5 +85,10 @@
     "concurrently": "^8.2.2",
     "wait-on": "^7.2.0"
   },
-  "main": "electron/main/index.js"
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "author": "",
+  "license": "ISC"
 }

@@ -1,0 +1,239 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 195 100% 50%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 280 100% 50%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 327 100% 50%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 33% 17%;
+    --input: 217 33% 17%;
+    --ring: 195 100% 50%;
+
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  /* Cyberpunk Industriel Theme */
+  .cyber-container {
+    @apply bg-background text-foreground;
+    background-image:
+      linear-gradient(to right, hsl(var(--border)) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(var(--border)) 1px, transparent 1px);
+    background-size: 20px 20px;
+  }
+
+  .cyber-card {
+    @apply bg-card border border-border rounded-lg p-6 shadow-lg;
+    box-shadow: 0 0 20px rgba(0, 240, 255, 0.1);
+    transition: all 0.3s ease;
+  }
+
+  .cyber-card:hover {
+    box-shadow: 0 0 30px rgba(0, 240, 255, 0.2);
+    border-color: hsl(var(--primary));
+  }
+
+  .cyber-button {
+    @apply px-4 py-2 rounded-md font-medium transition-all;
+    @apply bg-primary text-primary-foreground;
+    @apply hover:shadow-lg hover:scale-105;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.3);
+  }
+
+  .cyber-button-secondary {
+    @apply px-4 py-2 rounded-md font-medium transition-all;
+    @apply bg-secondary text-secondary-foreground;
+    @apply hover:shadow-lg hover:scale-105;
+    box-shadow: 0 0 15px rgba(176, 0, 255, 0.3);
+  }
+
+  .cyber-input {
+    @apply w-full px-4 py-2 rounded-md;
+    @apply bg-input border border-border;
+    @apply text-foreground placeholder:text-muted-foreground;
+    @apply focus:outline-none focus:ring-2 focus:ring-ring;
+    @apply transition-all;
+  }
+
+  .cyber-glow {
+    animation: pulse-glow 2s ease-in-out infinite;
+  }
+
+  .cyber-border-glow {
+    position: relative;
+  }
+
+  .cyber-border-glow::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 2px;
+    background: linear-gradient(45deg,
+      hsl(var(--primary)),
+      hsl(var(--secondary)),
+      hsl(var(--accent))
+    );
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: border-rotate 3s linear infinite;
+  }
+
+  @keyframes border-rotate {
+    0% {
+      filter: hue-rotate(0deg);
+    }
+    100% {
+      filter: hue-rotate(360deg);
+    }
+  }
+
+  /* Scrollbar Styling */
+  ::-webkit-scrollbar {
+    width: 12px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-muted;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-primary/30 rounded-full;
+    border: 2px solid hsl(var(--muted));
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-primary/50;
+  }
+
+  /* Split pane divider */
+  .split-divider {
+    @apply bg-border hover:bg-primary/50;
+    @apply cursor-col-resize;
+    @apply transition-colors duration-200;
+    width: 4px;
+    position: relative;
+  }
+
+  .split-divider:hover {
+    box-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+  }
+
+  /* Chart styling for Recharts */
+  .recharts-surface {
+    @apply rounded-lg;
+  }
+
+  .recharts-cartesian-grid-horizontal line,
+  .recharts-cartesian-grid-vertical line {
+    @apply stroke-border;
+  }
+
+  .recharts-text {
+    @apply fill-muted-foreground text-sm;
+  }
+
+  .recharts-legend-item-text {
+    @apply text-foreground;
+  }
+
+  /* Alert badges */
+  .alert-badge {
+    @apply inline-flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium;
+  }
+
+  .alert-badge-warning {
+    @apply bg-amber-500/20 text-amber-400 border border-amber-500/50;
+  }
+
+  .alert-badge-error {
+    @apply bg-red-500/20 text-red-400 border border-red-500/50;
+  }
+
+  .alert-badge-info {
+    @apply bg-blue-500/20 text-blue-400 border border-blue-500/50;
+  }
+
+  .alert-badge-success {
+    @apply bg-green-500/20 text-green-400 border border-green-500/50;
+  }
+
+  /* Loading animation */
+  .loading-spinner {
+    border: 3px solid hsl(var(--muted));
+    border-top: 3px solid hsl(var(--primary));
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
+
+  /* Typography enhancements */
+  .heading-gradient {
+    background: linear-gradient(
+      135deg,
+      hsl(var(--primary)),
+      hsl(var(--secondary)),
+      hsl(var(--accent))
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Photo pin marker on plans */
+  .photo-pin {
+    @apply absolute w-8 h-8 rounded-full;
+    @apply bg-accent border-2 border-white;
+    @apply cursor-pointer transition-transform hover:scale-125;
+    box-shadow: 0 0 15px rgba(255, 0, 110, 0.6);
+  }
+
+  .photo-pin::after {
+    content: '';
+    @apply absolute inset-0 rounded-full;
+    @apply bg-accent/50 animate-ping;
+  }
+}
