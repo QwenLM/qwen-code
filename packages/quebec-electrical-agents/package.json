@@ -9,10 +9,36 @@
     "build": "tsc",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
+    "electron": "electron .",
+    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "electron-builder",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.qwen.quebec-electrical-agents",
+    "productName": "Agents Électriques Québec",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "python/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    },
+    "mac": {
+      "category": "public.app-category.productivity"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "category": "Utility"
+    }
   },
   "keywords": [
     "electrical",
@@ -29,6 +55,7 @@
     "express": "^4.21.2",
     "mongoose": "^8.9.3",
     "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1",
     "multer": "^1.4.5-lts.1",
     "faiss-node": "^0.5.1",
     "@google-cloud/aiplatform": "^3.33.0",
@@ -39,7 +66,8 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "joi": "^17.14.0",
-    "winston": "^3.18.0"
+    "winston": "^3.18.0",
+    "electron-is-dev": "^3.0.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
@@ -48,6 +76,11 @@
     "@types/node": "^22.10.5",
     "typescript": "^5.7.3",
     "tsx": "^4.20.3",
-    "vitest": "^3.2.4"
-  }
+    "vitest": "^3.2.4",
+    "electron": "^28.1.0",
+    "electron-builder": "^24.9.1",
+    "concurrently": "^8.2.2",
+    "wait-on": "^7.2.0"
+  },
+  "main": "electron/main/index.js"
 }

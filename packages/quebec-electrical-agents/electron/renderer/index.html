@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:* ws://localhost:*">
+    <title>Agents Électriques Québécois</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="app-header">
+        <div class="header-content">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <path d="M16 2L6 12h6v10h8V12h6L16 2z" fill="#ffd700"/>
+                    <rect x="14" y="22" width="4" height="8" fill="#ffd700"/>
+                </svg>
+                <h1>Agents Électriques Québécois</h1>
+            </div>
+            <div class="header-status">
+                <div class="status-indicator" id="backendStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Backend</span>
+                </div>
+                <div class="status-indicator" id="wsStatus">
+                    <span class="status-dot"></span>
+                    <span class="status-text">WebSocket</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="main-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-view="dashboard">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 3h6v6H3V3zm8 0h6v6h-6V3zM3 11h6v6H3v-6zm8 0h6v6h-6v-6z"/>
+                    </svg>
+                    <span>Dashboard</span>
+                </button>
+                <button class="nav-item" data-view="plans">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M4 4h12v12H4V4zm2 2v8h8V6H6z"/>
+                    </svg>
+                    <span>Plans</span>
+                </button>
+                <button class="nav-item" data-view="bom">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M3 5h14v2H3V5zm0 4h14v2H3V9zm0 4h14v2H3v-2z"/>
+                    </svg>
+                    <span>BOM</span>
+                </button>
+                <button class="nav-item" data-view="compliance">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M10 2l8 4v6c0 3-2 6-8 8-6-2-8-5-8-8V6l8-4zm0 2L4 7v5c0 2 1 4 6 6 5-2 6-4 6-6V7l-6-3z"/>
+                    </svg>
+                    <span>Conformité</span>
+                </button>
+                <button class="nav-item" data-view="chat">
+                    <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M18 6v8H6l-4 4V6c0-1.1.9-2 2-2h12c1.1 0 2 .9 2 2z"/>
+                    </svg>
+                    <span>Chat Agent</span>
+                </button>
+            </nav>
+        </aside>
+
+        <!-- Content Area -->
+        <main class="content-area">
+            <!-- Dashboard View -->
+            <div class="view active" id="dashboardView">
+                <h2>Tableau de Bord</h2>
+
+                <!-- Dropzone pour plans PDF -->
+                <div class="dropzone" id="dropzone">
+                    <svg width="64" height="64" viewBox="0 0 64 64" fill="none" stroke="currentColor">
+                        <path d="M32 8v48M8 32h48M16 16l16 16m0-16l16 16M16 48l16-16m0 16l16-16" stroke-width="2"/>
+                    </svg>
+                    <h3>Glissez-déposez vos plans électriques ici</h3>
+                    <p>Formats supportés: PDF, PNG, JPG (max 50MB)</p>
+                    <button class="btn-primary" id="btnSelectFile">
+                        Ou cliquez pour sélectionner un fichier
+                    </button>
+                </div>
+
+                <!-- Stats Cards -->
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #4caf50;">
+                            <svg width="24" height="24" fill="white">
+                                <path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statPlansAnalyzed">0</div>
+                            <div class="stat-label">Plans Analysés</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #2196f3;">
+                            <svg width="24" height="24" fill="white">
+                                <path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statBOMItems">0</div>
+                            <div class="stat-label">Items BOM</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #ff9800;">
+                            <svg width="24" height="24" fill="white">
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-6h2v6zm0-8h-2V7h2v2z"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statIssues">0</div>
+                            <div class="stat-label">Problèmes Conformité</div>
+                        </div>
+                    </div>
+
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: #9c27b0;">
+                            <svg width="24" height="24" fill="white">
+                                <path d="M12 2L2 7v10c0 5.5 3.8 10.7 10 12 6.2-1.3 10-6.5 10-12V7l-10-5z"/>
+                            </svg>
+                        </div>
+                        <div class="stat-content">
+                            <div class="stat-value" id="statCompliance">--%</div>
+                            <div class="stat-label">Taux Conformité</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recent Activity -->
+                <div class="activity-section">
+                    <h3>Activité Récente</h3>
+                    <div class="activity-list" id="activityList">
+                        <div class="activity-item">
+                            <span class="activity-time">--:--</span>
+                            <span class="activity-text">Système démarré</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Plans View -->
+            <div class="view" id="plansView">
+                <h2>Plans Électriques</h2>
+                <div class="plans-grid" id="plansGrid">
+                    <div class="empty-state">
+                        <p>Aucun plan analysé pour le moment</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BOM View -->
+            <div class="view" id="bomView">
+                <h2>Bill of Materials (BOM)</h2>
+                <div class="bom-container" id="bomContainer">
+                    <div class="empty-state">
+                        <p>Aucune BOM générée</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Compliance View -->
+            <div class="view" id="complianceView">
+                <h2>Conformité CEQ/RBQ/RSST</h2>
+                <div class="compliance-container" id="complianceContainer">
+                    <div class="empty-state">
+                        <p>Aucun audit de conformité</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chat View -->
+            <div class="view" id="chatView">
+                <h2>Assistant IA - Normes Québécoises</h2>
+                <div class="chat-container">
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="message agent">
+                            <div class="message-avatar">AI</div>
+                            <div class="message-content">
+                                <p>Bonjour! Je suis votre assistant spécialisé en normes électriques québécoises (CEQ, RBQ, RSST, CSA).</p>
+                                <p>Comment puis-je vous aider aujourd'hui?</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="chat-input-container">
+                        <input
+                            type="text"
+                            id="chatInput"
+                            placeholder="Posez votre question sur les normes CEQ, RBQ, RSST..."
+                            autocomplete="off"
+                        />
+                        <button id="btnSendMessage" class="btn-primary">
+                            <svg width="20" height="20" fill="currentColor">
+                                <path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner"></div>
+        <p id="loadingText">Chargement...</p>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Scripts -->
+    <script src="app.js"></script>
+</body>
+</html>
