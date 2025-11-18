@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { AuthState } from '../types.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
+import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
@@ -61,11 +62,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     async (
       authType: AuthType,
       scope: SettingScope,
-      credentials?: {
-        apiKey?: string;
-        baseUrl?: string;
-        model?: string;
-      },
+      credentials?: OpenAICredentials,
     ) => {
       try {
         settings.setValue(scope, 'security.auth.selectedType', authType);
@@ -110,11 +107,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     async (
       authType: AuthType,
       scope: SettingScope,
-      credentials?: {
-        apiKey?: string;
-        baseUrl?: string;
-        model?: string;
-      },
+      credentials?: OpenAICredentials,
     ) => {
       try {
         await config.refreshAuth(authType);
@@ -130,11 +123,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
     async (
       authType: AuthType | undefined,
       scope: SettingScope,
-      credentials?: {
-        apiKey?: string;
-        baseUrl?: string;
-        model?: string;
-      },
+      credentials?: OpenAICredentials,
     ) => {
       if (!authType) {
         setIsAuthDialogOpen(false);
@@ -148,22 +137,12 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       setIsAuthenticating(true);
 
       if (authType === AuthType.USE_OPENAI) {
-        const hasApiKey =
-          credentials?.apiKey ||
-          settings.merged.security?.auth?.apiKey ||
-          process.env['OPENAI_API_KEY'];
-
         if (credentials) {
           config.updateCredentials({
             apiKey: credentials.apiKey,
             baseUrl: credentials.baseUrl,
             model: credentials.model,
           });
-        }
-
-        // Only perform auth if we have an API key
-        // Otherwise, wait for user to input via OpenAIKeyPrompt in DialogManager
-        if (hasApiKey) {
           await performAuth(authType, scope, credentials);
         }
         return;
@@ -171,7 +150,7 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
 
       await performAuth(authType, scope);
     },
-    [config, performAuth, settings.merged.security?.auth?.apiKey],
+    [config, performAuth],
   );
 
   const openAuthDialog = useCallback(() => {

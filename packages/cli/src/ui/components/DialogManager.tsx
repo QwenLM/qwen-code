@@ -59,6 +59,16 @@ export const DialogManager = ({
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
 
+  const getDefaultOpenAIConfig = () => {
+    const fromSettings = settings.merged.security?.auth;
+    const modelSettings = settings.merged.model;
+    return {
+      apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
+      baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
+      model: modelSettings?.name || process.env['OPENAI_MODEL'] || '',
+    };
+  };
+
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
       <WelcomeBackDialog
@@ -221,32 +231,25 @@ export const DialogManager = ({
 
   if (uiState.isAuthenticating) {
     if (uiState.pendingAuthType === AuthType.USE_OPENAI) {
-      const hasApiKey =
-        process.env['OPENAI_API_KEY'] || settings.merged.security?.auth?.apiKey;
-
-      if (!hasApiKey) {
-        return (
-          <OpenAIKeyPrompt
-            onSubmit={(apiKey, baseUrl, model) => {
-              uiActions.handleAuthSelect(
-                AuthType.USE_OPENAI,
-                SettingScope.User,
-                {
-                  apiKey,
-                  baseUrl,
-                  model,
-                },
-              );
-            }}
-            onCancel={() => {
-              uiActions.cancelAuthentication();
-              uiActions.setAuthState(AuthState.Updating);
-            }}
-          />
-        );
-      }
-
-      // Has API key, authentication completes immediately, no progress UI needed
+      const defaults = getDefaultOpenAIConfig();
+      return (
+        <OpenAIKeyPrompt
+          onSubmit={(apiKey, baseUrl, model) => {
+            uiActions.handleAuthSelect(AuthType.USE_OPENAI, SettingScope.User, {
+              apiKey,
+              baseUrl,
+              model,
+            });
+          }}
+          onCancel={() => {
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
+          defaultApiKey={defaults.apiKey}
+          defaultBaseUrl={defaults.baseUrl}
+          defaultModel={defaults.model}
+        />
+      );
     }
 
     if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {

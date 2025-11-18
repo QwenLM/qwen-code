@@ -7,6 +7,7 @@
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
 import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 
 export interface DialogCloseOptions {
   // Theme dialog
@@ -25,11 +26,7 @@ export interface DialogCloseOptions {
   handleAuthSelect: (
     authType: AuthType | undefined,
     scope: SettingScope,
-    credentials?: {
-      apiKey?: string;
-      baseUrl?: string;
-      model?: string;
-    },
+    credentials?: OpenAICredentials,
   ) => Promise<void>;
   pendingAuthType: AuthType | undefined;
 
