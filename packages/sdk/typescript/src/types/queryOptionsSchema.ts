@@ -48,6 +48,10 @@ export const QueryOptionsSchema = z
         (message: string) => void
       >((val) => typeof val === 'function', { message: 'stderr must be a function' })
       .optional(),
+    maxSessionTurns: z.number().optional(),
+    coreTools: z.array(z.string()).optional(),
+    excludeTools: z.array(z.string()).optional(),
+    authType: z.enum(['openai', 'qwen-oauth']).optional(),
   })
   .strict();
 

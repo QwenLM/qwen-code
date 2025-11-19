@@ -77,7 +77,7 @@ export type CreateQueryOptions = {
   /** Permission mode ('default' | 'plan' | 'auto-edit' | 'yolo') */
   permissionMode?: PermissionMode;
   /** Callback invoked before each tool execution */
-  canUseTool?: PermissionCallback;
+  canUseTool?: CanUseTool;
 
   // Hook system
   /** Hook configuration for tool execution lifecycle */
@@ -107,6 +107,14 @@ export type CreateQueryOptions = {
   debug?: boolean;
   /** Callback for stderr output */
   stderr?: (message: string) => void;
+  /** Maximum number of session turns */
+  maxSessionTurns?: number;
+  /** Core tool paths */
+  coreTools?: string[];
+  /** Tools to exclude */
+  excludeTools?: string[];
+  /** Authentication type */
+  authType?: string;
 };
 
 /**
@@ -131,4 +139,49 @@ export type TransportOptions = {
   debug?: boolean;
   /** Callback for stderr output */
   stderr?: (message: string) => void;
+  /** Maximum number of session turns */
+  maxSessionTurns?: number;
+  /** Core tool paths */
+  coreTools?: string[];
+  /** Tools to exclude */
+  excludeTools?: string[];
+  /** Authentication type */
+  authType?: string;
 };
+
+/**
+ * Tool input type
+ * TODO: align this type with actual tool inputs
+ */
+type ToolInput = Record<string, unknown>;
+
+/**
+ * Permission callback function
+ * Called before each tool execution to determine if it should be allowed
+ *
+ * @param toolName - Name of the tool being executed
+ * @param input - Input parameters for the tool
+ * @param options - Options including abort signal
+ * @returns Promise with permission result
+ */
+type CanUseTool = (
+  toolName: string,
+  input: ToolInput,
+  options: {
+    signal: AbortSignal;
+  },
+) => Promise<PermissionResult>;
+
+/**
+ * Result of permission check
+ */
+type PermissionResult =
+  | {
+      behavior: 'allow';
+      updatedInput: ToolInput;
+    }
+  | {
+      behavior: 'deny';
+      message: string;
+      interrupt?: boolean;
+    };

@@ -11,6 +11,7 @@ import type {
 import { extensionsCommand } from '../commands/extensions.js';
 import {
   ApprovalMode,
+  AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
@@ -128,6 +129,10 @@ export interface CliArgs {
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
+  maxSessionTurns: number | undefined;
+  coreTools: string[] | undefined;
+  excludeTools: string[] | undefined;
+  authType: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -394,6 +399,31 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description:
             'Include partial assistant messages when using stream-json output.',
           default: false,
+        })
+        .option('max-session-turns', {
+          type: 'number',
+          description: 'Maximum number of session turns',
+        })
+        .option('core-tools', {
+          type: 'array',
+          string: true,
+          description: 'Core tool paths',
+          coerce: (tools: string[]) =>
+            // Handle comma-separated values
+            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
+        })
+        .option('exclude-tools', {
+          type: 'array',
+          string: true,
+          description: 'Tools to exclude',
+          coerce: (tools: string[]) =>
+            // Handle comma-separated values
+            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
+        })
+        .option('auth-type', {
+          type: 'string',
+          choices: [AuthType.USE_OPENAI, AuthType.QWEN_OAUTH],
+          description: 'Authentication type',
         })
         .deprecateOption(
           'show-memory-usage',
@@ -738,6 +768,7 @@ export async function loadCliConfig(
     settings,
     activeExtensions,
     extraExcludes.length > 0 ? extraExcludes : undefined,
+    argv.excludeTools,
   );
   const blockedMcpServers: Array<{ name: string; extensionName: string }> = [];
 
@@ -793,7 +824,7 @@ export async function loadCliConfig(
     debugMode,
     question,
     fullContext: argv.allFiles || false,
-    coreTools: settings.tools?.core || undefined,
+    coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools,
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
@@ -826,13 +857,16 @@ export async function loadCliConfig(
     model: resolvedModel,
     extensionContextFilePaths,
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
-    maxSessionTurns: settings.model?.maxSessionTurns ?? -1,
+    maxSessionTurns:
+      argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.experimentalAcp || false,
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
     blockedMcpServers,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType: settings.security?.auth?.selectedType,
+    authType:
+      (argv.authType as AuthType | undefined) ||
+      settings.security?.auth?.selectedType,
     inputFormat,
     outputFormat,
     includePartialMessages,
@@ -941,8 +975,10 @@ function mergeExcludeTools(
   settings: Settings,
   extensions: Extension[],
   extraExcludes?: string[] | undefined,
+  cliExcludeTools?: string[] | undefined,
 ): string[] {
   const allExcludeTools = new Set([
+    ...(cliExcludeTools || []),
     ...(settings.tools?.exclude || []),
     ...(extraExcludes || []),
   ]);

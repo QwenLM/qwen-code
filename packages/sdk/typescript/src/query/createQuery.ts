@@ -73,6 +73,10 @@ export function query({
     abortController,
     debug: options.debug,
     stderr: options.stderr,
+    maxSessionTurns: options.maxSessionTurns,
+    coreTools: options.coreTools,
+    excludeTools: options.excludeTools,
+    authType: options.authType,
   });
 
   // Build query options with abortController

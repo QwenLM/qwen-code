@@ -166,6 +166,22 @@ export class ProcessTransport implements Transport {
       }
     }
 
+    if (this.options.maxSessionTurns !== undefined) {
+      args.push('--max-session-turns', String(this.options.maxSessionTurns));
+    }
+
+    if (this.options.coreTools && this.options.coreTools.length > 0) {
+      args.push('--core-tools', this.options.coreTools.join(','));
+    }
+
+    if (this.options.excludeTools && this.options.excludeTools.length > 0) {
+      args.push('--exclude-tools', this.options.excludeTools.join(','));
+    }
+
+    if (this.options.authType) {
+      args.push('--auth-type', this.options.authType);
+    }
+
     return args;
   }
 
