@@ -525,12 +525,12 @@ export async function getQwenOAuthClient(
       return client;
     }
 
-    // No cached credentials
     if (options?.requireCachedCredentials) {
-      throw new Error('No cached credentials found. Please re-authenticate.');
+      throw new Error(
+        'No cached Qwen-OAuth credentials found. Please re-authenticate.',
+      );
     }
 
-    // No cached credentials, use device authorization flow for authentication
     const result = await authWithQwenDeviceFlow(client, config);
     if (!result.success) {
       // Only emit timeout event if the failure reason is actually timeout
