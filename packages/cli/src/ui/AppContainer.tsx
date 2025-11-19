@@ -97,6 +97,7 @@ import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { ThemeProvider } from './contexts/ThemeContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -1466,7 +1467,9 @@ export const AppContainer = (props: AppContainerProps) => {
             }}
           >
             <ShellFocusContext.Provider value={isFocused}>
-              <App />
+              <ThemeProvider>
+                <App />
+              </ThemeProvider>
             </ShellFocusContext.Provider>
           </AppContext.Provider>
         </ConfigContext.Provider>
