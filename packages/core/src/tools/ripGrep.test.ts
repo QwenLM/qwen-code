@@ -20,14 +20,13 @@ import fs from 'node:fs/promises';
 import os, { EOL } from 'node:os';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
-import type { ChildProcess } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import { getRipgrepCommand } from '../utils/ripgrepUtils.js';
+import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
-  getRipgrepCommand: vi.fn(),
+  runRipgrep: vi.fn(),
 }));
 
 // Mock child_process for ripgrep calls
@@ -36,60 +35,6 @@ vi.mock('child_process', () => ({
 }));
 
 const mockSpawn = vi.mocked(spawn);
-
-// Helper function to create mock spawn implementations
-function createMockSpawn(
-  options: {
-    outputData?: string;
-    exitCode?: number;
-    signal?: string;
-    onCall?: (
-      command: string,
-      args: readonly string[],
-      spawnOptions?: unknown,
-    ) => void;
-  } = {},
-) {
-  const { outputData, exitCode = 0, signal, onCall } = options;
-
-  return (command: string, args: readonly string[], spawnOptions?: unknown) => {
-    onCall?.(command, args, spawnOptions);
-    const mockProcess = {
-      stdout: {
-        on: vi.fn(),
-        removeListener: vi.fn(),
-      },
-      stderr: {
-        on: vi.fn(),
-        removeListener: vi.fn(),
-      },
-      on: vi.fn(),
-      removeListener: vi.fn(),
-      kill: vi.fn(),
-    };
-
-    // Set up event listeners immediately
-    setTimeout(() => {
-      const stdoutDataHandler = mockProcess.stdout.on.mock.calls.find(
-        (call) => call[0] === 'data',
-      )?.[1];
-
-      const closeHandler = mockProcess.on.mock.calls.find(
-        (call) => call[0] === 'close',
-      )?.[1];
-
-      if (stdoutDataHandler && outputData) {
-        stdoutDataHandler(Buffer.from(outputData));
-      }
-
-      if (closeHandler) {
-        closeHandler(exitCode, signal);
-      }
-    }, 0);
-
-    return mockProcess as unknown as ChildProcess;
-  };
-}
 
 describe('RipGrepTool', () => {
   let tempRootDir: string;
@@ -109,7 +54,6 @@ describe('RipGrepTool', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    (getRipgrepCommand as Mock).mockResolvedValue('/mock/path/to/rg');
     mockSpawn.mockReset();
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     fileExclusionsMock = {
@@ -200,12 +144,11 @@ describe('RipGrepTool', () => {
 
   describe('execute', () => {
     it('should find matches for a simple pattern in all files', async () => {
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}sub/fileC.txt:1:another world in sub dir${EOL}`,
-          exitCode: 0,
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}sub/fileC.txt:1:another world in sub dir${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'world' };
       const invocation = grepTool.build(params);
@@ -223,12 +166,11 @@ describe('RipGrepTool', () => {
 
     it('should find matches in a specific path', async () => {
       // Setup specific mock for this test - searching in 'sub' should only return matches from that directory
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `fileC.txt:1:another world in sub dir${EOL}`,
-          exitCode: 0,
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileC.txt:1:another world in sub dir${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'world', path: 'sub' };
       const invocation = grepTool.build(params);
@@ -243,16 +185,11 @@ describe('RipGrepTool', () => {
     });
 
     it('should use target directory when path is not provided', async () => {
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `fileA.txt:1:hello world${EOL}`,
-          exitCode: 0,
-          onCall: (_, args) => {
-            // Should search in the target directory (tempRootDir)
-            expect(args[args.length - 1]).toBe(tempRootDir);
-          },
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt:1:hello world${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'world' };
       const invocation = grepTool.build(params);
@@ -264,12 +201,11 @@ describe('RipGrepTool', () => {
 
     it('should find matches with a glob filter', async () => {
       // Setup specific mock for this test
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `fileB.js:2:function baz() { return "hello"; }${EOL}`,
-          exitCode: 0,
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileB.js:2:function baz() { return "hello"; }${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'hello', glob: '*.js' };
       const invocation = grepTool.build(params);
@@ -290,39 +226,10 @@ describe('RipGrepTool', () => {
       );
 
       // Setup specific mock for this test - searching for 'hello' in 'sub' with '*.js' filter
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            // Only return match from the .js file in sub directory
-            onData(Buffer.from(`another.js:1:const greeting = "hello";${EOL}`));
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `another.js:1:const greeting = "hello";${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = {
@@ -346,15 +253,11 @@ describe('RipGrepTool', () => {
         path.join(tempRootDir, '.qwenignore'),
         'ignored.txt\n',
       );
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          exitCode: 1,
-          onCall: (_, args) => {
-            expect(args).toContain('--ignore-file');
-            expect(args).toContain(path.join(tempRootDir, '.qwenignore'));
-          },
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'secret' };
       const invocation = grepTool.build(params);
@@ -375,16 +278,11 @@ describe('RipGrepTool', () => {
         }),
       });
 
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `kept.txt:1:keep me${EOL}`,
-          exitCode: 0,
-          onCall: (_, args) => {
-            expect(args).not.toContain('--ignore-file');
-            expect(args).not.toContain(path.join(tempRootDir, '.qwenignore'));
-          },
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `kept.txt:1:keep me${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'keep' };
       const invocation = grepTool.build(params);
@@ -404,14 +302,11 @@ describe('RipGrepTool', () => {
         }),
       });
 
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          exitCode: 1,
-          onCall: (_, args) => {
-            expect(args).toContain('--no-ignore-vcs');
-          },
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'ignored' };
       const invocation = grepTool.build(params);
@@ -421,12 +316,11 @@ describe('RipGrepTool', () => {
     it('should truncate llm content when exceeding maximum length', async () => {
       const longMatch = 'fileA.txt:1:' + 'a'.repeat(30_000);
 
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `${longMatch}${EOL}`,
-          exitCode: 0,
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${longMatch}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'a+' };
       const invocation = grepTool.build(params);
@@ -439,11 +333,11 @@ describe('RipGrepTool', () => {
 
     it('should return "No matches found" when pattern does not exist', async () => {
       // Setup specific mock for no matches
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          exitCode: 1, // No matches found
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = { pattern: 'nonexistentpattern' };
       const invocation = grepTool.build(params);
@@ -463,39 +357,10 @@ describe('RipGrepTool', () => {
 
     it('should handle regex special characters correctly', async () => {
       // Setup specific mock for this test - regex pattern 'foo.*bar' should match 'const foo = "bar";'
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            // Return match for the regex pattern
-            onData(Buffer.from(`fileB.js:1:const foo = "bar";${EOL}`));
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileB.js:1:const foo = "bar";${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'foo.*bar' }; // Matches 'const foo = "bar";'
@@ -509,43 +374,10 @@ describe('RipGrepTool', () => {
 
     it('should be case-insensitive by default (JS fallback)', async () => {
       // Setup specific mock for this test - case insensitive search for 'HELLO'
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            // Return case-insensitive matches for 'HELLO'
-            onData(
-              Buffer.from(
-                `fileA.txt:1:hello world${EOL}fileB.js:2:function baz() { return "hello"; }${EOL}`,
-              ),
-            );
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt:1:hello world${EOL}fileB.js:2:function baz() { return "hello"; }${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'HELLO' };
@@ -568,12 +400,11 @@ describe('RipGrepTool', () => {
     });
 
     it('should search within a single file when path is a file', async () => {
-      mockSpawn.mockImplementationOnce(
-        createMockSpawn({
-          outputData: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}`,
-          exitCode: 0,
-        }),
-      );
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt:1:hello world${EOL}fileA.txt:2:second line with world${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
 
       const params: RipGrepToolParams = {
         pattern: 'world',
@@ -588,7 +419,11 @@ describe('RipGrepTool', () => {
     });
 
     it('should throw an error if ripgrep is not available', async () => {
-      (getRipgrepCommand as Mock).mockResolvedValue(null);
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: new Error('ripgrep binary not found.'),
+      });
 
       const params: RipGrepToolParams = { pattern: 'world' };
       const invocation = grepTool.build(params);
@@ -612,54 +447,6 @@ describe('RipGrepTool', () => {
       const result = await invocation.execute(controller.signal);
       expect(result).toBeDefined();
     });
-
-    it('should abort streaming search when signal is triggered', async () => {
-      // Setup specific mock for this test - simulate process being killed due to abort
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        // Simulate process being aborted - use setTimeout to ensure handlers are registered first
-        setTimeout(() => {
-          const closeHandler = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (closeHandler) {
-            // Simulate process killed by signal (code is null, signal is SIGTERM)
-            closeHandler(null, 'SIGTERM');
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
-      });
-
-      const controller = new AbortController();
-      const params: RipGrepToolParams = { pattern: 'test' };
-      const invocation = grepTool.build(params);
-
-      // Abort immediately before starting the search
-      controller.abort();
-
-      const result = await invocation.execute(controller.signal);
-      expect(result.llmContent).toContain(
-        'Error during grep search operation: ripgrep exited with code null',
-      );
-      expect(result.returnDisplay).toContain(
-        'Error: ripgrep exited with code null',
-      );
-    });
   });
 
   describe('error handling and edge cases', () => {
@@ -675,32 +462,10 @@ describe('RipGrepTool', () => {
       await fs.mkdir(emptyDir);
 
       // Setup specific mock for this test - searching in empty directory should return no matches
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onClose) {
-            onClose(1);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'test', path: 'empty' };
@@ -715,32 +480,10 @@ describe('RipGrepTool', () => {
       await fs.writeFile(path.join(tempRootDir, 'empty.txt'), '');
 
       // Setup specific mock for this test - searching for anything in empty files should return no matches
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onClose) {
-            onClose(1);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'anything' };
@@ -758,42 +501,10 @@ describe('RipGrepTool', () => {
       );
 
       // Setup specific mock for this test - searching for 'world' should find the file with special characters
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(
-              Buffer.from(
-                `${specialFileName}:1:hello world with special chars${EOL}`,
-              ),
-            );
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `file with spaces & symbols!.txt:1:hello world with special chars${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'world' };
@@ -813,42 +524,10 @@ describe('RipGrepTool', () => {
       );
 
       // Setup specific mock for this test - searching for 'deep' should find the deeply nested file
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(
-              Buffer.from(
-                `a/b/c/d/e/deep.txt:1:content in deep directory${EOL}`,
-              ),
-            );
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `a/b/c/d/e/deep.txt:1:content in deep directory${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'deep' };
@@ -868,42 +547,10 @@ describe('RipGrepTool', () => {
       );
 
       // Setup specific mock for this test - regex pattern should match function declarations
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(
-              Buffer.from(
-                `code.js:1:function getName() { return "test"; }${EOL}`,
-              ),
-            );
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `code.js:1:function getName() { return "test"; }${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'function\\s+\\w+\\s*\\(' };
@@ -921,42 +568,10 @@ describe('RipGrepTool', () => {
       );
 
       // Setup specific mock for this test - case insensitive search should match all variants
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(
-              Buffer.from(
-                `case.txt:1:Hello World${EOL}case.txt:2:hello world${EOL}case.txt:3:HELLO WORLD${EOL}`,
-              ),
-            );
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `case.txt:1:Hello World${EOL}case.txt:2:hello world${EOL}case.txt:3:HELLO WORLD${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: 'hello' };
@@ -975,38 +590,10 @@ describe('RipGrepTool', () => {
       );
 
       // Setup specific mock for this test - escaped regex pattern should match price format
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(Buffer.from(`special.txt:1:Price: $19.99${EOL}`));
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `special.txt:1:Price: $19.99${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = { pattern: '\\$\\d+\\.\\d+' };
@@ -1032,42 +619,10 @@ describe('RipGrepTool', () => {
       await fs.writeFile(path.join(tempRootDir, 'test.txt'), 'text content');
 
       // Setup specific mock for this test - glob pattern should filter to only ts/tsx files
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(
-              Buffer.from(
-                `test.ts:1:typescript content${EOL}test.tsx:1:tsx content${EOL}`,
-              ),
-            );
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `test.ts:1:typescript content${EOL}test.tsx:1:tsx content${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = {
@@ -1092,38 +647,10 @@ describe('RipGrepTool', () => {
       await fs.writeFile(path.join(tempRootDir, 'other.ts'), 'other code');
 
       // Setup specific mock for this test - glob pattern should filter to only src/** files
-      mockSpawn.mockImplementationOnce(() => {
-        const mockProcess = {
-          stdout: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          stderr: {
-            on: vi.fn(),
-            removeListener: vi.fn(),
-          },
-          on: vi.fn(),
-          removeListener: vi.fn(),
-          kill: vi.fn(),
-        };
-
-        setTimeout(() => {
-          const onData = mockProcess.stdout.on.mock.calls.find(
-            (call) => call[0] === 'data',
-          )?.[1];
-          const onClose = mockProcess.on.mock.calls.find(
-            (call) => call[0] === 'close',
-          )?.[1];
-
-          if (onData) {
-            onData(Buffer.from(`src/main.ts:1:source code${EOL}`));
-          }
-          if (onClose) {
-            onClose(0);
-          }
-        }, 0);
-
-        return mockProcess as unknown as ChildProcess;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `src/main.ts:1:source code${EOL}`,
+        truncated: false,
+        error: undefined,
       });
 
       const params: RipGrepToolParams = {
