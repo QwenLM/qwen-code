@@ -32,7 +32,7 @@ Both applications provide AI-powered chat, project management dashboards, photo 
 - ✅ Offline-first desktop application
 - ✅ Secure IPC with context isolation
 
-**Files Created (8 files, 3200+ lines):**
+**Files Created (12 files, 3200+ lines):**
 ```
 electron/
   main.js (450 lines)      - Main process, spawns Qwen CLI
@@ -44,6 +44,10 @@ src/
 package.json               - Dependencies & scripts
 README.md (1000+ lines)    - Complete documentation
 TESTING.md (240 lines)     - Testing checklist
+QUICKSTART.md (180 lines)  - 5-minute getting started guide
+install.sh (executable)    - Automated installation script
+start.sh (executable)      - One-command launcher
+.gitignore                 - Ignore patterns
 ```
 
 **Key Technologies:**
@@ -60,6 +64,12 @@ TESTING.md (240 lines)     - Testing checklist
 4. Renderer displays streaming text word-by-word
 5. PGI data auto-detected and visualized
 6. Photos uploaded → GPS extracted → displayed in grid
+
+**Installation Automation:**
+- ✅ `install.sh` - Automated setup with prerequisite checks
+- ✅ `start.sh` - One-command launcher with validation
+- ✅ `QUICKSTART.md` - 5-minute getting started guide
+- ✅ `.gitignore` - Proper exclusion patterns
 
 ---
 
@@ -82,7 +92,7 @@ TESTING.md (240 lines)     - Testing checklist
 - ✅ Multi-user capable
 - ✅ Cloud-deployable
 
-**Files Created (27 files, 4500+ lines):**
+**Files Created (31 files, 4500+ lines):**
 
 Backend (Python):
 ```
@@ -97,6 +107,8 @@ backend/
     ai_service.py (280 lines)        - OpenAI/Anthropic
     pgi_detector.py (500 lines)      - PGI detection
     photo_gps.py (400 lines)         - GPS extraction
+  data/
+    sample_pgi_data.json             - Sample project data
   requirements.txt                   - Python deps
   .env.example                       - Config template
 ```
@@ -118,6 +130,12 @@ frontend/
   package.json                       - Node deps
   tailwind.config.ts                 - Tailwind + theme
   next.config.js                     - Next.js config
+
+Automation (Webapp Root):
+QUICKSTART.md (250 lines)            - 5-minute setup guide
+install.sh (executable)              - Backend + frontend installer
+start.sh (executable)                - Parallel service launcher
+.gitignore                           - Ignore patterns
 ```
 
 **Key Technologies:**
@@ -136,27 +154,36 @@ frontend/
 5. Frontend renders dashboard with Recharts
 6. Photos uploaded → GPS extracted → mapped to plan coordinates
 
+**Installation Automation:**
+- ✅ `install.sh` - Automated backend + frontend setup with venv prompts
+- ✅ `start.sh` - Parallel service launcher (backend + frontend)
+- ✅ `QUICKSTART.md` - Complete 5-minute setup and usage guide
+- ✅ `sample_pgi_data.json` - Sample project data for testing
+- ✅ `.gitignore` - Python and Node.js exclusion patterns
+
 ---
 
 ## 📊 Statistics
 
 ### Overall
-- **Total Files**: 35 new files
-- **Total Lines**: 7,700+ lines of code
-- **Languages**: TypeScript, Python, JavaScript, HTML, CSS
-- **Commits**: 4 comprehensive commits
+- **Total Files**: 43 new files
+- **Total Lines**: 8,700+ lines of code
+- **Languages**: TypeScript, Python, JavaScript, HTML, CSS, Shell
+- **Commits**: 6 comprehensive commits
 
 ### Electron App
-- Files: 8
-- Lines: 3,200+
-- Languages: JavaScript, HTML, CSS
+- Files: 12
+- Lines: 3,200+ (code) + 1,500+ (docs/automation)
+- Languages: JavaScript, HTML, CSS, Bash
 - Dependencies: 5 (Electron, electron-store, exif-parser, etc.)
+- Automation: ✅ install.sh, start.sh, QUICKSTART.md, .gitignore
 
 ### Web App
-- Files: 27
-- Lines: 4,500+
-- Languages: TypeScript, Python
+- Files: 31
+- Lines: 4,500+ (code) + 1,000+ (docs/automation)
+- Languages: TypeScript, Python, Bash
 - Dependencies: 40+ (FastAPI, Next.js, Recharts, etc.)
+- Automation: ✅ install.sh, start.sh, QUICKSTART.md, sample data, .gitignore
 
 ---
 
@@ -219,26 +246,40 @@ See `packages/quebec-electrical-agents-electron/TESTING.md` for complete checkli
 
 **Quick Smoke Test:**
 
-Electron App:
+Electron App (Automated):
+```bash
+cd packages/quebec-electrical-agents-electron
+./install.sh   # One-time setup
+./start.sh     # Launch app
+# Try: "Montre-moi le projet KORLCC avec budget"
+```
+
+Or Manual:
 ```bash
 cd packages/quebec-electrical-agents-electron
 npm install
 npm start
-# Try: "Montre-moi le projet KORLCC avec budget"
 ```
 
-Web App:
+Web App (Automated):
 ```bash
-# Backend
+cd packages/quebec-electrical-agents/webapp
+./install.sh   # One-time setup (backend + frontend)
+./start.sh     # Launch both services in parallel
+# Open: http://localhost:3001
+```
+
+Or Manual:
+```bash
+# Terminal 1 - Backend
 cd packages/quebec-electrical-agents/webapp/backend
 pip install -r requirements.txt
 python main.py
 
-# Frontend
+# Terminal 2 - Frontend
 cd packages/quebec-electrical-agents/webapp/frontend
 npm install
 npm run dev
-# Open: http://localhost:3001
 ```
 
 ---
