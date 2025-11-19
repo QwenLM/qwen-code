@@ -5,7 +5,7 @@
  */
 
 import type { SpawnOptions } from 'node:child_process';
-import { spawn, execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -96,14 +96,8 @@ export const copyToClipboard = async (text: string): Promise<void> => {
   const linuxOptions: SpawnOptions = { stdio: ['pipe', 'inherit', 'pipe'] };
 
   switch (process.platform) {
-    case 'win32': {
-      const chcpOut = execSync('chcp', { encoding: 'utf8' });
-      const originalCp = chcpOut.match(/\d+/)?.[0] ?? String(CodePage.GBK);
-      return run('cmd', [
-        '/c',
-        `chcp ${CodePage.UTF8} >nul && clip && chcp ${originalCp} >nul`,
-      ]);
-    }
+    case 'win32':
+      return run('cmd', ['/c', `chcp ${CodePage.UTF8} >nul && clip`]);
     case 'darwin':
       return run('pbcopy', []);
     case 'linux':
