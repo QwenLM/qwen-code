@@ -21,22 +21,20 @@ describe('Interactive Mode', () => {
   it.skipIf(process.platform === 'win32')(
     'should trigger chat compression with /compress command',
     async () => {
-      await rig.setup('interactive-compress-test');
+      await rig.setup('interactive-compress-test', {
+        settings: {
+          security: {
+            auth: {
+              selectedType: 'openai',
+            },
+          },
+        },
+      });
 
       const { ptyProcess } = rig.runInteractive();
 
       let fullOutput = '';
       ptyProcess.onData((data) => (fullOutput += data));
-
-      const authDialogAppeared = await rig.waitForText(
-        'How would you like to authenticate',
-        5000,
-      );
-
-      // select the second option if auth dialog come's up
-      if (authDialogAppeared) {
-        ptyProcess.write('2');
-      }
 
       // Wait for the app to be ready
       const isReady = await rig.waitForText('Type your message', 15000);
@@ -71,22 +69,20 @@ describe('Interactive Mode', () => {
   it.skipIf(process.platform === 'win32')(
     'should handle compression failure on token inflation',
     async () => {
-      await rig.setup('interactive-compress-test');
+      await rig.setup('interactive-compress-test', {
+        settings: {
+          security: {
+            auth: {
+              selectedType: 'openai',
+            },
+          },
+        },
+      });
 
       const { ptyProcess } = rig.runInteractive();
 
       let fullOutput = '';
       ptyProcess.onData((data) => (fullOutput += data));
-
-      const authDialogAppeared = await rig.waitForText(
-        'How would you like to authenticate',
-        5000,
-      );
-
-      // select the second option if auth dialog come's up
-      if (authDialogAppeared) {
-        ptyProcess.write('2');
-      }
 
       // Wait for the app to be ready
       const isReady = await rig.waitForText('Type your message', 25000);
@@ -106,7 +102,7 @@ describe('Interactive Mode', () => {
       expect(foundEvent).toBe(true);
 
       const compressionFailed = await rig.waitForText(
-        'compression was not beneficial',
+        'Nothing to compress.',
         25000,
       );
 
