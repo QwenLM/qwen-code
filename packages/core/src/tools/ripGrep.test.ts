@@ -22,12 +22,12 @@ import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ChildProcess } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import { ensureRipgrepPath } from '../utils/ripgrepUtils.js';
+import { getRipgrepCommand } from '../utils/ripgrepUtils.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
-  ensureRipgrepPath: vi.fn(),
+  getRipgrepCommand: vi.fn(),
 }));
 
 // Mock child_process for ripgrep calls
@@ -109,7 +109,7 @@ describe('RipGrepTool', () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    (ensureRipgrepPath as Mock).mockResolvedValue('/mock/path/to/rg');
+    (getRipgrepCommand as Mock).mockResolvedValue('/mock/path/to/rg');
     mockSpawn.mockReset();
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     fileExclusionsMock = {
@@ -588,18 +588,15 @@ describe('RipGrepTool', () => {
     });
 
     it('should throw an error if ripgrep is not available', async () => {
-      // Make ensureRipgrepBinary throw
-      (ensureRipgrepPath as Mock).mockRejectedValue(
-        new Error('Ripgrep binary not found'),
-      );
+      (getRipgrepCommand as Mock).mockResolvedValue(null);
 
       const params: RipGrepToolParams = { pattern: 'world' };
       const invocation = grepTool.build(params);
 
       expect(await invocation.execute(abortSignal)).toStrictEqual({
         llmContent:
-          'Error during grep search operation: Ripgrep binary not found',
-        returnDisplay: 'Error: Ripgrep binary not found',
+          'Error during grep search operation: ripgrep binary not found.',
+        returnDisplay: 'Error: ripgrep binary not found.',
       });
     });
   });

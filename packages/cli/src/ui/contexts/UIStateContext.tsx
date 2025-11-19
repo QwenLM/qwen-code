@@ -16,10 +16,11 @@ import type {
   HistoryItemWithoutId,
   StreamingState,
 } from '../types.js';
-import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
+  AuthType,
   IdeContext,
   ApprovalMode,
   UserTierId,
@@ -49,18 +50,9 @@ export interface UIState {
   isConfigInitialized: boolean;
   authError: string | null;
   isAuthDialogOpen: boolean;
+  pendingAuthType: AuthType | undefined;
   // Qwen OAuth state
-  isQwenAuth: boolean;
-  isQwenAuthenticating: boolean;
-  deviceAuth: DeviceAuthorizationInfo | null;
-  authStatus:
-    | 'idle'
-    | 'polling'
-    | 'success'
-    | 'error'
-    | 'timeout'
-    | 'rate_limit';
-  authMessage: string | null;
+  qwenAuthState: QwenAuthState;
   editorError: string | null;
   isEditorDialogOpen: boolean;
   corgiMode: boolean;

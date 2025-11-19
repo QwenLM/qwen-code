@@ -8,26 +8,13 @@ import type React from 'react';
 import { useState } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { Box, Text } from 'ink';
-import { validateAuthMethod } from '../../config/auth.js';
-import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { SettingScope } from '../../config/settings.js';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
-import { OpenAIKeyPrompt } from '../components/OpenAIKeyPrompt.js';
 import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
-
-interface AuthDialogProps {
-  onSelect: (
-    authMethod: AuthType | undefined,
-    scope: SettingScope,
-    credentials?: {
-      apiKey?: string;
-      baseUrl?: string;
-      model?: string;
-    },
-  ) => void;
-  settings: LoadedSettings;
-  initialErrorMessage?: string | null;
-}
+import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 
 function parseDefaultAuthType(
   defaultAuthType: string | undefined,
@@ -41,15 +28,14 @@ function parseDefaultAuthType(
   return null;
 }
 
-export function AuthDialog({
-  onSelect,
-  settings,
-  initialErrorMessage,
-}: AuthDialogProps): React.JSX.Element {
-  const [errorMessage, setErrorMessage] = useState<string | null>(
-    initialErrorMessage || null,
-  );
-  const [showOpenAIKeyPrompt, setShowOpenAIKeyPrompt] = useState(false);
+export function AuthDialog(): React.JSX.Element {
+  const { pendingAuthType, authError } = useUIState();
+  const { handleAuthSelect: onAuthSelect } = useUIActions();
+  const settings = useSettings();
+
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+
   const items = [
     {
       key: AuthType.QWEN_OAUTH,
@@ -62,10 +48,17 @@ export function AuthDialog({
   const initialAuthIndex = Math.max(
     0,
     items.findIndex((item) => {
+      // Priority 1: pendingAuthType
+      if (pendingAuthType) {
+        return item.value === pendingAuthType;
+      }
+
+      // Priority 2: settings.merged.security?.auth?.selectedType
       if (settings.merged.security?.auth?.selectedType) {
         return item.value === settings.merged.security?.auth?.selectedType;
       }
 
+      // Priority 3: QWEN_DEFAULT_AUTH_TYPE env var
       const defaultAuthType = parseDefaultAuthType(
         process.env['QWEN_DEFAULT_AUTH_TYPE'],
       );
@@ -73,49 +66,29 @@ export function AuthDialog({
         return item.value === defaultAuthType;
       }
 
+      // Priority 4: default to QWEN_OAUTH
       return item.value === AuthType.QWEN_OAUTH;
     }),
   );
 
-  const handleAuthSelect = (authMethod: AuthType) => {
-    if (authMethod === AuthType.USE_OPENAI) {
-      setShowOpenAIKeyPrompt(true);
-      setErrorMessage(null);
-    } else {
-      const error = validateAuthMethod(authMethod);
-      if (error) {
-        setErrorMessage(error);
-      } else {
-        setErrorMessage(null);
-        onSelect(authMethod, SettingScope.User);
-      }
-    }
+  const hasApiKey = Boolean(settings.merged.security?.auth?.apiKey);
+  const currentSelectedAuthType =
+    selectedIndex !== null
+      ? items[selectedIndex]?.value
+      : items[initialAuthIndex]?.value;
+
+  const handleAuthSelect = async (authMethod: AuthType) => {
+    setErrorMessage(null);
+    await onAuthSelect(authMethod, SettingScope.User);
   };
 
-  const handleOpenAIKeySubmit = (
-    apiKey: string,
-    baseUrl: string,
-    model: string,
-  ) => {
-    setShowOpenAIKeyPrompt(false);
-    onSelect(AuthType.USE_OPENAI, SettingScope.User, {
-      apiKey,
-      baseUrl,
-      model,
-    });
-  };
-
-  const handleOpenAIKeyCancel = () => {
-    setShowOpenAIKeyPrompt(false);
-    setErrorMessage('OpenAI API key is required to use OpenAI authentication.');
+  const handleHighlight = (authMethod: AuthType) => {
+    const index = items.findIndex((item) => item.value === authMethod);
+    setSelectedIndex(index);
   };
 
   useKeypress(
     (key) => {
-      if (showOpenAIKeyPrompt) {
-        return;
-      }
-
       if (key.name === 'escape') {
         // Prevent exit if there is an error message.
         // This means they user is not authenticated yet.
@@ -129,33 +102,11 @@ export function AuthDialog({
           );
           return;
         }
-        onSelect(undefined, SettingScope.User);
+        onAuthSelect(undefined, SettingScope.User);
       }
     },
     { isActive: true },
   );
-  const getDefaultOpenAIConfig = () => {
-    const fromSettings = settings.merged.security?.auth;
-    const modelSettings = settings.merged.model;
-    return {
-      apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
-      baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
-      model: modelSettings?.name || process.env['OPENAI_MODEL'] || '',
-    };
-  };
-
-  if (showOpenAIKeyPrompt) {
-    const defaults = getDefaultOpenAIConfig();
-    return (
-      <OpenAIKeyPrompt
-        defaultApiKey={defaults.apiKey}
-        defaultBaseUrl={defaults.baseUrl}
-        defaultModel={defaults.model}
-        onSubmit={handleOpenAIKeySubmit}
-        onCancel={handleOpenAIKeyCancel}
-      />
-    );
-  }
 
   return (
     <Box
@@ -174,16 +125,26 @@ export function AuthDialog({
           items={items}
           initialIndex={initialAuthIndex}
           onSelect={handleAuthSelect}
+          onHighlight={handleHighlight}
         />
       </Box>
-      {errorMessage && (
+      {(authError || errorMessage) && (
         <Box marginTop={1}>
-          <Text color={Colors.AccentRed}>{errorMessage}</Text>
+          <Text color={Colors.AccentRed}>{authError || errorMessage}</Text>
         </Box>
       )}
       <Box marginTop={1}>
         <Text color={Colors.AccentPurple}>(Use Enter to Set Auth)</Text>
       </Box>
+      {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
+        <Box marginTop={1}>
+          <Text color={Colors.Gray}>
+            Note: Your existing API key in settings.json will not be cleared
+            when using Qwen OAuth. You can switch back to OpenAI authentication
+            later if needed.
+          </Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Text>Terms of Services and Privacy Notice for Qwen Code</Text>
       </Box>
