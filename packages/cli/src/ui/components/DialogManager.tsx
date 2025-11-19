@@ -12,9 +12,9 @@ import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
-import { AuthInProgress } from '../auth/AuthInProgress.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
+import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
 import { ProQuotaDialog } from './ProQuotaDialog.js';
@@ -26,6 +26,9 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingScope } from '../../config/settings.js';
+import { AuthState } from '../types.js';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import process from 'node:process';
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { IdeTrustChangeDialog } from './IdeTrustChangeDialog.js';
@@ -55,6 +58,16 @@ export const DialogManager = ({
   const uiActions = useUIActions();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
+
+  const getDefaultOpenAIConfig = () => {
+    const fromSettings = settings.merged.security?.auth;
+    const modelSettings = settings.merged.model;
+    return {
+      apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
+      baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
+      model: modelSettings?.name || process.env['OPENAI_MODEL'] || '',
+    };
+  };
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -207,39 +220,56 @@ export const DialogManager = ({
   if (uiState.isVisionSwitchDialogOpen) {
     return <ModelSwitchDialog onSelect={uiActions.handleVisionSwitchSelect} />;
   }
+
+  if (uiState.isAuthDialogOpen || uiState.authError) {
+    return (
+      <Box flexDirection="column">
+        <AuthDialog />
+      </Box>
+    );
+  }
+
   if (uiState.isAuthenticating) {
-    // Show Qwen OAuth progress if it's Qwen auth and OAuth is active
-    if (uiState.isQwenAuth && uiState.isQwenAuthenticating) {
+    if (uiState.pendingAuthType === AuthType.USE_OPENAI) {
+      const defaults = getDefaultOpenAIConfig();
       return (
-        <QwenOAuthProgress
-          deviceAuth={uiState.deviceAuth || undefined}
-          authStatus={uiState.authStatus}
-          authMessage={uiState.authMessage}
-          onTimeout={uiActions.handleQwenAuthTimeout}
-          onCancel={uiActions.handleQwenAuthCancel}
+        <OpenAIKeyPrompt
+          onSubmit={(apiKey, baseUrl, model) => {
+            uiActions.handleAuthSelect(AuthType.USE_OPENAI, SettingScope.User, {
+              apiKey,
+              baseUrl,
+              model,
+            });
+          }}
+          onCancel={() => {
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
+          defaultApiKey={defaults.apiKey}
+          defaultBaseUrl={defaults.baseUrl}
+          defaultModel={defaults.model}
         />
       );
     }
 
-    // Default auth progress for other auth types
-    return (
-      <AuthInProgress
-        onTimeout={() => {
-          uiActions.onAuthError('Authentication cancelled.');
-        }}
-      />
-    );
-  }
-  if (uiState.isAuthDialogOpen) {
-    return (
-      <Box flexDirection="column">
-        <AuthDialog
-          onSelect={uiActions.handleAuthSelect}
-          settings={settings}
-          initialErrorMessage={uiState.authError}
+    if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
+      return (
+        <QwenOAuthProgress
+          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
+          authStatus={uiState.qwenAuthState.authStatus}
+          authMessage={uiState.qwenAuthState.authMessage}
+          onTimeout={() => {
+            uiActions.onAuthError('Qwen OAuth authentication timed out.');
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
+          onCancel={() => {
+            uiActions.cancelAuthentication();
+            uiActions.setAuthState(AuthState.Updating);
+          }}
         />
-      </Box>
-    );
+      );
+    }
   }
   if (uiState.isEditorDialogOpen) {
     return (

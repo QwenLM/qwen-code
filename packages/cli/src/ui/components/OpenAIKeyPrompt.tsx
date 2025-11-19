@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { useState } from 'react';
+import { z } from 'zod';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -17,6 +18,16 @@ interface OpenAIKeyPromptProps {
   defaultBaseUrl?: string;
   defaultModel?: string;
 }
+
+export const credentialSchema = z.object({
+  apiKey: z.string().min(1, 'API key is required'),
+  baseUrl: z
+    .union([z.string().url('Base URL must be a valid URL'), z.literal('')])
+    .optional(),
+  model: z.string().min(1, 'Model must be a non-empty string').optional(),
+});
+
+export type OpenAICredentials = z.infer<typeof credentialSchema>;
 
 export function OpenAIKeyPrompt({
   onSubmit,
@@ -31,6 +42,34 @@ export function OpenAIKeyPrompt({
   const [currentField, setCurrentField] = useState<
     'apiKey' | 'baseUrl' | 'model'
   >('apiKey');
+  const [validationError, setValidationError] = useState<string | null>(null);
+
+  const validateAndSubmit = () => {
+    setValidationError(null);
+
+    try {
+      const validated = credentialSchema.parse({
+        apiKey: apiKey.trim(),
+        baseUrl: baseUrl.trim() || undefined,
+        model: model.trim() || undefined,
+      });
+
+      onSubmit(
+        validated.apiKey,
+        validated.baseUrl === '' ? '' : validated.baseUrl || '',
+        validated.model || '',
+      );
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const errorMessage = error.errors
+          .map((e) => `${e.path.join('.')}: ${e.message}`)
+          .join(', ');
+        setValidationError(`Invalid credentials: ${errorMessage}`);
+      } else {
+        setValidationError('Failed to validate credentials');
+      }
+    }
+  };
 
   useKeypress(
     (key) => {
@@ -52,7 +91,7 @@ export function OpenAIKeyPrompt({
         } else if (currentField === 'model') {
           // 只有在提交时才检查 API key 是否为空
           if (apiKey.trim()) {
-            onSubmit(apiKey.trim(), baseUrl.trim(), model.trim());
+            validateAndSubmit();
           } else {
             // 如果 API key 为空，回到 API key 字段
             setCurrentField('apiKey');
@@ -168,6 +207,11 @@ export function OpenAIKeyPrompt({
       <Text bold color={Colors.AccentBlue}>
         OpenAI Configuration Required
       </Text>
+      {validationError && (
+        <Box marginTop={1}>
+          <Text color={Colors.AccentRed}>{validationError}</Text>
+        </Box>
+      )}
       <Box marginTop={1}>
         <Text>
           Please enter your OpenAI configuration. You can get an API key from{' '}

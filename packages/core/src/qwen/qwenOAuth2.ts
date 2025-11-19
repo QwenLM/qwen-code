@@ -467,6 +467,7 @@ export type AuthResult =
   | {
       success: false;
       reason: 'timeout' | 'cancelled' | 'error' | 'rate_limit';
+      message?: string; // Detailed error message for better error reporting
     };
 
 /**
@@ -476,6 +477,7 @@ export const qwenOAuth2Events = new EventEmitter();
 
 export async function getQwenOAuthClient(
   config: Config,
+  options?: { requireCachedCredentials?: boolean },
 ): Promise<QwenOAuth2Client> {
   const client = new QwenOAuth2Client();
 
@@ -488,11 +490,6 @@ export async function getQwenOAuthClient(
     client.setCredentials(credentials);
     return client;
   } catch (error: unknown) {
-    console.debug(
-      'Shared token manager failed, attempting device flow:',
-      error,
-    );
-
     // Handle specific token manager errors
     if (error instanceof TokenManagerError) {
       switch (error.type) {
@@ -520,12 +517,20 @@ export async function getQwenOAuthClient(
       // Try device flow instead of forcing refresh
       const result = await authWithQwenDeviceFlow(client, config);
       if (!result.success) {
-        throw new Error('Qwen OAuth authentication failed');
+        // Use detailed error message if available, otherwise use default
+        const errorMessage =
+          result.message || 'Qwen OAuth authentication failed';
+        throw new Error(errorMessage);
       }
       return client;
     }
 
-    // No cached credentials, use device authorization flow for authentication
+    if (options?.requireCachedCredentials) {
+      throw new Error(
+        'No cached Qwen-OAuth credentials found. Please re-authenticate.',
+      );
+    }
+
     const result = await authWithQwenDeviceFlow(client, config);
     if (!result.success) {
       // Only emit timeout event if the failure reason is actually timeout
@@ -538,20 +543,24 @@ export async function getQwenOAuthClient(
         );
       }
 
-      // Throw error with appropriate message based on failure reason
-      switch (result.reason) {
-        case 'timeout':
-          throw new Error('Qwen OAuth authentication timed out');
-        case 'cancelled':
-          throw new Error('Qwen OAuth authentication was cancelled by user');
-        case 'rate_limit':
-          throw new Error(
-            'Too many request for Qwen OAuth authentication, please try again later.',
-          );
-        case 'error':
-        default:
-          throw new Error('Qwen OAuth authentication failed');
-      }
+      // Use detailed error message if available, otherwise use default based on reason
+      const errorMessage =
+        result.message ||
+        (() => {
+          switch (result.reason) {
+            case 'timeout':
+              return 'Qwen OAuth authentication timed out';
+            case 'cancelled':
+              return 'Qwen OAuth authentication was cancelled by user';
+            case 'rate_limit':
+              return 'Too many request for Qwen OAuth authentication, please try again later.';
+            case 'error':
+            default:
+              return 'Qwen OAuth authentication failed';
+          }
+        })();
+
+      throw new Error(errorMessage);
     }
 
     return client;
@@ -644,13 +653,10 @@ async function authWithQwenDeviceFlow(
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       // Check if authentication was cancelled
       if (isCancelled) {
-        console.debug('\nAuthentication cancelled by user.');
-        qwenOAuth2Events.emit(
-          QwenOAuth2Event.AuthProgress,
-          'error',
-          'Authentication cancelled by user.',
-        );
-        return { success: false, reason: 'cancelled' };
+        const message = 'Authentication cancelled by user.';
+        console.debug('\n' + message);
+        qwenOAuth2Events.emit(QwenOAuth2Event.AuthProgress, 'error', message);
+        return { success: false, reason: 'cancelled', message };
       }
 
       try {
@@ -738,13 +744,14 @@ async function authWithQwenDeviceFlow(
 
           // Check for cancellation after waiting
           if (isCancelled) {
-            console.debug('\nAuthentication cancelled by user.');
+            const message = 'Authentication cancelled by user.';
+            console.debug('\n' + message);
             qwenOAuth2Events.emit(
               QwenOAuth2Event.AuthProgress,
               'error',
-              'Authentication cancelled by user.',
+              message,
             );
-            return { success: false, reason: 'cancelled' };
+            return { success: false, reason: 'cancelled', message };
           }
 
           continue;
@@ -758,7 +765,7 @@ async function authWithQwenDeviceFlow(
           );
         }
       } catch (error: unknown) {
-        // Handle specific error cases
+        // Extract error information
         const errorMessage =
           error instanceof Error ? error.message : String(error);
         const statusCode =
@@ -766,42 +773,49 @@ async function authWithQwenDeviceFlow(
             ? (error as Error & { status?: number }).status
             : null;
 
-        if (errorMessage.includes('401') || statusCode === 401) {
-          const message =
-            'Device code expired or invalid, please restart the authorization process.';
-
-          // Emit error event
-          qwenOAuth2Events.emit(QwenOAuth2Event.AuthProgress, 'error', message);
-
-          return { success: false, reason: 'error' };
-        }
-
-        // Handle 429 Too Many Requests error
-        if (errorMessage.includes('429') || statusCode === 429) {
-          const message =
-            'Too many requests. The server is rate limiting our requests. Please select a different authentication method or try again later.';
-
-          // Emit rate limit event to notify user
+        // Helper function to handle error and stop polling
+        const handleError = (
+          reason: 'error' | 'rate_limit',
+          message: string,
+          eventType: 'error' | 'rate_limit' = 'error',
+        ): AuthResult => {
           qwenOAuth2Events.emit(
             QwenOAuth2Event.AuthProgress,
-            'rate_limit',
+            eventType,
             message,
           );
+          console.error('\n' + message);
+          return { success: false, reason, message };
+        };
 
-          console.log('\n' + message);
+        // Handle credential caching failures - stop polling immediately
+        if (errorMessage.includes('Failed to cache credentials')) {
+          return handleError('error', errorMessage);
+        }
 
-          // Return false to stop polling and go back to auth selection
-          return { success: false, reason: 'rate_limit' };
+        // Handle 401 Unauthorized - device code expired or invalid
+        if (errorMessage.includes('401') || statusCode === 401) {
+          return handleError(
+            'error',
+            'Device code expired or invalid, please restart the authorization process.',
+          );
+        }
+
+        // Handle 429 Too Many Requests - rate limiting
+        if (errorMessage.includes('429') || statusCode === 429) {
+          return handleError(
+            'rate_limit',
+            'Too many requests. The server is rate limiting our requests. Please select a different authentication method or try again later.',
+            'rate_limit',
+          );
         }
 
         const message = `Error polling for token: ${errorMessage}`;
-
-        // Emit error event
         qwenOAuth2Events.emit(QwenOAuth2Event.AuthProgress, 'error', message);
 
-        // Check for cancellation before waiting
         if (isCancelled) {
-          return { success: false, reason: 'cancelled' };
+          const message = 'Authentication cancelled by user.';
+          return { success: false, reason: 'cancelled', message };
         }
 
         await new Promise((resolve) => setTimeout(resolve, pollInterval));
@@ -818,11 +832,12 @@ async function authWithQwenDeviceFlow(
     );
 
     console.error('\n' + timeoutMessage);
-    return { success: false, reason: 'timeout' };
+    return { success: false, reason: 'timeout', message: timeoutMessage };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error('Device authorization flow failed:', errorMessage);
-    return { success: false, reason: 'error' };
+    const message = `Device authorization flow failed: ${errorMessage}`;
+    console.error(message);
+    return { success: false, reason: 'error', message };
   } finally {
     // Clean up event listener
     qwenOAuth2Events.off(QwenOAuth2Event.AuthCancel, cancelHandler);
@@ -852,10 +867,30 @@ async function loadCachedQwenCredentials(
 
 async function cacheQwenCredentials(credentials: QwenCredentials) {
   const filePath = getQwenCachedCredentialPath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  try {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
 
-  const credString = JSON.stringify(credentials, null, 2);
-  await fs.writeFile(filePath, credString);
+    const credString = JSON.stringify(credentials, null, 2);
+    await fs.writeFile(filePath, credString);
+  } catch (error: unknown) {
+    // Handle file system errors (e.g., EACCES permission denied)
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorCode =
+      error instanceof Error && 'code' in error
+        ? (error as Error & { code?: string }).code
+        : undefined;
+
+    if (errorCode === 'EACCES') {
+      throw new Error(
+        `Failed to cache credentials: Permission denied (EACCES). Current user has no permission to access \`${filePath}\`. Please check permissions.`,
+      );
+    }
+
+    // Throw error for other file system failures
+    throw new Error(
+      `Failed to cache credentials: error when creating folder \`${path.dirname(filePath)}\` and writing to \`${filePath}\`. ${errorMessage}. Please check permissions.`,
+    );
+  }
 }
 
 /**

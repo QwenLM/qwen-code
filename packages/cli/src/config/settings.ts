@@ -839,5 +839,6 @@ export function saveSettings(settingsFile: SettingsFile): void {
     );
   } catch (error) {
     console.error('Error saving user settings file:', error);
+    throw error;
   }
 }

@@ -37,6 +37,7 @@ import type {
   ExtensionEnableEvent,
   ModelSlashCommandEvent,
   ExtensionDisableEvent,
+  AuthEvent,
 } from '../types.js';
 import { EndSessionEvent } from '../types.js';
 import type {
@@ -740,6 +741,25 @@ export class QwenLogger {
         extension_name: event.extension_name,
         setting_scope: event.setting_scope,
       }),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logAuthEvent(event: AuthEvent): void {
+    const snapshots: Record<string, unknown> = {
+      auth_type: event.auth_type,
+      action_type: event.action_type,
+      status: event.status,
+    };
+
+    if (event.error_message) {
+      snapshots['error_message'] = event.error_message;
+    }
+
+    const rumEvent = this.createActionEvent('auth', 'auth', {
+      snapshots: JSON.stringify(snapshots),
     });
 
     this.enqueueLogEvent(rumEvent);
