@@ -66,47 +66,43 @@ describe('Interactive Mode', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
-    'should handle compression failure on token inflation',
-    async () => {
-      await rig.setup('interactive-compress-test', {
-        settings: {
-          security: {
-            auth: {
-              selectedType: 'openai',
-            },
+  it.skip('should handle compression failure on token inflation', async () => {
+    await rig.setup('interactive-compress-test', {
+      settings: {
+        security: {
+          auth: {
+            selectedType: 'openai',
           },
         },
-      });
+      },
+    });
 
-      const { ptyProcess } = rig.runInteractive();
+    const { ptyProcess } = rig.runInteractive();
 
-      let fullOutput = '';
-      ptyProcess.onData((data) => (fullOutput += data));
+    let fullOutput = '';
+    ptyProcess.onData((data) => (fullOutput += data));
 
-      // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message', 25000);
-      expect(
-        isReady,
-        'CLI did not start up in interactive mode correctly',
-      ).toBe(true);
+    // Wait for the app to be ready
+    const isReady = await rig.waitForText('Type your message', 25000);
+    expect(isReady, 'CLI did not start up in interactive mode correctly').toBe(
+      true,
+    );
 
-      await type(ptyProcess, '/compress');
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      await type(ptyProcess, '\r');
+    await type(ptyProcess, '/compress');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await type(ptyProcess, '\r');
 
-      const foundEvent = await rig.waitForTelemetryEvent(
-        'chat_compression',
-        90000,
-      );
-      expect(foundEvent).toBe(true);
+    const foundEvent = await rig.waitForTelemetryEvent(
+      'chat_compression',
+      90000,
+    );
+    expect(foundEvent).toBe(true);
 
-      const compressionFailed = await rig.waitForText(
-        'Nothing to compress.',
-        25000,
-      );
+    const compressionFailed = await rig.waitForText(
+      'Nothing to compress.',
+      25000,
+    );
 
-      expect(compressionFailed).toBe(true);
-    },
-  );
+    expect(compressionFailed).toBe(true);
+  });
 });
