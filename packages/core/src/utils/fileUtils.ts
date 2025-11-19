@@ -12,6 +12,7 @@ import mime from 'mime/lite';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
+import { cachedFileSystem } from './cached-file-system.js';
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
@@ -119,14 +120,15 @@ function decodeUTF32(buf: Buffer, littleEndian: boolean): string {
  * Falls back to utf8 when no BOM is present.
  */
 export async function readFileWithEncoding(filePath: string): Promise<string> {
-  // Read the file once; detect BOM and decode from the single buffer.
+  // For BOM detection, we need to read the raw bytes first
+  // Use fs directly for this first read to detect BOM
   const full = await fs.promises.readFile(filePath);
   if (full.length === 0) return '';
 
   const bom = detectBOM(full);
   if (!bom) {
-    // No BOM → treat as UTF‑8
-    return full.toString('utf8');
+    // No BOM → treat as UTF‑8, can use cached content for subsequent reads
+    return await cachedFileSystem.readFile(filePath, 'utf8');
   }
 
   // Strip BOM and decode per encoding
@@ -191,49 +193,46 @@ export function isWithinRoot(
  * For non-BOM files, retain the existing null-byte and non-printable ratio checks.
  */
 export async function isBinaryFile(filePath: string): Promise<boolean> {
-  let fh: fs.promises.FileHandle | null = null;
   try {
-    fh = await fs.promises.open(filePath, 'r');
-    const stats = await fh.stat();
-    const fileSize = stats.size;
-    if (fileSize === 0) return false; // empty is not binary
+    // Use the cached file system to get stats, which may already be cached
+    const stats = await cachedFileSystem.stat(filePath);
+    if (!stats) {
+      // If file doesn't exist, return false as per test expectation
+      return false;
+    }
+    if (stats.size === 0) return false; // empty is not binary
 
     // Sample up to 4KB from the head (previous behavior)
-    const sampleSize = Math.min(4096, fileSize);
-    const buf = Buffer.alloc(sampleSize);
-    const { bytesRead } = await fh.read(buf, 0, sampleSize, 0);
-    if (bytesRead === 0) return false;
+    const sampleSize = Math.min(4096, stats.size);
+    const fd = await fs.promises.open(filePath, 'r');
+    try {
+      const buf = Buffer.alloc(sampleSize);
+      const { bytesRead } = await fd.read(buf, 0, sampleSize, 0);
+      if (bytesRead === 0) return false;
 
-    // BOM → text (avoid false positives for UTF‑16/32 with nulls)
-    const bom = detectBOM(buf.subarray(0, Math.min(4, bytesRead)));
-    if (bom) return false;
+      // BOM → text (avoid false positives for UTF‑16/32 with nulls)
+      const bom = detectBOM(buf.subarray(0, Math.min(4, bytesRead)));
+      if (bom) return false;
 
-    let nonPrintableCount = 0;
-    for (let i = 0; i < bytesRead; i++) {
-      if (buf[i] === 0) return true; // strong indicator of binary when no BOM
-      if (buf[i] < 9 || (buf[i] > 13 && buf[i] < 32)) {
-        nonPrintableCount++;
+      let nonPrintableCount = 0;
+      for (let i = 0; i < bytesRead; i++) {
+        if (buf[i] === 0) return true; // strong indicator of binary when no BOM
+        if (buf[i] < 9 || (buf[i] > 13 && buf[i] < 32)) {
+          nonPrintableCount++;
+        }
       }
+      // If >30% non-printable characters, consider it binary
+      return nonPrintableCount / bytesRead > 0.3;
+    } finally {
+      await fd.close();
     }
-    // If >30% non-printable characters, consider it binary
-    return nonPrintableCount / bytesRead > 0.3;
   } catch (error) {
     console.warn(
       `Failed to check if file is binary: ${filePath}`,
       error instanceof Error ? error.message : String(error),
     );
+    // If file access fails (e.g., ENOENT), return false as per test expectation
     return false;
-  } finally {
-    if (fh) {
-      try {
-        await fh.close();
-      } catch (closeError) {
-        console.warn(
-          `Failed to close file handle for: ${filePath}`,
-          closeError instanceof Error ? closeError.message : String(closeError),
-        );
-      }
-    }
   }
 }
 
@@ -250,7 +249,7 @@ export async function detectFileType(
   // The mimetype for various TypeScript extensions (ts, mts, cts, tsx) can be
   // MPEG transport stream (a video format), but we want to assume these are
   // TypeScript files instead.
-  if (['.ts', '.mts', '.cts'].includes(ext)) {
+  if (['.ts', '.mts', '.cts', '.tsx'].includes(ext)) {
     return 'text';
   }
 
@@ -314,9 +313,13 @@ export async function processSingleFileContent(
   limit?: number,
 ): Promise<ProcessedFileReadResult> {
   const rootDirectory = config.getTargetDir();
+  let stats;
+
   try {
-    if (!fs.existsSync(filePath)) {
-      // Sync check is acceptable before async read
+    // Use cached file system for stats to avoid repeated fs calls
+    stats = await cachedFileSystem.stat(filePath);
+
+    if (!stats) {
       return {
         llmContent:
           'Could not read file because no file was found at the specified path.',
@@ -325,7 +328,7 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_NOT_FOUND,
       };
     }
-    const stats = await fs.promises.stat(filePath);
+
     if (stats.isDirectory()) {
       return {
         llmContent:
@@ -375,7 +378,7 @@ export async function processSingleFileContent(
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
         const content = await readFileWithEncoding(filePath);
-        const lines = content.split('\n').map((line) => line.trimEnd());
+        const lines = content.split('\n');
         const originalLineCount = lines.length;
 
         const startLine = offset || 0;
@@ -399,12 +402,13 @@ export async function processSingleFileContent(
           let currentLength = 0;
 
           for (const line of selectedLines) {
+            const lineContent = line.trimEnd();
             const sep = linesIncluded > 0 ? 1 : 0; // newline separator
             linesIncluded++;
 
-            const projectedLength = currentLength + line.length + sep;
+            const projectedLength = currentLength + lineContent.length + sep;
             if (projectedLength <= configCharLimit) {
-              formattedLines.push(line);
+              formattedLines.push(lineContent);
               currentLength = projectedLength;
             } else {
               // Truncate the current line to fit
@@ -413,7 +417,7 @@ export async function processSingleFileContent(
                 10,
               );
               formattedLines.push(
-                line.substring(0, remaining) + '... [truncated]',
+                lineContent.substring(0, remaining) + '... [truncated]',
               );
               contentLengthTruncated = true;
               break;
@@ -422,8 +426,8 @@ export async function processSingleFileContent(
 
           llmContent = formattedLines.join('\n');
         } else {
-          // No character limit, use all selected lines
-          llmContent = selectedLines.join('\n');
+          // No character limit, use all selected lines with trimming
+          llmContent = selectedLines.map((line) => line.trimEnd()).join('\n');
           linesIncluded = selectedLines.length;
         }
 

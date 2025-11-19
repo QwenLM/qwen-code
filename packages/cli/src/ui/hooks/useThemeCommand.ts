@@ -80,9 +80,13 @@ export const useThemeCommand = (
           return;
         }
         loadedSettings.setValue(scope, 'ui.theme', themeName); // Update the merged settings
+
+        // Only reload custom themes if they exist in the merged settings
         if (loadedSettings.merged.ui?.customThemes) {
-          themeManager.loadCustomThemes(loadedSettings.merged.ui?.customThemes);
+          themeManager.loadCustomThemes(loadedSettings.merged.ui.customThemes);
         }
+
+        // Apply the current theme from merged settings (not just the themeName parameter)
         applyTheme(loadedSettings.merged.ui?.theme); // Apply the current theme
         setThemeError(null);
       } finally {

@@ -58,6 +58,9 @@ export * from './utils/subagentGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
+export * from './utils/cached-file-system.js';
+export * from './utils/request-deduplicator.js';
+export * from './utils/general-cache.js';
 
 // Export services
 export * from './services/fileDiscoveryService.js';

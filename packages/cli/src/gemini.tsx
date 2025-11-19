@@ -58,29 +58,61 @@ import {
 } from './utils/relaunch.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 
+// Cache the DNS resolution order to avoid repeated validation for the same value
+let cachedDnsInput: string | undefined = undefined;
+let cachedDnsOutput: DnsResolutionOrder | null = null;
+
 export function validateDnsResolutionOrder(
   order: string | undefined,
 ): DnsResolutionOrder {
+  // If we've already computed the result for this input, return it
+  if (cachedDnsInput === order && cachedDnsOutput !== null) {
+    return cachedDnsOutput;
+  }
+
   const defaultValue: DnsResolutionOrder = 'ipv4first';
   if (order === undefined) {
+    cachedDnsInput = order;
+    cachedDnsOutput = defaultValue;
     return defaultValue;
   }
   if (order === 'ipv4first' || order === 'verbatim') {
+    cachedDnsInput = order;
+    cachedDnsOutput = order;
     return order;
   }
   // We don't want to throw here, just warn and use the default.
   console.warn(
     `Invalid value for dnsResolutionOrder in settings: "${order}". Using default "${defaultValue}".`,
   );
+  cachedDnsInput = order;
+  cachedDnsOutput = defaultValue;
   return defaultValue;
 }
 
+// Cache memory values to avoid recalculating on each call
+let cachedMemoryValues: {
+  totalMemoryMB: number;
+  currentMaxOldSpaceSizeMb: number;
+} | null = null;
+
+function getMemoryValues(): {
+  totalMemoryMB: number;
+  currentMaxOldSpaceSizeMb: number;
+} {
+  if (!cachedMemoryValues) {
+    const totalMemoryMB = os.totalmem() / (1024 * 1024);
+    const heapStats = v8.getHeapStatistics();
+    const currentMaxOldSpaceSizeMb = Math.floor(
+      heapStats.heap_size_limit / 1024 / 1024,
+    );
+    cachedMemoryValues = { totalMemoryMB, currentMaxOldSpaceSizeMb };
+  }
+  return cachedMemoryValues;
+}
+
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
-  const totalMemoryMB = os.totalmem() / (1024 * 1024);
-  const heapStats = v8.getHeapStatistics();
-  const currentMaxOldSpaceSizeMb = Math.floor(
-    heapStats.heap_size_limit / 1024 / 1024,
-  );
+  const { totalMemoryMB, currentMaxOldSpaceSizeMb } = getMemoryValues();
 
   // Set target to 50% of total memory
   const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.5);

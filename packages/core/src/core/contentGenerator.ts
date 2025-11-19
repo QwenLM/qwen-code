@@ -172,7 +172,7 @@ export async function createContentGenerator(
       throw new Error('OpenAI API key is required');
     }
 
-    // Import OpenAIContentGenerator dynamically to avoid circular dependencies
+    // Import OpenAIContentGenerator dynamically to avoid circular dependencies and reduce initial load
     const { createOpenAIContentGenerator } = await import(
       './openaiContentGenerator/index.js'
     );
@@ -182,13 +182,14 @@ export async function createContentGenerator(
   }
 
   if (config.authType === AuthType.QWEN_OAUTH) {
-    // Import required classes dynamically
-    const { getQwenOAuthClient: getQwenOauthClient } = await import(
-      '../qwen/qwenOAuth2.js'
-    );
-    const { QwenContentGenerator } = await import(
-      '../qwen/qwenContentGenerator.js'
-    );
+    // Import required classes dynamically to reduce initial bundle size
+    const [
+      { getQwenOAuthClient: getQwenOauthClient },
+      { QwenContentGenerator },
+    ] = await Promise.all([
+      import('../qwen/qwenOAuth2.js'),
+      import('../qwen/qwenContentGenerator.js'),
+    ]);
 
     try {
       // Get the Qwen OAuth client (now includes integrated token management)

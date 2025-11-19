@@ -5,7 +5,7 @@
  */
 
 import { useIsScreenReaderEnabled } from 'ink';
-import { useTerminalSize } from './hooks/useTerminalSize.js';
+import { useStableTerminalSize } from './hooks/useStableSize.js';
 import { lerp } from '../utils/math.js';
 import { useUIState } from './contexts/UIStateContext.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
@@ -31,7 +31,7 @@ const getContainerWidth = (terminalWidth: number): string => {
 export const App = () => {
   const uiState = useUIState();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
-  const { columns } = useTerminalSize();
+  const { columns } = useStableTerminalSize();
   const containerWidth = getContainerWidth(columns);
 
   if (uiState.quittingMessages) {

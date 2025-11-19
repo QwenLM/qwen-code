@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { themeManager, DEFAULT_THEME } from '../themes/theme-manager.js';
@@ -46,33 +46,35 @@ export function ThemeDialog({
     string | undefined
   >(settings.merged.ui?.theme || DEFAULT_THEME.name);
 
-  // Generate theme items filtered by selected scope
-  const customThemes =
-    selectedScope === SettingScope.User
-      ? settings.user.settings.ui?.customThemes || {}
-      : settings.merged.ui?.customThemes || {};
-  const builtInThemes = themeManager
-    .getAvailableThemes()
-    .filter((theme) => theme.type !== 'custom');
-  const customThemeNames = Object.keys(customThemes);
-  const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
-  // Generate theme items
-  const themeItems = [
-    ...builtInThemes.map((theme) => ({
-      label: theme.name,
-      value: theme.name,
-      themeNameDisplay: theme.name,
-      themeTypeDisplay: capitalize(theme.type),
-      key: theme.name,
-    })),
-    ...customThemeNames.map((name) => ({
-      label: name,
-      value: name,
-      themeNameDisplay: name,
-      themeTypeDisplay: 'Custom',
-      key: name,
-    })),
-  ];
+  // Memoize theme items to prevent unnecessary recalculations on each render
+  const themeItems = useMemo(() => {
+    const customThemes =
+      selectedScope === SettingScope.User
+        ? settings.user.settings.ui?.customThemes || {}
+        : settings.merged.ui?.customThemes || {};
+    const builtInThemes = themeManager
+      .getAvailableThemes()
+      .filter((theme) => theme.type !== 'custom');
+    const customThemeNames = Object.keys(customThemes);
+    const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+    // Generate theme items
+    return [
+      ...builtInThemes.map((theme) => ({
+        label: theme.name,
+        value: theme.name,
+        themeNameDisplay: theme.name,
+        themeTypeDisplay: capitalize(theme.type),
+        key: theme.name,
+      })),
+      ...customThemeNames.map((name) => ({
+        label: name,
+        value: name,
+        themeNameDisplay: name,
+        themeTypeDisplay: 'Custom',
+        key: name,
+      })),
+    ];
+  }, [selectedScope, settings]);
 
   // Find the index of the selected theme, but only if it exists in the list
   const initialThemeIndex = themeItems.findIndex(
@@ -125,63 +127,75 @@ export function ThemeDialog({
     settings,
   );
 
-  // Constants for calculating preview pane layout.
-  // These values are based on the JSX structure below.
-  const PREVIEW_PANE_WIDTH_PERCENTAGE = 0.55;
-  // A safety margin to prevent text from touching the border.
-  // This is a complete hack unrelated to the 0.9 used in App.tsx
-  const PREVIEW_PANE_WIDTH_SAFETY_MARGIN = 0.9;
-  // Combined horizontal padding from the dialog and preview pane.
-  const TOTAL_HORIZONTAL_PADDING = 4;
-  const colorizeCodeWidth = Math.max(
-    Math.floor(
-      (terminalWidth - TOTAL_HORIZONTAL_PADDING) *
-        PREVIEW_PANE_WIDTH_PERCENTAGE *
-        PREVIEW_PANE_WIDTH_SAFETY_MARGIN,
-    ),
-    1,
-  );
+  // Memoize layout calculations to prevent unnecessary recalculations on each render
+  const { colorizeCodeWidth, includePadding, codeBlockHeight, diffHeight } =
+    useMemo(() => {
+      // Constants for calculating preview pane layout.
+      // These values are based on the JSX structure below.
+      const PREVIEW_PANE_WIDTH_PERCENTAGE = 0.55;
+      // A safety margin to prevent text from touching the border.
+      // This is a complete hack unrelated to the 0.9 used in App.tsx
+      const PREVIEW_PANE_WIDTH_SAFETY_MARGIN = 0.9;
+      // Combined horizontal padding from the dialog and preview pane.
+      const TOTAL_HORIZONTAL_PADDING = 4;
+      const colorizeCodeWidth = Math.max(
+        Math.floor(
+          (terminalWidth - TOTAL_HORIZONTAL_PADDING) *
+            PREVIEW_PANE_WIDTH_PERCENTAGE *
+            PREVIEW_PANE_WIDTH_SAFETY_MARGIN,
+        ),
+        1,
+      );
 
-  const DIALOG_PADDING = 2;
-  const selectThemeHeight = themeItems.length + 1;
-  const TAB_TO_SELECT_HEIGHT = 2;
-  availableTerminalHeight = availableTerminalHeight ?? Number.MAX_SAFE_INTEGER;
-  availableTerminalHeight -= 2; // Top and bottom borders.
-  availableTerminalHeight -= TAB_TO_SELECT_HEIGHT;
+      const DIALOG_PADDING = 2;
+      const selectThemeHeight = themeItems.length + 1;
+      const TAB_TO_SELECT_HEIGHT = 2;
+      let localAvailableTerminalHeight =
+        availableTerminalHeight ?? Number.MAX_SAFE_INTEGER;
+      localAvailableTerminalHeight -= 2; // Top and bottom borders.
+      localAvailableTerminalHeight -= TAB_TO_SELECT_HEIGHT;
 
-  let totalLeftHandSideHeight = DIALOG_PADDING + selectThemeHeight;
+      let totalLeftHandSideHeight = DIALOG_PADDING + selectThemeHeight;
 
-  let includePadding = true;
+      let includePadding = true;
 
-  // Remove content from the LHS that can be omitted if it exceeds the available height.
-  if (totalLeftHandSideHeight > availableTerminalHeight) {
-    includePadding = false;
-    totalLeftHandSideHeight -= DIALOG_PADDING;
-  }
+      // Remove content from the LHS that can be omitted if it exceeds the available height.
+      if (totalLeftHandSideHeight > localAvailableTerminalHeight) {
+        includePadding = false;
+        totalLeftHandSideHeight -= DIALOG_PADDING;
+      }
 
-  // Vertical space taken by elements other than the two code blocks in the preview pane.
-  // Includes "Preview" title, borders, and margin between blocks.
-  const PREVIEW_PANE_FIXED_VERTICAL_SPACE = 8;
+      // Vertical space taken by elements other than the two code blocks in the preview pane.
+      // Includes "Preview" title, borders, and margin between blocks.
+      const PREVIEW_PANE_FIXED_VERTICAL_SPACE = 8;
 
-  // The right column doesn't need to ever be shorter than the left column.
-  availableTerminalHeight = Math.max(
-    availableTerminalHeight,
-    totalLeftHandSideHeight,
-  );
-  const availableTerminalHeightCodeBlock =
-    availableTerminalHeight -
-    PREVIEW_PANE_FIXED_VERTICAL_SPACE -
-    (includePadding ? 2 : 0) * 2;
+      // The right column doesn't need to ever be shorter than the left column.
+      localAvailableTerminalHeight = Math.max(
+        localAvailableTerminalHeight,
+        totalLeftHandSideHeight,
+      );
+      const availableTerminalHeightCodeBlock =
+        localAvailableTerminalHeight -
+        PREVIEW_PANE_FIXED_VERTICAL_SPACE -
+        (includePadding ? 2 : 0) * 2;
 
-  // Subtract margin between code blocks from available height.
-  const availableHeightForPanes = Math.max(
-    0,
-    availableTerminalHeightCodeBlock - 1,
-  );
+      // Subtract margin between code blocks from available height.
+      const availableHeightForPanes = Math.max(
+        0,
+        availableTerminalHeightCodeBlock - 1,
+      );
 
-  // The code block is slightly longer than the diff, so give it more space.
-  const codeBlockHeight = Math.ceil(availableHeightForPanes * 0.6);
-  const diffHeight = Math.floor(availableHeightForPanes * 0.4);
+      // The code block is slightly longer than the diff, so give it more space.
+      const codeBlockHeight = Math.ceil(availableHeightForPanes * 0.6);
+      const diffHeight = Math.floor(availableHeightForPanes * 0.4);
+
+      return {
+        colorizeCodeWidth,
+        includePadding,
+        codeBlockHeight,
+        diffHeight,
+      };
+    }, [terminalWidth, availableTerminalHeight, themeItems.length]);
   return (
     <Box
       borderStyle="round"

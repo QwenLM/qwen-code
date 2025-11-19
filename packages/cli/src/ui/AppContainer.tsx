@@ -55,7 +55,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
-import { useTerminalSize } from './hooks/useTerminalSize.js';
+import { useStableTerminalSize } from './hooks/useStableSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
@@ -200,7 +200,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
   // Terminal and layout hooks
-  const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
+  const { columns: terminalWidth, rows: terminalHeight } =
+    useStableTerminalSize();
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
 
@@ -270,8 +271,16 @@ export const AppContainer = (props: AppContainerProps) => {
       calculatePromptWidths(terminalWidth);
     return { inputWidth, suggestionsWidth };
   }, [terminalWidth]);
-  const mainAreaWidth = Math.floor(terminalWidth * 0.9);
-  const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
+
+  // Memoize main area width and static area height to prevent recalculation
+  const mainAreaWidth = useMemo(
+    () => Math.floor(terminalWidth * 0.9),
+    [terminalWidth],
+  );
+  const staticAreaMaxItemHeight = useMemo(
+    () => Math.max(terminalHeight * 4, 100),
+    [terminalHeight],
+  );
 
   const isValidPath = useCallback((filePath: string): boolean => {
     try {
@@ -747,20 +756,31 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight - controlsHeight - staticExtraHeight - 2,
   );
 
-  config.setShellExecutionConfig({
-    terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-    terminalHeight: Math.max(
-      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
-      1,
-    ),
-    pager: settings.merged.tools?.shell?.pager,
-    showColor: settings.merged.tools?.shell?.showColor,
-  });
+  // Memoize shell execution configuration to avoid unnecessary recalculations
+  const shellExecutionConfig = useMemo(
+    () => ({
+      terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+      terminalHeight: Math.max(
+        Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
+        1,
+      ),
+      pager: settings.merged.tools?.shell?.pager,
+      showColor: settings.merged.tools?.shell?.showColor,
+    }),
+    [
+      terminalWidth,
+      availableTerminalHeight,
+      settings.merged.tools?.shell?.pager,
+      settings.merged.tools?.shell?.showColor,
+    ],
+  );
+
+  config.setShellExecutionConfig(shellExecutionConfig);
 
   const isFocused = useFocus();
   useBracketedPaste();
 
-  // Context file names computation
+  // Context file names computation - memoize to prevent recalculation unless settings change
   const contextFileNames = useMemo(() => {
     const fromSettings = settings.merged.context?.fileName;
     return fromSettings
@@ -1154,7 +1174,10 @@ export const AppContainer = (props: AppContainerProps) => {
     if (config.getDebugMode()) {
       return consoleMessages;
     }
-    return consoleMessages.filter((msg) => msg.type !== 'debug');
+    // More efficient filtering by avoiding unnecessary operations when not in debug mode
+    return consoleMessages.length > 0
+      ? consoleMessages.filter((msg) => msg.type !== 'debug')
+      : [];
   }, [consoleMessages, config]);
 
   // Computed values
