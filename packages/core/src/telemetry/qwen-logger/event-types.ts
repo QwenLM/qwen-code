@@ -19,6 +19,21 @@ export interface RumView {
   name: string;
 }
 
+export interface RumOS {
+  type?: string;
+  version?: string;
+  container?: string;
+  container_version?: string;
+}
+
+export interface RumDevice {
+  id?: string;
+  name?: string;
+  type?: string;
+  brand?: string;
+  model?: string;
+}
+
 export interface RumEvent {
   timestamp?: number;
   event_type?: 'view' | 'action' | 'exception' | 'resource';
@@ -78,6 +93,8 @@ export interface RumPayload {
   user: RumUser;
   session: RumSession;
   view: RumView;
+  os?: RumOS;
+  device?: RumDevice;
   events: RumEvent[];
   properties?: Record<string, unknown>;
   _v: string;

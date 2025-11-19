@@ -8,7 +8,7 @@
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
-import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { DeviceAuthorizationData } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import type { Key } from '../contexts/KeypressContext.js';
 
@@ -42,12 +42,13 @@ describe('QwenOAuthProgress', () => {
   let keypressHandler: ((key: Key) => void) | null = null;
 
   const createMockDeviceAuth = (
-    overrides: Partial<DeviceAuthorizationInfo> = {},
-  ): DeviceAuthorizationInfo => ({
+    overrides: Partial<DeviceAuthorizationData> = {},
+  ): DeviceAuthorizationData => ({
     verification_uri: 'https://example.com/device',
     verification_uri_complete: 'https://example.com/device?user_code=ABC123',
     user_code: 'ABC123',
     expires_in: 300,
+    device_code: 'test-device-code',
     ...overrides,
   });
 
@@ -55,7 +56,7 @@ describe('QwenOAuthProgress', () => {
 
   const renderComponent = (
     props: Partial<{
-      deviceAuth: DeviceAuthorizationInfo;
+      deviceAuth: DeviceAuthorizationData;
       authStatus:
         | 'idle'
         | 'polling'
@@ -158,7 +159,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should format time correctly', () => {
-      const deviceAuthWithCustomTime: DeviceAuthorizationInfo = {
+      const deviceAuthWithCustomTime: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 125, // 2 minutes and 5 seconds
       };
@@ -176,7 +177,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should format single digit seconds with leading zero', () => {
-      const deviceAuthWithCustomTime: DeviceAuthorizationInfo = {
+      const deviceAuthWithCustomTime: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 67, // 1 minute and 7 seconds
       };
@@ -196,7 +197,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('Timer functionality', () => {
     it('should countdown and call onTimeout when timer expires', async () => {
-      const deviceAuthWithShortTime: DeviceAuthorizationInfo = {
+      const deviceAuthWithShortTime: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 2, // 2 seconds
       };
@@ -520,7 +521,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('Props changes', () => {
     it('should display initial timer value from deviceAuth', () => {
-      const deviceAuthWith10Min: DeviceAuthorizationInfo = {
+      const deviceAuthWith10Min: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 600, // 10 minutes
       };

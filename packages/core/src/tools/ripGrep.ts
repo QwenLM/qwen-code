@@ -6,7 +6,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { EOL } from 'node:os';
 import { spawn } from 'node:child_process';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -14,7 +13,7 @@ import { ToolNames } from './tool-names.js';
 import { resolveAndValidatePath } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { ensureRipgrepPath } from '../utils/ripgrepUtils.js';
+import { getRipgrepCommand } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -88,7 +87,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Split into lines and count total matches
-      const allLines = rawOutput.split(EOL).filter((line) => line.trim());
+      const allLines = rawOutput.split('\n').filter((line) => line.trim());
       const totalMatches = allLines.length;
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
@@ -159,7 +158,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: displayMessage,
       };
     } catch (error) {
-      console.error(`Error during GrepLogic execution: ${error}`);
+      console.error(`Error during ripgrep search operation: ${error}`);
       const errorMessage = getErrorMessage(error);
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
@@ -210,11 +209,15 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push(absolutePath);
 
     try {
-      const rgPath = this.config.getUseBuiltinRipgrep()
-        ? await ensureRipgrepPath()
-        : 'rg';
+      const rgCommand = await getRipgrepCommand(
+        this.config.getUseBuiltinRipgrep(),
+      );
+      if (!rgCommand) {
+        throw new Error('ripgrep binary not found.');
+      }
+
       const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(rgPath, rgArgs, {
+        const child = spawn(rgCommand, rgArgs, {
           windowsHide: true,
         });
 
@@ -234,7 +237,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         child.on('error', (err) => {
           options.signal.removeEventListener('abort', cleanup);
-          reject(new Error(`Failed to start ripgrep: ${err.message}.`));
+          reject(new Error(`failed to start ripgrep: ${err.message}.`));
         });
 
         child.on('close', (code) => {
@@ -256,7 +259,7 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       return output;
     } catch (error: unknown) {
-      console.error(`GrepLogic: ripgrep failed: ${getErrorMessage(error)}`);
+      console.error(`Ripgrep failed: ${getErrorMessage(error)}`);
       throw error;
     }
   }

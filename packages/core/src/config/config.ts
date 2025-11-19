@@ -562,7 +562,7 @@ export class Config {
     }
   }
 
-  async refreshAuth(authMethod: AuthType) {
+  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
     // Vertex and Genai have incompatible encryption and sending history with
     // throughtSignature from Genai to Vertex will fail, we need to strip them
     if (
@@ -582,6 +582,7 @@ export class Config {
       newContentGeneratorConfig,
       this,
       this.getSessionId(),
+      isInitialAuth,
     );
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;

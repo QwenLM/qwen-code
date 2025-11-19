@@ -686,6 +686,29 @@ export class SubagentExecutionEvent implements BaseTelemetryEvent {
   }
 }
 
+export class AuthEvent implements BaseTelemetryEvent {
+  'event.name': 'auth';
+  'event.timestamp': string;
+  auth_type: AuthType;
+  action_type: 'auto' | 'manual';
+  status: 'success' | 'error' | 'cancelled';
+  error_message?: string;
+
+  constructor(
+    auth_type: AuthType,
+    action_type: 'auto' | 'manual',
+    status: 'success' | 'error' | 'cancelled',
+    error_message?: string,
+  ) {
+    this['event.name'] = 'auth';
+    this['event.timestamp'] = new Date().toISOString();
+    this.auth_type = auth_type;
+    this.action_type = action_type;
+    this.status = status;
+    this.error_message = error_message;
+  }
+}
+
 export type TelemetryEvent =
   | StartSessionEvent
   | EndSessionEvent
@@ -713,7 +736,8 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
-  | ModelSlashCommandEvent;
+  | ModelSlashCommandEvent
+  | AuthEvent;
 
 export class ExtensionDisableEvent implements BaseTelemetryEvent {
   'event.name': 'extension_disable';
