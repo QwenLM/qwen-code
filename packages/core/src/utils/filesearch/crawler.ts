@@ -66,11 +66,14 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return [];
   }
 
-  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDirectory);
+  // Optimized path joining to reduce operations
+  const relativeToCwd = path.posix.relative(posixCwd, posixCrawlDirectory);
 
-  const relativeToCwdResults = results.map((p) =>
-    path.posix.join(relativeToCrawlDir, p),
-  );
+  // Only perform join operation if relativeToCwd is not empty (not ".")
+  const relativeToCwdResults =
+    relativeToCwd === '.' || relativeToCwd === ''
+      ? results
+      : results.map((p) => path.posix.join(relativeToCwd, p));
 
   if (options.cache) {
     const cacheKey = cache.getCacheKey(

@@ -52,17 +52,22 @@ export async function filter(
   });
 
   const results: string[] = [];
-  for (const [i, p] of allPaths.entries()) {
-    // Yield control to the event loop periodically to prevent blocking.
-    if (i % 1000 === 0) {
-      await new Promise((resolve) => setImmediate(resolve));
-      if (signal?.aborted) {
-        throw new AbortError();
+  const batchSize = 1000;
+
+  for (let i = 0; i < allPaths.length; i += batchSize) {
+    // Process a batch of items before yielding to event loop
+    const batchEnd = Math.min(i + batchSize, allPaths.length);
+    for (let j = i; j < batchEnd; j++) {
+      const p = allPaths[j];
+      if (patternFilter(p)) {
+        results.push(p);
       }
     }
 
-    if (patternFilter(p)) {
-      results.push(p);
+    // Yield control to the event loop after processing each batch
+    await new Promise((resolve) => setImmediate(resolve));
+    if (signal?.aborted) {
+      throw new AbortError();
     }
   }
 
@@ -176,6 +181,7 @@ class RecursiveFileSearch implements FileSearch {
         if (candidate === '.') {
           continue;
         }
+        // Only include files that are NOT ignored by the filter
         if (!fileFilter(candidate)) {
           results.push(candidate);
         }
@@ -255,6 +261,7 @@ class DirectoryFileSearch implements FileSearch {
         if (candidate === '.') {
           continue;
         }
+        // Only include files that are NOT ignored by the filter
         if (!fileFilter(candidate)) {
           finalResults.push(candidate);
         }

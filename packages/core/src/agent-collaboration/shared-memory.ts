@@ -90,4 +90,113 @@ export class AgentSharedMemory {
       agentId: metadata.agentId,
     };
   }
+
+  /**
+   * Update a value in shared memory by merging with existing data
+   * @param key The key to update
+   * @param updates Object containing updates to merge
+   */
+  async update(key: string, updates: Record<string, unknown>): Promise<void> {
+    const current = (await this.get<Record<string, unknown>>(key)) || {};
+    const merged = { ...current, ...updates };
+    await this.set(key, merged);
+  }
+
+  /**
+   * Add an item to an array in shared memory
+   * @param key The key containing an array
+   * @param item The item to add
+   */
+  async addItem(key: string, item: unknown): Promise<void> {
+    const current = (await this.get<unknown[]>(key)) || [];
+    current.push(item);
+    await this.set(key, current);
+  }
+
+  /**
+   * Initialize a team collaboration workspace
+   * @param teamName Name of the team
+   * @param members List of team members
+   * @param task The main task for the team
+   */
+  async initializeTeamWorkspace(
+    teamName: string,
+    members: Array<{ name: string; role: string }>,
+    task: string,
+  ): Promise<void> {
+    const teamKey = `team:${teamName}`;
+    const teamData = {
+      name: teamName,
+      members,
+      task,
+      created: new Date().toISOString(),
+      status: 'active',
+      completedTasks: [],
+      sharedContext: {
+        initialTask: task,
+        currentPhase: 'initial',
+        progress: 0,
+        results: {},
+        communications: [],
+      },
+    };
+
+    await this.set(teamKey, teamData);
+
+    // Initialize each member's context
+    for (const member of members) {
+      await this.set(`agent:${member.name}:context`, {
+        team: teamName,
+        role: member.role,
+        assignedTasks: [],
+        completedTasks: [],
+        knowledge: {},
+        lastInteraction: new Date().toISOString(),
+      });
+    }
+  }
+
+  /**
+   * Update team progress
+   * @param teamName Name of the team
+   * @param progress Current progress percentage
+   * @param phase Current phase of the project
+   * @param results Latest results
+   */
+  async updateTeamProgress(
+    teamName: string,
+    progress: number,
+    phase: string,
+    results?: Record<string, unknown>,
+  ): Promise<void> {
+    const teamKey = `team:${teamName}`;
+    const teamData = await this.get<Record<string, unknown>>(teamKey);
+
+    if (teamData) {
+      const teamDataRecord = teamData as Record<string, unknown>;
+      const sharedContext = teamDataRecord['sharedContext'] as Record<
+        string,
+        unknown
+      >;
+      const updatedData = {
+        ...teamData,
+        sharedContext: {
+          ...sharedContext,
+          progress,
+          currentPhase: phase,
+          results: results
+            ? {
+                ...(typeof sharedContext['results'] === 'object' &&
+                sharedContext['results'] !== null
+                  ? (sharedContext['results'] as Record<string, unknown>)
+                  : {}),
+                ...results,
+              }
+            : sharedContext['results'] || {},
+        },
+      };
+
+      await this.set(teamKey, updatedData);
+    }
+  }
 }

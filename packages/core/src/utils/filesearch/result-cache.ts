@@ -44,15 +44,11 @@ export class ResultCache {
     // of the current query.
     // We use an optimized approach by checking the longest matching prefix only
     let bestBaseQuery = '';
-    const cacheKeys = Array.from(this.cache.keys());
-
-    // Sort keys by length in descending order to find the longest match first
-    cacheKeys.sort((a, b) => b.length - a.length);
-
-    for (const key of cacheKeys) {
-      if (query.startsWith(key)) {
+    // Use a more efficient approach to find the longest matching prefix
+    // Instead of getting all keys and sorting, find the longest match in one pass
+    for (const key of this.cache.keys()) {
+      if (query.startsWith(key) && key.length > bestBaseQuery.length) {
         bestBaseQuery = key;
-        break; // Since we sorted by length, the first match is the best
       }
     }
 

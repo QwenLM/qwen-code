@@ -240,17 +240,47 @@ export class AgentCoordinationSystem {
         if (!processed.has(taskId) && canExecute(taskId)) {
           const task = taskMap.get(taskId)!;
 
-          // Execute the assigned task
+          // Execute the assigned task with shared context
           try {
+            // Get the shared context and task-specific data
+            const sharedContext =
+              (await this.getMemory().get('shared-context')) || {};
+            const taskContext = {
+              ...sharedContext,
+              current_task: task.description,
+              task_results: results,
+              team_context: (await this.getMemory().get('team-context')) || {},
+            };
+
             const result = await this.getAgentsManager().executeAgent(
               task.name,
               `Perform the following task: ${task.description}`,
               task.description,
+              undefined, // tools
+              taskContext, // context
             );
 
             results[taskId] = result;
             processed.add(taskId);
             taskExecutionOrder.push(taskId);
+
+            // Update shared context with the result of this task
+            const sharedContextRecord = sharedContext as Record<
+              string,
+              unknown
+            >;
+            const completedTasks = Array.isArray(
+              sharedContextRecord['completed_tasks'],
+            )
+              ? (sharedContextRecord['completed_tasks'] as string[])
+              : [];
+            const updatedSharedContext = {
+              ...sharedContext,
+              [taskId]: result,
+              last_task_result: result,
+              completed_tasks: [...completedTasks, taskId],
+            };
+            await this.getMemory().set('shared-context', updatedSharedContext);
 
             if (onProgress) {
               onProgress(taskId, 'completed', result);

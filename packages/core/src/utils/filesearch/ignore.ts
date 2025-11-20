@@ -23,14 +23,18 @@ export function loadIgnoreRules(options: LoadIgnoreRulesOptions): Ignore {
   if (options.useGitignore) {
     const gitignorePath = path.join(options.projectRoot, '.gitignore');
     if (fs.existsSync(gitignorePath)) {
-      ignorer.add(fs.readFileSync(gitignorePath, 'utf8'));
+      const content = fs.readFileSync(gitignorePath, 'utf8');
+      // Remove leading/trailing whitespace and handle different line ending styles
+      ignorer.add(content.replace(/^\s+|\s+$/g, ''));
     }
   }
 
   if (options.useQwenignore) {
     const qwenignorePath = path.join(options.projectRoot, '.qwenignore');
     if (fs.existsSync(qwenignorePath)) {
-      ignorer.add(fs.readFileSync(qwenignorePath, 'utf8'));
+      const content = fs.readFileSync(qwenignorePath, 'utf8');
+      // Remove leading/trailing whitespace and handle different line ending styles
+      ignorer.add(content.replace(/^\s+|\s+$/g, ''));
     }
   }
 

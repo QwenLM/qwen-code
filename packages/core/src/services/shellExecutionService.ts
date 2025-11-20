@@ -136,7 +136,7 @@ export class ShellExecutionService {
             shellExecutionConfig,
             ptyInfo,
           );
-        } catch (_e) {
+        } catch (_e: unknown) {
           // Fallback to child_process
         }
       }
@@ -272,7 +272,7 @@ export class ShellExecutionService {
                 if (!exited) {
                   process.kill(-child.pid, 'SIGKILL');
                 }
-              } catch (_e) {
+              } catch (_e: unknown) {
                 if (!exited) child.kill('SIGKILL');
               }
             }
@@ -467,9 +467,14 @@ export class ShellExecutionService {
             renderFn();
           } else {
             // Use requestAnimationFrame for better rendering performance if available
-            if (typeof requestAnimationFrame === 'function') {
+            const globalWithRaf = globalThis as typeof globalThis & {
+              requestAnimationFrame?: (
+                callback: FrameRequestCallback,
+              ) => number;
+            };
+            if (typeof globalWithRaf.requestAnimationFrame === 'function') {
               renderTimeout = setTimeout(() => {
-                requestAnimationFrame(renderFn);
+                globalWithRaf.requestAnimationFrame!(renderFn);
               }, 0);
             } else {
               // Fallback to setTimeout with optimized timing
@@ -571,7 +576,7 @@ export class ShellExecutionService {
               try {
                 // Kill the entire process group
                 process.kill(-ptyProcess.pid, 'SIGINT');
-              } catch (_e) {
+              } catch (_e: unknown) {
                 // Fallback to killing just the process if the group kill fails
                 ptyProcess.kill('SIGINT');
               }

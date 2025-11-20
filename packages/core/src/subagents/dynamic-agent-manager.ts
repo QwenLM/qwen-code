@@ -15,6 +15,7 @@ import type {
   ToolConfig,
 } from '../subagents/types.js';
 import type { SubAgentEventEmitter } from '../subagents/subagent-events.js';
+import { SubagentManager } from './subagent-manager.js';
 
 export interface DynamicAgentDefinition {
   name: string;
@@ -34,9 +35,11 @@ export interface DynamicAgentExecutionOptions {
 
 export class DynamicAgentManager {
   private config: Config;
+  private subagentManager: SubagentManager;
 
   constructor(config: Config) {
     this.config = config;
+    this.subagentManager = new SubagentManager(config);
   }
 
   /**
@@ -142,7 +145,7 @@ export class DynamicAgentManager {
   }
 
   /**
-   * Execute a dynamic agent with a simple interface
+   * Execute an agent (either built-in or dynamic) with a simple interface
    */
   async executeAgent(
     name: string,
@@ -152,19 +155,59 @@ export class DynamicAgentManager {
     context?: Record<string, unknown>,
     options?: Omit<DynamicAgentExecutionOptions, 'context'>,
   ): Promise<string> {
-    const definition: DynamicAgentDefinition = {
-      name,
-      description: `Dynamically created agent for: ${task.substring(0, 50)}...`,
-      systemPrompt,
-      tools,
-    };
+    // First, try to load an existing agent configuration (built-in or user-defined)
+    const existingAgent = await this.subagentManager.loadSubagent(name);
 
-    return this.createAndRunAgent(definition, {
-      ...options,
-      context: {
-        task_prompt: task,
-        ...context,
-      },
-    });
+    if (existingAgent) {
+      // Use the existing agent configuration
+      return this.executeExistingAgent(existingAgent, task, context, options);
+    } else {
+      // Create a dynamic agent based on the provided parameters
+      const definition: DynamicAgentDefinition = {
+        name,
+        description: `Dynamically created agent for: ${task.substring(0, 50)}...`,
+        systemPrompt,
+        tools,
+      };
+
+      return this.createAndRunAgent(definition, {
+        ...options,
+        context: {
+          task_prompt: task,
+          ...context,
+        },
+      });
+    }
+  }
+
+  /**
+   * Execute an existing agent configuration (built-in or user-defined)
+   */
+  private async executeExistingAgent(
+    agentConfig: SubagentConfig,
+    task: string,
+    context?: Record<string, unknown>,
+    options?: Omit<DynamicAgentExecutionOptions, 'context'>,
+  ): Promise<string> {
+    // Create a SubAgentScope from the existing configuration
+    const scope = await this.subagentManager.createSubagentScope(
+      agentConfig,
+      this.config,
+      options,
+    );
+
+    // Create context state with the task
+    const contextState = new ContextState();
+    if (context) {
+      for (const [key, value] of Object.entries(context)) {
+        contextState.set(key, value);
+      }
+    }
+    contextState.set('task_prompt', task); // Set the specific task
+
+    // Run the agent
+    await scope.runNonInteractive(contextState, options?.externalSignal);
+
+    return scope.getFinalText();
   }
 }

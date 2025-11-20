@@ -65,6 +65,9 @@ export async function createAgentTeam(
 ): Promise<AgentCollaborationAPI> {
   const api = createAgentCollaborationAPI(config);
 
+  // Initialize the team workspace in shared memory
+  await api.memory.initializeTeamWorkspace(teamName, agents, task);
+
   // Register the team in shared memory
   await api.memory.set(`team:${teamName}`, {
     name: teamName,
@@ -103,7 +106,8 @@ export async function executeCollaborativeTask(
     | 'parallel'
     | 'sequential'
     | 'round-robin'
-    | 'delegation' = 'sequential',
+    | 'delegation'
+    | 'specialized' = 'sequential',
 ): Promise<Record<string, unknown>> {
   const api = createAgentCollaborationAPI(config);
   const results: Record<string, unknown> = {};
@@ -113,41 +117,75 @@ export async function executeCollaborativeTask(
   let result: unknown;
   let promises: Array<Promise<{ agent: string; result: unknown }>>;
 
+  // Initialize shared context for collaboration
+  await api.memory.set('shared-context', {
+    initial_task: task,
+    results: {},
+    timestamp: new Date().toISOString(),
+  });
+
   switch (strategy) {
     case 'parallel':
       // Execute tasks in parallel
-      promises = agents.map((agent) =>
-        api.coordination
-          .getAgentsManager()
-          .executeAgent(
-            agent,
-            `Collaborate on the following task: ${task}`,
-            task,
-          )
-          .then((result) => ({ agent, result }))
-          .catch((error) => ({
-            agent,
-            result: { error: (error as Error).message },
-          })),
-      );
-      parallelResults = await Promise.all(promises);
-      for (const { agent: agentKey, result: resultValue } of parallelResults) {
-        results[agentKey] = resultValue;
+      {
+        const sharedContext = (await api.memory.get('shared-context')) || {};
+        promises = agents.map((agent) =>
+          api.coordination
+            .getAgentsManager()
+            .executeAgent(
+              agent,
+              `Collaborate on the following task: ${task}`,
+              task,
+              undefined, // tools
+              { shared_context: sharedContext }, // context
+            )
+            .then((result) => ({ agent, result }))
+            .catch((error) => ({
+              agent,
+              result: { error: (error as Error).message },
+            })),
+        );
+        parallelResults = await Promise.all(promises);
+        for (const {
+          agent: agentKey,
+          result: resultValue,
+        } of parallelResults) {
+          results[agentKey] = resultValue;
+        }
       }
       break;
 
     case 'sequential':
-      // Execute tasks sequentially
+      // Execute tasks sequentially, with context sharing between agents
       for (const agentKey of agents) {
         try {
-          result = await api.coordination
-            .getAgentsManager()
-            .executeAgent(
-              agentKey,
-              `Collaborate on the following task: ${task}`,
-              task,
-            );
+          // Get shared context to pass to the agent
+          const sharedContext = (await api.memory.get('shared-context')) || {};
+          const taskContext = {
+            ...sharedContext,
+            current_agent: agentKey,
+            previous_results: results,
+            team_task: task,
+          };
+
+          result = await api.coordination.getAgentsManager().executeAgent(
+            agentKey,
+            `Collaborate on the following task: ${task}. Use any information from previous agents' work to inform your contribution.`,
+            task,
+            undefined, // tools
+            taskContext, // context
+          );
           results[agentKey] = result;
+
+          // Update shared context with the latest result
+          const updatedContext = {
+            ...sharedContext,
+            [agentKey]: result,
+            results: { ...results },
+            last_agent_result: result,
+            last_agent: agentKey,
+          };
+          await api.memory.set('shared-context', updatedContext);
         } catch (error) {
           results[agentKey] = { error: (error as Error).message };
           break; // Stop on error for sequential approach
@@ -160,15 +198,36 @@ export async function executeCollaborativeTask(
       currentTask = task;
       for (const agentKey of agents) {
         try {
-          result = await api.coordination
-            .getAgentsManager()
-            .executeAgent(
-              agentKey,
-              `Process the following task, building on previous work: ${currentTask}`,
-              currentTask,
-            );
+          // Get shared context and previous results
+          const sharedContext = (await api.memory.get('shared-context')) || {};
+          const taskContext = {
+            ...sharedContext,
+            current_agent: agentKey,
+            current_task: currentTask,
+            previous_results: results,
+            previous_task: currentTask,
+          };
+
+          result = await api.coordination.getAgentsManager().executeAgent(
+            agentKey,
+            `Process the following task, building on previous work: ${currentTask}. Use shared context and previous results to inform your contribution.`,
+            currentTask,
+            undefined, // tools
+            taskContext, // context
+          );
           results[agentKey] = result;
-          currentTask = JSON.stringify(result); // Pass result as next task
+
+          // Update shared context
+          const updatedContext = {
+            ...sharedContext,
+            [agentKey]: result,
+            last_result: result,
+            last_agent: agentKey,
+          };
+          await api.memory.set('shared-context', updatedContext);
+
+          // Create next task based on current result
+          currentTask = `Continue the work based on previous results: ${JSON.stringify(result)}. Task: ${task}`;
         } catch (error) {
           results[agentKey] = { error: (error as Error).message };
           break; // Stop on error
@@ -180,19 +239,88 @@ export async function executeCollaborativeTask(
       // Task is delegated to the most appropriate agent based on naming convention
       primaryAgent = agents[0]; // For now, delegate to first agent
       try {
-        result = await api.coordination
-          .getAgentsManager()
-          .executeAgent(
-            primaryAgent,
-            `Handle the following task, delegating parts to other team members as needed: ${task}`,
-            task,
-          );
+        result = await api.coordination.getAgentsManager().executeAgent(
+          primaryAgent,
+          `Handle the following task, delegating parts to other team members as needed: ${task}`,
+          task,
+          undefined, // tools
+          { available_agents: agents, team_task: task }, // context
+        );
         results[primaryAgent] = result;
 
         // If the primary agent requests help with subtasks, coordinate those
         // This would be handled through shared memory and communication channels
       } catch (error) {
         results[primaryAgent] = { error: (error as Error).message };
+      }
+      break;
+
+    case 'specialized':
+      // Each agent specializes in a specific aspect of the overall task
+      for (const agentKey of agents) {
+        try {
+          // Determine the specialized aspect based on agent type
+          let agentSpecificTask = task;
+          if (agentKey.includes('researcher')) {
+            agentSpecificTask = `Research and analyze: ${task}`;
+          } else if (agentKey.includes('architect')) {
+            agentSpecificTask = `Design solution architecture for: ${task}`;
+          } else if (agentKey.includes('engineer')) {
+            agentSpecificTask = `Implement solution for: ${task}`;
+          } else if (agentKey.includes('tester')) {
+            agentSpecificTask = `Test and validate: ${task}`;
+          } else if (agentKey.includes('planner')) {
+            agentSpecificTask = `Plan and organize approach for: ${task}`;
+          }
+
+          // Get shared context to pass to the specialized agent
+          const sharedContext = (await api.memory.get('shared-context')) || {};
+          const taskContext = {
+            ...sharedContext,
+            specialized_role: agentKey,
+            agent_task: agentSpecificTask,
+            previous_results: results,
+            team_task: task,
+          };
+
+          result = await api.coordination.getAgentsManager().executeAgent(
+            agentKey,
+            `As a specialized ${agentKey}, work on your specific role: ${agentSpecificTask}. Use shared context and results from other team members to inform your work.`,
+            agentSpecificTask,
+            undefined, // tools
+            taskContext, // context
+          );
+          results[agentKey] = result;
+
+          // Update shared context with this agent's specialized contribution
+          const sharedContextRecord = sharedContext as Record<string, unknown>;
+          const specializedResults = sharedContextRecord['specialized_results']
+            ? {
+                ...(sharedContextRecord['specialized_results'] as Record<
+                  string,
+                  unknown
+                >),
+              }
+            : {};
+          const completedAgents = Array.isArray(
+            sharedContextRecord['completed_agents'],
+          )
+            ? (sharedContextRecord['completed_agents'] as string[])
+            : [];
+          const updatedContext = {
+            ...sharedContext,
+            [agentKey]: result,
+            specialized_results: {
+              ...specializedResults,
+              [agentKey]: result,
+            },
+            completed_agents: [...completedAgents, agentKey],
+          };
+          await api.memory.set('shared-context', updatedContext);
+        } catch (error) {
+          results[agentKey] = { error: (error as Error).message };
+          // Continue with other agents even if one fails
+        }
       }
       break;
 

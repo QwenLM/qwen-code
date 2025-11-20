@@ -550,8 +550,10 @@ async function fetchAndCacheUserInfo(client: OAuth2Client): Promise<void> {
       return;
     }
 
-    const userInfo = await response.json();
-    await userAccountManager.cacheGoogleAccount(userInfo.email);
+    const userInfo: { email?: string } = await response.json();
+    if (userInfo.email) {
+      await userAccountManager.cacheGoogleAccount(userInfo.email);
+    }
   } catch (error) {
     console.error('Error retrieving user info:', error);
   }
