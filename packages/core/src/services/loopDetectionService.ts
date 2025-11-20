@@ -79,7 +79,7 @@ export class LoopDetectionService {
   // Tool call tracking
   private lastToolCallKey: string | null = null;
   private toolCallRepetitionCount: number = 0;
-  private readonly toolCallArgsCache = new WeakMap<object, string>();
+  private toolCallArgsCache = new WeakMap<object, string>();
 
   // Content streaming tracking
   private streamContentHistory = '';
