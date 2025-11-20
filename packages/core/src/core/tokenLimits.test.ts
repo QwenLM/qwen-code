@@ -64,6 +64,12 @@ describe('normalize', () => {
     expect(normalize('qwen-vl-max-latest')).toBe('qwen-vl-max-latest');
   });
 
+  it('should preserve date suffixes for Kimi K2 models', () => {
+    expect(normalize('kimi-k2-0905-preview')).toBe('kimi-k2-0905');
+    expect(normalize('kimi-k2-0711-preview')).toBe('kimi-k2-0711');
+    expect(normalize('kimi-k2-turbo-preview')).toBe('kimi-k2-turbo');
+  });
+
   it('should remove date like suffixes', () => {
     expect(normalize('deepseek-r1-0528')).toBe('deepseek-r1');
   });
@@ -213,7 +219,7 @@ describe('tokenLimit', () => {
     });
   });
 
-  describe('Other models', () => {
+  describe('DeepSeek', () => {
     it('should return the correct limit for deepseek-r1', () => {
       expect(tokenLimit('deepseek-r1')).toBe(131072);
     });
@@ -226,9 +232,27 @@ describe('tokenLimit', () => {
     it('should return the correct limit for deepseek-v3.2', () => {
       expect(tokenLimit('deepseek-v3.2-exp')).toBe(131072);
     });
-    it('should return the correct limit for kimi-k2-instruct', () => {
-      expect(tokenLimit('kimi-k2-instruct')).toBe(131072);
+  });
+
+  describe('Moonshot Kimi', () => {
+    it('should return the correct limit for kimi-k2-0905-preview', () => {
+      expect(tokenLimit('kimi-k2-0905-preview')).toBe(262144); // 256K
+      expect(tokenLimit('kimi-k2-0905')).toBe(262144);
     });
+    it('should return the correct limit for kimi-k2-turbo-preview', () => {
+      expect(tokenLimit('kimi-k2-turbo-preview')).toBe(262144); // 256K
+      expect(tokenLimit('kimi-k2-turbo')).toBe(262144);
+    });
+    it('should return the correct limit for kimi-k2-0711-preview', () => {
+      expect(tokenLimit('kimi-k2-0711-preview')).toBe(131072); // 128K
+      expect(tokenLimit('kimi-k2-0711')).toBe(131072);
+    });
+    it('should return the correct limit for kimi-k2-instruct', () => {
+      expect(tokenLimit('kimi-k2-instruct')).toBe(131072); // 128K
+    });
+  });
+
+  describe('Other models', () => {
     it('should return the correct limit for gpt-oss', () => {
       expect(tokenLimit('gpt-oss')).toBe(131072);
     });

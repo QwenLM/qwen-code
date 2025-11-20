@@ -63,8 +63,12 @@ const TomlCommandDefSchema = z.object({
  */
 export class FileCommandLoader implements ICommandLoader {
   private readonly projectRoot: string;
+  private readonly folderTrustEnabled: boolean;
+  private readonly folderTrust: boolean;
 
   constructor(private readonly config: Config | null) {
+    this.folderTrustEnabled = !!config?.getFolderTrustFeature();
+    this.folderTrust = !!config?.getFolderTrust();
     this.projectRoot = config?.getProjectRoot() || process.cwd();
   }
 
@@ -97,6 +101,10 @@ export class FileCommandLoader implements ICommandLoader {
           cwd: dirInfo.path,
         });
 
+        if (this.folderTrustEnabled && !this.folderTrust) {
+          return [];
+        }
+
         const commandPromises = files.map((file) =>
           this.parseAndAdaptFile(
             path.join(dirInfo.path, file),
@@ -112,7 +120,11 @@ export class FileCommandLoader implements ICommandLoader {
         // Add all commands without deduplication
         allCommands.push(...commands);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        // Ignore ENOENT (directory doesn't exist) and AbortError (operation was cancelled)
+        const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
+        const isAbortError =
+          error instanceof Error && error.name === 'AbortError';
+        if (!isEnoent && !isAbortError) {
           console.error(
             `[FileCommandLoader] Error loading commands from ${dirInfo.path}:`,
             error,

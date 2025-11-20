@@ -141,7 +141,12 @@ describe('TodoWriteTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(result.llmContent).toContain('success');
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(result.llmContent).toContain('<system-reminder>');
+      expect(result.llmContent).toContain('Your todo list has changed');
+      expect(result.llmContent).toContain(JSON.stringify(params.todos));
       expect(result.returnDisplay).toEqual({
         type: 'todo_list',
         todos: [
@@ -178,7 +183,12 @@ describe('TodoWriteTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(result.llmContent).toContain('success');
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(result.llmContent).toContain('<system-reminder>');
+      expect(result.llmContent).toContain('Your todo list has changed');
+      expect(result.llmContent).toContain(JSON.stringify(params.todos));
       expect(result.returnDisplay).toEqual({
         type: 'todo_list',
         todos: [
@@ -208,7 +218,10 @@ describe('TodoWriteTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(result.llmContent).toContain('"success":false');
+      expect(result.llmContent).toContain('Failed to modify todos');
+      expect(result.llmContent).toContain('<system-reminder>');
+      expect(result.llmContent).toContain('Todo list modification failed');
+      expect(result.llmContent).toContain('Write failed');
       expect(result.returnDisplay).toContain('Error writing todos');
     });
 
@@ -223,7 +236,10 @@ describe('TodoWriteTool', () => {
       const invocation = tool.build(params);
       const result = await invocation.execute(mockAbortSignal);
 
-      expect(result.llmContent).toContain('success');
+      expect(result.llmContent).toContain('Todo list has been cleared');
+      expect(result.llmContent).toContain('<system-reminder>');
+      expect(result.llmContent).toContain('Your todo list is now empty');
+      expect(result.llmContent).toContain('no pending tasks');
       expect(result.returnDisplay).toEqual({
         type: 'todo_list',
         todos: [],

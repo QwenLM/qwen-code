@@ -100,19 +100,66 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(3);
   });
 
+  it('should default to 5 maxAttempts if no options are provided', async () => {
+    // This function will fail more than 5 times to ensure all retries are used.
+    const mockFn = createFailingFunction(10);
+
+    const promise = retryWithBackoff(mockFn);
+
+    // Expect it to fail with the error from the 5th attempt.
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow(
+      'Simulated error attempt 5',
+    );
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    expect(mockFn).toHaveBeenCalledTimes(5);
+  });
+
+  it('should default to 5 maxAttempts if options.maxAttempts is undefined', async () => {
+    // This function will fail more than 5 times to ensure all retries are used.
+    const mockFn = createFailingFunction(10);
+
+    const promise = retryWithBackoff(mockFn, { maxAttempts: undefined });
+
+    // Expect it to fail with the error from the 5th attempt.
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow(
+      'Simulated error attempt 5',
+    );
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    expect(mockFn).toHaveBeenCalledTimes(5);
+  });
+
   it('should not retry if shouldRetry returns false', async () => {
     const mockFn = vi.fn(async () => {
       throw new NonRetryableError('Non-retryable error');
     });
-    const shouldRetry = (error: Error) => !(error instanceof NonRetryableError);
+    const shouldRetryOnError = (error: Error) =>
+      !(error instanceof NonRetryableError);
 
     const promise = retryWithBackoff(mockFn, {
-      shouldRetry,
+      shouldRetryOnError,
       initialDelayMs: 10,
     });
 
     await expect(promise).rejects.toThrow('Non-retryable error');
     expect(mockFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('should throw an error if maxAttempts is not a positive number', async () => {
+    const mockFn = createFailingFunction(1);
+
+    // Test with 0
+    await expect(retryWithBackoff(mockFn, { maxAttempts: 0 })).rejects.toThrow(
+      'maxAttempts must be a positive number.',
+    );
+
+    // The function should not be called at all if validation fails
+    expect(mockFn).not.toHaveBeenCalled();
   });
 
   it('should use default shouldRetry if not provided, retrying on 429', async () => {
@@ -419,7 +466,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 100,
         maxDelayMs: 1000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 
@@ -441,7 +487,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 1000,
         maxDelayMs: 5000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 
@@ -462,7 +507,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 1000,
         maxDelayMs: 5000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 
@@ -488,7 +532,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 100,
         maxDelayMs: 1000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 
@@ -514,7 +557,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 100,
         maxDelayMs: 1000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 
@@ -536,7 +578,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 1000,
         maxDelayMs: 5000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 
@@ -560,7 +601,6 @@ describe('retryWithBackoff', () => {
         maxAttempts: 5,
         initialDelayMs: 100,
         maxDelayMs: 1000,
-        shouldRetry: () => true,
         authType: AuthType.QWEN_OAUTH,
       });
 

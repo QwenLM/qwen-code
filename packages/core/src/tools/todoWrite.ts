@@ -14,6 +14,7 @@ import * as process from 'process';
 
 import { QWEN_DIR } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
 
 export interface TodoItem {
   id: string;
@@ -340,11 +341,30 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         todos: finalTodos,
       };
 
+      // Create plain string format with system reminder
+      const todosJson = JSON.stringify(finalTodos);
+      let llmContent: string;
+
+      if (finalTodos.length === 0) {
+        // Special message for empty todos
+        llmContent = `Todo list has been cleared.
+
+<system-reminder>
+Your todo list is now empty. DO NOT mention this explicitly to the user. You have no pending tasks in your todo list.
+</system-reminder>`;
+      } else {
+        // Normal message for todos with items
+        llmContent = `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
+
+<system-reminder>
+Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list: 
+
+${todosJson}. Continue on with the tasks at hand if applicable.
+</system-reminder>`;
+      }
+
       return {
-        llmContent: JSON.stringify({
-          success: true,
-          todos: finalTodos,
-        }),
+        llmContent,
         returnDisplay: todoResultDisplay,
       };
     } catch (error) {
@@ -353,11 +373,16 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       console.error(
         `[TodoWriteTool] Error executing todo_write: ${errorMessage}`,
       );
+
+      // Create plain string format for error with system reminder
+      const errorLlmContent = `Failed to modify todos. An error occurred during the operation.
+
+<system-reminder>
+Todo list modification failed with error: ${errorMessage}. You may need to retry or handle this error appropriately.
+</system-reminder>`;
+
       return {
-        llmContent: JSON.stringify({
-          success: false,
-          error: `Failed to write todos. Detail: ${errorMessage}`,
-        }),
+        llmContent: errorLlmContent,
         returnDisplay: `Error writing todos: ${errorMessage}`,
       };
     }
@@ -398,12 +423,12 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   TodoWriteParams,
   ToolResult
 > {
-  static readonly Name: string = todoWriteToolSchemaData.name!;
+  static readonly Name: string = ToolNames.TODO_WRITE;
 
   constructor(private readonly config: Config) {
     super(
       TodoWriteTool.Name,
-      'TodoWrite',
+      ToolDisplayNames.TODO_WRITE,
       todoWriteToolDescription,
       Kind.Think,
       todoWriteToolSchemaData.parametersJsonSchema as Record<string, unknown>,

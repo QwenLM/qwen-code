@@ -45,7 +45,7 @@ export function useWelcomeBack(
   // Check for conversation history on startup
   const checkWelcomeBack = useCallback(async () => {
     // Check if welcome back is enabled in settings
-    if (settings.enableWelcomeBack === false) {
+    if (settings.ui?.enableWelcomeBack === false) {
       return;
     }
 
@@ -59,7 +59,7 @@ export function useWelcomeBack(
       // Silently ignore errors - welcome back is not critical
       console.debug('Welcome back check failed:', error);
     }
-  }, [settings.enableWelcomeBack]);
+  }, [settings.ui?.enableWelcomeBack]);
 
   // Handle welcome back dialog selection
   const handleWelcomeBackSelection = useCallback(

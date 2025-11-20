@@ -7,7 +7,7 @@
 import type { Config } from '../../config/config.js';
 import { logApiError, logApiResponse } from '../../telemetry/loggers.js';
 import { ApiErrorEvent, ApiResponseEvent } from '../../telemetry/types.js';
-import { openaiLogger } from '../../utils/openaiLogger.js';
+import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type { GenerateContentResponse } from '@google/genai';
 import type OpenAI from 'openai';
 
@@ -43,10 +43,17 @@ export interface TelemetryService {
 }
 
 export class DefaultTelemetryService implements TelemetryService {
+  private logger: OpenAILogger;
+
   constructor(
     private config: Config,
     private enableOpenAILogging: boolean = false,
-  ) {}
+    openAILoggingDir?: string,
+  ) {
+    // Always create a new logger instance to ensure correct working directory
+    // If no custom directory is provided, undefined will use the default path
+    this.logger = new OpenAILogger(openAILoggingDir);
+  }
 
   async logSuccess(
     context: RequestContext,
@@ -68,7 +75,7 @@ export class DefaultTelemetryService implements TelemetryService {
 
     // Log interaction if enabled
     if (this.enableOpenAILogging && openaiRequest && openaiResponse) {
-      await openaiLogger.logInteraction(openaiRequest, openaiResponse);
+      await this.logger.logInteraction(openaiRequest, openaiResponse);
     }
   }
 
@@ -97,7 +104,7 @@ export class DefaultTelemetryService implements TelemetryService {
 
     // Log error interaction if enabled
     if (this.enableOpenAILogging && openaiRequest) {
-      await openaiLogger.logInteraction(
+      await this.logger.logInteraction(
         openaiRequest,
         undefined,
         error as Error,
@@ -137,7 +144,7 @@ export class DefaultTelemetryService implements TelemetryService {
       openaiChunks.length > 0
     ) {
       const combinedResponse = this.combineOpenAIChunksForLogging(openaiChunks);
-      await openaiLogger.logInteraction(openaiRequest, combinedResponse);
+      await this.logger.logInteraction(openaiRequest, combinedResponse);
     }
   }
 

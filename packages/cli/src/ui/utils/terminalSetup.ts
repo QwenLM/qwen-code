@@ -48,7 +48,7 @@ export interface TerminalSetupResult {
   requiresRestart?: boolean;
 }
 
-type SupportedTerminal = 'vscode' | 'cursor' | 'windsurf';
+type SupportedTerminal = 'vscode' | 'cursor' | 'windsurf' | 'trae';
 
 // Terminal detection
 async function detectTerminal(): Promise<SupportedTerminal | null> {
@@ -68,6 +68,11 @@ async function detectTerminal(): Promise<SupportedTerminal | null> {
   ) {
     return 'windsurf';
   }
+
+  if (process.env['TERM_PRODUCT']?.toLowerCase().includes('trae')) {
+    return 'trae';
+  }
+
   // Check VS Code last since forks may also set VSCODE env vars
   if (termProgram === 'vscode' || process.env['VSCODE_GIT_IPC_HANDLE']) {
     return 'vscode';
@@ -86,6 +91,8 @@ async function detectTerminal(): Promise<SupportedTerminal | null> {
         return 'cursor';
       if (parentName.includes('code') || parentName.includes('Code'))
         return 'vscode';
+      if (parentName.includes('trae') || parentName.includes('Trae'))
+        return 'trae';
     } catch (error) {
       // Continue detection even if process check fails
       console.debug('Parent process detection failed:', error);
@@ -287,6 +294,10 @@ async function configureWindsurf(): Promise<TerminalSetupResult> {
   return configureVSCodeStyle('Windsurf', 'Windsurf');
 }
 
+async function configureTrae(): Promise<TerminalSetupResult> {
+  return configureVSCodeStyle('Trae', 'Trae');
+}
+
 /**
  * Main terminal setup function that detects and configures the current terminal.
  *
@@ -333,6 +344,8 @@ export async function terminalSetup(): Promise<TerminalSetupResult> {
       return configureCursor();
     case 'windsurf':
       return configureWindsurf();
+    case 'trae':
+      return configureTrae();
     default:
       return {
         success: false,

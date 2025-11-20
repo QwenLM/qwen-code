@@ -21,6 +21,9 @@ vi.mock('../../telemetry/loggers.js', () => ({
 }));
 
 vi.mock('../../utils/openaiLogger.js', () => ({
+  OpenAILogger: vi.fn().mockImplementation(() => ({
+    logInteraction: vi.fn(),
+  })),
   openaiLogger: {
     logInteraction: vi.fn(),
   },

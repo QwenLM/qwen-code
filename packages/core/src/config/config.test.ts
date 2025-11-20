@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import { Config, ApprovalMode } from './config.js';
@@ -13,8 +13,10 @@ import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../tools/memoryT
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
+  QwenLogger,
 } from '../telemetry/index.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
   createContentGeneratorConfig,
@@ -36,6 +38,21 @@ vi.mock('fs', async (importOriginal) => {
 
 import { ShellTool } from '../tools/shell.js';
 import { ReadFileTool } from '../tools/read-file.js';
+import { GrepTool } from '../tools/grep.js';
+import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { RipGrepTool } from '../tools/ripGrep.js';
+import { logRipgrepFallback } from '../telemetry/loggers.js';
+import { RipgrepFallbackEvent } from '../telemetry/types.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+
+function createToolMock(toolName: string) {
+  const ToolMock = vi.fn();
+  Object.defineProperty(ToolMock, 'Name', {
+    value: toolName,
+    writable: true,
+  });
+  return ToolMock;
+}
 
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
@@ -65,35 +82,55 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
-vi.mock('../tools/ls');
-vi.mock('../tools/read-file');
-vi.mock('../tools/grep');
-vi.mock('../tools/glob');
-vi.mock('../tools/edit');
-vi.mock('../tools/shell');
-vi.mock('../tools/write-file');
-vi.mock('../tools/web-fetch');
-vi.mock('../tools/read-many-files');
+vi.mock('../tools/ls', () => ({
+  LSTool: createToolMock('list_directory'),
+}));
+vi.mock('../tools/read-file', () => ({
+  ReadFileTool: createToolMock('read_file'),
+}));
+vi.mock('../tools/grep.js', () => ({
+  GrepTool: createToolMock('grep_search'),
+}));
+vi.mock('../tools/ripGrep.js', () => ({
+  RipGrepTool: createToolMock('grep_search'),
+}));
+vi.mock('../utils/ripgrepUtils.js', () => ({
+  canUseRipgrep: vi.fn(),
+}));
+vi.mock('../tools/glob', () => ({
+  GlobTool: createToolMock('glob'),
+}));
+vi.mock('../tools/edit', () => ({
+  EditTool: createToolMock('edit'),
+}));
+vi.mock('../tools/shell', () => ({
+  ShellTool: createToolMock('run_shell_command'),
+}));
+vi.mock('../tools/write-file', () => ({
+  WriteFileTool: createToolMock('write_file'),
+}));
+vi.mock('../tools/web-fetch', () => ({
+  WebFetchTool: createToolMock('web_fetch'),
+}));
+vi.mock('../tools/read-many-files', () => ({
+  ReadManyFilesTool: createToolMock('read_many_files'),
+}));
 vi.mock('../tools/memoryTool', () => ({
-  MemoryTool: vi.fn(),
+  MemoryTool: createToolMock('save_memory'),
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
-  GEMINI_CONFIG_DIR: '.gemini',
+  QWEN_CONFIG_DIR: '.qwen',
 }));
 
-vi.mock('../core/contentGenerator.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../core/contentGenerator.js')>();
-  return {
-    ...actual,
-    createContentGeneratorConfig: vi.fn(),
-  };
-});
+vi.mock('../core/contentGenerator.js');
 
 vi.mock('../core/client.js', () => ({
   GeminiClient: vi.fn().mockImplementation(() => ({
     initialize: vi.fn().mockResolvedValue(undefined),
+    isInitialized: vi.fn().mockReturnValue(true),
+    stripThoughtsFromHistory: vi.fn(),
+    setTools: vi.fn(),
   })),
 }));
 
@@ -102,6 +139,18 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     initializeTelemetry: vi.fn(),
+    uiTelemetryService: {
+      getLastPromptTokenCount: vi.fn(),
+    },
+  };
+});
+
+vi.mock('../telemetry/loggers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/loggers.js')>();
+  return {
+    ...actual,
+    logRipgrepFallback: vi.fn(),
   };
 });
 
@@ -121,8 +170,22 @@ vi.mock('../ide/ide-client.js', () => ({
   },
 }));
 
+import { BaseLlmClient } from '../core/baseLlmClient.js';
+import { tokenLimit } from '../core/tokenLimits.js';
+import { uiTelemetryService } from '../telemetry/index.js';
+
+vi.mock('../core/baseLlmClient.js');
+vi.mock('../core/tokenLimits.js', () => ({
+  tokenLimit: vi.fn(),
+}));
+
 describe('Server Config (config.ts)', () => {
-  const MODEL = 'gemini-pro';
+  const MODEL = 'qwen3-coder-plus';
+
+  // Default mock for canUseRipgrep to return true (tests that care about ripgrep will override this)
+  beforeEach(() => {
+    vi.mocked(canUseRipgrep).mockResolvedValue(true);
+  });
   const SANDBOX: SandboxConfig = {
     command: 'docker',
     image: 'qwen-code-sandbox',
@@ -153,6 +216,9 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
+      () => undefined,
+    );
   });
 
   describe('initialize', () => {
@@ -197,13 +263,14 @@ describe('Server Config (config.ts)', () => {
     it('should refresh auth and update config', async () => {
       const config = new Config(baseParams);
       const authType = AuthType.USE_GEMINI;
-      const newModel = 'gemini-flash';
       const mockContentConfig = {
-        model: newModel,
         apiKey: 'test-key',
+        model: 'qwen3-coder-plus',
       };
 
-      (createContentGeneratorConfig as Mock).mockReturnValue(mockContentConfig);
+      vi.mocked(createContentGeneratorConfig).mockReturnValue(
+        mockContentConfig,
+      );
 
       // Set fallback mode to true to ensure it gets reset
       config.setFallbackMode(true);
@@ -214,182 +281,50 @@ describe('Server Config (config.ts)', () => {
       expect(createContentGeneratorConfig).toHaveBeenCalledWith(
         config,
         authType,
+        {
+          model: MODEL,
+          baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
+        },
       );
-      // Verify that contentGeneratorConfig is updated with the new model
+      // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
-      expect(config.getContentGeneratorConfig().model).toBe(newModel);
-      expect(config.getModel()).toBe(newModel); // getModel() should return the updated model
       expect(GeminiClient).toHaveBeenCalledWith(config);
       // Verify that fallback mode is reset
       expect(config.isInFallbackMode()).toBe(false);
     });
 
-    it('should preserve conversation history when refreshing auth', async () => {
-      const config = new Config(baseParams);
-      const authType = AuthType.USE_GEMINI;
-      const mockContentConfig = {
-        model: 'gemini-pro',
-        apiKey: 'test-key',
-      };
-
-      (createContentGeneratorConfig as Mock).mockReturnValue(mockContentConfig);
-
-      // Mock the existing client with some history
-      const mockExistingHistory = [
-        { role: 'user', parts: [{ text: 'Hello' }] },
-        { role: 'model', parts: [{ text: 'Hi there!' }] },
-        { role: 'user', parts: [{ text: 'How are you?' }] },
-      ];
-
-      const mockExistingClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue(mockExistingHistory),
-      };
-
-      const mockNewClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-        initialize: vi.fn().mockResolvedValue(undefined),
-      };
-
-      // Set the existing client
-      (
-        config as unknown as { geminiClient: typeof mockExistingClient }
-      ).geminiClient = mockExistingClient;
-      (GeminiClient as Mock).mockImplementation(() => mockNewClient);
-
-      await config.refreshAuth(authType);
-
-      // Verify that existing history was retrieved
-      expect(mockExistingClient.getHistory).toHaveBeenCalled();
-
-      // Verify that new client was created and initialized
-      expect(GeminiClient).toHaveBeenCalledWith(config);
-      expect(mockNewClient.initialize).toHaveBeenCalledWith(mockContentConfig);
-
-      // Verify that history was restored to the new client
-      expect(mockNewClient.setHistory).toHaveBeenCalledWith(
-        mockExistingHistory,
-        { stripThoughts: false },
-      );
-    });
-
-    it('should handle case when no existing client is initialized', async () => {
-      const config = new Config(baseParams);
-      const authType = AuthType.USE_GEMINI;
-      const mockContentConfig = {
-        model: 'gemini-pro',
-        apiKey: 'test-key',
-      };
-
-      (createContentGeneratorConfig as Mock).mockReturnValue(mockContentConfig);
-
-      const mockNewClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-        initialize: vi.fn().mockResolvedValue(undefined),
-      };
-
-      // No existing client
-      (config as unknown as { geminiClient: null }).geminiClient = null;
-      (GeminiClient as Mock).mockImplementation(() => mockNewClient);
-
-      await config.refreshAuth(authType);
-
-      // Verify that new client was created and initialized
-      expect(GeminiClient).toHaveBeenCalledWith(config);
-      expect(mockNewClient.initialize).toHaveBeenCalledWith(mockContentConfig);
-
-      // Verify that setHistory was not called since there was no existing history
-      expect(mockNewClient.setHistory).not.toHaveBeenCalled();
-    });
-
     it('should strip thoughts when switching from GenAI to Vertex', async () => {
       const config = new Config(baseParams);
-      const mockContentConfig = {
-        model: 'gemini-pro',
-        apiKey: 'test-key',
-        authType: AuthType.USE_GEMINI,
-      };
-      (
-        config as unknown as { contentGeneratorConfig: ContentGeneratorConfig }
-      ).contentGeneratorConfig = mockContentConfig;
 
-      (createContentGeneratorConfig as Mock).mockReturnValue({
-        ...mockContentConfig,
-        authType: AuthType.LOGIN_WITH_GOOGLE,
-      });
+      vi.mocked(createContentGeneratorConfig).mockImplementation(
+        (_: Config, authType: AuthType | undefined) =>
+          ({ authType }) as unknown as ContentGeneratorConfig,
+      );
 
-      const mockExistingHistory = [
-        { role: 'user', parts: [{ text: 'Hello' }] },
-      ];
-      const mockExistingClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue(mockExistingHistory),
-      };
-      const mockNewClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-        initialize: vi.fn().mockResolvedValue(undefined),
-      };
-
-      (
-        config as unknown as { geminiClient: typeof mockExistingClient }
-      ).geminiClient = mockExistingClient;
-      (GeminiClient as Mock).mockImplementation(() => mockNewClient);
+      await config.refreshAuth(AuthType.USE_GEMINI);
 
       await config.refreshAuth(AuthType.LOGIN_WITH_GOOGLE);
 
-      expect(mockNewClient.setHistory).toHaveBeenCalledWith(
-        mockExistingHistory,
-        { stripThoughts: true },
-      );
+      expect(
+        config.getGeminiClient().stripThoughtsFromHistory,
+      ).toHaveBeenCalledWith();
     });
 
     it('should not strip thoughts when switching from Vertex to GenAI', async () => {
       const config = new Config(baseParams);
-      const mockContentConfig = {
-        model: 'gemini-pro',
-        apiKey: 'test-key',
-        authType: AuthType.LOGIN_WITH_GOOGLE,
-      };
-      (
-        config as unknown as { contentGeneratorConfig: ContentGeneratorConfig }
-      ).contentGeneratorConfig = mockContentConfig;
 
-      (createContentGeneratorConfig as Mock).mockReturnValue({
-        ...mockContentConfig,
-        authType: AuthType.USE_GEMINI,
-      });
+      vi.mocked(createContentGeneratorConfig).mockImplementation(
+        (_: Config, authType: AuthType | undefined) =>
+          ({ authType }) as unknown as ContentGeneratorConfig,
+      );
 
-      const mockExistingHistory = [
-        { role: 'user', parts: [{ text: 'Hello' }] },
-      ];
-      const mockExistingClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue(mockExistingHistory),
-      };
-      const mockNewClient = {
-        isInitialized: vi.fn().mockReturnValue(true),
-        getHistory: vi.fn().mockReturnValue([]),
-        setHistory: vi.fn(),
-        initialize: vi.fn().mockResolvedValue(undefined),
-      };
-
-      (
-        config as unknown as { geminiClient: typeof mockExistingClient }
-      ).geminiClient = mockExistingClient;
-      (GeminiClient as Mock).mockImplementation(() => mockNewClient);
+      await config.refreshAuth(AuthType.USE_VERTEX_AI);
 
       await config.refreshAuth(AuthType.USE_GEMINI);
 
-      expect(mockNewClient.setHistory).toHaveBeenCalledWith(
-        mockExistingHistory,
-        { stripThoughts: false },
-      );
+      expect(
+        config.getGeminiClient().stripThoughtsFromHistory,
+      ).not.toHaveBeenCalledWith();
     });
   });
 
@@ -482,6 +417,33 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
   });
 
+  it('Config constructor should set telemetry useCollector to true when provided', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true, useCollector: true },
+    };
+    const config = new Config(paramsWithTelemetry);
+    expect(config.getTelemetryUseCollector()).toBe(true);
+  });
+
+  it('Config constructor should set telemetry useCollector to false when provided', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true, useCollector: false },
+    };
+    const config = new Config(paramsWithTelemetry);
+    expect(config.getTelemetryUseCollector()).toBe(false);
+  });
+
+  it('Config constructor should default telemetry useCollector to false if not provided', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+    };
+    const config = new Config(paramsWithTelemetry);
+    expect(config.getTelemetryUseCollector()).toBe(false);
+  });
+
   it('should have a getFileService method that returns FileDiscoveryService', () => {
     const config = new Config(baseParams);
     const fileService = config.getFileService();
@@ -508,6 +470,16 @@ describe('Server Config (config.ts)', () => {
         expect(config.getUsageStatisticsEnabled()).toBe(enabled);
       },
     );
+
+    it('logs the session start event', async () => {
+      const config = new Config({
+        ...baseParams,
+        usageStatisticsEnabled: true,
+      });
+      await config.refreshAuth(AuthType.USE_GEMINI);
+
+      expect(QwenLogger.prototype.logStartSessionEvent).toHaveBeenCalledOnce();
+    });
   });
 
   describe('Telemetry Settings', () => {
@@ -605,21 +577,12 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('UseRipgrep Configuration', () => {
-    it('should default useRipgrep to false when not provided', () => {
+    it('should default useRipgrep to true when not provided', () => {
       const config = new Config(baseParams);
-      expect(config.getUseRipgrep()).toBe(false);
-    });
-
-    it('should set useRipgrep to true when provided as true', () => {
-      const paramsWithRipgrep: ConfigParameters = {
-        ...baseParams,
-        useRipgrep: true,
-      };
-      const config = new Config(paramsWithRipgrep);
       expect(config.getUseRipgrep()).toBe(true);
     });
 
-    it('should set useRipgrep to false when explicitly provided as false', () => {
+    it('should set useRipgrep to false when provided as false', () => {
       const paramsWithRipgrep: ConfigParameters = {
         ...baseParams,
         useRipgrep: false,
@@ -628,13 +591,56 @@ describe('Server Config (config.ts)', () => {
       expect(config.getUseRipgrep()).toBe(false);
     });
 
-    it('should default useRipgrep to false when undefined', () => {
+    it('should set useRipgrep to true when explicitly provided as true', () => {
+      const paramsWithRipgrep: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: true,
+      };
+      const config = new Config(paramsWithRipgrep);
+      expect(config.getUseRipgrep()).toBe(true);
+    });
+
+    it('should default useRipgrep to true when undefined', () => {
       const paramsWithUndefinedRipgrep: ConfigParameters = {
         ...baseParams,
         useRipgrep: undefined,
       };
       const config = new Config(paramsWithUndefinedRipgrep);
-      expect(config.getUseRipgrep()).toBe(false);
+      expect(config.getUseRipgrep()).toBe(true);
+    });
+  });
+
+  describe('UseBuiltinRipgrep Configuration', () => {
+    it('should default useBuiltinRipgrep to true when not provided', () => {
+      const config = new Config(baseParams);
+      expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+
+    it('should set useBuiltinRipgrep to false when provided as false', () => {
+      const paramsWithBuiltinRipgrep: ConfigParameters = {
+        ...baseParams,
+        useBuiltinRipgrep: false,
+      };
+      const config = new Config(paramsWithBuiltinRipgrep);
+      expect(config.getUseBuiltinRipgrep()).toBe(false);
+    });
+
+    it('should set useBuiltinRipgrep to true when explicitly provided as true', () => {
+      const paramsWithBuiltinRipgrep: ConfigParameters = {
+        ...baseParams,
+        useBuiltinRipgrep: true,
+      };
+      const config = new Config(paramsWithBuiltinRipgrep);
+      expect(config.getUseBuiltinRipgrep()).toBe(true);
+    });
+
+    it('should default useBuiltinRipgrep to true when undefined', () => {
+      const paramsWithUndefinedBuiltinRipgrep: ConfigParameters = {
+        ...baseParams,
+        useBuiltinRipgrep: undefined,
+      };
+      const config = new Config(paramsWithUndefinedBuiltinRipgrep);
+      expect(config.getUseBuiltinRipgrep()).toBe(true);
     });
   });
 
@@ -642,7 +648,7 @@ describe('Server Config (config.ts)', () => {
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,
-        coreTools: ['ShellTool(git status)'],
+        coreTools: ['Shell(git status)'], // Use display name instead of class name
       };
       const config = new Config(params);
       await config.initialize();
@@ -666,47 +672,316 @@ describe('Server Config (config.ts)', () => {
       ).mock.calls.some((call) => call[0] instanceof vi.mocked(ReadFileTool));
       expect(wasReadFileToolRegistered).toBe(false);
     });
+
+    it('should register a tool if coreTools contains the displayName', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        coreTools: ['Shell'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(ShellTool),
+      );
+      expect(wasShellToolRegistered).toBe(true);
+    });
+
+    it('should register a tool if coreTools contains the displayName with argument-specific pattern', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        coreTools: ['Shell(git status)'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(ShellTool),
+      );
+      expect(wasShellToolRegistered).toBe(true);
+    });
+
+    it('should register a tool if coreTools contains a legacy tool name alias', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: ['search_file_content'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasGrepToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+      expect(wasGrepToolRegistered).toBe(true);
+    });
+
+    it('should not register a tool if excludeTools contains a legacy display name alias', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        excludeTools: ['SearchFiles'],
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerTool: Mock } };
+        }
+      ).ToolRegistry.prototype.registerTool;
+
+      const wasGrepToolRegistered = (registerToolMock as Mock).mock.calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+      expect(wasGrepToolRegistered).toBe(false);
+    });
+
+    describe('with minified tool class names', () => {
+      beforeEach(() => {
+        Object.defineProperty(
+          vi.mocked(ShellTool).prototype.constructor,
+          'name',
+          {
+            value: '_ShellTool',
+            configurable: true,
+          },
+        );
+      });
+
+      afterEach(() => {
+        Object.defineProperty(
+          vi.mocked(ShellTool).prototype.constructor,
+          'name',
+          {
+            value: 'ShellTool',
+          },
+        );
+      });
+
+      it('should register a tool if coreTools contains the non-minified class name', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: ['Shell'], // Use display name instead of class name
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(true);
+      });
+
+      it('should register a tool if coreTools contains the displayName', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: ['Shell'],
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(true);
+      });
+
+      it('should not register a tool if excludeTools contains the non-minified class name', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: undefined, // all tools enabled by default
+          excludeTools: ['Shell'], // Use display name instead of class name
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(false);
+      });
+
+      it('should not register a tool if excludeTools contains the displayName', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: undefined, // all tools enabled by default
+          excludeTools: ['Shell'],
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(false);
+      });
+
+      it('should register a tool if coreTools contains an argument-specific pattern with the non-minified class name', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: ['Shell(git status)'], // Use display name instead of class name
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(true);
+      });
+
+      it('should register a tool if coreTools contains an argument-specific pattern with the displayName', async () => {
+        const params: ConfigParameters = {
+          ...baseParams,
+          coreTools: ['Shell(git status)'],
+        };
+        const config = new Config(params);
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerTool: Mock } };
+          }
+        ).ToolRegistry.prototype.registerTool;
+
+        const wasShellToolRegistered = (
+          registerToolMock as Mock
+        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        expect(wasShellToolRegistered).toBe(true);
+      });
+    });
+  });
+
+  describe('getTruncateToolOutputThreshold', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('should return the calculated threshold when it is smaller than the default', () => {
+      const config = new Config(baseParams);
+      vi.mocked(tokenLimit).mockReturnValue(8000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        2000,
+      );
+      // 4 * (8000 - 2000) = 4 * 6000 = 24000
+      // default is 25_000
+      expect(config.getTruncateToolOutputThreshold()).toBe(24000);
+    });
+
+    it('should return the default threshold when the calculated value is larger', () => {
+      const config = new Config(baseParams);
+      vi.mocked(tokenLimit).mockReturnValue(2_000_000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        500_000,
+      );
+      // 4 * (2_000_000 - 500_000) = 4 * 1_500_000 = 6_000_000
+      // default is 25_000
+      expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
+    });
+
+    it('should use a custom truncateToolOutputThreshold if provided', () => {
+      const customParams = {
+        ...baseParams,
+        truncateToolOutputThreshold: 50000,
+      };
+      const config = new Config(customParams);
+      vi.mocked(tokenLimit).mockReturnValue(8000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        2000,
+      );
+      // 4 * (8000 - 2000) = 4 * 6000 = 24000
+      // custom threshold is 50000
+      expect(config.getTruncateToolOutputThreshold()).toBe(24000);
+
+      vi.mocked(tokenLimit).mockReturnValue(32000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        1000,
+      );
+      // 4 * (32000 - 1000) = 124000
+      // custom threshold is 50000
+      expect(config.getTruncateToolOutputThreshold()).toBe(50000);
+    });
   });
 });
 
 describe('setApprovalMode with folder trust', () => {
+  const baseParams: ConfigParameters = {
+    sessionId: 'test',
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+  };
+
   it('should throw an error when setting YOLO mode in an untrusted folder', () => {
-    const config = new Config({
-      sessionId: 'test',
-      targetDir: '.',
-      debugMode: false,
-      model: 'test-model',
-      cwd: '.',
-      trustedFolder: false, // Untrusted
-    });
+    const config = new Config(baseParams);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
   it('should throw an error when setting AUTO_EDIT mode in an untrusted folder', () => {
-    const config = new Config({
-      sessionId: 'test',
-      targetDir: '.',
-      debugMode: false,
-      model: 'test-model',
-      cwd: '.',
-      trustedFolder: false, // Untrusted
-    });
+    const config = new Config(baseParams);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
   });
 
   it('should NOT throw an error when setting DEFAULT mode in an untrusted folder', () => {
-    const config = new Config({
-      sessionId: 'test',
-      targetDir: '.',
-      debugMode: false,
-      model: 'test-model',
-      cwd: '.',
-      trustedFolder: false, // Untrusted
-    });
+    const config = new Config(baseParams);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
   });
 
@@ -723,14 +998,8 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   it('should NOT throw an error when setting any mode in a trusted folder', () => {
-    const config = new Config({
-      sessionId: 'test',
-      targetDir: '.',
-      debugMode: false,
-      model: 'test-model',
-      cwd: '.',
-      trustedFolder: true, // Trusted
-    });
+    const config = new Config(baseParams);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
@@ -738,98 +1007,205 @@ describe('setApprovalMode with folder trust', () => {
   });
 
   it('should NOT throw an error when setting any mode if trustedFolder is undefined', () => {
-    const config = new Config({
-      sessionId: 'test',
-      targetDir: '.',
-      debugMode: false,
-      model: 'test-model',
-      cwd: '.',
-      trustedFolder: undefined, // Undefined
-    });
+    const config = new Config(baseParams);
+    vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true); // isTrustedFolder defaults to true
     expect(() => config.setApprovalMode(ApprovalMode.YOLO)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.AUTO_EDIT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.DEFAULT)).not.toThrow();
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
-  describe('Model Switch Logging', () => {
-    it('should log model switch when setModel is called with different model', async () => {
-      const config = new Config({
-        sessionId: 'test-model-switch',
-        targetDir: '.',
-        debugMode: false,
-        model: 'qwen3-coder-plus',
-        cwd: '.',
-      });
-
-      // Initialize the config to set up content generator
-      await config.initialize();
-
-      // Mock the logger's logModelSwitch method
-      const logModelSwitchSpy = vi.spyOn(config['logger']!, 'logModelSwitch');
-
-      // Change the model
-      await config.setModel('qwen-vl-max-latest', {
-        reason: 'vision_auto_switch',
-        context: 'Test model switch',
-      });
-
-      // Verify that logModelSwitch was called with correct parameters
-      expect(logModelSwitchSpy).toHaveBeenCalledWith({
-        fromModel: 'qwen3-coder-plus',
-        toModel: 'qwen-vl-max-latest',
-        reason: 'vision_auto_switch',
-        context: 'Test model switch',
-      });
+  describe('registerCoreTools', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
     });
 
-    it('should not log when setModel is called with same model', async () => {
-      const config = new Config({
-        sessionId: 'test-same-model',
-        targetDir: '.',
-        debugMode: false,
-        model: 'qwen3-coder-plus',
-        cwd: '.',
-      });
-
-      // Initialize the config to set up content generator
+    it('should register RipGrepTool when useRipgrep is true and it is available', async () => {
+      (canUseRipgrep as Mock).mockResolvedValue(true);
+      const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
-      // Mock the logger's logModelSwitch method
-      const logModelSwitchSpy = vi.spyOn(config['logger']!, 'logModelSwitch');
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
 
-      // Set the same model
-      await config.setModel('qwen3-coder-plus');
-
-      // Verify that logModelSwitch was not called
-      expect(logModelSwitchSpy).not.toHaveBeenCalled();
+      expect(wasRipGrepRegistered).toBe(true);
+      expect(wasGrepRegistered).toBe(false);
+      expect(canUseRipgrep).toHaveBeenCalledWith(true);
     });
 
-    it('should use default reason when no options provided', async () => {
+    it('should register RipGrepTool with system ripgrep when useBuiltinRipgrep is false', async () => {
+      (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({
-        sessionId: 'test-default-reason',
-        targetDir: '.',
-        debugMode: false,
-        model: 'qwen3-coder-plus',
-        cwd: '.',
+        ...baseParams,
+        useRipgrep: true,
+        useBuiltinRipgrep: false,
       });
-
-      // Initialize the config to set up content generator
       await config.initialize();
 
-      // Mock the logger's logModelSwitch method
-      const logModelSwitchSpy = vi.spyOn(config['logger']!, 'logModelSwitch');
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
 
-      // Change the model without options
-      await config.setModel('qwen-vl-max-latest');
-
-      // Verify that logModelSwitch was called with default reason
-      expect(logModelSwitchSpy).toHaveBeenCalledWith({
-        fromModel: 'qwen3-coder-plus',
-        toModel: 'qwen-vl-max-latest',
-        reason: 'manual',
-        context: undefined,
-      });
+      expect(wasRipGrepRegistered).toBe(true);
+      expect(wasGrepRegistered).toBe(false);
+      expect(canUseRipgrep).toHaveBeenCalledWith(false);
     });
+
+    it('should fall back to GrepTool and log error when useBuiltinRipgrep is false but system ripgrep is not available', async () => {
+      (canUseRipgrep as Mock).mockResolvedValue(false);
+      const config = new Config({
+        ...baseParams,
+        useRipgrep: true,
+        useBuiltinRipgrep: false,
+      });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+
+      expect(wasRipGrepRegistered).toBe(false);
+      expect(wasGrepRegistered).toBe(true);
+      expect(canUseRipgrep).toHaveBeenCalledWith(false);
+      expect(logRipgrepFallback).toHaveBeenCalledWith(
+        config,
+        expect.any(RipgrepFallbackEvent),
+      );
+      const event = (logRipgrepFallback as Mock).mock.calls[0][1];
+      expect(event.error).toContain('ripgrep is not available');
+    });
+
+    it('should fall back to GrepTool and log error when useRipgrep is true and builtin ripgrep is not available', async () => {
+      (canUseRipgrep as Mock).mockResolvedValue(false);
+      const config = new Config({ ...baseParams, useRipgrep: true });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+
+      expect(wasRipGrepRegistered).toBe(false);
+      expect(wasGrepRegistered).toBe(true);
+      expect(canUseRipgrep).toHaveBeenCalledWith(true);
+      expect(logRipgrepFallback).toHaveBeenCalledWith(
+        config,
+        expect.any(RipgrepFallbackEvent),
+      );
+      const event = (logRipgrepFallback as Mock).mock.calls[0][1];
+      expect(event.error).toContain('ripgrep is not available');
+    });
+
+    it('should fall back to GrepTool and log error when canUseRipgrep throws an error', async () => {
+      const error = new Error('ripGrep check failed');
+      (canUseRipgrep as Mock).mockRejectedValue(error);
+      const config = new Config({ ...baseParams, useRipgrep: true });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+
+      expect(wasRipGrepRegistered).toBe(false);
+      expect(wasGrepRegistered).toBe(true);
+      expect(logRipgrepFallback).toHaveBeenCalledWith(
+        config,
+        expect.any(RipgrepFallbackEvent),
+      );
+      const event = (logRipgrepFallback as Mock).mock.calls[0][1];
+      expect(event.error).toBe(`ripGrep check failed`);
+    });
+
+    it('should register GrepTool when useRipgrep is false', async () => {
+      const config = new Config({ ...baseParams, useRipgrep: false });
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
+      const wasRipGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(RipGrepTool),
+      );
+      const wasGrepRegistered = calls.some(
+        (call) => call[0] instanceof vi.mocked(GrepTool),
+      );
+
+      expect(wasRipGrepRegistered).toBe(false);
+      expect(wasGrepRegistered).toBe(true);
+      expect(canUseRipgrep).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('BaseLlmClient Lifecycle', () => {
+  const MODEL = 'gemini-pro';
+  const SANDBOX: SandboxConfig = {
+    command: 'docker',
+    image: 'gemini-cli-sandbox',
+  };
+  const TARGET_DIR = '/path/to/target';
+  const DEBUG_MODE = false;
+  const QUESTION = 'test question';
+  const FULL_CONTEXT = false;
+  const USER_MEMORY = 'Test User Memory';
+  const TELEMETRY_SETTINGS = { enabled: false };
+  const EMBEDDING_MODEL = 'gemini-embedding';
+  const SESSION_ID = 'test-session-id';
+  const baseParams: ConfigParameters = {
+    cwd: '/tmp',
+    embeddingModel: EMBEDDING_MODEL,
+    sandbox: SANDBOX,
+    targetDir: TARGET_DIR,
+    debugMode: DEBUG_MODE,
+    question: QUESTION,
+    fullContext: FULL_CONTEXT,
+    userMemory: USER_MEMORY,
+    telemetry: TELEMETRY_SETTINGS,
+    sessionId: SESSION_ID,
+    model: MODEL,
+    usageStatisticsEnabled: false,
+  };
+
+  it('should throw an error if getBaseLlmClient is called before refreshAuth', () => {
+    const config = new Config(baseParams);
+    expect(() => config.getBaseLlmClient()).toThrow(
+      'BaseLlmClient not initialized. Ensure authentication has occurred and ContentGenerator is ready.',
+    );
+  });
+
+  it('should successfully initialize BaseLlmClient after refreshAuth is called', async () => {
+    const config = new Config(baseParams);
+    const authType = AuthType.USE_GEMINI;
+    const mockContentConfig = { model: 'gemini-flash', apiKey: 'test-key' };
+
+    vi.mocked(createContentGeneratorConfig).mockReturnValue(mockContentConfig);
+
+    await config.refreshAuth(authType);
+
+    // Should not throw
+    const llmService = config.getBaseLlmClient();
+    expect(llmService).toBeDefined();
+    expect(BaseLlmClient).toHaveBeenCalledWith(
+      config.getContentGenerator(),
+      config,
+    );
   });
 });

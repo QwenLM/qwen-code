@@ -4,6 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { useSlashCommandProcessor } from './slashCommandProcessor.js';
+import type {
+  CommandContext,
+  ConfirmShellCommandsActionReturn,
+  SlashCommand,
+} from '../commands/types.js';
+import { CommandKind } from '../commands/types.js';
+import type { LoadedSettings } from '../../config/settings.js';
+import { MessageType } from '../types.js';
+import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
+import { FileCommandLoader } from '../../services/FileCommandLoader.js';
+import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import {
+  type GeminiClient,
+  SlashCommandStatus,
+  ToolConfirmationOutcome,
+  makeFakeConfig,
+} from '@qwen-code/qwen-code-core';
+
 const { logSlashCommand } = vi.hoisted(() => ({
   logSlashCommand: vi.fn(),
 }));
@@ -67,27 +88,6 @@ vi.mock('../../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
 }));
 
-import { act, renderHook, waitFor } from '@testing-library/react';
-import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
-import { useSlashCommandProcessor } from './slashCommandProcessor.js';
-import type {
-  CommandContext,
-  ConfirmShellCommandsActionReturn,
-  SlashCommand,
-} from '../commands/types.js';
-import { CommandKind } from '../commands/types.js';
-import type { LoadedSettings } from '../../config/settings.js';
-import { MessageType } from '../types.js';
-import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
-import { FileCommandLoader } from '../../services/FileCommandLoader.js';
-import { McpPromptLoader } from '../../services/McpPromptLoader.js';
-import {
-  SlashCommandStatus,
-  makeFakeConfig,
-  ToolConfirmationOutcome,
-  type IdeClient,
-} from '@qwen-code/qwen-code-core';
-
 function createTestCommand(
   overrides: Partial<SlashCommand>,
   kind: CommandKind = CommandKind.BUILT_IN,
@@ -106,24 +106,19 @@ describe('useSlashCommandProcessor', () => {
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
   const mockOpenAuthDialog = vi.fn();
-  const mockOpenModelSelectionDialog = vi.fn();
+  const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
 
   const mockConfig = makeFakeConfig({});
-  vi.spyOn(mockConfig, 'getIdeClient').mockReturnValue({
-    addStatusChangeListener: vi.fn(),
-    removeStatusChangeListener: vi.fn(),
-  } as unknown as IdeClient);
-
   const mockSettings = {} as LoadedSettings;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    (vi.mocked(BuiltinCommandLoader) as Mock).mockClear();
+    vi.mocked(BuiltinCommandLoader).mockClear();
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
-    mockOpenModelSelectionDialog.mockClear();
+    mockOpenModelDialog.mockClear();
   });
 
   const setupProcessorHook = (
@@ -144,21 +139,19 @@ describe('useSlashCommandProcessor', () => {
         mockClearItems,
         mockLoadHistory,
         vi.fn(), // refreshStatic
-        vi.fn(), // onDebugMessage
-        mockOpenThemeDialog, // openThemeDialog
-        mockOpenAuthDialog,
-        vi.fn(), // openEditorDialog
-        vi.fn(), // toggleCorgiMode
-        mockSetQuittingMessages,
-        vi.fn(), // openPrivacyNotice
-        vi.fn(), // openSettingsDialog
-        mockOpenModelSelectionDialog,
-        vi.fn(), // openSubagentCreateDialog
-        vi.fn(), // openAgentsManagerDialog
         vi.fn(), // toggleVimEnabled
         setIsProcessing,
         vi.fn(), // setGeminiMdFileCount
-        vi.fn(), // _showQuitConfirmation
+        {
+          openAuthDialog: mockOpenAuthDialog,
+          openThemeDialog: mockOpenThemeDialog,
+          openEditorDialog: vi.fn(),
+          openSettingsDialog: vi.fn(),
+          openModelDialog: mockOpenModelDialog,
+          quit: mockSetQuittingMessages,
+          setDebugMessage: vi.fn(),
+          toggleCorgiMode: vi.fn(),
+        },
       ),
     );
 
@@ -411,10 +404,16 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/modelcmd');
       });
 
-      expect(mockOpenModelSelectionDialog).toHaveBeenCalled();
+      expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
     it('should handle "load_history" action', async () => {
+      const mockClient = {
+        setHistory: vi.fn(),
+        stripThoughtsFromHistory: vi.fn(),
+      } as unknown as GeminiClient;
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
+
       const command = createTestCommand({
         name: 'load',
         action: vi.fn().mockResolvedValue({
@@ -437,73 +436,57 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
-    describe('with fake timers', () => {
-      // This test needs to let the async `waitFor` complete with REAL timers
-      // before switching to FAKE timers to test setTimeout.
-      it('should handle a "quit" action', async () => {
-        const quitAction = vi
-          .fn()
-          .mockResolvedValue({ type: 'quit', messages: [] });
-        const command = createTestCommand({
-          name: 'exit',
-          action: quitAction,
-        });
-        const result = setupProcessorHook([command]);
+    it('should strip thoughts when handling "load_history" action', async () => {
+      const mockClient = {
+        setHistory: vi.fn(),
+        stripThoughtsFromHistory: vi.fn(),
+      } as unknown as GeminiClient;
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue(mockClient);
 
-        await waitFor(() =>
-          expect(result.current.slashCommands).toHaveLength(1),
-        );
-
-        vi.useFakeTimers();
-
-        try {
-          await act(async () => {
-            await result.current.handleSlashCommand('/exit');
-          });
-
-          await act(async () => {
-            await vi.advanceTimersByTimeAsync(1000); // Advance by 1000ms to trigger the setTimeout callback
-          });
-
-          expect(mockSetQuittingMessages).toHaveBeenCalledWith([]);
-          expect(mockProcessExit).toHaveBeenCalledWith(0);
-        } finally {
-          vi.useRealTimers();
-        }
+      const historyWithThoughts = [
+        {
+          role: 'model',
+          parts: [{ text: 'response', thoughtSignature: 'CikB...' }],
+        },
+      ];
+      const command = createTestCommand({
+        name: 'loadwiththoughts',
+        action: vi.fn().mockResolvedValue({
+          type: 'load_history',
+          history: [{ type: MessageType.MODEL, text: 'response' }],
+          clientHistory: historyWithThoughts,
+        }),
       });
 
-      it('should call runExitCleanup when handling a "quit" action', async () => {
-        const quitAction = vi
-          .fn()
-          .mockResolvedValue({ type: 'quit', messages: [] });
-        const command = createTestCommand({
-          name: 'exit',
-          action: quitAction,
-        });
-        const result = setupProcessorHook([command]);
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
-        await waitFor(() =>
-          expect(result.current.slashCommands).toHaveLength(1),
-        );
-
-        vi.useFakeTimers();
-
-        try {
-          await act(async () => {
-            await result.current.handleSlashCommand('/exit');
-          });
-
-          await act(async () => {
-            await vi.advanceTimersByTimeAsync(1000); // Advance by 1000ms to trigger the setTimeout callback
-          });
-
-          expect(mockRunExitCleanup).toHaveBeenCalledTimes(1);
-        } finally {
-          vi.useRealTimers();
-        }
+      await act(async () => {
+        await result.current.handleSlashCommand('/loadwiththoughts');
       });
+
+      expect(mockClient.setHistory).toHaveBeenCalledTimes(1);
+      expect(mockClient.stripThoughtsFromHistory).toHaveBeenCalledWith();
     });
 
+    it('should handle a "quit" action', async () => {
+      const quitAction = vi
+        .fn()
+        .mockResolvedValue({ type: 'quit', messages: ['bye'] });
+      const command = createTestCommand({
+        name: 'exit',
+        action: quitAction,
+      });
+      const result = setupProcessorHook([command]);
+
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/exit');
+      });
+
+      expect(mockSetQuittingMessages).toHaveBeenCalledWith(['bye']);
+    });
     it('should handle "submit_prompt" action returned from a file-based command', async () => {
       const fileCommand = createTestCommand(
         {
@@ -921,7 +904,6 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // openEditorDialog
           vi.fn(), // toggleCorgiMode
           mockSetQuittingMessages,
-          vi.fn(), // openPrivacyNotice
           vi.fn(), // openSettingsDialog
           vi.fn(), // openModelSelectionDialog
           vi.fn(), // openSubagentCreateDialog

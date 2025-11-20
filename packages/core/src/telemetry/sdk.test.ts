@@ -14,6 +14,10 @@ import { OTLPTraceExporter as OTLPTraceExporterHttp } from '@opentelemetry/expor
 import { OTLPLogExporter as OTLPLogExporterHttp } from '@opentelemetry/exporter-logs-otlp-http';
 import { OTLPMetricExporter as OTLPMetricExporterHttp } from '@opentelemetry/exporter-metrics-otlp-http';
 import { NodeSDK } from '@opentelemetry/sdk-node';
+import { TelemetryTarget } from './index.js';
+
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 vi.mock('@opentelemetry/exporter-trace-otlp-grpc');
 vi.mock('@opentelemetry/exporter-logs-otlp-grpc');
@@ -22,6 +26,7 @@ vi.mock('@opentelemetry/exporter-trace-otlp-http');
 vi.mock('@opentelemetry/exporter-logs-otlp-http');
 vi.mock('@opentelemetry/exporter-metrics-otlp-http');
 vi.mock('@opentelemetry/sdk-node');
+vi.mock('./gcp-exporters.js');
 
 describe('Telemetry SDK', () => {
   let mockConfig: Config;
@@ -32,6 +37,8 @@ describe('Telemetry SDK', () => {
       getTelemetryEnabled: () => true,
       getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
       getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryTarget: () => 'local',
+      getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
@@ -100,5 +107,42 @@ describe('Telemetry SDK', () => {
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith(
       expect.objectContaining({ url: 'https://my-collector.com/' }),
     );
+  });
+
+  it('should use OTLP exporters when target is gcp but useCollector is true', () => {
+    vi.spyOn(mockConfig, 'getTelemetryTarget').mockReturnValue(
+      TelemetryTarget.GCP,
+    );
+    vi.spyOn(mockConfig, 'getTelemetryUseCollector').mockReturnValue(true);
+
+    initializeTelemetry(mockConfig);
+
+    expect(OTLPTraceExporter).toHaveBeenCalledWith({
+      url: 'http://localhost:4317',
+      compression: 'gzip',
+    });
+    expect(OTLPLogExporter).toHaveBeenCalledWith({
+      url: 'http://localhost:4317',
+      compression: 'gzip',
+    });
+    expect(OTLPMetricExporter).toHaveBeenCalledWith({
+      url: 'http://localhost:4317',
+      compression: 'gzip',
+    });
+  });
+
+  it('should not use OTLP exporters when telemetryOutfile is set', () => {
+    vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue(
+      path.join(os.tmpdir(), 'test.log'),
+    );
+    initializeTelemetry(mockConfig);
+
+    expect(OTLPTraceExporter).not.toHaveBeenCalled();
+    expect(OTLPLogExporter).not.toHaveBeenCalled();
+    expect(OTLPMetricExporter).not.toHaveBeenCalled();
+    expect(OTLPTraceExporterHttp).not.toHaveBeenCalled();
+    expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
+    expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
+    expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
 });

@@ -12,6 +12,7 @@ import type {
   Config,
 } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../../test-utils/render.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 
 describe('ToolConfirmationMessage', () => {
   const mockConfig = {
@@ -168,24 +169,6 @@ describe('ToolConfirmationMessage', () => {
         expect(lastFrame()).toContain(alwaysAllowText);
       });
 
-      it('should show "allow always" when folder trust is undefined', () => {
-        const mockConfig = {
-          isTrustedFolder: () => undefined,
-          getIdeMode: () => false,
-        } as unknown as Config;
-
-        const { lastFrame } = renderWithProviders(
-          <ToolConfirmationMessage
-            confirmationDetails={details}
-            config={mockConfig}
-            availableTerminalHeight={30}
-            terminalWidth={80}
-          />,
-        );
-
-        expect(lastFrame()).toContain(alwaysAllowText);
-      });
-
       it('should NOT show "allow always" when folder is untrusted', () => {
         const mockConfig = {
           isTrustedFolder: () => false,
@@ -203,6 +186,65 @@ describe('ToolConfirmationMessage', () => {
 
         expect(lastFrame()).not.toContain(alwaysAllowText);
       });
+    });
+  });
+
+  describe('external editor option', () => {
+    const editConfirmationDetails: ToolCallConfirmationDetails = {
+      type: 'edit',
+      title: 'Confirm Edit',
+      fileName: 'test.txt',
+      filePath: '/test.txt',
+      fileDiff: '...diff...',
+      originalContent: 'a',
+      newContent: 'b',
+      onConfirm: vi.fn(),
+    };
+
+    it('should show "Modify with external editor" when preferredEditor is set', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          terminalWidth={80}
+        />,
+        {
+          settings: {
+            merged: { general: { preferredEditor: 'vscode' } },
+          } as unknown as LoadedSettings,
+        },
+      );
+
+      expect(lastFrame()).toContain('Modify with external editor');
+    });
+
+    it('should NOT show "Modify with external editor" when preferredEditor is not set', () => {
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={editConfirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          terminalWidth={80}
+        />,
+        {
+          settings: {
+            merged: { general: {} },
+          } as unknown as LoadedSettings,
+        },
+      );
+
+      expect(lastFrame()).not.toContain('Modify with external editor');
     });
   });
 });

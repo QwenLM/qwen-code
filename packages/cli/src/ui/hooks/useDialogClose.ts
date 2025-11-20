@@ -6,20 +6,29 @@
 
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
+import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 
 export interface DialogCloseOptions {
   // Theme dialog
   isThemeDialogOpen: boolean;
   handleThemeSelect: (theme: string | undefined, scope: SettingScope) => void;
 
+  // Approval mode dialog
+  isApprovalModeDialogOpen: boolean;
+  handleApprovalModeSelect: (
+    mode: ApprovalMode | undefined,
+    scope: SettingScope,
+  ) => void;
+
   // Auth dialog
   isAuthDialogOpen: boolean;
   handleAuthSelect: (
     authType: AuthType | undefined,
     scope: SettingScope,
+    credentials?: OpenAICredentials,
   ) => Promise<void>;
-  selectedAuthType: AuthType | undefined;
+  pendingAuthType: AuthType | undefined;
 
   // Editor dialog
   isEditorDialogOpen: boolean;
@@ -31,10 +40,6 @@ export interface DialogCloseOptions {
 
   // Folder trust dialog
   isFolderTrustDialogOpen: boolean;
-
-  // Privacy notice
-  showPrivacyNotice: boolean;
-  setShowPrivacyNotice: (show: boolean) => void;
 
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
@@ -61,6 +66,12 @@ export function useDialogClose(options: DialogCloseOptions) {
       return true;
     }
 
+    if (options.isApprovalModeDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined, selectedScope) - keeps current mode
+      options.handleApprovalModeSelect(undefined, SettingScope.User);
+      return true;
+    }
+
     if (options.isEditorDialogOpen) {
       // Mimic ESC behavior: call onExit() directly
       options.exitEditorDialog();
@@ -76,12 +87,6 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isFolderTrustDialogOpen) {
       // FolderTrustDialog doesn't expose close function, but ESC would prevent exit
       // We follow the same pattern - prevent exit behavior
-      return true;
-    }
-
-    if (options.showPrivacyNotice) {
-      // PrivacyNotice uses onExit callback
-      options.setShowPrivacyNotice(false);
       return true;
     }
 

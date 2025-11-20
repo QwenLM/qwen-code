@@ -278,17 +278,6 @@ export class Logger {
     }
   }
 
-  async logModelSwitch(event: ModelSwitchEvent): Promise<void> {
-    const message = JSON.stringify({
-      fromModel: event.fromModel,
-      toModel: event.toModel,
-      reason: event.reason,
-      context: event.context,
-    });
-
-    await this.logMessage(MessageSenderType.MODEL_SWITCH, message);
-  }
-
   private _checkpointPath(tag: string): string {
     if (!tag.length) {
       throw new Error('No checkpoint tag specified.');

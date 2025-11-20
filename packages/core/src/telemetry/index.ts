@@ -13,48 +13,89 @@ export enum TelemetryTarget {
 const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.LOCAL;
 const DEFAULT_OTLP_ENDPOINT = 'http://localhost:4317';
 
-export { SpanStatusCode, ValueType } from '@opentelemetry/api';
-export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
-export {
-  logApiError,
-  logApiCancel,
-  logApiRequest,
-  logApiResponse,
-  logChatCompression,
-  logCliConfiguration,
-  logConversationFinishedEvent,
-  logFlashFallback,
-  logKittySequenceOverflow,
-  logSlashCommand,
-  logToolCall,
-  logUserPrompt,
-} from './loggers.js';
+export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
   initializeTelemetry,
-  isTelemetrySdkInitialized,
   shutdownTelemetry,
+  isTelemetrySdkInitialized,
 } from './sdk.js';
 export {
-  ApiErrorEvent,
-  ApiCancelEvent,
-  ApiRequestEvent,
-  ApiResponseEvent,
-  ConversationFinishedEvent,
-  EndSessionEvent,
-  FlashFallbackEvent,
-  KittySequenceOverflowEvent,
-  makeChatCompressionEvent,
-  makeSlashCommandEvent,
+  resolveTelemetrySettings,
+  parseBooleanEnvFlag,
+  parseTelemetryTargetValue,
+} from './config.js';
+export {
+  logCliConfiguration,
+  logUserPrompt,
+  logToolCall,
+  logApiRequest,
+  logApiError,
+  logApiCancel,
+  logApiResponse,
+  logFlashFallback,
+  logSlashCommand,
+  logConversationFinishedEvent,
+  logKittySequenceOverflow,
+  logChatCompression,
+  logToolOutputTruncated,
+  logExtensionEnable,
+  logExtensionInstallEvent,
+  logExtensionUninstall,
+  logRipgrepFallback,
+  logNextSpeakerCheck,
+  logAuth,
+} from './loggers.js';
+export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
+export {
   SlashCommandStatus,
+  EndSessionEvent,
+  UserPromptEvent,
+  ApiRequestEvent,
+  ApiErrorEvent,
+  ApiResponseEvent,
+  ApiCancelEvent,
+  FlashFallbackEvent,
   StartSessionEvent,
   ToolCallEvent,
-  UserPromptEvent,
+  ConversationFinishedEvent,
+  KittySequenceOverflowEvent,
+  ToolOutputTruncatedEvent,
+  RipgrepFallbackEvent,
+  NextSpeakerCheckEvent,
+  AuthEvent,
 } from './types.js';
-export type {
-  ChatCompressionEvent,
-  SlashCommandEvent,
-  TelemetryEvent,
-} from './types.js';
+export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
+export type { TelemetryEvent } from './types.js';
+export { SpanStatusCode, ValueType } from '@opentelemetry/api';
+export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 export * from './uiTelemetry.js';
+export {
+  // Core metrics functions
+  recordToolCallMetrics,
+  recordTokenUsageMetrics,
+  recordApiResponseMetrics,
+  recordApiErrorMetrics,
+  recordFileOperationMetric,
+  recordInvalidChunk,
+  recordContentRetry,
+  recordContentRetryFailure,
+  // Performance monitoring functions
+  recordStartupPerformance,
+  recordMemoryUsage,
+  recordCpuUsage,
+  recordToolQueueDepth,
+  recordToolExecutionBreakdown,
+  recordTokenEfficiency,
+  recordApiRequestBreakdown,
+  recordPerformanceScore,
+  recordPerformanceRegression,
+  recordBaselineComparison,
+  isPerformanceMonitoringActive,
+  // Performance monitoring types
+  PerformanceMetricType,
+  MemoryMetricType,
+  ToolExecutionPhase,
+  ApiRequestPhase,
+  FileOperation,
+} from './metrics.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
-export { DEFAULT_OTLP_ENDPOINT, DEFAULT_TELEMETRY_TARGET };

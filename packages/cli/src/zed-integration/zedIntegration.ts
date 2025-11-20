@@ -12,34 +12,82 @@ import type {
   GeminiChat,
   ToolCallConfirmationDetails,
   ToolResult,
+  SubAgentEventEmitter,
+  SubAgentToolCallEvent,
+  SubAgentToolResultEvent,
+  SubAgentApprovalRequestEvent,
+  AnyDeclarativeTool,
+  AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   clearCachedCredentialFile,
   convertToFunctionResponse,
   DiscoveredMCPTool,
-  getErrorMessage,
-  getErrorStatus,
-  isNodeError,
-  isWithinRoot,
-  logToolCall,
-  MCPServerConfig,
   StreamEventType,
+  DEFAULT_GEMINI_MODEL,
+  DEFAULT_GEMINI_MODEL_AUTO,
+  DEFAULT_GEMINI_FLASH_MODEL,
+  MCPServerConfig,
   ToolConfirmationOutcome,
+  logToolCall,
+  logUserPrompt,
+  getErrorStatus,
+  isWithinRoot,
+  isNodeError,
+  SubAgentEventType,
+  TaskTool,
+  Kind,
+  TodoWriteTool,
+  UserPromptEvent,
 } from '@qwen-code/qwen-code-core';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import { Readable, Writable } from 'node:stream';
-import { z } from 'zod';
-import type { LoadedSettings } from '../config/settings.js';
-import { SettingScope } from '../config/settings.js';
 import * as acp from './acp.js';
 import { AcpFileSystemService } from './fileSystemService.js';
-
+import { Readable, Writable } from 'node:stream';
+import type { LoadedSettings } from '../config/settings.js';
+import { SettingScope } from '../config/settings.js';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
+import { getErrorMessage } from '../utils/errors.js';
+import { ExtensionStorage, type Extension } from '../config/extension.js';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
-import type { Extension } from '../config/extension.js';
+import { ExtensionEnablementManager } from '../config/extensions/extensionEnablement.js';
+import {
+  handleSlashCommand,
+  getAvailableCommands,
+} from '../nonInteractiveCliCommands.js';
+import type { AvailableCommand, AvailableCommandsUpdate } from './schema.js';
+import { isSlashCommand } from '../ui/utils/commandUtils.js';
+
+/**
+ * Built-in commands that are allowed in ACP integration mode.
+ * Only these commands will be available when using handleSlashCommand
+ * or getAvailableCommands in ACP integration.
+ *
+ * Currently, only "init" is supported because `handleSlashCommand` in
+ * nonInteractiveCliCommands.ts only supports handling results where
+ * result.type is "submit_prompt". Other result types are either coupled
+ * to the UI or cannot send notifications to the client via ACP.
+ *
+ * If you have a good idea to add support for more commands, PRs are welcome!
+ */
+const ALLOWED_BUILTIN_COMMANDS_FOR_ACP = ['init'];
+
+/**
+ * Resolves the model to use based on the current configuration.
+ *
+ * If the model is set to "auto", it will use the flash model if in fallback
+ * mode, otherwise it will use the default model.
+ */
+export function resolveModel(model: string, isInFallbackMode: boolean): string {
+  if (model === DEFAULT_GEMINI_MODEL_AUTO) {
+    return isInFallbackMode ? DEFAULT_GEMINI_FLASH_MODEL : DEFAULT_GEMINI_MODEL;
+  }
+  return model;
+}
 
 export async function runZedIntegration(
   config: Config,
@@ -125,7 +173,7 @@ class GeminiAgent {
     cwd,
     mcpServers,
   }: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
-    const sessionId = randomUUID();
+    const sessionId = this.config.getSessionId() || randomUUID();
     const config = await this.newSessionConfig(sessionId, cwd, mcpServers);
 
     let isAuthenticated = false;
@@ -156,8 +204,19 @@ class GeminiAgent {
 
     const geminiClient = config.getGeminiClient();
     const chat = await geminiClient.startChat();
-    const session = new Session(sessionId, chat, config, this.client);
+    const session = new Session(
+      sessionId,
+      chat,
+      config,
+      this.client,
+      this.settings,
+    );
     this.sessions.set(sessionId, session);
+
+    // Send available commands update as the first session update
+    setTimeout(async () => {
+      await session.sendAvailableCommandsUpdate();
+    }, 0);
 
     return {
       sessionId,
@@ -184,6 +243,10 @@ class GeminiAgent {
     const config = await loadCliConfig(
       settings,
       this.extensions,
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        this.argv.extensions,
+      ),
       sessionId,
       this.argv,
       cwd,
@@ -212,12 +275,14 @@ class GeminiAgent {
 
 class Session {
   private pendingPrompt: AbortController | null = null;
+  private turn: number = 0;
 
   constructor(
     private readonly id: string,
     private readonly chat: GeminiChat,
     private readonly config: Config,
     private readonly client: acp.Client,
+    private readonly settings: LoadedSettings,
   ) {}
 
   async cancelPendingPrompt(): Promise<void> {
@@ -234,10 +299,57 @@ class Session {
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
-    const promptId = Math.random().toString(16).slice(2);
-    const chat = this.chat;
+    // Increment turn counter for each user prompt
+    this.turn += 1;
 
-    const parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+    const chat = this.chat;
+    const promptId = this.config.getSessionId() + '########' + this.turn;
+
+    // Extract text from all text blocks to construct the full prompt text for logging
+    const promptText = params.prompt
+      .filter((block) => block.type === 'text')
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join(' ');
+
+    // Log user prompt
+    logUserPrompt(
+      this.config,
+      new UserPromptEvent(
+        promptText.length,
+        promptId,
+        this.config.getContentGeneratorConfig()?.authType,
+        promptText,
+      ),
+    );
+
+    // Check if the input contains a slash command
+    // Extract text from the first text block if present
+    const firstTextBlock = params.prompt.find((block) => block.type === 'text');
+    const inputText = firstTextBlock?.text || '';
+
+    let parts: Part[];
+
+    if (isSlashCommand(inputText)) {
+      // Handle slash command - allow specific built-in commands for ACP integration
+      const slashCommandResult = await handleSlashCommand(
+        inputText,
+        pendingSend,
+        this.config,
+        this.settings,
+        ALLOWED_BUILTIN_COMMANDS_FOR_ACP,
+      );
+
+      if (slashCommandResult) {
+        // Use the result from the slash command
+        parts = slashCommandResult as Part[];
+      } else {
+        // Slash command didn't return a prompt, continue with normal processing
+        parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+      }
+    } else {
+      // Normal processing for non-slash commands
+      parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+    }
 
     let nextMessage: Content | null = { role: 'user', parts };
 
@@ -251,6 +363,7 @@ class Session {
 
       try {
         const responseStream = await chat.sendMessageStream(
+          resolveModel(this.config.getModel(), this.config.isInFallbackMode()),
           {
             message: nextMessage?.parts ?? [],
             config: {
@@ -330,6 +443,37 @@ class Session {
     await this.client.sessionUpdate(params);
   }
 
+  async sendAvailableCommandsUpdate(): Promise<void> {
+    const abortController = new AbortController();
+    try {
+      const slashCommands = await getAvailableCommands(
+        this.config,
+        this.settings,
+        abortController.signal,
+        ALLOWED_BUILTIN_COMMANDS_FOR_ACP,
+      );
+
+      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
+      const availableCommands: AvailableCommand[] = slashCommands.map(
+        (cmd) => ({
+          name: cmd.name,
+          description: cmd.description,
+          input: null,
+        }),
+      );
+
+      const update: AvailableCommandsUpdate = {
+        sessionUpdate: 'available_commands_update',
+        availableCommands,
+      };
+
+      await this.sendUpdate(update);
+    } catch (error) {
+      // Log error but don't fail session creation
+      console.error('Error sending available commands update:', error);
+    }
+  }
+
   private async runTool(
     abortSignal: AbortSignal,
     promptId: string,
@@ -382,8 +526,33 @@ class Session {
       );
     }
 
+    // Detect TodoWriteTool early - route to plan updates instead of tool_call events
+    const isTodoWriteTool =
+      fc.name === TodoWriteTool.Name || tool.name === TodoWriteTool.Name;
+
+    // Declare subAgentToolEventListeners outside try block for cleanup in catch
+    let subAgentToolEventListeners: Array<() => void> = [];
+
     try {
       const invocation = tool.build(args);
+
+      // Detect TaskTool and set up sub-agent tool tracking
+      const isTaskTool = tool.name === TaskTool.Name;
+
+      if (isTaskTool && 'eventEmitter' in invocation) {
+        // Access eventEmitter from TaskTool invocation
+        const taskEventEmitter = (
+          invocation as {
+            eventEmitter: SubAgentEventEmitter;
+          }
+        ).eventEmitter;
+
+        // Set up sub-agent tool tracking
+        subAgentToolEventListeners = this.setupSubAgentToolTracking(
+          taskEventEmitter,
+          abortSignal,
+        );
+      }
 
       const confirmationDetails =
         await invocation.shouldConfirmExecute(abortSignal);
@@ -439,7 +608,8 @@ class Session {
             throw new Error(`Unexpected: ${resultOutcome}`);
           }
         }
-      } else {
+      } else if (!isTodoWriteTool) {
+        // Skip tool_call event for TodoWriteTool
         await this.sendUpdate({
           sessionUpdate: 'tool_call',
           toolCallId: callId,
@@ -452,14 +622,61 @@ class Session {
       }
 
       const toolResult: ToolResult = await invocation.execute(abortSignal);
-      const content = toToolCallContent(toolResult);
 
-      await this.sendUpdate({
-        sessionUpdate: 'tool_call_update',
-        toolCallId: callId,
-        status: 'completed',
-        content: content ? [content] : [],
-      });
+      // Clean up event listeners
+      subAgentToolEventListeners.forEach((cleanup) => cleanup());
+
+      // Handle TodoWriteTool: extract todos and send plan update
+      if (isTodoWriteTool) {
+        // Extract todos from args (initial state)
+        let todos: Array<{
+          id: string;
+          content: string;
+          status: 'pending' | 'in_progress' | 'completed';
+        }> = [];
+
+        if (Array.isArray(args['todos'])) {
+          todos = args['todos'] as Array<{
+            id: string;
+            content: string;
+            status: 'pending' | 'in_progress' | 'completed';
+          }>;
+        }
+
+        // If returnDisplay has todos (e.g., modified by user), use those instead
+        if (
+          toolResult.returnDisplay &&
+          typeof toolResult.returnDisplay === 'object' &&
+          'type' in toolResult.returnDisplay &&
+          toolResult.returnDisplay.type === 'todo_list' &&
+          'todos' in toolResult.returnDisplay &&
+          Array.isArray(toolResult.returnDisplay.todos)
+        ) {
+          todos = toolResult.returnDisplay.todos;
+        }
+
+        // Convert todos to plan entries and send plan update
+        if (todos.length > 0 || Array.isArray(args['todos'])) {
+          const planEntries = convertTodosToPlanEntries(todos);
+          await this.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: planEntries,
+          });
+        }
+
+        // Skip tool_call_update event for TodoWriteTool
+        // Still log and return function response for LLM
+      } else {
+        // Normal tool handling: send tool_call_update
+        const content = toToolCallContent(toolResult);
+
+        await this.sendUpdate({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: callId,
+          status: 'completed',
+          content: content ? [content] : [],
+        });
+      }
 
       const durationMs = Date.now() - startTime;
       logToolCall(this.config, {
@@ -479,6 +696,9 @@ class Session {
 
       return convertToFunctionResponse(fc.name, callId, toolResult.llmContent);
     } catch (e) {
+      // Ensure cleanup on error
+      subAgentToolEventListeners.forEach((cleanup) => cleanup());
+
       const error = e instanceof Error ? e : new Error(String(e));
 
       await this.sendUpdate({
@@ -492,6 +712,300 @@ class Session {
 
       return errorResponse(error);
     }
+  }
+
+  /**
+   * Sets up event listeners to track sub-agent tool calls within a TaskTool execution.
+   * Converts subagent tool call events into zedIntegration session updates.
+   *
+   * @param eventEmitter - The SubAgentEventEmitter from TaskTool
+   * @param abortSignal - Signal to abort tracking if parent is cancelled
+   * @returns Array of cleanup functions to remove event listeners
+   */
+  private setupSubAgentToolTracking(
+    eventEmitter: SubAgentEventEmitter,
+    abortSignal: AbortSignal,
+  ): Array<() => void> {
+    const cleanupFunctions: Array<() => void> = [];
+    const toolRegistry = this.config.getToolRegistry();
+
+    // Track subagent tool call states
+    const subAgentToolStates = new Map<
+      string,
+      {
+        tool?: AnyDeclarativeTool;
+        invocation?: AnyToolInvocation;
+        args?: Record<string, unknown>;
+      }
+    >();
+
+    // Listen for tool call start
+    const onToolCall = (...args: unknown[]) => {
+      const event = args[0] as SubAgentToolCallEvent;
+      if (abortSignal.aborted) return;
+
+      const subAgentTool = toolRegistry.getTool(event.name);
+      let subAgentInvocation: AnyToolInvocation | undefined;
+      let toolKind: acp.ToolKind = 'other';
+      let locations: acp.ToolCallLocation[] = [];
+
+      if (subAgentTool) {
+        try {
+          subAgentInvocation = subAgentTool.build(event.args);
+          toolKind = this.mapToolKind(subAgentTool.kind);
+          locations = subAgentInvocation.toolLocations().map((loc) => ({
+            path: loc.path,
+            line: loc.line ?? null,
+          }));
+        } catch (e) {
+          // If building fails, continue with defaults
+          console.warn(`Failed to build subagent tool ${event.name}:`, e);
+        }
+      }
+
+      // Save state for subsequent updates
+      subAgentToolStates.set(event.callId, {
+        tool: subAgentTool,
+        invocation: subAgentInvocation,
+        args: event.args,
+      });
+
+      // Check if this is TodoWriteTool - if so, skip sending tool_call event
+      // Plan update will be sent in onToolResult when we have the final state
+      if (event.name === TodoWriteTool.Name) {
+        return;
+      }
+
+      // Send tool call start update with rawInput
+      void this.sendUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId: event.callId,
+        status: 'in_progress',
+        title: event.description || event.name,
+        content: [],
+        locations,
+        kind: toolKind,
+        rawInput: event.args,
+      });
+    };
+
+    // Listen for tool call result
+    const onToolResult = (...args: unknown[]) => {
+      const event = args[0] as SubAgentToolResultEvent;
+      if (abortSignal.aborted) return;
+
+      const state = subAgentToolStates.get(event.callId);
+
+      // Check if this is TodoWriteTool - if so, route to plan updates
+      if (event.name === TodoWriteTool.Name) {
+        let todos:
+          | Array<{
+              id: string;
+              content: string;
+              status: 'pending' | 'in_progress' | 'completed';
+            }>
+          | undefined;
+
+        // Try to extract todos from resultDisplay first (final state)
+        if (event.resultDisplay) {
+          try {
+            // resultDisplay might be a JSON stringified object
+            const parsed =
+              typeof event.resultDisplay === 'string'
+                ? JSON.parse(event.resultDisplay)
+                : event.resultDisplay;
+
+            if (
+              typeof parsed === 'object' &&
+              parsed !== null &&
+              'type' in parsed &&
+              parsed.type === 'todo_list' &&
+              'todos' in parsed &&
+              Array.isArray(parsed.todos)
+            ) {
+              todos = parsed.todos;
+            }
+          } catch {
+            // If parsing fails, ignore - resultDisplay might not be JSON
+          }
+        }
+
+        // Fallback to args if resultDisplay doesn't have todos
+        if (!todos && state?.args && Array.isArray(state.args['todos'])) {
+          todos = state.args['todos'] as Array<{
+            id: string;
+            content: string;
+            status: 'pending' | 'in_progress' | 'completed';
+          }>;
+        }
+
+        // Send plan update if we have todos
+        if (todos) {
+          const planEntries = convertTodosToPlanEntries(todos);
+          void this.sendUpdate({
+            sessionUpdate: 'plan',
+            entries: planEntries,
+          });
+        }
+
+        // Skip sending tool_call_update event for TodoWriteTool
+        // Clean up state
+        subAgentToolStates.delete(event.callId);
+        return;
+      }
+
+      let content: acp.ToolCallContent[] = [];
+
+      // If there's a result display, try to convert to ToolCallContent
+      if (event.resultDisplay && state?.invocation) {
+        // resultDisplay is typically a string
+        if (typeof event.resultDisplay === 'string') {
+          content = [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: event.resultDisplay,
+              },
+            },
+          ];
+        }
+      }
+
+      // Send tool call completion update
+      void this.sendUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: event.callId,
+        status: event.success ? 'completed' : 'failed',
+        content: content.length > 0 ? content : [],
+        title: state?.invocation?.getDescription() ?? event.name,
+        kind: state?.tool ? this.mapToolKind(state.tool.kind) : null,
+        locations:
+          state?.invocation?.toolLocations().map((loc) => ({
+            path: loc.path,
+            line: loc.line ?? null,
+          })) ?? null,
+        rawInput: state?.args,
+      });
+
+      // Clean up state
+      subAgentToolStates.delete(event.callId);
+    };
+
+    // Listen for permission requests
+    const onToolWaitingApproval = async (...args: unknown[]) => {
+      const event = args[0] as SubAgentApprovalRequestEvent;
+      if (abortSignal.aborted) return;
+
+      const state = subAgentToolStates.get(event.callId);
+      const content: acp.ToolCallContent[] = [];
+
+      // Handle different confirmation types
+      if (event.confirmationDetails.type === 'edit') {
+        const editDetails = event.confirmationDetails as unknown as {
+          type: 'edit';
+          fileName: string;
+          originalContent: string | null;
+          newContent: string;
+        };
+        content.push({
+          type: 'diff',
+          path: editDetails.fileName,
+          oldText: editDetails.originalContent ?? '',
+          newText: editDetails.newContent,
+        });
+      }
+
+      // Build permission request options from confirmation details
+      // event.confirmationDetails already contains all fields except onConfirm,
+      // which we add here to satisfy the type requirement for toPermissionOptions
+      const fullConfirmationDetails = {
+        ...event.confirmationDetails,
+        onConfirm: async () => {
+          // This is a placeholder - the actual response is handled via event.respond
+        },
+      } as unknown as ToolCallConfirmationDetails;
+
+      const params: acp.RequestPermissionRequest = {
+        sessionId: this.id,
+        options: toPermissionOptions(fullConfirmationDetails),
+        toolCall: {
+          toolCallId: event.callId,
+          status: 'pending',
+          title: event.description || event.name,
+          content,
+          locations:
+            state?.invocation?.toolLocations().map((loc) => ({
+              path: loc.path,
+              line: loc.line ?? null,
+            })) ?? [],
+          kind: state?.tool ? this.mapToolKind(state.tool.kind) : 'other',
+          rawInput: state?.args,
+        },
+      };
+
+      try {
+        // Request permission from zed client
+        const output = await this.client.requestPermission(params);
+        const outcome =
+          output.outcome.outcome === 'cancelled'
+            ? ToolConfirmationOutcome.Cancel
+            : z
+                .nativeEnum(ToolConfirmationOutcome)
+                .parse(output.outcome.optionId);
+
+        // Respond to subagent with the outcome
+        await event.respond(outcome);
+      } catch (error) {
+        // If permission request fails, cancel the tool call
+        console.error(
+          `Permission request failed for subagent tool ${event.name}:`,
+          error,
+        );
+        await event.respond(ToolConfirmationOutcome.Cancel);
+      }
+    };
+
+    // Register event listeners
+    eventEmitter.on(SubAgentEventType.TOOL_CALL, onToolCall);
+    eventEmitter.on(SubAgentEventType.TOOL_RESULT, onToolResult);
+    eventEmitter.on(
+      SubAgentEventType.TOOL_WAITING_APPROVAL,
+      onToolWaitingApproval,
+    );
+
+    // Return cleanup functions
+    cleanupFunctions.push(() => {
+      eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
+      eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
+      eventEmitter.off(
+        SubAgentEventType.TOOL_WAITING_APPROVAL,
+        onToolWaitingApproval,
+      );
+    });
+
+    return cleanupFunctions;
+  }
+
+  /**
+   * Maps core Tool Kind enum to ACP ToolKind string literals.
+   *
+   * @param kind - The core Kind enum value
+   * @returns The corresponding ACP ToolKind string literal
+   */
+  private mapToolKind(kind: Kind): acp.ToolKind {
+    const kindMap: Record<Kind, acp.ToolKind> = {
+      [Kind.Read]: 'read',
+      [Kind.Edit]: 'edit',
+      [Kind.Delete]: 'delete',
+      [Kind.Move]: 'move',
+      [Kind.Search]: 'search',
+      [Kind.Execute]: 'execute',
+      [Kind.Think]: 'think',
+      [Kind.Fetch]: 'fetch',
+      [Kind.Other]: 'other',
+    };
+    return kindMap[kind] ?? 'other';
   }
 
   async #resolvePrompt(
@@ -838,6 +1352,27 @@ class Session {
   }
 }
 
+/**
+ * Converts todo items to plan entries format for zed integration.
+ * Maps todo status to plan status and assigns a default priority.
+ *
+ * @param todos - Array of todo items with id, content, and status
+ * @returns Array of plan entries with content, priority, and status
+ */
+function convertTodosToPlanEntries(
+  todos: Array<{
+    id: string;
+    content: string;
+    status: 'pending' | 'in_progress' | 'completed';
+  }>,
+): acp.PlanEntry[] {
+  return todos.map((todo) => ({
+    content: todo.content,
+    priority: 'medium' as const, // Default priority since todos don't have priority
+    status: todo.status,
+  }));
+}
+
 function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
   if (toolResult.error?.message) {
     throw new Error(toolResult.error.message);
@@ -851,26 +1386,6 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
       };
     } else if (
       'type' in toolResult.returnDisplay &&
-      toolResult.returnDisplay.type === 'todo_list'
-    ) {
-      // Handle TodoResultDisplay - convert to text representation
-      const todoText = toolResult.returnDisplay.todos
-        .map((todo) => {
-          const statusIcon = {
-            pending: '○',
-            in_progress: '◐',
-            completed: '●',
-          }[todo.status];
-          return `${statusIcon} ${todo.content}`;
-        })
-        .join('\n');
-
-      return {
-        type: 'content',
-        content: { type: 'text', text: todoText },
-      };
-    } else if (
-      'type' in toolResult.returnDisplay &&
       toolResult.returnDisplay.type === 'plan_summary'
     ) {
       const planDisplay = toolResult.returnDisplay;
@@ -879,14 +1394,16 @@ function toToolCallContent(toolResult: ToolResult): acp.ToolCallContent | null {
         type: 'content',
         content: { type: 'text', text: planText },
       };
-    } else if ('fileDiff' in toolResult.returnDisplay) {
-      // Handle FileDiff
-      return {
-        type: 'diff',
-        path: toolResult.returnDisplay.fileName,
-        oldText: toolResult.returnDisplay.originalContent,
-        newText: toolResult.returnDisplay.newContent,
-      };
+    } else {
+      if ('fileName' in toolResult.returnDisplay) {
+        return {
+          type: 'diff',
+          path: toolResult.returnDisplay.fileName,
+          oldText: toolResult.returnDisplay.originalContent,
+          newText: toolResult.returnDisplay.newContent,
+        };
+      }
+      return null;
     }
   }
   return null;

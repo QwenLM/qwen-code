@@ -82,6 +82,7 @@ export function EditOptionsStep({
       <Box flexDirection="column">
         <RadioButtonSelect
           items={editOptions.map((option) => ({
+            key: option.id,
             label: option.label,
             value: option.id,
           }))}

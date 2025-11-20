@@ -13,8 +13,10 @@ import {
   afterEach,
   afterAll,
 } from 'vitest';
+import * as os from 'node:os';
 import { QwenLogger, TEST_ONLY } from './qwen-logger.js';
 import type { Config } from '../../config/config.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import {
   StartSessionEvent,
   EndSessionEvent,
@@ -22,7 +24,7 @@ import {
   KittySequenceOverflowEvent,
   IdeConnectionType,
 } from '../types.js';
-import type { RumEvent } from './event-types.js';
+import type { RumEvent, RumPayload } from './event-types.js';
 
 // Mock dependencies
 vi.mock('../../utils/user_id.js', () => ({
@@ -46,6 +48,7 @@ const makeFakeConfig = (overrides: Partial<Config> = {}): Config => {
     getCliVersion: () => '1.0.0',
     getProxy: () => undefined,
     getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
+    getAuthType: () => AuthType.QWEN_OAUTH,
     getMcpServers: () => ({}),
     getModel: () => 'test-model',
     getEmbeddingModel: () => 'test-embedding',
@@ -55,6 +58,7 @@ const makeFakeConfig = (overrides: Partial<Config> = {}): Config => {
     getTelemetryEnabled: () => true,
     getTelemetryLogPromptsEnabled: () => false,
     getFileFilteringRespectGitIgnore: () => true,
+    getOutputFormat: () => 'text',
     ...overrides,
   };
   return defaults as Config;
@@ -98,6 +102,24 @@ describe('QwenLogger', () => {
       const logger1 = QwenLogger.getInstance(mockConfig);
       const logger2 = QwenLogger.getInstance(mockConfig);
       expect(logger1).toBe(logger2);
+    });
+  });
+
+  describe('createRumPayload', () => {
+    it('includes os metadata in payload', async () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const payload = await (
+        logger as unknown as {
+          createRumPayload(): Promise<RumPayload>;
+        }
+      ).createRumPayload();
+
+      expect(payload.os).toEqual(
+        expect.objectContaining({
+          type: os.platform(),
+          version: os.release(),
+        }),
+      );
     });
   });
 
@@ -262,7 +284,7 @@ describe('QwenLogger', () => {
       expect(enqueueSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           event_type: 'action',
-          type: 'connection',
+          type: 'ide',
           name: 'ide_connection',
           snapshots: JSON.stringify({
             connection_type: IdeConnectionType.SESSION,

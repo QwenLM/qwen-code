@@ -8,7 +8,7 @@ import { OpenAIContentGenerator } from '../core/openaiContentGenerator/index.js'
 import { DashScopeOpenAICompatibleProvider } from '../core/openaiContentGenerator/provider/dashscope.js';
 import type { IQwenOAuth2Client } from './qwenOAuth2.js';
 import { SharedTokenManager } from './sharedTokenManager.js';
-import type { Config } from '../config/config.js';
+import { type Config } from '../config/config.js';
 import type {
   GenerateContentParameters,
   GenerateContentResponse,
@@ -18,10 +18,7 @@ import type {
   EmbedContentResponse,
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
-
-// Default fallback base URL if no endpoint is provided
-const DEFAULT_QWEN_BASE_URL =
-  'https://dashscope.aliyuncs.com/compatible-mode/v1';
+import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 
 /**
  * Qwen Content Generator that uses Qwen OAuth tokens with automatic refresh
@@ -58,7 +55,7 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
    * Get the current endpoint URL with proper protocol and /v1 suffix
    */
   private getCurrentEndpoint(resourceUrl?: string): string {
-    const baseEndpoint = resourceUrl || DEFAULT_QWEN_BASE_URL;
+    const baseEndpoint = resourceUrl || DEFAULT_DASHSCOPE_BASE_URL;
     const suffix = '/v1';
 
     // Normalize the URL: add protocol if missing, ensure /v1 suffix

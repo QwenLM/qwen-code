@@ -19,24 +19,10 @@ process_pr() {
     local PR_NUMBER=$1
     echo "🔄 Processing PR #${PR_NUMBER}"
 
-    # Get PR body with error handling
-    local PR_BODY
-    if ! PR_BODY=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json body -q .body 2>/dev/null); then
-        echo "   ⚠️ Could not fetch PR #${PR_NUMBER} details"
-        return 1
-    fi
-
-    # Look for issue references using multiple patterns
-    local ISSUE_NUMBER=""
-
-    # Pattern 1: Direct reference like #123
-    if [[ -z "${ISSUE_NUMBER}" ]]; then
-        ISSUE_NUMBER=$(echo "${PR_BODY}" | grep -oE '#[0-9]+' | head -1 | sed 's/#//' 2>/dev/null || echo "")
-    fi
-
-    # Pattern 2: Closes/Fixes/Resolves patterns (case-insensitive)
-    if [[ -z "${ISSUE_NUMBER}" ]]; then
-        ISSUE_NUMBER=$(echo "${PR_BODY}" | grep -iE '(closes?|fixes?|resolves?) #[0-9]+' | grep -oE '#[0-9]+' | head -1 | sed 's/#//' 2>/dev/null || echo "")
+    # Get closing issue number with error handling
+    local ISSUE_NUMBER
+    if ! ISSUE_NUMBER=$(gh pr view "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --json closingIssuesReferences -q '.closingIssuesReferences.nodes[0].number' 2>/dev/null); then
+        echo "   ⚠️ Could not fetch closing issue for PR #${PR_NUMBER}"
     fi
 
     if [[ -z "${ISSUE_NUMBER}" ]]; then
@@ -110,14 +96,7 @@ process_pr() {
             fi
         fi
 
-        if [[ -n "${LABELS_TO_REMOVE}" ]]; then
-            echo "➖ Removing labels: ${LABELS_TO_REMOVE}"
-            if ! gh pr edit "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --remove-label "${LABELS_TO_REMOVE}" 2>/dev/null; then
-                echo "   ⚠️ Failed to remove some labels"
-            fi
-        fi
-
-        if [[ -z "${LABELS_TO_ADD}" ]] && [[ -z "${LABELS_TO_REMOVE}" ]]; then
+        if [[ -z "${LABELS_TO_ADD}" ]]; then
             echo "✅ Labels already synchronized"
         fi
         echo "needs_comment=false" >> "${GITHUB_OUTPUT}"

@@ -7,7 +7,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
-import { Colors } from '../../../colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
 
@@ -242,7 +241,9 @@ export const AgentSelectionStep = ({
             </Text>
           )}
           {agent.level === 'user' && projectNames.has(agent.name) && (
-            <Text color={isSelected ? theme.status.warning : Colors.Gray}>
+            <Text
+              color={isSelected ? theme.status.warning : theme.text.secondary}
+            >
               {' '}
               (overridden by project level agent)
             </Text>

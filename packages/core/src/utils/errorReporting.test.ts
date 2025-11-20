@@ -20,7 +20,7 @@ describe('reportError', () => {
 
   beforeEach(async () => {
     // Create a temporary directory for logs
-    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gemini-report-test-'));
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-report-test-'));
     vi.resetAllMocks();
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(Date.prototype, 'toISOString').mockReturnValue(MOCK_TIMESTAMP);
@@ -33,7 +33,7 @@ describe('reportError', () => {
   });
 
   const getExpectedReportPath = (type: string) =>
-    path.join(testDir, `gemini-client-error-${type}-${MOCK_TIMESTAMP}.json`);
+    path.join(testDir, `qwen-client-error-${type}-${MOCK_TIMESTAMP}.json`);
 
   it('should generate a report and log the path', async () => {
     const error = new Error('Test error');

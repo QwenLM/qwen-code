@@ -16,8 +16,7 @@ import type {
   ToolConfirmationOutcome,
   ToolCallConfirmationDetails,
 } from '../tools/tools.js';
-import { createContentGenerator } from '../core/contentGenerator.js';
-import { getEnvironmentContext } from '../utils/environmentContext.js';
+import { getInitialChatHistory } from '../utils/environmentContext.js';
 import type {
   Content,
   Part,
@@ -55,6 +54,7 @@ import type { SubagentHooks } from './subagent-hooks.js';
 import { logSubagentExecution } from '../telemetry/loggers.js';
 import { SubagentExecutionEvent } from '../telemetry/types.js';
 import { TaskTool } from '../tools/task.js';
+import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 
 /**
  * @fileoverview Defines the configuration interfaces for a subagent.
@@ -329,7 +329,10 @@ export class SubAgentScope {
       this.eventEmitter?.emit(SubAgentEventType.START, {
         subagentId: this.subagentId,
         name: this.name,
-        model: this.modelConfig.model,
+        model:
+          this.modelConfig.model ||
+          this.runtimeContext.getModel() ||
+          DEFAULT_QWEN_MODEL,
         tools: (this.toolConfig?.tools || ['*']).map((t) =>
           typeof t === 'string' ? t : t.name,
         ),
@@ -367,6 +370,9 @@ export class SubAgentScope {
         };
 
         const responseStream = await chat.sendMessageStream(
+          this.modelConfig.model ||
+            this.runtimeContext.getModel() ||
+            DEFAULT_QWEN_MODEL,
           messageParams,
           promptId,
         );
@@ -801,11 +807,7 @@ export class SubAgentScope {
       );
     }
 
-    const envParts = await getEnvironmentContext(this.runtimeContext);
-    const envHistory: Content[] = [
-      { role: 'user', parts: envParts },
-      { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
-    ];
+    const envHistory = await getInitialChatHistory(this.runtimeContext);
 
     const start_history = [
       ...envHistory,
@@ -828,26 +830,15 @@ export class SubAgentScope {
         generationConfig.systemInstruction = systemInstruction;
       }
 
-      const contentGenerator = await createContentGenerator(
-        this.runtimeContext.getContentGeneratorConfig(),
-        this.runtimeContext,
-        this.runtimeContext.getSessionId(),
-      );
-
-      if (this.modelConfig.model) {
-        await this.runtimeContext.setModel(this.modelConfig.model);
-      }
-
       return new GeminiChat(
         this.runtimeContext,
-        contentGenerator,
         generationConfig,
         start_history,
       );
     } catch (error) {
       await reportError(
         error,
-        'Error initializing Gemini chat session.',
+        'Error initializing chat session.',
         start_history,
         'startChat',
       );

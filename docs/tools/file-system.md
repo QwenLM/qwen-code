@@ -4,12 +4,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 **Note:** All file system tools operate within a `rootDirectory` (usually the current working directory where you launched the CLI) for security. Paths that you provide to these tools are generally expected to be absolute or are resolved relative to this root directory.
 
-## 1. `list_directory` (ReadFolder)
+## 1. `list_directory` (ListFiles)
 
 `list_directory` lists the names of files and subdirectories directly within a specified directory path. It can optionally ignore entries matching provided glob patterns.
 
 - **Tool name:** `list_directory`
-- **Display name:** ReadFolder
+- **Display name:** ListFiles
 - **File:** `ls.ts`
 - **Parameters:**
   - `path` (string, required): The absolute path to the directory to list.
@@ -59,86 +59,80 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 - **Output (`llmContent`):** A success message, e.g., `Successfully overwrote file: /path/to/your/file.txt` or `Successfully created and wrote to new file: /path/to/new/file.txt`.
 - **Confirmation:** Yes. Shows a diff of changes and asks for user approval before writing.
 
-## 4. `glob` (FindFiles)
+## 4. `glob` (Glob)
 
 `glob` finds files matching specific glob patterns (e.g., `src/**/*.ts`, `*.md`), returning absolute paths sorted by modification time (newest first).
 
 - **Tool name:** `glob`
-- **Display name:** FindFiles
+- **Display name:** Glob
 - **File:** `glob.ts`
 - **Parameters:**
   - `pattern` (string, required): The glob pattern to match against (e.g., `"*.py"`, `"src/**/*.js"`).
-  - `path` (string, optional): The absolute path to the directory to search within. If omitted, searches the tool's root directory.
-  - `case_sensitive` (boolean, optional): Whether the search should be case-sensitive. Defaults to `false`.
-  - `respect_git_ignore` (boolean, optional): Whether to respect .gitignore patterns when finding files. Defaults to `true`.
+  - `path` (string, optional): The directory to search in. If not specified, the current working directory will be used.
 - **Behavior:**
   - Searches for files matching the glob pattern within the specified directory.
   - Returns a list of absolute paths, sorted with the most recently modified files first.
-  - Ignores common nuisance directories like `node_modules` and `.git` by default.
-- **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within src, sorted by modification time (newest first):\nsrc/file1.ts\nsrc/subdir/file2.ts...`
+  - Respects .gitignore and .qwenignore patterns by default.
+  - Limits results to 100 files to prevent context overflow.
+- **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/file1.ts\n/path/to/subdir/file2.ts\n---\n[95 files truncated] ...`
 - **Confirmation:** No.
 
-## 5. `search_file_content` (SearchText)
+## 5. `grep_search` (Grep)
 
-`search_file_content` searches for a regular expression pattern within the content of files in a specified directory. Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.
+`grep_search` searches for a regular expression pattern within the content of files in a specified directory. Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.
 
-- **Tool name:** `search_file_content`
-- **Display name:** SearchText
-- **File:** `grep.ts`
+- **Tool name:** `grep_search`
+- **Display name:** Grep
+- **File:** `ripGrep.ts` (with `grep.ts` as fallback)
 - **Parameters:**
-  - `pattern` (string, required): The regular expression (regex) to search for (e.g., `"function\s+myFunction"`).
-  - `path` (string, optional): The absolute path to the directory to search within. Defaults to the current working directory.
-  - `include` (string, optional): A glob pattern to filter which files are searched (e.g., `"*.js"`, `"src/**/*.{ts,tsx}"`). If omitted, searches most files (respecting common ignores).
-  - `maxResults` (number, optional): Maximum number of matches to return to prevent context overflow (default: 20, max: 100). Use lower values for broad searches, higher for specific searches.
+  - `pattern` (string, required): The regular expression pattern to search for in file contents (e.g., `"function\\s+myFunction"`, `"log.*Error"`).
+  - `path` (string, optional): File or directory to search in. Defaults to current working directory.
+  - `glob` (string, optional): Glob pattern to filter files (e.g. `"*.js"`, `"src/**/*.{ts,tsx}"`).
+  - `limit` (number, optional): Limit output to first N matching lines. Optional - shows all matches if not specified.
 - **Behavior:**
-  - Uses `git grep` if available in a Git repository for speed; otherwise, falls back to system `grep` or a JavaScript-based search.
-  - Returns a list of matching lines, each prefixed with its file path (relative to the search directory) and line number.
-  - Limits results to a maximum of 20 matches by default to prevent context overflow. When results are truncated, shows a clear warning with guidance on refining searches.
+  - Uses ripgrep for fast search when available; otherwise falls back to a JavaScript-based search implementation.
+  - Returns matching lines with file paths and line numbers.
+  - Case-insensitive by default.
+  - Respects .gitignore and .qwenignore patterns.
+  - Limits output to prevent context overflow.
 - **Output (`llmContent`):** A formatted string of matches, e.g.:
 
   ```
   Found 3 matches for pattern "myFunction" in path "." (filter: "*.ts"):
   ---
-  File: src/utils.ts
-  L15: export function myFunction() {
-  L22:   myFunction.call();
-  ---
-  File: src/index.ts
-  L5: import { myFunction } from './utils';
+  src/utils.ts:15:export function myFunction() {
+  src/utils.ts:22:  myFunction.call();
+  src/index.ts:5:import { myFunction } from './utils';
   ---
 
-  WARNING: Results truncated to prevent context overflow. To see more results:
-  - Use a more specific pattern to reduce matches
-  - Add file filters with the 'include' parameter (e.g., "*.js", "src/**")
-  - Specify a narrower 'path' to search in a subdirectory
-  - Increase 'maxResults' parameter if you need more matches (current: 20)
+  [0 lines truncated] ...
   ```
 
 - **Confirmation:** No.
 
-### `search_file_content` examples
+### `grep_search` examples
 
 Search for a pattern with default result limiting:
 
 ```
-search_file_content(pattern="function\s+myFunction", path="src")
+grep_search(pattern="function\\s+myFunction", path="src")
 ```
 
 Search for a pattern with custom result limiting:
 
 ```
-search_file_content(pattern="function", path="src", maxResults=50)
+grep_search(pattern="function", path="src", limit=50)
 ```
 
 Search for a pattern with file filtering and custom result limiting:
 
 ```
-search_file_content(pattern="function", include="*.js", maxResults=10)
+grep_search(pattern="function", glob="*.js", limit=10)
 ```
 
 ## 6. `edit` (Edit)
 
-`edit` replaces text within a file. By default, replaces a single occurrence, but can replace multiple occurrences when `expected_replacements` is specified. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
+`edit` replaces text within a file. By default it requires `old_string` to match a single unique location; set `replace_all` to `true` when you intentionally want to change every occurrence. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
 
 - **Tool name:** `edit`
 - **Display name:** Edit
@@ -150,12 +144,12 @@ search_file_content(pattern="function", include="*.js", maxResults=10)
     **CRITICAL:** This string must uniquely identify the single instance to change. It should include at least 3 lines of context _before_ and _after_ the target text, matching whitespace and indentation precisely. If `old_string` is empty, the tool attempts to create a new file at `file_path` with `new_string` as content.
 
   - `new_string` (string, required): The exact literal text to replace `old_string` with.
-  - `expected_replacements` (number, optional): The number of occurrences to replace. Defaults to `1`.
+  - `replace_all` (boolean, optional): Replace all occurrences of `old_string`. Defaults to `false`.
 
 - **Behavior:**
   - If `old_string` is empty and `file_path` does not exist, creates a new file with `new_string` as content.
-  - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence of `old_string`.
-  - If one occurrence is found, it replaces it with `new_string`.
+  - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence unless `replace_all` is true.
+  - If the match is unique (or `replace_all` is true), it replaces the text with `new_string`.
   - **Enhanced Reliability (Multi-Stage Edit Correction):** To significantly improve the success rate of edits, especially when the model-provided `old_string` might not be perfectly precise, the tool incorporates a multi-stage edit correction mechanism.
     - If the initial `old_string` isn't found or matches multiple locations, the tool can leverage the Qwen model to iteratively refine `old_string` (and potentially `new_string`).
     - This self-correction process attempts to identify the unique segment the model intended to modify, making the `edit` operation more robust even with slightly imperfect initial context.
@@ -164,10 +158,10 @@ search_file_content(pattern="function", include="*.js", maxResults=10)
   - `old_string` is not empty, but the `file_path` does not exist.
   - `old_string` is empty, but the `file_path` already exists.
   - `old_string` is not found in the file after attempts to correct it.
-  - `old_string` is found multiple times, and the self-correction mechanism cannot resolve it to a single, unambiguous match.
+  - `old_string` is found multiple times, `replace_all` is false, and the self-correction mechanism cannot resolve it to a single, unambiguous match.
 - **Output (`llmContent`):**
   - On success: `Successfully modified file: /path/to/file.txt (1 replacements).` or `Created new file: /path/to/new_file.txt with provided content.`
-  - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit, expected 1 occurrences but found 2...`).
+  - On failure: An error message explaining the reason (e.g., `Failed to edit, 0 occurrences found...`, `Failed to edit because the text matches multiple locations...`).
 - **Confirmation:** Yes. Shows a diff of the proposed changes and asks for user approval before writing to the file.
 
 These file system tools provide a foundation for Qwen Code to understand and interact with your local project context.

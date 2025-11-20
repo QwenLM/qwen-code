@@ -5,17 +5,17 @@
  */
 
 import open from 'open';
-import process from 'node:process';
 import {
   type CommandContext,
   type SlashCommand,
   CommandKind,
 } from './types.js';
 import { MessageType } from '../types.js';
-import { GIT_COMMIT_INFO } from '../../generated/git-commit.js';
-import { formatMemoryUsage } from '../utils/formatters.js';
-import { getCliVersion } from '../../utils/version.js';
-import { sessionId } from '@qwen-code/qwen-code-core';
+import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
+import {
+  getSystemInfoFields,
+  getFieldValue,
+} from '../../utils/systemInfoFields.js';
 
 export const bugCommand: SlashCommand = {
   name: 'bug',
@@ -23,42 +23,20 @@ export const bugCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext, args?: string): Promise<void> => {
     const bugDescription = (args || '').trim();
-    const { config } = context.services;
+    const systemInfo = await getExtendedSystemInfo(context);
 
-    const osVersion = `${process.platform} ${process.version}`;
-    let sandboxEnv = 'no sandbox';
-    if (process.env['SANDBOX'] && process.env['SANDBOX'] !== 'sandbox-exec') {
-      sandboxEnv = process.env['SANDBOX'].replace(/^qwen-(?:code-)?/, '');
-    } else if (process.env['SANDBOX'] === 'sandbox-exec') {
-      sandboxEnv = `sandbox-exec (${
-        process.env['SEATBELT_PROFILE'] || 'unknown'
-      })`;
-    }
-    const modelVersion = config?.getModel() || 'Unknown';
-    const cliVersion = await getCliVersion();
-    const memoryUsage = formatMemoryUsage(process.memoryUsage().rss);
-    const ideClient =
-      (context.services.config?.getIdeMode() &&
-        context.services.config?.getIdeClient()?.getDetectedIdeDisplayName()) ||
-      '';
+    const fields = getSystemInfoFields(systemInfo);
 
-    let info = `
-* **CLI Version:** ${cliVersion}
-* **Git Commit:** ${GIT_COMMIT_INFO}
-* **Session ID:** ${sessionId}
-* **Operating System:** ${osVersion}
-* **Sandbox Environment:** ${sandboxEnv}
-* **Model Version:** ${modelVersion}
-* **Memory Usage:** ${memoryUsage}
-`;
-    if (ideClient) {
-      info += `* **IDE Client:** ${ideClient}\n`;
+    // Generate bug report info using the same field configuration
+    let info = '\n';
+    for (const field of fields) {
+      info += `* **${field.label}:** ${getFieldValue(field, systemInfo)}\n`;
     }
 
     let bugReportUrl =
       'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title={title}&info={info}';
 
-    const bugCommandSettings = config?.getBugCommand();
+    const bugCommandSettings = context.services.config?.getBugCommand();
     if (bugCommandSettings?.urlTemplate) {
       bugReportUrl = bugCommandSettings.urlTemplate;
     }

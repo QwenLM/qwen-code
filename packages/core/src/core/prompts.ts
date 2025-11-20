@@ -10,32 +10,57 @@ import os from 'node:os';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
-import { GEMINI_CONFIG_DIR } from '../tools/memoryTool.js';
+import { QWEN_CONFIG_DIR } from '../tools/memoryTool.js';
 import type { GenerateContentConfig } from '@google/genai';
 
-export interface ModelTemplateMapping {
-  baseUrls?: string[];
-  modelNames?: string[];
-  template?: string;
-}
+export function resolvePathFromEnv(envVar?: string): {
+  isSwitch: boolean;
+  value: string | null;
+  isDisabled: boolean;
+} {
+  // Handle the case where the environment variable is not set, empty, or just whitespace.
+  const trimmedEnvVar = envVar?.trim();
+  if (!trimmedEnvVar) {
+    return { isSwitch: false, value: null, isDisabled: false };
+  }
 
-export interface SystemPromptConfig {
-  systemPromptMappings?: ModelTemplateMapping[];
-}
+  const lowerEnvVar = trimmedEnvVar.toLowerCase();
+  // Check if the input is a common boolean-like string.
+  if (['0', 'false', '1', 'true'].includes(lowerEnvVar)) {
+    // If so, identify it as a "switch" and return its value.
+    const isDisabled = ['0', 'false'].includes(lowerEnvVar);
+    return { isSwitch: true, value: lowerEnvVar, isDisabled };
+  }
 
-/**
- * Normalizes a URL by removing trailing slash for consistent comparison
- */
-function normalizeUrl(url: string): string {
-  return url.endsWith('/') ? url.slice(0, -1) : url;
-}
+  // If it's not a switch, treat it as a potential file path.
+  let customPath = trimmedEnvVar;
 
-/**
- * Checks if a URL matches any URL in the array, ignoring trailing slashes
- */
-function urlMatches(urlArray: string[], targetUrl: string): boolean {
-  const normalizedTarget = normalizeUrl(targetUrl);
-  return urlArray.some((url) => normalizeUrl(url) === normalizedTarget);
+  // Safely expand the tilde (~) character to the user's home directory.
+  if (customPath.startsWith('~/') || customPath === '~') {
+    try {
+      const home = os.homedir(); // This is the call that can throw an error.
+      if (customPath === '~') {
+        customPath = home;
+      } else {
+        customPath = path.join(home, customPath.slice(2));
+      }
+    } catch (error) {
+      // If os.homedir() fails, we catch the error instead of crashing.
+      console.warn(
+        `Could not resolve home directory for path: ${trimmedEnvVar}`,
+        error,
+      );
+      // Return null to indicate the path resolution failed.
+      return { isSwitch: false, value: null, isDisabled: false };
+    }
+  }
+
+  // Return it as a non-switch with the fully resolved absolute path.
+  return {
+    isSwitch: false,
+    value: path.resolve(customPath),
+    isDisabled: false,
+  };
 }
 
 /**
@@ -82,76 +107,28 @@ export function getCustomSystemPrompt(
 
 export function getCoreSystemPrompt(
   userMemory?: string,
-  config?: SystemPromptConfig,
   model?: string,
 ): string {
-  // if GEMINI_SYSTEM_MD is set (and not 0|false), override system prompt from file
-  // default path is .gemini/system.md but can be modified via custom path in GEMINI_SYSTEM_MD
+  // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
+  // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
   let systemMdEnabled = false;
-  let systemMdPath = path.resolve(path.join(GEMINI_CONFIG_DIR, 'system.md'));
-  const systemMdVar = process.env['GEMINI_SYSTEM_MD'];
-  if (systemMdVar) {
-    const systemMdVarLower = systemMdVar.toLowerCase();
-    if (!['0', 'false'].includes(systemMdVarLower)) {
-      systemMdEnabled = true; // enable system prompt override
-      if (!['1', 'true'].includes(systemMdVarLower)) {
-        let customPath = systemMdVar;
-        if (customPath.startsWith('~/')) {
-          customPath = path.join(os.homedir(), customPath.slice(2));
-        } else if (customPath === '~') {
-          customPath = os.homedir();
-        }
-        systemMdPath = path.resolve(customPath); // use custom path from GEMINI_SYSTEM_MD
-      }
-      // require file to exist when override is enabled
-      if (!fs.existsSync(systemMdPath)) {
-        throw new Error(`missing system prompt file '${systemMdPath}'`);
-      }
+  // The default path for the system prompt file. This can be overridden.
+  let systemMdPath = path.resolve(path.join(QWEN_CONFIG_DIR, 'system.md'));
+  // Resolve the environment variable to get either a path or a switch value.
+  const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+
+  // Proceed only if the environment variable is set and is not disabled.
+  if (systemMdResolution.value && !systemMdResolution.isDisabled) {
+    systemMdEnabled = true;
+
+    // We update systemMdPath to this new custom path.
+    if (!systemMdResolution.isSwitch) {
+      systemMdPath = systemMdResolution.value;
     }
-  }
 
-  // Check for system prompt mappings from global config
-  if (config?.systemPromptMappings) {
-    const currentModel = process.env['OPENAI_MODEL'] || '';
-    const currentBaseUrl = process.env['OPENAI_BASE_URL'] || '';
-
-    const matchedMapping = config.systemPromptMappings.find((mapping) => {
-      const { baseUrls, modelNames } = mapping;
-      // Check if baseUrl matches (when specified)
-      if (
-        baseUrls &&
-        modelNames &&
-        urlMatches(baseUrls, currentBaseUrl) &&
-        modelNames.includes(currentModel)
-      ) {
-        return true;
-      }
-
-      if (baseUrls && urlMatches(baseUrls, currentBaseUrl) && !modelNames) {
-        return true;
-      }
-      if (modelNames && modelNames.includes(currentModel) && !baseUrls) {
-        return true;
-      }
-
-      return false;
-    });
-
-    if (matchedMapping?.template) {
-      const isGitRepo = isGitRepository(process.cwd());
-
-      // Replace placeholders in template
-      let template = matchedMapping.template;
-      template = template.replace(
-        '{RUNTIME_VARS_IS_GIT_REPO}',
-        String(isGitRepo),
-      );
-      template = template.replace(
-        '{RUNTIME_VARS_SANDBOX}',
-        process.env['SANDBOX'] || '',
-      );
-
-      return template;
+    // require file to exist when override is enabled
+    if (!fs.existsSync(systemMdPath)) {
+      throw new Error(`missing system prompt file '${systemMdPath}'`);
     }
   }
 
@@ -167,7 +144,7 @@ You are Qwen Code, an interactive CLI agent developed by Alibaba Group, speciali
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
 - **Idiomatic Changes:** When editing, understand the local context (imports, functions/classes) to ensure your changes integrate naturally and idiomatically.
 - **Comments:** Add code comments sparingly. Focus on *why* something is done, especially for complex logic, rather than *what* is done. Only add high-value comments if necessary for clarity or if requested by the user. Do not edit comments that are separate from the code you are changing. *NEVER* talk to the user or describe your changes through comments.
-- **Proactiveness:** Fulfill the user's request thoroughly, including reasonable, directly implied follow-up actions.
+- **Proactiveness:** Fulfill the user's request thoroughly. When adding features or fixing bugs, this includes adding tests to ensure quality. Consider all created files, especially tests, to be permanent artifacts unless the user says otherwise.
 - **Confirm Ambiguity/Expansion:** Do not take significant actions beyond the clear scope of the request without confirming with the user. If asked *how* to do something, explain first, don't just do it.
 - **Explaining Changes:** After completing a code modification or file operation *do not* provide summaries unless asked.
 - **Path Construction:** Before using any file system tool (e.g., ${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'), you must construct the full absolute path for the file_path argument. Always combine the absolute path of the project's root directory with the file's path relative to the root. For example, if the project root is /path/to/project/ and the file is foo/bar/baz.txt, the final path you must use is /path/to/project/foo/bar/baz.txt. If the user provides a relative path, you must resolve it against the root directory to create an absolute path.
@@ -337,26 +314,20 @@ ${getToolCallExamples(model || '')}
 Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' or '${ToolNames.READ_MANY_FILES}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
 `.trim();
 
-  // if GEMINI_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
-  const writeSystemMdVar = process.env['GEMINI_WRITE_SYSTEM_MD'];
-  if (writeSystemMdVar) {
-    const writeSystemMdVarLower = writeSystemMdVar.toLowerCase();
-    if (!['0', 'false'].includes(writeSystemMdVarLower)) {
-      if (['1', 'true'].includes(writeSystemMdVarLower)) {
-        fs.mkdirSync(path.dirname(systemMdPath), { recursive: true });
-        fs.writeFileSync(systemMdPath, basePrompt); // write to default path, can be modified via GEMINI_SYSTEM_MD
-      } else {
-        let customPath = writeSystemMdVar;
-        if (customPath.startsWith('~/')) {
-          customPath = path.join(os.homedir(), customPath.slice(2));
-        } else if (customPath === '~') {
-          customPath = os.homedir();
-        }
-        const resolvedPath = path.resolve(customPath);
-        fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
-        fs.writeFileSync(resolvedPath, basePrompt); // write to custom path from GEMINI_WRITE_SYSTEM_MD
-      }
-    }
+  // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
+  const writeSystemMdResolution = resolvePathFromEnv(
+    process.env['QWEN_WRITE_SYSTEM_MD'],
+  );
+
+  // Check if the feature is enabled. This proceeds only if the environment
+  // variable is set and is not explicitly '0' or 'false'.
+  if (writeSystemMdResolution.value && !writeSystemMdResolution.isDisabled) {
+    const writePath = writeSystemMdResolution.isSwitch
+      ? systemMdPath
+      : writeSystemMdResolution.value;
+
+    fs.mkdirSync(path.dirname(writePath), { recursive: true });
+    fs.writeFileSync(writePath, basePrompt);
   }
 
   const memorySuffix =

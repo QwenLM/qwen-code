@@ -18,19 +18,26 @@ import type { LogEvent, LogEventEntry } from './clearcut-logger.js';
 import { ClearcutLogger, EventNames, TEST_ONLY } from './clearcut-logger.js';
 import type { ContentGeneratorConfig } from '../../core/contentGenerator.js';
 import { AuthType } from '../../core/contentGenerator.js';
+import type { SuccessfulToolCall } from '../../core/coreToolScheduler.js';
 import type { ConfigParameters } from '../../config/config.js';
 import { EventMetadataKey } from './event-metadata-key.js';
 import { makeFakeConfig } from '../../test-utils/config.js';
 import { http, HttpResponse } from 'msw';
 import { server } from '../../mocks/msw.js';
-import { UserPromptEvent, makeChatCompressionEvent } from '../types.js';
+import {
+  UserPromptEvent,
+  makeChatCompressionEvent,
+  ToolCallEvent,
+} from '../types.js';
 import { GIT_COMMIT_INFO, CLI_VERSION } from '../../generated/git-commit.js';
 import { UserAccountManager } from '../../utils/userAccountManager.js';
 import { InstallationManager } from '../../utils/installationManager.js';
+import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 
 interface CustomMatchers<R = unknown> {
   toHaveMetadataValue: ([key, value]: [EventMetadataKey, string]) => R;
   toHaveEventName: (name: EventNames) => R;
+  toHaveMetadataKey: (key: EventMetadataKey) => R;
 }
 
 declare module 'vitest' {
@@ -65,6 +72,20 @@ expect.extend({
       pass,
       message: () =>
         `event ${received} does${isNot ? ' not' : ''} have ${value}}`,
+    };
+  },
+
+  toHaveMetadataKey(received: LogEventEntry[], key: EventMetadataKey) {
+    const { isNot } = this;
+    const event = JSON.parse(received[0].source_extension_json) as LogEvent;
+    const metadata = event['event_metadata'][0];
+
+    const pass = metadata.some((m) => m.gemini_cli_key === key);
+
+    return {
+      pass,
+      message: () =>
+        `event ${received} ${isNot ? 'has' : 'does not have'} the metadata key ${key}`,
     };
   },
 });
@@ -199,6 +220,32 @@ describe('ClearcutLogger', () => {
       });
     });
 
+    it('logs the current surface from Cloud Shell via EDITOR_IN_CLOUD_SHELL', () => {
+      const { logger } = setup({});
+
+      vi.stubEnv('EDITOR_IN_CLOUD_SHELL', 'true');
+
+      const event = logger?.createLogEvent(EventNames.CHAT_COMPRESSION, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_SURFACE,
+        value: 'cloudshell',
+      });
+    });
+
+    it('logs the current surface from Cloud Shell via CLOUD_SHELL', () => {
+      const { logger } = setup({});
+
+      vi.stubEnv('CLOUD_SHELL', 'true');
+
+      const event = logger?.createLogEvent(EventNames.CHAT_COMPRESSION, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_SURFACE,
+        value: 'cloudshell',
+      });
+    });
+
     it('logs default metadata', () => {
       // Define expected values
       const session_id = 'my-session-id';
@@ -208,6 +255,7 @@ describe('ClearcutLogger', () => {
       const cli_version = CLI_VERSION;
       const git_commit_hash = GIT_COMMIT_INFO;
       const prompt_id = 'my-prompt-123';
+      const user_settings = safeJsonStringify([{ smart_edit_enabled: false }]);
 
       // Setup logger with expected values
       const { logger, loggerConfig } = setup({
@@ -258,8 +306,23 @@ describe('ClearcutLogger', () => {
             gemini_cli_key: EventMetadataKey.GEMINI_CLI_OS,
             value: process.platform,
           },
+          {
+            gemini_cli_key: EventMetadataKey.GEMINI_CLI_USER_SETTINGS,
+            value: user_settings,
+          },
         ]),
       );
+    });
+
+    it('logs the current nodejs version', () => {
+      const { logger } = setup({});
+
+      const event = logger?.createLogEvent(EventNames.API_ERROR, []);
+
+      expect(event?.event_metadata[0]).toContainEqual({
+        gemini_cli_key: EventMetadataKey.GEMINI_CLI_NODE_VERSION,
+        value: process.versions.node,
+      });
     });
 
     it('logs the current surface', () => {
@@ -369,6 +432,24 @@ describe('ClearcutLogger', () => {
         EventMetadataKey.GEMINI_CLI_COMPRESSION_TOKENS_AFTER,
         '8000',
       ]);
+    });
+  });
+
+  describe('logRipgrepFallbackEvent', () => {
+    it('logs an event with the proper name', () => {
+      const { logger } = setup();
+      // Spy on flushToClearcut to prevent it from clearing the queue
+      const flushSpy = vi
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .spyOn(logger!, 'flushToClearcut' as any)
+        .mockResolvedValue({ nextRequestWaitMs: 0 });
+
+      logger?.logRipgrepFallbackEvent();
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.RIPGREP_FALLBACK);
+      expect(flushSpy).toHaveBeenCalledOnce();
     });
   });
 
@@ -555,6 +636,142 @@ describe('ClearcutLogger', () => {
         getEvents(logger!)[0][0].source_extension_json,
       ) as { event_id: string };
       expect(firstRequeuedEvent.event_id).toBe('failed_5');
+    });
+  });
+
+  describe('logToolCallEvent', () => {
+    it('logs an event with all diff metadata', () => {
+      const { logger } = setup();
+      const completedToolCall = {
+        request: { name: 'test', args: {}, prompt_id: 'prompt-123' },
+        response: {
+          resultDisplay: {
+            diffStat: {
+              model_added_lines: 1,
+              model_removed_lines: 2,
+              model_added_chars: 3,
+              model_removed_chars: 4,
+              user_added_lines: 5,
+              user_removed_lines: 6,
+              user_added_chars: 7,
+              user_removed_chars: 8,
+            },
+          },
+        },
+        status: 'success',
+      } as SuccessfulToolCall;
+
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall));
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.TOOL_CALL);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_ADDED_LINES,
+        '1',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_REMOVED_LINES,
+        '2',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_ADDED_CHARS,
+        '3',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_REMOVED_CHARS,
+        '4',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_USER_ADDED_LINES,
+        '5',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_USER_REMOVED_LINES,
+        '6',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_USER_ADDED_CHARS,
+        '7',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_USER_REMOVED_CHARS,
+        '8',
+      ]);
+    });
+
+    it('logs an event with partial diff metadata', () => {
+      const { logger } = setup();
+      const completedToolCall = {
+        request: { name: 'test', args: {}, prompt_id: 'prompt-123' },
+        response: {
+          resultDisplay: {
+            diffStat: {
+              model_added_lines: 1,
+              model_removed_lines: 2,
+              model_added_chars: 3,
+              model_removed_chars: 4,
+            },
+          },
+        },
+        status: 'success',
+      } as SuccessfulToolCall;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall as any));
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.TOOL_CALL);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_ADDED_LINES,
+        '1',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_REMOVED_LINES,
+        '2',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_ADDED_CHARS,
+        '3',
+      ]);
+      expect(events[0]).toHaveMetadataValue([
+        EventMetadataKey.GEMINI_CLI_AI_REMOVED_CHARS,
+        '4',
+      ]);
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_USER_ADDED_LINES,
+      );
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_USER_REMOVED_LINES,
+      );
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_USER_ADDED_CHARS,
+      );
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_USER_REMOVED_CHARS,
+      );
+    });
+
+    it('does not log diff metadata if diffStat is not present', () => {
+      const { logger } = setup();
+      const completedToolCall = {
+        request: { name: 'test', args: {}, prompt_id: 'prompt-123' },
+        response: {
+          resultDisplay: {},
+        },
+        status: 'success',
+      } as SuccessfulToolCall;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      logger?.logToolCallEvent(new ToolCallEvent(completedToolCall as any));
+
+      const events = getEvents(logger!);
+      expect(events.length).toBe(1);
+      expect(events[0]).toHaveEventName(EventNames.TOOL_CALL);
+      expect(events[0]).not.toHaveMetadataKey(
+        EventMetadataKey.GEMINI_CLI_AI_ADDED_LINES,
+      );
     });
   });
 });

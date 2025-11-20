@@ -6,9 +6,11 @@
 
 import type { FunctionDeclaration, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
-import type { DiffUpdateResult } from '../ide/ideContext.js';
+import type { DiffUpdateResult } from '../ide/ide-client.js';
+import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -53,6 +55,7 @@ export interface ToolInvocation<
   execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
+    shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
 }
 
@@ -81,6 +84,7 @@ export abstract class BaseToolInvocation<
   abstract execute(
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
+    shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult>;
 }
 
@@ -199,9 +203,10 @@ export abstract class DeclarativeTool<
     params: TParams,
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
+    shellExecutionConfig?: ShellExecutionConfig,
   ): Promise<TResult> {
     const invocation = this.build(params);
-    return invocation.execute(signal, updateOutput);
+    return invocation.execute(signal, updateOutput, shellExecutionConfig);
   }
 
   /**
@@ -460,12 +465,17 @@ export interface TaskResultDisplay {
   }>;
 }
 
+export interface AnsiOutputDisplay {
+  ansiOutput: AnsiOutput;
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
-  | TaskResultDisplay;
+  | TaskResultDisplay
+  | AnsiOutputDisplay;
 
 export interface FileDiff {
   fileDiff: string;
@@ -476,10 +486,14 @@ export interface FileDiff {
 }
 
 export interface DiffStat {
-  ai_removed_lines: number;
-  ai_added_lines: number;
+  model_added_lines: number;
+  model_removed_lines: number;
+  model_added_chars: number;
+  model_removed_chars: number;
   user_added_lines: number;
   user_removed_lines: number;
+  user_added_chars: number;
+  user_removed_chars: number;
 }
 
 export interface TodoResultDisplay {
@@ -578,6 +592,14 @@ export enum Kind {
   Fetch = 'fetch',
   Other = 'other',
 }
+
+// Function kinds that have side effects
+export const MUTATOR_KINDS: Kind[] = [
+  Kind.Edit,
+  Kind.Delete,
+  Kind.Move,
+  Kind.Execute,
+] as const;
 
 export interface ToolLocation {
   // Absolute path to the file

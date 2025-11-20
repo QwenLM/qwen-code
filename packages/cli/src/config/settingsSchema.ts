@@ -11,20 +11,70 @@ import type {
   AuthType,
   ChatCompressionSettings,
 } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+} from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
 
+export type SettingsType =
+  | 'boolean'
+  | 'string'
+  | 'number'
+  | 'array'
+  | 'object'
+  | 'enum';
+
+export type SettingsValue =
+  | boolean
+  | string
+  | number
+  | string[]
+  | object
+  | undefined;
+
+/**
+ * Setting datatypes that "toggle" through a fixed list of options
+ * (e.g. an enum or true/false) rather than allowing for free form input
+ * (like a number or string).
+ */
+export const TOGGLE_TYPES: ReadonlySet<SettingsType | undefined> = new Set([
+  'boolean',
+  'enum',
+]);
+
+export interface SettingEnumOption {
+  value: string | number;
+  label: string;
+}
+
+export enum MergeStrategy {
+  // Replace the old value with the new value. This is the default.
+  REPLACE = 'replace',
+  // Concatenate arrays.
+  CONCAT = 'concat',
+  // Merge arrays, ensuring unique values.
+  UNION = 'union',
+  // Shallow merge objects.
+  SHALLOW_MERGE = 'shallow_merge',
+}
+
 export interface SettingDefinition {
-  type: 'boolean' | 'string' | 'number' | 'array' | 'object';
+  type: SettingsType;
   label: string;
   category: string;
   requiresRestart: boolean;
-  default: boolean | string | number | string[] | object | undefined;
+  default: SettingsValue;
   description?: string;
   parentKey?: string;
   childKey?: string;
   key?: string;
   properties?: SettingsSchema;
   showInDialog?: boolean;
+  mergeStrategy?: MergeStrategy;
+  /** Enum type options  */
+  options?: readonly SettingEnumOption[];
 }
 
 export interface SettingsSchema {
@@ -39,7 +89,7 @@ export type DnsResolutionOrder = 'ipv4first' | 'verbatim';
  * The structure of this object defines the structure of the `Settings` type.
  * `as const` is crucial for TypeScript to infer the most specific types possible.
  */
-export const SETTINGS_SCHEMA = {
+const SETTINGS_SCHEMA = {
   // Maintained for compatibility/criticality
   mcpServers: {
     type: 'object',
@@ -49,6 +99,7 @@ export const SETTINGS_SCHEMA = {
     default: {} as Record<string, MCPServerConfig>,
     description: 'Configuration for MCP servers.',
     showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
   general: {
@@ -116,16 +167,6 @@ export const SETTINGS_SCHEMA = {
           },
         },
       },
-      enablePromptCompletion: {
-        type: 'boolean',
-        label: 'Enable Prompt Completion',
-        category: 'General',
-        requiresRestart: true,
-        default: false,
-        description:
-          'Enable AI-powered prompt completion suggestions while typing.',
-        showInDialog: true,
-      },
       debugKeystrokeLogging: {
         type: 'boolean',
         label: 'Debug Keystroke Logging',
@@ -134,6 +175,30 @@ export const SETTINGS_SCHEMA = {
         default: false,
         description: 'Enable debug logging of keystrokes to the console.',
         showInDialog: true,
+      },
+    },
+  },
+  output: {
+    type: 'object',
+    label: 'Output',
+    category: 'General',
+    requiresRestart: false,
+    default: {},
+    description: 'Settings for the CLI output.',
+    showInDialog: false,
+    properties: {
+      format: {
+        type: 'enum',
+        label: 'Output Format',
+        category: 'General',
+        requiresRestart: false,
+        default: 'text',
+        description: 'The format of the CLI output.',
+        showInDialog: true,
+        options: [
+          { value: 'text', label: 'Text' },
+          { value: 'json', label: 'JSON' },
+        ],
       },
     },
   },
@@ -174,6 +239,16 @@ export const SETTINGS_SCHEMA = {
         description: 'Hide the window title bar',
         showInDialog: true,
       },
+      showStatusInTitle: {
+        type: 'boolean',
+        label: 'Show Status in Title',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show Gemini CLI status and thoughts in the terminal window title',
+        showInDialog: true,
+      },
       hideTips: {
         type: 'boolean',
         label: 'Hide Tips',
@@ -191,6 +266,55 @@ export const SETTINGS_SCHEMA = {
         default: false,
         description: 'Hide the application banner',
         showInDialog: true,
+      },
+      hideContextSummary: {
+        type: 'boolean',
+        label: 'Hide Context Summary',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide the context summary (GEMINI.md, MCP servers) above the input.',
+        showInDialog: true,
+      },
+      footer: {
+        type: 'object',
+        label: 'Footer',
+        category: 'UI',
+        requiresRestart: false,
+        default: {},
+        description: 'Settings for the footer.',
+        showInDialog: false,
+        properties: {
+          hideCWD: {
+            type: 'boolean',
+            label: 'Hide CWD',
+            category: 'UI',
+            requiresRestart: false,
+            default: false,
+            description:
+              'Hide the current working directory path in the footer.',
+            showInDialog: true,
+          },
+          hideSandboxStatus: {
+            type: 'boolean',
+            label: 'Hide Sandbox Status',
+            category: 'UI',
+            requiresRestart: false,
+            default: false,
+            description: 'Hide the sandbox status indicator in the footer.',
+            showInDialog: true,
+          },
+          hideModelInfo: {
+            type: 'boolean',
+            label: 'Hide Model Info',
+            category: 'UI',
+            requiresRestart: false,
+            default: false,
+            description: 'Hide the model name and context usage in the footer.',
+            showInDialog: true,
+          },
+        },
       },
       hideFooter: {
         type: 'boolean',
@@ -217,6 +341,34 @@ export const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description: 'Show line numbers in the chat.',
+        showInDialog: true,
+      },
+      showCitations: {
+        type: 'boolean',
+        label: 'Show Citations',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description: 'Show citations for generated text in the chat.',
+        showInDialog: true,
+      },
+      customWittyPhrases: {
+        type: 'array',
+        label: 'Custom Witty Phrases',
+        category: 'UI',
+        requiresRestart: false,
+        default: [] as string[],
+        description: 'Custom witty phrases to display during loading.',
+        showInDialog: false,
+      },
+      enableWelcomeBack: {
+        type: 'boolean',
+        label: 'Enable Welcome Back',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show welcome back dialog when returning to a project with conversation history.',
         showInDialog: true,
       },
       accessibility: {
@@ -361,14 +513,105 @@ export const SETTINGS_SCHEMA = {
         description: 'Chat compression settings.',
         showInDialog: false,
       },
+      sessionTokenLimit: {
+        type: 'number',
+        label: 'Session Token Limit',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description: 'The maximum number of tokens allowed in a session.',
+        showInDialog: false,
+      },
       skipNextSpeakerCheck: {
         type: 'boolean',
         label: 'Skip Next Speaker Check',
         category: 'Model',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Skip the next speaker check.',
         showInDialog: true,
+      },
+      skipLoopDetection: {
+        type: 'boolean',
+        label: 'Skip Loop Detection',
+        category: 'Model',
+        requiresRestart: false,
+        default: false,
+        description: 'Disable all loop detection checks (streaming and LLM).',
+        showInDialog: true,
+      },
+      skipStartupContext: {
+        type: 'boolean',
+        label: 'Skip Startup Context',
+        category: 'Model',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Avoid sending the workspace startup context at the beginning of each session.',
+        showInDialog: true,
+      },
+      enableOpenAILogging: {
+        type: 'boolean',
+        label: 'Enable OpenAI Logging',
+        category: 'Model',
+        requiresRestart: false,
+        default: false,
+        description: 'Enable OpenAI logging.',
+        showInDialog: true,
+      },
+      openAILoggingDir: {
+        type: 'string',
+        label: 'OpenAI Logging Directory',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.',
+        showInDialog: true,
+      },
+      generationConfig: {
+        type: 'object',
+        label: 'Generation Configuration',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as Record<string, unknown> | undefined,
+        description: 'Generation configuration settings.',
+        showInDialog: false,
+        properties: {
+          timeout: {
+            type: 'number',
+            label: 'Timeout',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description: 'Request timeout in milliseconds.',
+            parentKey: 'generationConfig',
+            childKey: 'timeout',
+            showInDialog: true,
+          },
+          maxRetries: {
+            type: 'number',
+            label: 'Max Retries',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description: 'Maximum number of retries for failed requests.',
+            parentKey: 'generationConfig',
+            childKey: 'maxRetries',
+            showInDialog: true,
+          },
+          disableCacheControl: {
+            type: 'boolean',
+            label: 'Disable Cache Control',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: false,
+            description: 'Disable cache control for DashScope providers.',
+            parentKey: 'generationConfig',
+            childKey: 'disableCacheControl',
+            showInDialog: true,
+          },
+        },
       },
     },
   },
@@ -418,6 +661,7 @@ export const SETTINGS_SCHEMA = {
         description:
           'Additional directories to include in the workspace context. Missing directories will be skipped with a warning.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
       loadMemoryFromIncludeDirectories: {
         type: 'boolean',
@@ -446,7 +690,7 @@ export const SETTINGS_SCHEMA = {
             description: 'Respect .gitignore files when searching',
             showInDialog: true,
           },
-          respectGeminiIgnore: {
+          respectQwenIgnore: {
             type: 'boolean',
             label: 'Respect .qwenignore',
             category: 'Context',
@@ -497,14 +741,54 @@ export const SETTINGS_SCHEMA = {
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
       },
-      usePty: {
-        type: 'boolean',
-        label: 'Use node-pty for Shell Execution',
+      shell: {
+        type: 'object',
+        label: 'Shell',
         category: 'Tools',
-        requiresRestart: true,
+        requiresRestart: false,
+        default: {},
+        description: 'Settings for shell execution.',
+        showInDialog: false,
+        properties: {
+          enableInteractiveShell: {
+            type: 'boolean',
+            label: 'Enable Interactive Shell',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Use node-pty for an interactive shell experience. Fallback to child_process still applies.',
+            showInDialog: true,
+          },
+          pager: {
+            type: 'string',
+            label: 'Pager',
+            category: 'Tools',
+            requiresRestart: false,
+            default: 'cat' as string | undefined,
+            description:
+              'The pager command to use for shell output. Defaults to `cat`.',
+            showInDialog: false,
+          },
+          showColor: {
+            type: 'boolean',
+            label: 'Show Color',
+            category: 'Tools',
+            requiresRestart: false,
+            default: false,
+            description: 'Show color in shell output.',
+            showInDialog: true,
+          },
+        },
+      },
+      autoAccept: {
+        type: 'boolean',
+        label: 'Auto Accept',
+        category: 'Tools',
+        requiresRestart: false,
         default: false,
         description:
-          'Use node-pty for shell command execution. Fallback to child_process still applies.',
+          'Automatically accept and execute tool calls that are considered safe (e.g., read-only operations).',
         showInDialog: true,
       },
       core: {
@@ -534,6 +818,23 @@ export const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'Tool names to exclude from discovery.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      approvalMode: {
+        type: 'enum',
+        label: 'Approval Mode',
+        category: 'Tools',
+        requiresRestart: false,
+        default: ApprovalMode.DEFAULT,
+        description:
+          'Approval mode for tool usage. Controls how tools are approved before execution.',
+        showInDialog: true,
+        options: [
+          { value: ApprovalMode.PLAN, label: 'Plan' },
+          { value: ApprovalMode.DEFAULT, label: 'Default' },
+          { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
+          { value: ApprovalMode.YOLO, label: 'YOLO' },
+        ],
       },
       discoveryCommand: {
         type: 'string',
@@ -558,9 +859,47 @@ export const SETTINGS_SCHEMA = {
         label: 'Use Ripgrep',
         category: 'Tools',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.',
+        showInDialog: true,
+      },
+      useBuiltinRipgrep: {
+        type: 'boolean',
+        label: 'Use Builtin Ripgrep',
+        category: 'Tools',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+        showInDialog: true,
+      },
+      enableToolOutputTruncation: {
+        type: 'boolean',
+        label: 'Enable Tool Output Truncation',
+        category: 'General',
+        requiresRestart: true,
+        default: true,
+        description: 'Enable truncation of large tool outputs.',
+        showInDialog: true,
+      },
+      truncateToolOutputThreshold: {
+        type: 'number',
+        label: 'Tool Output Truncation Threshold',
+        category: 'General',
+        requiresRestart: true,
+        default: DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+        description:
+          'Truncate tool output if it is larger than this many characters. Set to -1 to disable.',
+        showInDialog: true,
+      },
+      truncateToolOutputLines: {
+        type: 'number',
+        label: 'Tool Output Truncation Lines',
+        category: 'General',
+        requiresRestart: true,
+        default: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        description: 'The number of lines to keep when truncating tool output.',
         showInDialog: true,
       },
     },
@@ -590,7 +929,7 @@ export const SETTINGS_SCHEMA = {
         category: 'MCP',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'A whitelist of MCP servers to allow.',
+        description: 'A list of MCP servers to allow.',
         showInDialog: false,
       },
       excluded: {
@@ -599,12 +938,20 @@ export const SETTINGS_SCHEMA = {
         category: 'MCP',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'A blacklist of MCP servers to exclude.',
+        description: 'A list of MCP servers to exclude.',
         showInDialog: false,
       },
     },
   },
-
+  useSmartEdit: {
+    type: 'boolean',
+    label: 'Use Smart Edit',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: false,
+    description: 'Enable the smart-edit tool instead of the replace tool.',
+    showInDialog: false,
+  },
   security: {
     type: 'object',
     label: 'Security',
@@ -623,20 +970,11 @@ export const SETTINGS_SCHEMA = {
         description: 'Settings for folder trust.',
         showInDialog: false,
         properties: {
-          featureEnabled: {
-            type: 'boolean',
-            label: 'Folder Trust Feature',
-            category: 'Security',
-            requiresRestart: false,
-            default: false,
-            description: 'Enable folder trust feature for enhanced security.',
-            showInDialog: true,
-          },
           enabled: {
             type: 'boolean',
             label: 'Folder Trust',
             category: 'Security',
-            requiresRestart: false,
+            requiresRestart: true,
             default: false,
             description: 'Setting to track whether Folder trust is enabled.',
             showInDialog: true,
@@ -661,6 +999,16 @@ export const SETTINGS_SCHEMA = {
             description: 'The currently selected authentication type.',
             showInDialog: false,
           },
+          enforcedType: {
+            type: 'string',
+            label: 'Enforced Auth Type',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: undefined as AuthType | undefined,
+            description:
+              'The required auth type. If this does not match the selected auth type, the user will be prompted to re-authenticate.',
+            showInDialog: false,
+          },
           useExternal: {
             type: 'boolean',
             label: 'Use External Auth',
@@ -668,6 +1016,24 @@ export const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: undefined as boolean | undefined,
             description: 'Whether to use an external authentication flow.',
+            showInDialog: false,
+          },
+          apiKey: {
+            type: 'string',
+            label: 'API Key',
+            category: 'Security',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description: 'API key for OpenAI compatible authentication.',
+            showInDialog: false,
+          },
+          baseUrl: {
+            type: 'string',
+            label: 'Base URL',
+            category: 'Security',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description: 'Base URL for OpenAI compatible API.',
             showInDialog: false,
           },
         },
@@ -710,6 +1076,7 @@ export const SETTINGS_SCHEMA = {
         default: ['DEBUG', 'DEBUG_MODE'] as string[],
         description: 'Environment variables to exclude from project context.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
       },
       bugCommand: {
         type: 'object',
@@ -720,7 +1087,36 @@ export const SETTINGS_SCHEMA = {
         description: 'Configuration for the bug report command.',
         showInDialog: false,
       },
+      tavilyApiKey: {
+        type: 'string',
+        label: 'Tavily API Key (Deprecated)',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          '⚠️ DEPRECATED: Please use webSearch.provider configuration instead. Legacy API key for the Tavily API.',
+        showInDialog: false,
+      },
     },
+  },
+
+  webSearch: {
+    type: 'object',
+    label: 'Web Search',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as
+      | {
+          provider: Array<{
+            type: 'tavily' | 'google' | 'dashscope';
+            apiKey?: string;
+            searchEngineId?: string;
+          }>;
+          default: string;
+        }
+      | undefined,
+    description: 'Configuration for web search providers.',
+    showInDialog: false,
   },
 
   experimental: {
@@ -737,7 +1133,7 @@ export const SETTINGS_SCHEMA = {
         label: 'Extension Management',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: true,
         description: 'Enable extension management features.',
         showInDialog: false,
       },
@@ -781,6 +1177,7 @@ export const SETTINGS_SCHEMA = {
         default: [] as string[],
         description: 'List of disabled extensions.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
       },
       workspacesWithMigrationNudge: {
         type: 'array',
@@ -791,135 +1188,34 @@ export const SETTINGS_SCHEMA = {
         description:
           'List of workspaces for which the migration nudge has been shown.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
       },
     },
   },
-  contentGenerator: {
-    type: 'object',
-    label: 'Content Generator',
-    category: 'General',
-    requiresRestart: false,
-    default: undefined as Record<string, unknown> | undefined,
-    description: 'Content generator settings.',
-    showInDialog: false,
-    properties: {
-      timeout: {
-        type: 'number',
-        label: 'Timeout',
-        category: 'Content Generator',
-        requiresRestart: false,
-        default: undefined as number | undefined,
-        description: 'Request timeout in milliseconds.',
-        parentKey: 'contentGenerator',
-        childKey: 'timeout',
-        showInDialog: true,
-      },
-      maxRetries: {
-        type: 'number',
-        label: 'Max Retries',
-        category: 'Content Generator',
-        requiresRestart: false,
-        default: undefined as number | undefined,
-        description: 'Maximum number of retries for failed requests.',
-        parentKey: 'contentGenerator',
-        childKey: 'maxRetries',
-        showInDialog: true,
-      },
-      disableCacheControl: {
-        type: 'boolean',
-        label: 'Disable Cache Control',
-        category: 'Content Generator',
-        requiresRestart: false,
-        default: false,
-        description: 'Disable cache control for DashScope providers.',
-        parentKey: 'contentGenerator',
-        childKey: 'disableCacheControl',
-        showInDialog: true,
-      },
-    },
-  },
-  enableOpenAILogging: {
-    type: 'boolean',
-    label: 'Enable OpenAI Logging',
-    category: 'General',
-    requiresRestart: false,
-    default: false,
-    description: 'Enable OpenAI logging.',
-    showInDialog: true,
-  },
-  sessionTokenLimit: {
-    type: 'number',
-    label: 'Session Token Limit',
-    category: 'General',
-    requiresRestart: false,
-    default: undefined as number | undefined,
-    description: 'The maximum number of tokens allowed in a session.',
-    showInDialog: false,
-  },
-  systemPromptMappings: {
-    type: 'object',
-    label: 'System Prompt Mappings',
-    category: 'General',
-    requiresRestart: false,
-    default: undefined as Record<string, string> | undefined,
-    description: 'Mappings of system prompts to model names.',
-    showInDialog: false,
-  },
-  tavilyApiKey: {
-    type: 'string',
-    label: 'Tavily API Key',
-    category: 'General',
-    requiresRestart: false,
-    default: undefined as string | undefined,
-    description: 'The API key for the Tavily API.',
-    showInDialog: false,
-  },
-  skipNextSpeakerCheck: {
-    type: 'boolean',
-    label: 'Skip Next Speaker Check',
-    category: 'General',
-    requiresRestart: false,
-    default: false,
-    description: 'Skip the next speaker check.',
-    showInDialog: true,
-  },
-  skipLoopDetection: {
-    type: 'boolean',
-    label: 'Skip Loop Detection',
-    category: 'General',
-    requiresRestart: false,
-    default: false,
-    description: 'Disable all loop detection checks (streaming and LLM).',
-    showInDialog: true,
-  },
-  approvalMode: {
-    type: 'string',
-    label: 'Default Approval Mode',
-    category: 'General',
-    requiresRestart: false,
-    default: 'default',
-    description:
-      'Default approval mode for tool usage. Valid values: plan, default, auto-edit, yolo.',
-    showInDialog: true,
-  },
-  enableWelcomeBack: {
-    type: 'boolean',
-    label: 'Enable Welcome Back',
-    category: 'UI',
-    requiresRestart: false,
-    default: true,
-    description:
-      'Show welcome back dialog when returning to a project with conversation history.',
-    showInDialog: true,
-  },
-} as const;
+} as const satisfies SettingsSchema;
+
+export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
+
+export function getSettingsSchema(): SettingsSchemaType {
+  return SETTINGS_SCHEMA;
+}
 
 type InferSettings<T extends SettingsSchema> = {
   -readonly [K in keyof T]?: T[K] extends { properties: SettingsSchema }
     ? InferSettings<T[K]['properties']>
-    : T[K]['default'] extends boolean
-      ? boolean
-      : T[K]['default'];
+    : T[K]['type'] extends 'enum'
+      ? T[K]['options'] extends readonly SettingEnumOption[]
+        ? T[K]['options'][number]['value']
+        : T[K]['default']
+      : T[K]['default'] extends boolean
+        ? boolean
+        : T[K]['default'];
 };
 
-export type Settings = InferSettings<typeof SETTINGS_SCHEMA>;
+export type Settings = InferSettings<SettingsSchemaType>;
+
+export interface FooterSettings {
+  hideCWD?: boolean;
+  hideSandboxStatus?: boolean;
+  hideModelInfo?: boolean;
+}

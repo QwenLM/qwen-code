@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import * as os from 'node:os';
 
 import {
-  GEMINI_CONFIG_DIR,
+  QWEN_CONFIG_DIR,
   DEFAULT_CONTEXT_FILENAME,
 } from '../packages/core/src/tools/memoryTool.js';
 
@@ -33,7 +33,7 @@ let runDir = ''; // Make runDir accessible in teardown
 
 const memoryFilePath = join(
   os.homedir(),
-  GEMINI_CONFIG_DIR,
+  QWEN_CONFIG_DIR,
   DEFAULT_CONTEXT_FILENAME,
 );
 let originalMemoryContent: string | null = null;

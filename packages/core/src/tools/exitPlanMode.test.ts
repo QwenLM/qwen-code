@@ -131,16 +131,14 @@ describe('ExitPlanModeTool', () => {
       }
 
       const result = await invocation.execute(signal);
-      const expectedLlmMessage =
-        'User has approved your plan. You can now start coding. Start with updating your todo list if applicable.';
 
-      expect(result).toEqual({
-        llmContent: expectedLlmMessage,
-        returnDisplay: {
-          type: 'plan_summary',
-          message: 'User approved the plan.',
-          plan: params.plan,
-        },
+      expect(result.llmContent).toContain(
+        'User has approved your plan. You can now start coding',
+      );
+      expect(result.returnDisplay).toEqual({
+        type: 'plan_summary',
+        message: 'User approved the plan.',
+        plan: params.plan,
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
@@ -188,15 +186,12 @@ describe('ExitPlanModeTool', () => {
 
       const result = await invocation.execute(signal);
 
-      expect(result).toEqual({
-        llmContent: JSON.stringify({
-          success: false,
-          plan: params.plan,
-          error: 'Plan execution was not approved. Remaining in plan mode.',
-        }),
-        returnDisplay:
-          'Plan execution was not approved. Remaining in plan mode.',
-      });
+      expect(result.llmContent).toBe(
+        'Plan execution was not approved. Remaining in plan mode.',
+      );
+      expect(result.returnDisplay).toBe(
+        'Plan execution was not approved. Remaining in plan mode.',
+      );
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
@@ -213,50 +208,6 @@ describe('ExitPlanModeTool', () => {
       expect(invocation.getDescription()).toBe(
         'Present implementation plan for user approval',
       );
-    });
-
-    it('should handle execution errors gracefully', async () => {
-      const params: ExitPlanModeParams = {
-        plan: 'Test plan',
-      };
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      if (confirmation) {
-        // Don't approve the plan so we go through the rejection path
-        await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
-      }
-
-      // Create a spy to simulate an error during the execution
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-
-      // Mock JSON.stringify to throw an error in the rejection path
-      const originalStringify = JSON.stringify;
-      vi.spyOn(JSON, 'stringify').mockImplementationOnce(() => {
-        throw new Error('JSON stringify error');
-      });
-
-      const result = await invocation.execute(new AbortController().signal);
-
-      expect(result).toEqual({
-        llmContent: JSON.stringify({
-          success: false,
-          error: 'Failed to present plan. Detail: JSON stringify error',
-        }),
-        returnDisplay: 'Error presenting plan: JSON stringify error',
-      });
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        '[ExitPlanModeTool] Error executing exit_plan_mode: JSON stringify error',
-      );
-
-      // Restore original JSON.stringify
-      JSON.stringify = originalStringify;
-      consoleSpy.mockRestore();
     });
 
     it('should return empty tool locations', () => {

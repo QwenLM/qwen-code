@@ -38,14 +38,17 @@ describe('ModelSwitchDialog', () => {
 
     const expectedItems = [
       {
+        key: 'switch-once',
         label: 'Switch for this request only',
         value: VisionSwitchOutcome.SwitchOnce,
       },
       {
+        key: 'switch-session',
         label: 'Switch session to vision model',
         value: VisionSwitchOutcome.SwitchSessionToVL,
       },
       {
+        key: 'continue',
         label: 'Continue with current model',
         value: VisionSwitchOutcome.ContinueWithCurrentModel,
       },

@@ -14,6 +14,7 @@ import {
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { ToolDisplayNames, ToolNames } from './tool-names.js';
 
 export interface ExitPlanModeParams {
   plan: string;
@@ -115,17 +116,12 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         const rejectionMessage =
           'Plan execution was not approved. Remaining in plan mode.';
         return {
-          llmContent: JSON.stringify({
-            success: false,
-            plan,
-            error: rejectionMessage,
-          }),
+          llmContent: rejectionMessage,
           returnDisplay: rejectionMessage,
         };
       }
 
-      const llmMessage =
-        'User has approved your plan. You can now start coding. Start with updating your todo list if applicable.';
+      const llmMessage = `User has approved your plan. You can now start coding. Start with updating your todo list if applicable.`;
       const displayMessage = 'User approved the plan.';
 
       return {
@@ -142,11 +138,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       console.error(
         `[ExitPlanModeTool] Error executing exit_plan_mode: ${errorMessage}`,
       );
+
+      const errorLlmContent = `Failed to present plan: ${errorMessage}`;
+
       return {
-        llmContent: JSON.stringify({
-          success: false,
-          error: `Failed to present plan. Detail: ${errorMessage}`,
-        }),
+        llmContent: errorLlmContent,
         returnDisplay: `Error presenting plan: ${errorMessage}`,
       };
     }
@@ -157,12 +153,12 @@ export class ExitPlanModeTool extends BaseDeclarativeTool<
   ExitPlanModeParams,
   ToolResult
 > {
-  static readonly Name: string = exitPlanModeToolSchemaData.name!;
+  static readonly Name: string = ToolNames.EXIT_PLAN_MODE;
 
   constructor(private readonly config: Config) {
     super(
       ExitPlanModeTool.Name,
-      'ExitPlanMode',
+      ToolDisplayNames.EXIT_PLAN_MODE,
       exitPlanModeToolDescription,
       Kind.Think,
       exitPlanModeToolSchemaData.parametersJsonSchema as Record<

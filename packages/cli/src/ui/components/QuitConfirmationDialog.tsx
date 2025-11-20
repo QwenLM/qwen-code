@@ -38,18 +38,22 @@ export const QuitConfirmationDialog: React.FC<QuitConfirmationDialogProps> = ({
 
   const options: Array<RadioSelectItem<QuitChoice>> = [
     {
+      key: 'quit',
       label: 'Quit immediately (/quit)',
       value: QuitChoice.QUIT,
     },
     {
+      key: 'summary-and-quit',
       label: 'Generate summary and quit (/summary)',
       value: QuitChoice.SUMMARY_AND_QUIT,
     },
     {
+      key: 'save-and-quit',
       label: 'Save conversation and quit (/chat save)',
       value: QuitChoice.SAVE_AND_QUIT,
     },
     {
+      key: 'cancel',
       label: 'Cancel (stay in application)',
       value: QuitChoice.CANCEL,
     },

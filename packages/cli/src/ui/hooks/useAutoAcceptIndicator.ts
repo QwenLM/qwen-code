@@ -16,12 +16,14 @@ import { MessageType } from '../types.js';
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;
-  addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
+  addItem?: (item: HistoryItemWithoutId, timestamp: number) => void;
+  onApprovalModeChange?: (mode: ApprovalMode) => void;
 }
 
 export function useAutoAcceptIndicator({
   config,
   addItem,
+  onApprovalModeChange,
 }: UseAutoAcceptIndicatorArgs): ApprovalMode {
   const currentConfigValue = config.getApprovalMode();
   const [showAutoAcceptIndicator, setShowAutoAcceptIndicator] =
@@ -33,28 +35,30 @@ export function useAutoAcceptIndicator({
 
   useKeypress(
     (key) => {
-      if (!(key.shift && key.name === 'tab')) {
-        return;
-      }
+      // Handle Shift+Tab to cycle through all modes
+      if (key.shift && key.name === 'tab') {
+        const currentMode = config.getApprovalMode();
+        const currentIndex = APPROVAL_MODES.indexOf(currentMode);
+        const nextIndex =
+          currentIndex === -1 ? 0 : (currentIndex + 1) % APPROVAL_MODES.length;
+        const nextApprovalMode = APPROVAL_MODES[nextIndex];
 
-      const currentMode = config.getApprovalMode();
-      const currentIndex = APPROVAL_MODES.indexOf(currentMode);
-      const nextIndex =
-        currentIndex === -1 ? 0 : (currentIndex + 1) % APPROVAL_MODES.length;
-      const nextApprovalMode = APPROVAL_MODES[nextIndex];
+        try {
+          config.setApprovalMode(nextApprovalMode);
+          // Update local state immediately for responsiveness
+          setShowAutoAcceptIndicator(nextApprovalMode);
 
-      try {
-        config.setApprovalMode(nextApprovalMode);
-        // Update local state immediately for responsiveness
-        setShowAutoAcceptIndicator(nextApprovalMode);
-      } catch (e) {
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: (e as Error).message,
-          },
-          Date.now(),
-        );
+          // Notify the central handler about the approval mode change
+          onApprovalModeChange?.(nextApprovalMode);
+        } catch (e) {
+          addItem?.(
+            {
+              type: MessageType.INFO,
+              text: (e as Error).message,
+            },
+            Date.now(),
+          );
+        }
       }
     },
     { isActive: true },

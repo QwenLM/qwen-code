@@ -69,7 +69,14 @@ if (process.env.DEBUG) {
   // than the relaunched process making it harder to debug.
   env.GEMINI_CLI_NO_RELAUNCH = 'true';
 }
-const child = spawn('node', nodeArgs, { stdio: 'inherit', env });
+// Use process.cwd() to inherit the working directory from launch.json cwd setting
+// This allows debugging from a specific directory (e.g., .todo)
+const workingDir = process.env.QWEN_WORKING_DIR || process.cwd();
+const child = spawn('node', nodeArgs, {
+  stdio: 'inherit',
+  env,
+  cwd: workingDir,
+});
 
 child.on('close', (code) => {
   process.exit(code);

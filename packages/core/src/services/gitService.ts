@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { exec } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { CheckRepoActions, simpleGit, type SimpleGit } from 'simple-git';
+import { isCommandAvailable } from '../utils/shell-utils.js';
+import type { SimpleGit } from 'simple-git';
+import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 
@@ -25,7 +26,7 @@ export class GitService {
   }
 
   async initialize(): Promise<void> {
-    const gitAvailable = await this.verifyGitAvailability();
+    const { available: gitAvailable } = isCommandAvailable('git');
     if (!gitAvailable) {
       throw new Error(
         'Checkpointing is enabled, but Git is not installed. Please install Git or disable checkpointing to continue.',
@@ -38,18 +39,6 @@ export class GitService {
         `Failed to initialize checkpointing: ${error instanceof Error ? error.message : 'Unknown error'}. Please check that Git is working properly or disable checkpointing.`,
       );
     }
-  }
-
-  verifyGitAvailability(): Promise<boolean> {
-    return new Promise((resolve) => {
-      exec('git --version', (error) => {
-        if (error) {
-          resolve(false);
-        } else {
-          resolve(true);
-        }
-      });
-    });
   }
 
   /**

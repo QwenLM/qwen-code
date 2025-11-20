@@ -5,7 +5,7 @@
  */
 
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -77,7 +77,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
 
     super(
       TaskTool.Name,
-      'Task',
+      ToolDisplayNames.TASK,
       'Delegate tasks to specialized subagents. Loading available subagents...', // Initial description
       Kind.Other,
       initialSchema,
@@ -109,7 +109,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
     } finally {
       // Update the client with the new tools
       const geminiClient = this.config.getGeminiClient();
-      if (geminiClient) {
+      if (geminiClient && geminiClient.isInitialized()) {
         await geminiClient.setTools();
       }
     }

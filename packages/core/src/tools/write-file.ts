@@ -27,17 +27,17 @@ import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
-import { ToolNames } from './tool-names.js';
+import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { IDEConnectionStatus } from '../ide/ide-client.js';
-import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
+import { IdeClient } from '../ide/ide-client.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
+import { FileOperation } from '../telemetry/metrics.js';
+import { getSpecificMimeType } from '../utils/fileUtils.js';
+import { getLanguageFromFilePath } from '../utils/language-detection.js';
 
 /**
  * Parameters for the WriteFile tool
@@ -162,10 +162,9 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       DEFAULT_DIFF_OPTIONS,
     );
 
-    const ideClient = this.config.getIdeClient();
+    const ideClient = await IdeClient.getInstance();
     const ideConfirmation =
-      this.config.getIdeMode() &&
-      ideClient.getConnectionStatus().status === IDEConnectionStatus.Connected
+      this.config.getIdeMode() && ideClient.isDiffingEnabled()
         ? ideClient.openDiff(this.params.file_path, correctedContent)
         : undefined;
 
@@ -277,6 +276,24 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         );
       }
 
+      // Log file operation for telemetry (without diff_stat to avoid double-counting)
+      const mimetype = getSpecificMimeType(file_path);
+      const programmingLanguage = getLanguageFromFilePath(file_path);
+      const extension = path.extname(file_path);
+      const operation = isNewFile ? FileOperation.CREATE : FileOperation.UPDATE;
+
+      logFileOperation(
+        this.config,
+        new FileOperationEvent(
+          WriteFileTool.Name,
+          operation,
+          fileContent.split('\n').length,
+          mimetype,
+          extension,
+          programmingLanguage,
+        ),
+      );
+
       const displayResult: FileDiff = {
         fileDiff,
         fileName,
@@ -284,38 +301,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         newContent: correctedContentResult.correctedContent,
         diffStat,
       };
-
-      const lines = fileContent.split('\n').length;
-      const mimetype = getSpecificMimeType(file_path);
-      const extension = path.extname(file_path); // Get extension
-      const programming_language = getProgrammingLanguage({ file_path });
-      if (isNewFile) {
-        logFileOperation(
-          this.config,
-          new FileOperationEvent(
-            WriteFileTool.Name,
-            FileOperation.CREATE,
-            lines,
-            mimetype,
-            extension,
-            diffStat,
-            programming_language,
-          ),
-        );
-      } else {
-        logFileOperation(
-          this.config,
-          new FileOperationEvent(
-            WriteFileTool.Name,
-            FileOperation.UPDATE,
-            lines,
-            mimetype,
-            extension,
-            diffStat,
-            programming_language,
-          ),
-        );
-      }
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),
@@ -376,7 +361,7 @@ export class WriteFileTool
   constructor(private readonly config: Config) {
     super(
       WriteFileTool.Name,
-      'WriteFile',
+      ToolDisplayNames.WRITE_FILE,
       `Writes content to a specified file in the local filesystem.
 
       The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,

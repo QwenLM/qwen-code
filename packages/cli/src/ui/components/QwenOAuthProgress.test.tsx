@@ -8,7 +8,14 @@
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
-import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { DeviceAuthorizationData } from '@qwen-code/qwen-code-core';
+import { useKeypress } from '../hooks/useKeypress.js';
+import type { Key } from '../contexts/KeypressContext.js';
+
+// Mock useKeypress hook
+vi.mock('../hooks/useKeypress.js', () => ({
+  useKeypress: vi.fn(),
+}));
 
 // Mock qrcode-terminal module
 vi.mock('qrcode-terminal', () => ({
@@ -31,14 +38,17 @@ vi.mock('ink-link', () => ({
 describe('QwenOAuthProgress', () => {
   const mockOnTimeout = vi.fn();
   const mockOnCancel = vi.fn();
+  const mockedUseKeypress = vi.mocked(useKeypress);
+  let keypressHandler: ((key: Key) => void) | null = null;
 
   const createMockDeviceAuth = (
-    overrides: Partial<DeviceAuthorizationInfo> = {},
-  ): DeviceAuthorizationInfo => ({
+    overrides: Partial<DeviceAuthorizationData> = {},
+  ): DeviceAuthorizationData => ({
     verification_uri: 'https://example.com/device',
     verification_uri_complete: 'https://example.com/device?user_code=ABC123',
     user_code: 'ABC123',
     expires_in: 300,
+    device_code: 'test-device-code',
     ...overrides,
   });
 
@@ -46,7 +56,7 @@ describe('QwenOAuthProgress', () => {
 
   const renderComponent = (
     props: Partial<{
-      deviceAuth: DeviceAuthorizationInfo;
+      deviceAuth: DeviceAuthorizationData;
       authStatus:
         | 'idle'
         | 'polling'
@@ -68,6 +78,12 @@ describe('QwenOAuthProgress', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    keypressHandler = null;
+
+    // Mock useKeypress to capture the handler
+    mockedUseKeypress.mockImplementation((handler) => {
+      keypressHandler = handler;
+    });
   });
 
   afterEach(() => {
@@ -143,7 +159,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should format time correctly', () => {
-      const deviceAuthWithCustomTime: DeviceAuthorizationInfo = {
+      const deviceAuthWithCustomTime: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 125, // 2 minutes and 5 seconds
       };
@@ -161,7 +177,7 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should format single digit seconds with leading zero', () => {
-      const deviceAuthWithCustomTime: DeviceAuthorizationInfo = {
+      const deviceAuthWithCustomTime: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 67, // 1 minute and 7 seconds
       };
@@ -181,7 +197,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('Timer functionality', () => {
     it('should countdown and call onTimeout when timer expires', async () => {
-      const deviceAuthWithShortTime: DeviceAuthorizationInfo = {
+      const deviceAuthWithShortTime: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 2, // 2 seconds
       };
@@ -419,7 +435,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('User interactions', () => {
     it('should call onCancel when ESC key is pressed', () => {
-      const { stdin } = render(
+      render(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -428,24 +444,42 @@ describe('QwenOAuthProgress', () => {
       );
 
       // Simulate ESC key press
-      stdin.write('\u001b'); // ESC character
+      if (keypressHandler) {
+        keypressHandler({
+          name: 'escape',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\u001b',
+        });
+      }
 
       expect(mockOnCancel).toHaveBeenCalledTimes(1);
     });
 
     it('should call onCancel when ESC is pressed in loading state', () => {
-      const { stdin } = render(
+      render(
         <QwenOAuthProgress onTimeout={mockOnTimeout} onCancel={mockOnCancel} />,
       );
 
       // Simulate ESC key press
-      stdin.write('\u001b'); // ESC character
+      if (keypressHandler) {
+        keypressHandler({
+          name: 'escape',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\u001b',
+        });
+      }
 
       expect(mockOnCancel).toHaveBeenCalledTimes(1);
     });
 
     it('should not call onCancel for other key presses', () => {
-      const { stdin } = render(
+      render(
         <QwenOAuthProgress
           onTimeout={mockOnTimeout}
           onCancel={mockOnCancel}
@@ -454,9 +488,32 @@ describe('QwenOAuthProgress', () => {
       );
 
       // Simulate other key presses
-      stdin.write('a');
-      stdin.write('\r'); // Enter
-      stdin.write(' '); // Space
+      if (keypressHandler) {
+        keypressHandler({
+          name: 'a',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'a',
+        });
+        keypressHandler({
+          name: 'return',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\r',
+        });
+        keypressHandler({
+          name: 'space',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: ' ',
+        });
+      }
 
       expect(mockOnCancel).not.toHaveBeenCalled();
     });
@@ -464,7 +521,7 @@ describe('QwenOAuthProgress', () => {
 
   describe('Props changes', () => {
     it('should display initial timer value from deviceAuth', () => {
-      const deviceAuthWith10Min: DeviceAuthorizationInfo = {
+      const deviceAuthWith10Min: DeviceAuthorizationData = {
         ...mockDeviceAuth,
         expires_in: 600, // 10 minutes
       };
@@ -529,17 +586,35 @@ describe('QwenOAuthProgress', () => {
     });
 
     it('should call onCancel for any key press in timeout state', () => {
-      const { stdin } = renderComponent({
+      renderComponent({
         authStatus: 'timeout',
       });
 
       // Simulate any key press
-      stdin.write('a');
+      if (keypressHandler) {
+        keypressHandler({
+          name: 'a',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'a',
+        });
+      }
       expect(mockOnCancel).toHaveBeenCalledTimes(1);
 
       // Reset mock and try enter key
       mockOnCancel.mockClear();
-      stdin.write('\r');
+      if (keypressHandler) {
+        keypressHandler({
+          name: 'return',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: '\r',
+        });
+      }
       expect(mockOnCancel).toHaveBeenCalledTimes(1);
     });
   });

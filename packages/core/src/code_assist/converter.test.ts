@@ -299,6 +299,17 @@ describe('converter', () => {
         codeAssistRes.response.automaticFunctionCallingHistory,
       );
     });
+
+    it('should handle modelVersion', () => {
+      const codeAssistRes: CaGenerateContentResponse = {
+        response: {
+          candidates: [],
+          modelVersion: 'qwen3-coder-plus',
+        },
+      };
+      const genaiRes = fromGenerateContentResponse(codeAssistRes);
+      expect(genaiRes.modelVersion).toEqual('qwen3-coder-plus');
+    });
   });
 
   describe('toContents', () => {

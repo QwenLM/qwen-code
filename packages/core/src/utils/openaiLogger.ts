@@ -18,10 +18,23 @@ export class OpenAILogger {
 
   /**
    * Creates a new OpenAI logger
-   * @param customLogDir Optional custom log directory path
+   * @param customLogDir Optional custom log directory path (supports relative paths, absolute paths, and ~ expansion)
    */
   constructor(customLogDir?: string) {
-    this.logDir = customLogDir || path.join(process.cwd(), 'logs', 'openai');
+    if (customLogDir) {
+      // Resolve relative paths to absolute paths
+      // Handle ~ expansion
+      let resolvedPath = customLogDir;
+      if (customLogDir === '~' || customLogDir.startsWith('~/')) {
+        resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
+      } else if (!path.isAbsolute(customLogDir)) {
+        // If it's a relative path, resolve it relative to current working directory
+        resolvedPath = path.resolve(process.cwd(), customLogDir);
+      }
+      this.logDir = path.normalize(resolvedPath);
+    } else {
+      this.logDir = path.join(process.cwd(), 'logs', 'openai');
+    }
   }
 
   /**

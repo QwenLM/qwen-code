@@ -21,10 +21,10 @@ The Qwen Code core (`packages/core`) features a robust system for defining, regi
 - **Returning Rich Content:** Tools are not limited to returning simple text. The `llmContent` can be a `PartListUnion`, which is an array that can contain a mix of `Part` objects (for images, audio, etc.) and `string`s. This allows a single tool execution to return multiple pieces of rich content.
 
 - **Tool Registry (`tool-registry.ts`):** A class (`ToolRegistry`) responsible for:
-  - **Registering Tools:** Holding a collection of all available built-in tools (e.g., `ReadFileTool`, `ShellTool`).
+  - **Registering Tools:** Holding a collection of all available built-in tools (e.g., `ListFiles`, `ReadFile`).
   - **Discovering Tools:** It can also discover tools dynamically:
-    - **Command-based Discovery:** If `toolDiscoveryCommand` is configured in settings, this command is executed. It's expected to output JSON describing custom tools, which are then registered as `DiscoveredTool` instances.
-    - **MCP-based Discovery:** If `mcpServerCommand` is configured, the registry can connect to a Model Context Protocol (MCP) server to list and register tools (`DiscoveredMCPTool`).
+    - **Command-based Discovery:** If `tools.toolDiscoveryCommand` is configured in settings, this command is executed. It's expected to output JSON describing custom tools, which are then registered as `DiscoveredTool` instances.
+    - **MCP-based Discovery:** If `mcp.mcpServerCommand` is configured, the registry can connect to a Model Context Protocol (MCP) server to list and register tools (`DiscoveredMCPTool`).
   - **Providing Schemas:** Exposing the `FunctionDeclaration` schemas of all registered tools to the model, so it knows what tools are available and how to use them.
   - **Retrieving Tools:** Allowing the core to get a specific tool by name for execution.
 
@@ -33,20 +33,24 @@ The Qwen Code core (`packages/core`) features a robust system for defining, regi
 The core comes with a suite of pre-defined tools, typically found in `packages/core/src/tools/`. These include:
 
 - **File System Tools:**
-  - `LSTool` (`ls.ts`): Lists directory contents.
-  - `ReadFileTool` (`read-file.ts`): Reads the content of a single file. It takes an `absolute_path` parameter, which must be an absolute path.
-  - `WriteFileTool` (`write-file.ts`): Writes content to a file.
-  - `GrepTool` (`grep.ts`): Searches for patterns in files.
-  - `GlobTool` (`glob.ts`): Finds files matching glob patterns.
-  - `EditTool` (`edit.ts`): Performs in-place modifications to files (often requiring confirmation).
-  - `ReadManyFilesTool` (`read-many-files.ts`): Reads and concatenates content from multiple files or glob patterns (used by the `@` command in CLI).
+  - `ListFiles` (`ls.ts`): Lists directory contents.
+  - `ReadFile` (`read-file.ts`): Reads the content of a single file. It takes an `absolute_path` parameter, which must be an absolute path.
+  - `WriteFile` (`write-file.ts`): Writes content to a file.
+  - `ReadManyFiles` (`read-many-files.ts`): Reads and concatenates content from multiple files or glob patterns (used by the `@` command in CLI).
+  - `Grep` (`grep.ts`): Searches for patterns in files.
+  - `Glob` (`glob.ts`): Finds files matching glob patterns.
+  - `Edit` (`edit.ts`): Performs in-place modifications to files (often requiring confirmation).
 - **Execution Tools:**
-  - `ShellTool` (`shell.ts`): Executes arbitrary shell commands (requires careful sandboxing and user confirmation).
+  - `Shell` (`shell.ts`): Executes arbitrary shell commands (requires careful sandboxing and user confirmation).
 - **Web Tools:**
-  - `WebFetchTool` (`web-fetch.ts`): Fetches content from a URL.
-  - `WebSearchTool` (`web-search.ts`): Performs a web search.
+  - `WebFetch` (`web-fetch.ts`): Fetches content from a URL.
+  - `WebSearch` (`web-search.ts`): Performs a web search.
 - **Memory Tools:**
-  - `MemoryTool` (`memoryTool.ts`): Interacts with the AI's memory.
+  - `SaveMemory` (`memoryTool.ts`): Interacts with the AI's memory.
+- **Planning Tools:**
+  - `Task` (`task.ts`): Delegates tasks to specialized subagents.
+  - `TodoWrite` (`todoWrite.ts`): Creates and manages a structured task list.
+  - `ExitPlanMode` (`exitPlanMode.ts`): Exits plan mode and returns to normal operation.
 
 Each of these tools extends `BaseTool` and implements the required methods for its specific functionality.
 
@@ -69,7 +73,7 @@ Each of these tools extends `BaseTool` and implements the required methods for i
 
 While direct programmatic registration of new tools by users isn't explicitly detailed as a primary workflow in the provided files for typical end-users, the architecture supports extension through:
 
-- **Command-based Discovery:** Advanced users or project administrators can define a `toolDiscoveryCommand` in `settings.json`. This command, when run by the core, should output a JSON array of `FunctionDeclaration` objects. The core will then make these available as `DiscoveredTool` instances. The corresponding `toolCallCommand` would then be responsible for actually executing these custom tools.
+- **Command-based Discovery:** Advanced users or project administrators can define a `tools.toolDiscoveryCommand` in `settings.json`. This command, when run by the core, should output a JSON array of `FunctionDeclaration` objects. The core will then make these available as `DiscoveredTool` instances. The corresponding `tools.toolCallCommand` would then be responsible for actually executing these custom tools.
 - **MCP Server(s):** For more complex scenarios, one or more MCP servers can be set up and configured via the `mcpServers` setting in `settings.json`. The core can then discover and use tools exposed by these servers. As mentioned, if you have multiple MCP servers, the tool names will be prefixed with the server name from your configuration (e.g., `serverAlias__actualToolName`).
 
 This tool system provides a flexible and powerful way to augment the model's capabilities, making Qwen Code a versatile assistant for a wide range of tasks.

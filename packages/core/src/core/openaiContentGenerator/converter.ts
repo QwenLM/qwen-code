@@ -24,6 +24,14 @@ import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 
 /**
+ * Extended usage type that supports both OpenAI standard format and alternative formats
+ * Some models return cached_tokens at the top level instead of in prompt_tokens_details
+ */
+interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
+  cached_tokens?: number;
+}
+
+/**
  * Tool call accumulator for streaming responses
  */
 export interface ToolCallAccumulator {
@@ -276,10 +284,7 @@ export class OpenAIContentConverter {
         messages.push({
           role: 'tool' as const,
           tool_call_id: funcResponse.id || '',
-          content:
-            typeof funcResponse.response === 'string'
-              ? funcResponse.response
-              : JSON.stringify(funcResponse.response),
+          content: this.extractFunctionResponseContent(funcResponse.response),
         });
       }
       return;
@@ -357,6 +362,36 @@ export class OpenAIContentConverter {
     }
 
     return { textParts, functionCalls, functionResponses, mediaParts };
+  }
+
+  private extractFunctionResponseContent(response: unknown): string {
+    if (response === null || response === undefined) {
+      return '';
+    }
+
+    if (typeof response === 'string') {
+      return response;
+    }
+
+    if (typeof response === 'object') {
+      const responseObject = response as Record<string, unknown>;
+      const output = responseObject['output'];
+      if (typeof output === 'string') {
+        return output;
+      }
+
+      const error = responseObject['error'];
+      if (typeof error === 'string') {
+        return error;
+      }
+    }
+
+    try {
+      const serialized = JSON.stringify(response);
+      return serialized ?? String(response);
+    } catch {
+      return String(response);
+    }
   }
 
   /**
@@ -555,7 +590,13 @@ export class OpenAIContentConverter {
       const promptTokens = usage.prompt_tokens || 0;
       const completionTokens = usage.completion_tokens || 0;
       const totalTokens = usage.total_tokens || 0;
-      const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+      // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
+      // and cached_tokens (some models return it at top level)
+      const extendedUsage = usage as ExtendedCompletionUsage;
+      const cachedTokens =
+        usage.prompt_tokens_details?.cached_tokens ??
+        extendedUsage.cached_tokens ??
+        0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations
@@ -680,7 +721,13 @@ export class OpenAIContentConverter {
       const promptTokens = usage.prompt_tokens || 0;
       const completionTokens = usage.completion_tokens || 0;
       const totalTokens = usage.total_tokens || 0;
-      const cachedTokens = usage.prompt_tokens_details?.cached_tokens || 0;
+      // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
+      // and cached_tokens (some models return it at top level)
+      const extendedUsage = usage as ExtendedCompletionUsage;
+      const cachedTokens =
+        usage.prompt_tokens_details?.cached_tokens ??
+        extendedUsage.cached_tokens ??
+        0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations

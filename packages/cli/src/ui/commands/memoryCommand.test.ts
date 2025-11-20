@@ -15,6 +15,7 @@ import {
   getErrorMessage,
   loadServerHierarchicalMemory,
   type FileDiscoveryService,
+  type LoadServerHierarchicalMemoryResponse,
 } from '@qwen-code/qwen-code-core';
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -225,6 +226,7 @@ describe('memoryCommand', () => {
           ignore: [],
           include: [],
         }),
+        getFolderTrust: () => false,
       };
 
       mockContext = createMockCommandContext({
@@ -243,7 +245,7 @@ describe('memoryCommand', () => {
     it('should display success message when memory is refreshed with content', async () => {
       if (!refreshCommand.action) throw new Error('Command has no action');
 
-      const refreshResult = {
+      const refreshResult: LoadServerHierarchicalMemoryResponse = {
         memoryContent: 'new memory content',
         fileCount: 2,
       };

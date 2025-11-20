@@ -8,6 +8,23 @@ import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 
 /**
+ * Common Windows console code pages (CP) used for encoding conversions.
+ *
+ * @remarks
+ * - `UTF8` (65001): Unicode (UTF-8) — recommended for cross-language scripts.
+ * - `GBK` (936): Simplified Chinese — default on most Chinese Windows systems.
+ * - `BIG5` (950): Traditional Chinese.
+ * - `LATIN1` (1252): Western European — default on many Western systems.
+ */
+export const CodePage = {
+  UTF8: 65001,
+  GBK: 936,
+  BIG5: 950,
+  LATIN1: 1252,
+} as const;
+
+export type CodePage = (typeof CodePage)[keyof typeof CodePage];
+/**
  * Checks if a query string potentially represents an '@' command.
  * It triggers if the query starts with '@' or contains '@' preceded by whitespace
  * and followed by a non-whitespace character.
@@ -80,7 +97,7 @@ export const copyToClipboard = async (text: string): Promise<void> => {
 
   switch (process.platform) {
     case 'win32':
-      return run('clip', []);
+      return run('cmd', ['/c', `chcp ${CodePage.UTF8} >nul && clip`]);
     case 'darwin':
       return run('pbcopy', []);
     case 'linux':
