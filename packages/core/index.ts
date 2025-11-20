@@ -6,6 +6,7 @@
 
 export * from './src/index.js';
 export { Storage } from './src/config/storage.js';
+export * from './src/agent-collaboration/index.js';
 export {
   DEFAULT_QWEN_MODEL,
   DEFAULT_QWEN_EMBEDDING_MODEL,

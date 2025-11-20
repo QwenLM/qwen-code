@@ -901,7 +901,7 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(9); // agent1 (project takes precedence), agent2, agent3, general-purpose, project-manager, deep-web-search, deep-planner, software-engineer, software-tester (built-in)
+      expect(subagents).toHaveLength(11); // agent1 (project takes precedence), agent2, agent3, general-purpose, project-manager, deep-web-search, deep-planner, deep-researcher, software-architecture, software-engineer, software-tester (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
@@ -910,6 +910,8 @@ System prompt 3`);
         'project-manager',
         'deep-web-search',
         'deep-planner',
+        'deep-researcher',
+        'software-architecture',
         'software-engineer',
         'software-tester',
       ]);
@@ -943,9 +945,11 @@ System prompt 3`);
         'agent2',
         'agent3',
         'deep-planner',
+        'deep-researcher',
         'deep-web-search',
         'general-purpose',
         'project-manager',
+        'software-architecture',
         'software-engineer',
         'software-tester',
       ]);
@@ -959,11 +963,13 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(6); // Only built-in agents remain
+      expect(subagents).toHaveLength(8); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toContain('general-purpose');
       expect(subagents.map((s) => s.name)).toContain('project-manager');
       expect(subagents.map((s) => s.name)).toContain('deep-web-search');
       expect(subagents.map((s) => s.name)).toContain('deep-planner');
+      expect(subagents.map((s) => s.name)).toContain('deep-researcher');
+      expect(subagents.map((s) => s.name)).toContain('software-architecture');
       expect(subagents.map((s) => s.name)).toContain('software-engineer');
       expect(subagents.map((s) => s.name)).toContain('software-tester');
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
@@ -976,11 +982,13 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(6); // Only built-in agents remain
+      expect(subagents).toHaveLength(8); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toContain('general-purpose');
       expect(subagents.map((s) => s.name)).toContain('project-manager');
       expect(subagents.map((s) => s.name)).toContain('deep-web-search');
       expect(subagents.map((s) => s.name)).toContain('deep-planner');
+      expect(subagents.map((s) => s.name)).toContain('deep-researcher');
+      expect(subagents.map((s) => s.name)).toContain('software-architecture');
       expect(subagents.map((s) => s.name)).toContain('software-engineer');
       expect(subagents.map((s) => s.name)).toContain('software-tester');
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);

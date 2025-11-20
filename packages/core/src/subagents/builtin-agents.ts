@@ -8,6 +8,8 @@ import type { SubagentConfig } from './types.js';
 import { ProjectManagementAgent } from './project-management-agent.js';
 import { DeepWebSearchAgent } from './deep-web-search-agent.js';
 import { DeepPlannerAgent } from './deep-planner-agent.js';
+import { DeepResearcherAgent } from './deep-researcher-agent.js';
+import { SoftwareArchitectureAgent } from './software-architecture-agent.js';
 import { SoftwareEngineerAgent } from './software-engineer-agent.js';
 import { SoftwareTesterAgent } from './software-tester-agent.js';
 
@@ -50,6 +52,8 @@ Notes:
     ProjectManagementAgent,
     DeepWebSearchAgent,
     DeepPlannerAgent,
+    DeepResearcherAgent,
+    SoftwareArchitectureAgent,
     SoftwareEngineerAgent,
     SoftwareTesterAgent,
   ];

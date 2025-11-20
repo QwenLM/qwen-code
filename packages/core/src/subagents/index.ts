@@ -70,6 +70,10 @@ export type {
 
 export { SubAgentEventEmitter, SubAgentEventType } from './subagent-events.js';
 
+// Built-in agent configurations
+export { DeepResearcherAgent } from './deep-researcher-agent.js';
+export { SoftwareArchitectureAgent } from './software-architecture-agent.js';
+
 // Statistics and formatting
 export type {
   SubagentStatsSummary,
