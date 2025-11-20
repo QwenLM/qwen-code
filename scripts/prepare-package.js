@@ -56,6 +56,43 @@ for (const file of filesToCopy) {
   }
 }
 
+// Copy locales folder
+console.log('Copying locales folder...');
+const localesSourceDir = path.join(
+  rootDir,
+  'packages',
+  'cli',
+  'src',
+  'i18n',
+  'locales',
+);
+const localesDestDir = path.join(distDir, 'locales');
+
+if (fs.existsSync(localesSourceDir)) {
+  // Recursive copy function
+  function copyRecursiveSync(src, dest) {
+    const stats = fs.statSync(src);
+    if (stats.isDirectory()) {
+      if (!fs.existsSync(dest)) {
+        fs.mkdirSync(dest, { recursive: true });
+      }
+      const entries = fs.readdirSync(src);
+      for (const entry of entries) {
+        const srcPath = path.join(src, entry);
+        const destPath = path.join(dest, entry);
+        copyRecursiveSync(srcPath, destPath);
+      }
+    } else {
+      fs.copyFileSync(src, dest);
+    }
+  }
+
+  copyRecursiveSync(localesSourceDir, localesDestDir);
+  console.log('Copied locales folder');
+} else {
+  console.warn(`Warning: locales folder not found at ${localesSourceDir}`);
+}
+
 // Copy package.json from root and modify it for publishing
 console.log('Creating package.json for distribution...');
 const rootPackageJson = JSON.parse(
@@ -85,7 +122,7 @@ const distPackageJson = {
   bin: {
     qwen: 'cli.js',
   },
-  files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE'],
+  files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE', 'locales'],
   config: rootPackageJson.config,
   dependencies: runtimeDependencies,
   optionalDependencies: {
