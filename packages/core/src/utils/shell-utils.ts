@@ -508,37 +508,52 @@ export function execCommand(
 /**
  * Resolves the path of a command in the system's PATH.
  * @param {string} command The command name (e.g., 'git', 'grep').
- * @returns {string | null} The path of the command, or null if it is not found.
+ * @returns {path: string | null; error?: Error} The path of the command, or null if it is not found and any error that occurred.
  */
-export function resolveCommandPath(command: string): string | null {
+export function resolveCommandPath(command: string): {
+  path: string | null;
+  error?: Error;
+} {
   try {
     const isWin = process.platform === 'win32';
 
     const checkCommand = isWin ? 'where' : 'command';
     const checkArgs = isWin ? [command] : ['-v', command];
 
-    const result = execFileSync(checkCommand, checkArgs, {
-      encoding: 'utf8',
-      shell: isWin,
-    }).trim();
+    let result: string | null = null;
+    try {
+      result = execFileSync(checkCommand, checkArgs, {
+        encoding: 'utf8',
+        shell: isWin,
+      }).trim();
+    } catch {
+      console.warn(`Command ${checkCommand} not found`);
+    }
 
-    if (!result) return null;
+    if (!result) return { path: null, error: undefined };
     if (!isWin) {
       accessSync(result, fsConstants.X_OK);
     }
-    return result;
-  } catch {
-    return null;
+    return { path: result, error: undefined };
+  } catch (error) {
+    return {
+      path: null,
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
   }
 }
 
 /**
  * Checks if a command is available in the system's PATH.
  * @param {string} command The command name (e.g., 'git', 'grep').
- * @returns {boolean} True if the command is available, false otherwise.
+ * @returns {available: boolean; error?: Error} The availability of the command and any error that occurred.
  */
-export function isCommandAvailable(command: string): boolean {
-  return resolveCommandPath(command) !== null;
+export function isCommandAvailable(command: string): {
+  available: boolean;
+  error?: Error;
+} {
+  const { path, error } = resolveCommandPath(command);
+  return { available: path !== null, error };
 }
 
 export function isCommandAllowed(

@@ -82,6 +82,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -1154,17 +1155,20 @@ export class Config {
       try {
         useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
       } catch (error: unknown) {
-        errorString = String(error);
+        errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
         registerCoreTool(RipGrepTool, this);
       } else {
-        errorString =
-          errorString ||
-          'Ripgrep is not available. Please install ripgrep globally.';
-
         // Log for telemetry
-        logRipgrepFallback(this, new RipgrepFallbackEvent(errorString));
+        logRipgrepFallback(
+          this,
+          new RipgrepFallbackEvent(
+            this.getUseRipgrep(),
+            this.getUseBuiltinRipgrep(),
+            errorString || 'ripgrep is not available',
+          ),
+        );
         registerCoreTool(GrepTool, this);
       }
     } else {

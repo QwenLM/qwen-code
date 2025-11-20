@@ -76,7 +76,7 @@ describe('GitService', () => {
 
     vi.clearAllMocks();
     hoistedIsGitRepositoryMock.mockReturnValue(true);
-    (isCommandAvailable as Mock).mockReturnValue(true);
+    (isCommandAvailable as Mock).mockReturnValue({ available: true });
 
     hoistedMockHomedir.mockReturnValue(homedir);
 
@@ -118,7 +118,7 @@ describe('GitService', () => {
 
   describe('initialize', () => {
     it('should throw an error if Git is not available', async () => {
-      (isCommandAvailable as Mock).mockReturnValue(false);
+      (isCommandAvailable as Mock).mockReturnValue({ available: false });
       const service = new GitService(projectRoot, storage);
       await expect(service.initialize()).rejects.toThrow(
         'Checkpointing is enabled, but Git is not installed. Please install Git or disable checkpointing to continue.',

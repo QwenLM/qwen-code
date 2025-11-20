@@ -26,7 +26,7 @@ export class GitService {
   }
 
   async initialize(): Promise<void> {
-    const gitAvailable = isCommandAvailable('git');
+    const { available: gitAvailable } = isCommandAvailable('git');
     if (!gitAvailable) {
       throw new Error(
         'Checkpointing is enabled, but Git is not installed. Please install Git or disable checkpointing to continue.',

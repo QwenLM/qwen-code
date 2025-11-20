@@ -38,6 +38,7 @@ import type {
   ModelSlashCommandEvent,
   ExtensionDisableEvent,
   AuthEvent,
+  RipgrepFallbackEvent,
 } from '../types.js';
 import { EndSessionEvent } from '../types.js';
 import type {
@@ -778,8 +779,16 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logRipgrepFallbackEvent(): void {
-    const rumEvent = this.createActionEvent('misc', 'ripgrep_fallback', {});
+  logRipgrepFallbackEvent(event: RipgrepFallbackEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'ripgrep_fallback', {
+      snapshots: JSON.stringify({
+        platform: process.platform,
+        arch: process.arch,
+        use_ripgrep: event.use_ripgrep,
+        use_builtin_ripgrep: event.use_builtin_ripgrep,
+        error: event.error ?? undefined,
+      }),
+    });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

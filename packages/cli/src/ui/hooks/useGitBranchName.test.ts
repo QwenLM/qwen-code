@@ -48,7 +48,7 @@ describe('useGitBranchName', () => {
       [GIT_LOGS_HEAD_PATH]: 'ref: refs/heads/main',
     });
     vi.useFakeTimers(); // Use fake timers for async operations
-    (isCommandAvailable as Mock).mockResolvedValue(true);
+    (isCommandAvailable as Mock).mockReturnValue({ available: true });
   });
 
   afterEach(() => {
@@ -86,7 +86,6 @@ describe('useGitBranchName', () => {
   });
 
   it('should return short commit hash if branch is HEAD (detached state)', async () => {
-     
     (execCommand as Mock).mockImplementation(
       async (_command: string, args?: readonly string[] | null) => {
         if (args?.includes('--abbrev-ref')) {

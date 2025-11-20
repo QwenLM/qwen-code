@@ -314,7 +314,7 @@ export function logRipgrepFallback(
   config: Config,
   event: RipgrepFallbackEvent,
 ): void {
-  QwenLogger.getInstance(config)?.logRipgrepFallbackEvent();
+  QwenLogger.getInstance(config)?.logRipgrepFallbackEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {

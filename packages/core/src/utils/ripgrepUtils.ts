@@ -139,33 +139,34 @@ export function getBuiltinRipgrep(): string | null {
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
  * @returns The path to ripgrep binary ('rg' or 'rg.exe' for system ripgrep, or full path for bundled), or null if not available
+ * @throws {Error} If an error occurs while resolving the ripgrep binary.
  */
 export async function resolveRipgrep(
   useBuiltin: boolean = true,
 ): Promise<RipgrepSelection | null> {
   if (cachedSelection) return cachedSelection;
 
-  try {
-    if (useBuiltin) {
-      // Try bundled ripgrep first
-      const rgPath = getBuiltinRipgrep();
-      if (rgPath && (await fileExists(rgPath))) {
-        cachedSelection = { mode: 'builtin', command: rgPath };
-        return cachedSelection;
-      }
-      // Fallback to system rg if bundled binary is not available
-    }
-
-    const isAvailable = isCommandAvailable(RIPGREP_COMMAND);
-    if (isAvailable) {
-      cachedSelection = { mode: 'system', command: RIPGREP_COMMAND };
+  if (useBuiltin) {
+    // Try bundled ripgrep first
+    const rgPath = getBuiltinRipgrep();
+    if (rgPath && (await fileExists(rgPath))) {
+      cachedSelection = { mode: 'builtin', command: rgPath };
       return cachedSelection;
     }
-
-    return null;
-  } catch (_error) {
-    return null;
+    // Fallback to system rg if bundled binary is not available
   }
+
+  const { available, error } = isCommandAvailable(RIPGREP_COMMAND);
+  if (available) {
+    cachedSelection = { mode: 'system', command: RIPGREP_COMMAND };
+    return cachedSelection;
+  }
+
+  if (error) {
+    throw error;
+  }
+
+  return null;
 }
 
 /**
@@ -232,20 +233,18 @@ export async function ensureMacBinarySigned(
  * Checks if ripgrep binary is available
  * @param useBuiltin If true, tries bundled ripgrep first, then falls back to system ripgrep.
  *                   If false, only checks for system ripgrep.
+ * @returns True if ripgrep is available, false otherwise.
+ * @throws {Error} If an error occurs while resolving the ripgrep binary.
  */
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
 ): Promise<boolean> {
-  try {
-    const selection = await resolveRipgrep(useBuiltin);
-    if (!selection) {
-      return false;
-    }
-    await ensureRipgrepHealthy(selection);
-    return true;
-  } catch {
+  const selection = await resolveRipgrep(useBuiltin);
+  if (!selection) {
     return false;
   }
+  await ensureRipgrepHealthy(selection);
+  return true;
 }
 
 /**
@@ -253,6 +252,7 @@ export async function canUseRipgrep(
  * @param args The arguments to pass to ripgrep
  * @param signal The signal to abort the ripgrep process
  * @returns The result of running ripgrep
+ * @throws {Error} If an error occurs while running ripgrep.
  */
 export async function runRipgrep(
   args: string[],

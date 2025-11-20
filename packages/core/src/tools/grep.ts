@@ -275,7 +275,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     try {
       // --- Strategy 1: git grep ---
       const isGit = isGitRepository(absolutePath);
-      const gitAvailable = isGit && isCommandAvailable('git');
+      const gitAvailable = isGit && isCommandAvailable('git').available;
 
       if (gitAvailable) {
         strategyUsed = 'git grep';
@@ -328,7 +328,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // --- Strategy 2: System grep ---
-      const grepAvailable = isCommandAvailable('grep');
+      const { available: grepAvailable } = isCommandAvailable('grep');
       if (grepAvailable) {
         strategyUsed = 'system grep';
         const grepArgs = ['-r', '-n', '-H', '-E'];

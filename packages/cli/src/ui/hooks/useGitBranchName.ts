@@ -15,7 +15,7 @@ export function useGitBranchName(cwd: string): string | undefined {
 
   const fetchBranchName = useCallback(async () => {
     try {
-      if (!isCommandAvailable('git')) {
+      if (!isCommandAvailable('git').available) {
         return;
       }
 
