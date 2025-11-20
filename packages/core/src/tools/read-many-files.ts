@@ -282,77 +282,85 @@ ${finalExclusionPatternsForDescription
       ? Math.floor(truncateToolOutputLines / Math.max(1, sortedFiles.length))
       : undefined;
 
-    const fileProcessingPromises = sortedFiles.map(
-      async (filePath): Promise<FileProcessingResult> => {
-        try {
-          const relativePathForDisplay = path
-            .relative(this.config.getTargetDir(), filePath)
-            .replace(/\\/g, '/');
+    // Process files with a concurrency limit to prevent overwhelming the system
+    const CONCURRENCY_LIMIT = 10;
+    const results: Array<PromiseSettledResult<FileProcessingResult>> = [];
 
-          const fileType = await detectFileType(filePath);
+    for (let i = 0; i < sortedFiles.length; i += CONCURRENCY_LIMIT) {
+      const batch = sortedFiles.slice(i, i + CONCURRENCY_LIMIT);
+      const batchPromises = batch.map(
+        async (filePath): Promise<FileProcessingResult> => {
+          try {
+            const relativePathForDisplay = path
+              .relative(this.config.getTargetDir(), filePath)
+              .replace(/\\/g, '/');
 
-          if (fileType === 'image' || fileType === 'pdf') {
-            const fileExtension = path.extname(filePath).toLowerCase();
-            const fileNameWithoutExtension = path.basename(
+            const fileType = await detectFileType(filePath);
+
+            if (fileType === 'image' || fileType === 'pdf') {
+              const fileExtension = path.extname(filePath).toLowerCase();
+              const fileNameWithoutExtension = path.basename(
+                filePath,
+                fileExtension,
+              );
+              const requestedExplicitly = inputPatterns.some(
+                (pattern: string) =>
+                  pattern.toLowerCase().includes(fileExtension) ||
+                  pattern.includes(fileNameWithoutExtension),
+              );
+
+              if (!requestedExplicitly) {
+                return {
+                  success: false,
+                  filePath,
+                  relativePathForDisplay,
+                  reason:
+                    'asset file (image/pdf) was not explicitly requested by name or extension',
+                };
+              }
+            }
+
+            // Use processSingleFileContent for all file types now
+            const fileReadResult = await processSingleFileContent(
               filePath,
-              fileExtension,
-            );
-            const requestedExplicitly = inputPatterns.some(
-              (pattern: string) =>
-                pattern.toLowerCase().includes(fileExtension) ||
-                pattern.includes(fileNameWithoutExtension),
+              this.config,
+              0,
+              file_line_limit,
             );
 
-            if (!requestedExplicitly) {
+            if (fileReadResult.error) {
               return {
                 success: false,
                 filePath,
                 relativePathForDisplay,
-                reason:
-                  'asset file (image/pdf) was not explicitly requested by name or extension',
+                reason: `Read error: ${fileReadResult.error}`,
               };
             }
-          }
 
-          // Use processSingleFileContent for all file types now
-          const fileReadResult = await processSingleFileContent(
-            filePath,
-            this.config,
-            0,
-            file_line_limit,
-          );
+            return {
+              success: true,
+              filePath,
+              relativePathForDisplay,
+              fileReadResult,
+            };
+          } catch (error) {
+            const relativePathForDisplay = path
+              .relative(this.config.getTargetDir(), filePath)
+              .replace(/\\/g, '/');
 
-          if (fileReadResult.error) {
             return {
               success: false,
               filePath,
               relativePathForDisplay,
-              reason: `Read error: ${fileReadResult.error}`,
+              reason: `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
             };
           }
+        },
+      );
 
-          return {
-            success: true,
-            filePath,
-            relativePathForDisplay,
-            fileReadResult,
-          };
-        } catch (error) {
-          const relativePathForDisplay = path
-            .relative(this.config.getTargetDir(), filePath)
-            .replace(/\\/g, '/');
-
-          return {
-            success: false,
-            filePath,
-            relativePathForDisplay,
-            reason: `Unexpected error: ${error instanceof Error ? error.message : String(error)}`,
-          };
-        }
-      },
-    );
-
-    const results = await Promise.allSettled(fileProcessingPromises);
+      const batchResults = await Promise.allSettled(batchPromises);
+      results.push(...batchResults);
+    }
 
     for (const result of results) {
       if (result.status === 'fulfilled') {

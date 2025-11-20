@@ -42,10 +42,17 @@ export class ResultCache {
     // from the results of the "foo" search.
     // This finds the most specific, already-cached query that is a prefix
     // of the current query.
+    // We use an optimized approach by checking the longest matching prefix only
     let bestBaseQuery = '';
-    for (const key of this.cache?.keys?.() ?? []) {
-      if (query.startsWith(key) && key.length > bestBaseQuery.length) {
+    const cacheKeys = Array.from(this.cache.keys());
+
+    // Sort keys by length in descending order to find the longest match first
+    cacheKeys.sort((a, b) => b.length - a.length);
+
+    for (const key of cacheKeys) {
+      if (query.startsWith(key)) {
         bestBaseQuery = key;
+        break; // Since we sorted by length, the first match is the best
       }
     }
 

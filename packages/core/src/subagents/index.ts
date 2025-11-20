@@ -41,6 +41,9 @@ export { SubagentValidator } from './validation.js';
 // Main management class
 export { SubagentManager } from './subagent-manager.js';
 
+// Dynamic agents management
+export { DynamicAgentManager } from './dynamic-agent-manager.js';
+
 // Re-export existing runtime types for convenience
 export type {
   PromptConfig,
@@ -50,7 +53,7 @@ export type {
   SubagentTerminateMode,
 } from './types.js';
 
-export { SubAgentScope } from './subagent.js';
+export { SubAgentScope, ContextState } from './subagent.js';
 
 // Event system for UI integration
 export type {

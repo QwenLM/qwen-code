@@ -110,7 +110,9 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "simple-git": "^3.28.0"
+    "run": "^1.5.0",
+    "simple-git": "^3.28.0",
+    "tar": "^7.5.2"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.1.0",

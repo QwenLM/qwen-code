@@ -58,35 +58,108 @@ import {
 } from './utils/relaunch.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 
+// LRU Cache for DNS resolution order to avoid repeated validation for the same value
+class LruCache<T> {
+  private readonly map = new Map<string | undefined, T>();
+  private readonly maxEntries: number;
+
+  constructor(maxEntries: number) {
+    this.maxEntries = maxEntries;
+  }
+
+  get(key: string | undefined): T | undefined {
+    const item = this.map.get(key);
+    if (item !== undefined) {
+      // Move to end to indicate recent usage
+      this.map.delete(key);
+      this.map.set(key, item);
+    }
+    return item;
+  }
+
+  set(key: string | undefined, value: T): void {
+    if (this.map.size >= this.maxEntries && !this.map.has(key)) {
+      // Remove the first (oldest) entry
+      const firstKey = this.map.keys().next().value;
+      this.map.delete(firstKey);
+    }
+    this.map.set(key, value);
+  }
+}
+
+const dnsCache = new LruCache<DnsResolutionOrder>(10); // Limit cache size to prevent memory bloat
+
 export function validateDnsResolutionOrder(
   order: string | undefined,
 ): DnsResolutionOrder {
+  // Check if result is already cached
+  const cached = dnsCache.get(order);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   const defaultValue: DnsResolutionOrder = 'ipv4first';
+  let result: DnsResolutionOrder;
+
   if (order === undefined) {
-    return defaultValue;
+    result = defaultValue;
+  } else if (order === 'ipv4first' || order === 'verbatim') {
+    result = order;
+  } else {
+    // We don't want to throw here, just warn and use the default.
+    console.warn(
+      `Invalid value for dnsResolutionOrder in settings: "${order}". Using default "${defaultValue}".`,
+    );
+    result = defaultValue;
   }
-  if (order === 'ipv4first' || order === 'verbatim') {
-    return order;
+
+  // Add result to cache
+  dnsCache.set(order, result);
+
+  return result;
+}
+
+// Cache memory values to avoid recalculating on each call
+let cachedMemoryValues: {
+  totalMemoryMB: number;
+  currentMaxOldSpaceSizeMb: number;
+} | null = null;
+let cacheTimestamp = 0;
+const CACHE_DURATION = 30000; // 30 seconds
+
+function getMemoryValues(): {
+  totalMemoryMB: number;
+  currentMaxOldSpaceSizeMb: number;
+} {
+  const now = Date.now();
+  // Refresh cache if it's older than CACHE_DURATION
+  if (cachedMemoryValues === null || now - cacheTimestamp > CACHE_DURATION) {
+    const totalMemoryMB = os.totalmem() / (1024 * 1024);
+    const heapStats = v8.getHeapStatistics();
+    const currentMaxOldSpaceSizeMb = Math.floor(
+      heapStats.heap_size_limit / 1024 / 1024,
+    );
+    cachedMemoryValues = { totalMemoryMB, currentMaxOldSpaceSizeMb };
+    cacheTimestamp = now;
   }
-  // We don't want to throw here, just warn and use the default.
-  console.warn(
-    `Invalid value for dnsResolutionOrder in settings: "${order}". Using default "${defaultValue}".`,
-  );
-  return defaultValue;
+  return cachedMemoryValues!;
 }
 
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
-  const totalMemoryMB = os.totalmem() / (1024 * 1024);
-  const heapStats = v8.getHeapStatistics();
-  const currentMaxOldSpaceSizeMb = Math.floor(
-    heapStats.heap_size_limit / 1024 / 1024,
+  const { totalMemoryMB, currentMaxOldSpaceSizeMb } = getMemoryValues();
+
+  // Set target to 50% of total memory, with reasonable bounds
+  const targetMaxOldSpaceSizeInMB = Math.max(
+    512, // Minimum 512MB
+    Math.min(
+      Math.floor(totalMemoryMB * 0.5), // 50% of total memory
+      8192, // Maximum 8GB to avoid excessive memory allocation
+    ),
   );
 
-  // Set target to 50% of total memory
-  const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.5);
   if (isDebugMode) {
     console.debug(
-      `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB`,
+      `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB, target ${targetMaxOldSpaceSizeInMB} MB`,
     );
   }
 
@@ -97,7 +170,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   if (targetMaxOldSpaceSizeInMB > currentMaxOldSpaceSizeMb) {
     if (isDebugMode) {
       console.debug(
-        `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB`,
+        `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB} MB`,
       );
     }
     return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];

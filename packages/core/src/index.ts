@@ -58,6 +58,9 @@ export * from './utils/subagentGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
+export * from './utils/cached-file-system.js';
+export * from './utils/request-deduplicator.js';
+export * from './utils/general-cache.js';
 
 // Export services
 export * from './services/fileDiscoveryService.js';
@@ -80,6 +83,8 @@ export * from './services/shellExecutionService.js';
 export * from './tools/tools.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
+// Export dynamic tool management
+export * from './tools/dynamic-tool-manager.js';
 
 // Export subagents (Phase 1)
 export * from './subagents/index.js';
@@ -129,3 +134,6 @@ export { Storage } from './config/storage.js';
 
 // Export test utils
 export * from './test-utils/index.js';
+
+// Export agent team API
+export * from './agent-team-api.js';

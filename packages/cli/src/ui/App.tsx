@@ -5,13 +5,14 @@
  */
 
 import { useIsScreenReaderEnabled } from 'ink';
-import { useTerminalSize } from './hooks/useTerminalSize.js';
+import { useStableTerminalSize } from './hooks/useStableSize.js';
 import { lerp } from '../utils/math.js';
 import { useUIState } from './contexts/UIStateContext.js';
 import { StreamingContext } from './contexts/StreamingContext.js';
 import { QuittingDisplay } from './components/QuittingDisplay.js';
 import { ScreenReaderAppLayout } from './layouts/ScreenReaderAppLayout.js';
 import { DefaultAppLayout } from './layouts/DefaultAppLayout.js';
+import { useMemo } from 'react';
 
 const getContainerWidth = (terminalWidth: number): string => {
   if (terminalWidth <= 80) {
@@ -31,20 +32,25 @@ const getContainerWidth = (terminalWidth: number): string => {
 export const App = () => {
   const uiState = useUIState();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
-  const { columns } = useTerminalSize();
-  const containerWidth = getContainerWidth(columns);
+  const { columns } = useStableTerminalSize();
 
-  if (uiState.quittingMessages) {
-    return <QuittingDisplay />;
-  }
+  // Execute all hooks consistently regardless of state
+  const containerWidth = useMemo(() => getContainerWidth(columns), [columns]);
 
-  return (
-    <StreamingContext.Provider value={uiState.streamingState}>
-      {isScreenReaderEnabled ? (
+  // Determine layout based on screen reader status, but define it consistently
+  const layout = useMemo(
+    () =>
+      isScreenReaderEnabled ? (
         <ScreenReaderAppLayout />
       ) : (
         <DefaultAppLayout width={containerWidth} />
-      )}
+      ),
+    [isScreenReaderEnabled, containerWidth],
+  );
+
+  return (
+    <StreamingContext.Provider value={uiState.streamingState}>
+      {uiState.quittingMessages ? <QuittingDisplay /> : layout}
     </StreamingContext.Provider>
   );
 };

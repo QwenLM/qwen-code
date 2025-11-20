@@ -7,11 +7,13 @@
 import type { TiktokenEncoding, Tiktoken } from 'tiktoken';
 import { get_encoding } from 'tiktoken';
 
+// Cache encodings globally to reuse across instances
+const encodingCache = new Map<string, Tiktoken>();
+
 /**
  * Text tokenizer for calculating text tokens using tiktoken
  */
 export class TextTokenizer {
-  private encoding: Tiktoken | null = null;
   private encodingName: string;
 
   constructor(encodingName: string = 'cl100k_base') {
@@ -21,18 +23,23 @@ export class TextTokenizer {
   /**
    * Initialize the tokenizer (lazy loading)
    */
-  private async ensureEncoding(): Promise<void> {
-    if (this.encoding) return;
+  private async ensureEncoding(): Promise<Tiktoken | null> {
+    // Check if we already have this encoding cached
+    if (encodingCache.has(this.encodingName)) {
+      return encodingCache.get(this.encodingName) || null;
+    }
 
     try {
       // Use type assertion since we know the encoding name is valid
-      this.encoding = get_encoding(this.encodingName as TiktokenEncoding);
+      const encoding = get_encoding(this.encodingName as TiktokenEncoding);
+      encodingCache.set(this.encodingName, encoding);
+      return encoding;
     } catch (error) {
       console.warn(
         `Failed to load tiktoken with encoding ${this.encodingName}:`,
         error,
       );
-      this.encoding = null;
+      return null;
     }
   }
 
@@ -42,11 +49,11 @@ export class TextTokenizer {
   async calculateTokens(text: string): Promise<number> {
     if (!text) return 0;
 
-    await this.ensureEncoding();
+    const encoding = await this.ensureEncoding();
 
-    if (this.encoding) {
+    if (encoding) {
       try {
-        return this.encoding.encode(text).length;
+        return encoding.encode(text).length;
       } catch (error) {
         console.warn('Error encoding text with tiktoken:', error);
       }
@@ -61,14 +68,13 @@ export class TextTokenizer {
    * Calculate tokens for multiple text strings in parallel
    */
   async calculateTokensBatch(texts: string[]): Promise<number[]> {
-    await this.ensureEncoding();
+    const encoding = await this.ensureEncoding();
 
-    if (this.encoding) {
+    if (encoding) {
       try {
         return texts.map((text) => {
           if (!text) return 0;
-          // this.encoding may be null, add a null check to satisfy lint
-          return this.encoding ? this.encoding.encode(text).length : 0;
+          return encoding.encode(text).length;
         });
       } catch (error) {
         console.warn('Error encoding texts with tiktoken:', error);
@@ -85,13 +91,21 @@ export class TextTokenizer {
    * Dispose of resources
    */
   dispose(): void {
-    if (this.encoding) {
+    if (encodingCache.has(this.encodingName)) {
       try {
-        this.encoding.free();
+        const encoding = encodingCache.get(this.encodingName)!;
+        encoding.free();
+        encodingCache.delete(this.encodingName);
       } catch (error) {
         console.warn('Error freeing tiktoken encoding:', error);
       }
-      this.encoding = null;
     }
+  }
+
+  /**
+   * Get the encoding instance, useful for external consumers who want to reuse it
+   */
+  async getEncoding(): Promise<Tiktoken | null> {
+    return await this.ensureEncoding();
   }
 }

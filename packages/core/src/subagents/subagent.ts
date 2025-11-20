@@ -574,10 +574,21 @@ export class SubAgentScope {
     const scheduler = new CoreToolScheduler({
       outputUpdateHandler: undefined,
       onAllToolCallsComplete: async (completedCalls) => {
-        for (const call of completedCalls) {
+        // Pre-allocate arrays for common operations to avoid repeated allocations
+        const toolNames = new Array(completedCalls.length);
+        const durations = new Array(completedCalls.length);
+        const successes = new Array(completedCalls.length);
+
+        for (let i = 0; i < completedCalls.length; i++) {
+          const call = completedCalls[i];
           const toolName = call.request.name;
           const duration = call.durationMs ?? 0;
           const success = call.status === 'success';
+
+          toolNames[i] = toolName;
+          durations[i] = duration;
+          successes[i] = success;
+
           const errorMessage =
             call.status === 'error' || call.status === 'cancelled'
               ? call.response.error?.message
@@ -591,14 +602,19 @@ export class SubAgentScope {
             this.executionStats.failedToolCalls += 1;
           }
 
-          // Per-tool usage
-          const tu = this.toolUsage.get(toolName) || {
-            count: 0,
-            success: 0,
-            failure: 0,
-            totalDurationMs: 0,
-            averageDurationMs: 0,
-          };
+          // Per-tool usage - use a more efficient update pattern
+          let tu = this.toolUsage.get(toolName);
+          if (!tu) {
+            tu = {
+              count: 0,
+              success: 0,
+              failure: 0,
+              totalDurationMs: 0,
+              averageDurationMs: 0,
+            };
+            this.toolUsage.set(toolName, tu);
+          }
+
           tu.count += 1;
           if (success) {
             tu.success += 1;
@@ -609,7 +625,6 @@ export class SubAgentScope {
           tu.totalDurationMs = (tu.totalDurationMs || 0) + duration;
           tu.averageDurationMs =
             tu.count > 0 ? tu.totalDurationMs / tu.count : 0;
-          this.toolUsage.set(toolName, tu);
 
           // Emit tool result event
           this.eventEmitter?.emit(SubAgentEventType.TOOL_RESULT, {
@@ -636,8 +651,8 @@ export class SubAgentScope {
             this.toolUsage.get(toolName)?.lastError,
           );
 
-          // post-tool hook
-          await this.hooks?.postToolUse?.({
+          // post-tool hook - execute asynchronously to not block the main flow
+          void this.hooks?.postToolUse?.({
             subagentId: this.subagentId,
             name: this.name,
             toolName,
@@ -708,7 +723,9 @@ export class SubAgentScope {
     });
 
     // Prepare requests and emit TOOL_CALL events
-    const requests: ToolCallRequestInfo[] = functionCalls.map((fc) => {
+    const requests: ToolCallRequestInfo[] = [];
+    for (let i = 0; i < functionCalls.length; i++) {
+      const fc = functionCalls[i];
       const toolName = String(fc.name || 'unknown');
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
       const args = (fc.args ?? {}) as Record<string, unknown>;
@@ -732,7 +749,7 @@ export class SubAgentScope {
         timestamp: Date.now(),
       } as SubAgentToolCallEvent);
 
-      // pre-tool hook
+      // pre-tool hook - execute asynchronously to not block the main flow
       void this.hooks?.preToolUse?.({
         subagentId: this.subagentId,
         name: this.name,
@@ -741,8 +758,8 @@ export class SubAgentScope {
         timestamp: Date.now(),
       });
 
-      return request;
-    });
+      requests.push(request);
+    }
 
     if (requests.length > 0) {
       // Create a per-batch completion promise, resolve when onAllToolCallsComplete fires

@@ -27,6 +27,7 @@ import { ANSI } from './ansi.js';
 import { ANSILight } from './ansi-light.js';
 import { NoColorTheme } from './no-color.js';
 import process from 'node:process';
+import { EventEmitter } from 'node:events';
 
 export interface ThemeDisplay {
   name: string;
@@ -36,12 +37,15 @@ export interface ThemeDisplay {
 
 export const DEFAULT_THEME: Theme = QwenDark;
 
-class ThemeManager {
+class ThemeManager extends EventEmitter {
   private readonly availableThemes: Theme[];
+  private readonly themeNameMap: Map<string, Theme>;
   private activeTheme: Theme;
   private customThemes: Map<string, Theme> = new Map();
+  private readonly fileThemeCache: Map<string, Theme> = new Map();
 
   constructor() {
+    super();
     this.availableThemes = [
       AyuDark,
       AyuLight,
@@ -59,6 +63,11 @@ class ThemeManager {
       ANSI,
       ANSILight,
     ];
+    // Create a map for O(1) theme lookup by name
+    this.themeNameMap = new Map();
+    for (const theme of this.availableThemes) {
+      this.themeNameMap.set(theme.name, theme);
+    }
     this.activeTheme = DEFAULT_THEME;
   }
 
@@ -70,9 +79,15 @@ class ThemeManager {
     this.customThemes.clear();
 
     if (!customThemesSettings) {
+      // If no custom themes are provided, ensure active theme isn't a custom one
+      if (this.activeTheme.type === 'custom') {
+        this.activeTheme = DEFAULT_THEME;
+      }
       return;
     }
 
+    // Process all custom themes first to avoid multiple setActiveTheme calls
+    const validCustomThemes = new Map<string, Theme>();
     for (const [name, customThemeConfig] of Object.entries(
       customThemesSettings,
     )) {
@@ -90,7 +105,7 @@ class ThemeManager {
 
         try {
           const theme = createCustomTheme(themeWithDefaults);
-          this.customThemes.set(name, theme);
+          validCustomThemes.set(name, theme);
         } catch (error) {
           console.warn(`Failed to load custom theme "${name}":`, error);
         }
@@ -98,6 +113,10 @@ class ThemeManager {
         console.warn(`Invalid custom theme "${name}": ${validation.error}`);
       }
     }
+
+    // Set the valid custom themes after processing all of them
+    this.customThemes = validCustomThemes;
+
     // If the current active theme is a custom theme, keep it if still valid
     if (
       this.activeTheme &&
@@ -118,8 +137,36 @@ class ThemeManager {
     if (!theme) {
       return false;
     }
+
+    const oldThemeName = this.activeTheme?.name;
     this.activeTheme = theme;
+
+    // Emit theme change event
+    this.emit('themeChanged', theme, oldThemeName);
+
     return true;
+  }
+
+  /**
+   * Adds a listener for theme changes.
+   * @param eventName The name of the event ('themeChanged').
+   * @param listener The callback to execute when the theme changes.
+   */
+  onThemeChange(
+    listener: (newTheme: Theme, oldThemeName: string | undefined) => void,
+  ): void {
+    this.on('themeChanged', listener);
+  }
+
+  /**
+   * Removes a listener for theme changes.
+   * @param eventName The name of the event ('themeChanged').
+   * @param listener The callback to remove.
+   */
+  offThemeChange(
+    listener: (newTheme: Theme, oldThemeName: string | undefined) => void,
+  ): void {
+    this.off('themeChanged', listener);
   }
 
   /**
@@ -138,8 +185,11 @@ class ThemeManager {
       const isCustom = [...this.customThemes.values()].includes(
         this.activeTheme,
       );
+      const isFromFile = [...this.fileThemeCache.values()].includes(
+        this.activeTheme,
+      );
 
-      if (isBuiltIn || isCustom) {
+      if (isBuiltIn || isCustom || isFromFile) {
         return this.activeTheme;
       }
     }
@@ -178,11 +228,24 @@ class ThemeManager {
    * Returns a list of available theme names.
    */
   getAvailableThemes(): ThemeDisplay[] {
-    const builtInThemes = this.availableThemes.map((theme) => ({
-      name: theme.name,
-      type: theme.type,
-      isCustom: false,
-    }));
+    // Create theme displays from the cached map for better performance
+    const builtInThemes: ThemeDisplay[] = [];
+    const qwenThemes: ThemeDisplay[] = [];
+
+    // Efficiently separate Qwen themes and other built-in themes
+    for (const theme of this.availableThemes) {
+      const themeDisplay: ThemeDisplay = {
+        name: theme.name,
+        type: theme.type,
+        isCustom: false,
+      };
+
+      if (theme.name === QwenLight.name || theme.name === QwenDark.name) {
+        qwenThemes.push(themeDisplay);
+      } else {
+        builtInThemes.push(themeDisplay);
+      }
+    }
 
     const customThemes = Array.from(this.customThemes.values()).map(
       (theme) => ({
@@ -192,16 +255,8 @@ class ThemeManager {
       }),
     );
 
-    // Separate Qwen themes
-    const qwenThemes = builtInThemes.filter(
-      (theme) => theme.name === QwenLight.name || theme.name === QwenDark.name,
-    );
-    const otherBuiltInThemes = builtInThemes.filter(
-      (theme) => theme.name !== QwenLight.name && theme.name !== QwenDark.name,
-    );
-
     // Sort other themes by type and then name
-    const sortedOtherThemes = [...otherBuiltInThemes, ...customThemes].sort(
+    const sortedOtherThemes = [...builtInThemes, ...customThemes].sort(
       (a, b) => {
         const typeOrder = (type: ThemeType): number => {
           switch (type) {
@@ -252,9 +307,9 @@ class ThemeManager {
       // realpathSync resolves the path and throws if it doesn't exist.
       const canonicalPath = fs.realpathSync(path.resolve(themePath));
 
-      // 1. Check cache using the canonical path.
-      if (this.customThemes.has(canonicalPath)) {
-        return this.customThemes.get(canonicalPath);
+      // 1. Check file theme cache using the canonical path.
+      if (this.fileThemeCache.has(canonicalPath)) {
+        return this.fileThemeCache.get(canonicalPath);
       }
 
       // 2. Perform security check.
@@ -292,7 +347,7 @@ class ThemeManager {
       };
 
       const theme = createCustomTheme(themeWithDefaults);
-      this.customThemes.set(canonicalPath, theme); // Cache by canonical path
+      this.fileThemeCache.set(canonicalPath, theme); // Cache by canonical path
       return theme;
     } catch (error) {
       // Any error in the process (file not found, bad JSON, etc.) is caught here.
@@ -311,26 +366,33 @@ class ThemeManager {
       return DEFAULT_THEME;
     }
 
-    // First check built-in themes
-    const builtInTheme = this.availableThemes.find(
-      (theme) => theme.name === themeName,
-    );
+    // First check built-in themes using the cached map for O(1) lookup
+    const builtInTheme = this.themeNameMap.get(themeName);
     if (builtInTheme) {
       return builtInTheme;
     }
 
-    // Then check custom themes that have been loaded from settings, or file paths
-    if (this.isPath(themeName)) {
-      return this.loadThemeFromFile(themeName);
-    }
-
+    // Then check custom themes that have been loaded from settings
     if (this.customThemes.has(themeName)) {
       return this.customThemes.get(themeName);
+    }
+
+    // Finally check file paths
+    if (this.isPath(themeName)) {
+      return this.loadThemeFromFile(themeName);
     }
 
     // If it's not a built-in, not in cache, and not a valid file path,
     // it's not a valid theme.
     return undefined;
+  }
+
+  /**
+   * Clears the file theme cache to free up memory.
+   * This is useful when reloading many theme files to prevent memory bloat.
+   */
+  clearFileThemeCache(): void {
+    this.fileThemeCache.clear();
   }
 }
 

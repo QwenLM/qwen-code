@@ -466,7 +466,15 @@ export class ShellExecutionService {
           if (finalRender) {
             renderFn();
           } else {
-            renderTimeout = setTimeout(renderFn, 17);
+            // Use requestAnimationFrame for better rendering performance if available
+            if (typeof requestAnimationFrame === 'function') {
+              renderTimeout = setTimeout(() => {
+                requestAnimationFrame(renderFn);
+              }, 0);
+            } else {
+              // Fallback to setTimeout with optimized timing
+              renderTimeout = setTimeout(renderFn, 17); // ~60fps
+            }
           }
         };
 

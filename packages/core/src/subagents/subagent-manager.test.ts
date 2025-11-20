@@ -901,12 +901,14 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(4); // agent1 (project takes precedence), agent2, agent3, general-purpose (built-in)
+      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, project-manager, deep-web-search (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
         'agent3',
         'general-purpose',
+        'project-manager',
+        'deep-web-search',
       ]);
     });
 
@@ -933,7 +935,14 @@ System prompt 3`);
       });
 
       const names = subagents.map((s) => s.name);
-      expect(names).toEqual(['agent1', 'agent2', 'agent3', 'general-purpose']);
+      expect(names).toEqual([
+        'agent1',
+        'agent2',
+        'agent3',
+        'deep-web-search',
+        'general-purpose',
+        'project-manager',
+      ]);
     });
 
     it('should handle empty directories', async () => {
@@ -944,9 +953,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(1); // Only built-in agents remain
-      expect(subagents[0].name).toBe('general-purpose');
-      expect(subagents[0].level).toBe('builtin');
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents.map((s) => s.name)).toContain('general-purpose');
+      expect(subagents.map((s) => s.name)).toContain('project-manager');
+      expect(subagents.map((s) => s.name)).toContain('deep-web-search');
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
 
     it('should handle directory read errors', async () => {
@@ -956,9 +967,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(1); // Only built-in agents remain
-      expect(subagents[0].name).toBe('general-purpose');
-      expect(subagents[0].level).toBe('builtin');
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents.map((s) => s.name)).toContain('general-purpose');
+      expect(subagents.map((s) => s.name)).toContain('project-manager');
+      expect(subagents.map((s) => s.name)).toContain('deep-web-search');
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
   });
 

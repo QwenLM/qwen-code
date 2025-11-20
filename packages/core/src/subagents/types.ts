@@ -258,3 +258,6 @@ export interface RunConfig {
    */
   max_turns?: number;
 }
+
+// Import SubAgentEventEmitter from the subagent-events module
+export { SubAgentEventEmitter } from './subagent-events.js';

@@ -217,6 +217,10 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^deepseek-reasoner$/, LIMITS['64k']],
 ];
 
+// Separate caches for input and output token limits to reduce pattern matching overhead
+const inputTokenLimitCache = new Map<string, TokenCount>();
+const outputTokenLimitCache = new Map<string, TokenCount>();
+
 /**
  * Return the token limit for a model string based on the specified type.
  *
@@ -232,6 +236,16 @@ export function tokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
 ): TokenCount {
+  // Choose the appropriate cache based on token type
+  const tokenCache =
+    type === 'output' ? outputTokenLimitCache : inputTokenLimitCache;
+
+  // Check if result is already cached
+  const cached = tokenCache.get(model);
+  if (cached !== undefined) {
+    return cached;
+  }
+
   const norm = normalize(model);
 
   // Choose the appropriate patterns based on token type
@@ -239,10 +253,23 @@ export function tokenLimit(
 
   for (const [regex, limit] of patterns) {
     if (regex.test(norm)) {
+      // Cache the result before returning
+      tokenCache.set(model, limit);
       return limit;
     }
   }
 
   // Return appropriate default based on token type
-  return type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT;
+  const defaultLimit =
+    type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT;
+  tokenCache.set(model, defaultLimit);
+  return defaultLimit;
+}
+
+/**
+ * Clears the token limit cache, useful for testing or when model configurations change.
+ */
+export function clearTokenLimitCache(): void {
+  inputTokenLimitCache.clear();
+  outputTokenLimitCache.clear();
 }

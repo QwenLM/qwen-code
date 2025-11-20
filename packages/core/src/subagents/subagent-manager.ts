@@ -346,12 +346,17 @@ export class SubagentManager {
    * @private
    */
   private async refreshCache(): Promise<void> {
-    const subagentsCache = new Map();
-
+    const subagentsCache = new Map<SubagentLevel, SubagentConfig[]>();
     const levels: SubagentLevel[] = ['project', 'user', 'builtin'];
 
-    for (const level of levels) {
+    // Process all levels in parallel for better performance
+    const levelPromises = levels.map(async (level) => {
       const levelSubagents = await this.listSubagentsAtLevel(level);
+      return { level, levelSubagents };
+    });
+
+    const results = await Promise.all(levelPromises);
+    for (const { level, levelSubagents } of results) {
       subagentsCache.set(level, levelSubagents);
     }
 
