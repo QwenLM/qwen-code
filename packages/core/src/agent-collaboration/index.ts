@@ -211,3 +211,7 @@ export async function executeCollaborativeTask(
 
   return results;
 }
+
+// Export the project workflow functionality
+export * from './project-workflow.js';
+export * from './workflow-examples.js';

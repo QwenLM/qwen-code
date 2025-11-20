@@ -222,3 +222,6 @@ export {
   exampleCollaborativeStrategies,
   exampleCreateAgentTeam,
 };
+
+// Import and export the workflow examples
+export * from './workflow-examples.js';
