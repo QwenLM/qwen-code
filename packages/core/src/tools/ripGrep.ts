@@ -6,15 +6,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { EOL } from 'node:os';
-import { spawn } from 'node:child_process';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
 import { resolveAndValidatePath } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
-import { ensureRipgrepPath } from '../utils/ripgrepUtils.js';
+import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -88,7 +86,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Split into lines and count total matches
-      const allLines = rawOutput.split(EOL).filter((line) => line.trim());
+      const allLines = rawOutput.split('\n').filter((line) => line.trim());
       const totalMatches = allLines.length;
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
@@ -159,7 +157,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         returnDisplay: displayMessage,
       };
     } catch (error) {
-      console.error(`Error during GrepLogic execution: ${error}`);
+      console.error(`Error during ripgrep search operation: ${error}`);
       const errorMessage = getErrorMessage(error);
       return {
         llmContent: `Error during grep search operation: ${errorMessage}`,
@@ -209,56 +207,12 @@ class GrepToolInvocation extends BaseToolInvocation<
     rgArgs.push('--threads', '4');
     rgArgs.push(absolutePath);
 
-    try {
-      const rgPath = this.config.getUseBuiltinRipgrep()
-        ? await ensureRipgrepPath()
-        : 'rg';
-      const output = await new Promise<string>((resolve, reject) => {
-        const child = spawn(rgPath, rgArgs, {
-          windowsHide: true,
-        });
-
-        const stdoutChunks: Buffer[] = [];
-        const stderrChunks: Buffer[] = [];
-
-        const cleanup = () => {
-          if (options.signal.aborted) {
-            child.kill();
-          }
-        };
-
-        options.signal.addEventListener('abort', cleanup, { once: true });
-
-        child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
-        child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-
-        child.on('error', (err) => {
-          options.signal.removeEventListener('abort', cleanup);
-          reject(new Error(`Failed to start ripgrep: ${err.message}.`));
-        });
-
-        child.on('close', (code) => {
-          options.signal.removeEventListener('abort', cleanup);
-          const stdoutData = Buffer.concat(stdoutChunks).toString('utf8');
-          const stderrData = Buffer.concat(stderrChunks).toString('utf8');
-
-          if (code === 0) {
-            resolve(stdoutData);
-          } else if (code === 1) {
-            resolve(''); // No matches found
-          } else {
-            reject(
-              new Error(`ripgrep exited with code ${code}: ${stderrData}`),
-            );
-          }
-        });
-      });
-
-      return output;
-    } catch (error: unknown) {
-      console.error(`GrepLogic: ripgrep failed: ${getErrorMessage(error)}`);
-      throw error;
+    const result = await runRipgrep(rgArgs, options.signal);
+    if (result.error && !result.stdout) {
+      throw result.error;
     }
+
+    return result.stdout;
   }
 
   private getFileFilteringOptions(): FileFilteringOptions {

@@ -487,8 +487,11 @@ describe('SettingsDialog', () => {
       it('loops back when reaching the end of an enum', async () => {
         vi.mocked(saveModifiedSettings).mockClear();
         vi.mocked(getSettingsSchema).mockReturnValue(FAKE_SCHEMA);
-        const settings = createMockSettings();
-        settings.setValue(SettingScope.User, 'ui.theme', StringEnum.BAZ);
+        const settings = createMockSettings({
+          ui: {
+            theme: StringEnum.BAZ,
+          },
+        });
         const onSelect = vi.fn();
         const component = (
           <KeypressProvider kittyProtocolEnabled={false}>
@@ -1268,7 +1271,6 @@ describe('SettingsDialog', () => {
           vimMode: true,
           disableAutoUpdate: true,
           debugKeystrokeLogging: true,
-          enablePromptCompletion: true,
         },
         ui: {
           hideWindowTitle: true,
@@ -1514,7 +1516,6 @@ describe('SettingsDialog', () => {
           vimMode: false,
           disableAutoUpdate: false,
           debugKeystrokeLogging: false,
-          enablePromptCompletion: false,
         },
         ui: {
           hideWindowTitle: false,

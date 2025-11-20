@@ -447,7 +447,11 @@ describe('loggers', () => {
     });
 
     it('should log ripgrep fallback event', () => {
-      const event = new RipgrepFallbackEvent();
+      const event = new RipgrepFallbackEvent(
+        false,
+        false,
+        'ripgrep is not available',
+      );
 
       logRipgrepFallback(mockConfig, event);
 
@@ -460,13 +464,13 @@ describe('loggers', () => {
           'session.id': 'test-session-id',
           'user.email': 'test-user@example.com',
           'event.name': EVENT_RIPGREP_FALLBACK,
-          error: undefined,
+          error: 'ripgrep is not available',
         }),
       );
     });
 
     it('should log ripgrep fallback event with an error', () => {
-      const event = new RipgrepFallbackEvent('rg not found');
+      const event = new RipgrepFallbackEvent(false, false, 'rg not found');
 
       logRipgrepFallback(mockConfig, event);
 

@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { spawnAsync } from '@qwen-code/qwen-code-core';
+import { execCommand } from '@qwen-code/qwen-code-core';
 
 /**
  * Checks if the system clipboard contains an image (macOS only for now)
@@ -19,7 +19,7 @@ export async function clipboardHasImage(): Promise<boolean> {
 
   try {
     // Use osascript to check clipboard type
-    const { stdout } = await spawnAsync('osascript', ['-e', 'clipboard info']);
+    const { stdout } = await execCommand('osascript', ['-e', 'clipboard info']);
     const imageRegex =
       /«class PNGf»|TIFF picture|JPEG picture|GIF picture|«class JPEG»|«class TIFF»/;
     return imageRegex.test(stdout);
@@ -80,7 +80,7 @@ export async function saveClipboardImage(
         end try
       `;
 
-      const { stdout } = await spawnAsync('osascript', ['-e', script]);
+      const { stdout } = await execCommand('osascript', ['-e', script]);
 
       if (stdout.trim() === 'success') {
         // Verify the file was created and has content

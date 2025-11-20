@@ -18,6 +18,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
+import { isCommandAvailable } from '../utils/shell-utils.js';
 
 // --- Interfaces ---
 
@@ -196,29 +197,6 @@ class GrepToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Checks if a command is available in the system's PATH.
-   * @param {string} command The command name (e.g., 'git', 'grep').
-   * @returns {Promise<boolean>} True if the command is available, false otherwise.
-   */
-  private isCommandAvailable(command: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      const checkCommand = process.platform === 'win32' ? 'where' : 'command';
-      const checkArgs =
-        process.platform === 'win32' ? [command] : ['-v', command];
-      try {
-        const child = spawn(checkCommand, checkArgs, {
-          stdio: 'ignore',
-          shell: process.platform === 'win32',
-        });
-        child.on('close', (code) => resolve(code === 0));
-        child.on('error', () => resolve(false));
-      } catch {
-        resolve(false);
-      }
-    });
-  }
-
-  /**
    * Parses the standard output of grep-like commands (git grep, system grep).
    * Expects format: filePath:lineNumber:lineContent
    * Handles colons within file paths and line content correctly.
@@ -297,7 +275,7 @@ class GrepToolInvocation extends BaseToolInvocation<
     try {
       // --- Strategy 1: git grep ---
       const isGit = isGitRepository(absolutePath);
-      const gitAvailable = isGit && (await this.isCommandAvailable('git'));
+      const gitAvailable = isGit && isCommandAvailable('git').available;
 
       if (gitAvailable) {
         strategyUsed = 'git grep';
@@ -350,7 +328,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // --- Strategy 2: System grep ---
-      const grepAvailable = await this.isCommandAvailable('grep');
+      const { available: grepAvailable } = isCommandAvailable('grep');
       if (grepAvailable) {
         strategyUsed = 'system grep';
         const grepArgs = ['-r', '-n', '-H', '-E'];

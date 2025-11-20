@@ -11,7 +11,7 @@ import {
   logIdeConnection,
   type Config,
 } from '@qwen-code/qwen-code-core';
-import { type LoadedSettings } from '../config/settings.js';
+import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
 import { initializeI18n } from '../i18n/index.js';
@@ -41,10 +41,17 @@ export async function initializeApp(
     'auto';
   await initializeI18n(languageSetting);
 
-  const authError = await performInitialAuth(
-    config,
-    settings.merged.security?.auth?.selectedType,
-  );
+  const authType = settings.merged.security?.auth?.selectedType;
+  const authError = await performInitialAuth(config, authType);
+
+  // Fallback to user select when initial authentication fails
+  if (authError) {
+    settings.setValue(
+      SettingScope.User,
+      'security.auth.selectedType',
+      undefined,
+    );
+  }
   const themeError = validateTheme(settings);
 
   const shouldOpenAuthDialog =

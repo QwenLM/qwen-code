@@ -13,6 +13,7 @@ import {
   isSlashCommand,
   copyToClipboard,
   getUrlOpenCommand,
+  CodePage,
 } from './commandUtils.js';
 
 // Mock child_process
@@ -188,7 +189,10 @@ describe('commandUtils', () => {
 
         await copyToClipboard(testText);
 
-        expect(mockSpawn).toHaveBeenCalledWith('clip', []);
+        expect(mockSpawn).toHaveBeenCalledWith('cmd', [
+          '/c',
+          `chcp ${CodePage.UTF8} >nul && clip`,
+        ]);
         expect(mockChild.stdin.write).toHaveBeenCalledWith(testText);
         expect(mockChild.stdin.end).toHaveBeenCalled();
       });

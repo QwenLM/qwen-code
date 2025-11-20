@@ -18,19 +18,68 @@ import * as glob from 'glob';
 vi.mock('glob', { spy: true });
 
 // Mock the child_process module to control grep/git grep behavior
-vi.mock('child_process', () => ({
-  spawn: vi.fn(() => ({
-    on: (event: string, cb: (...args: unknown[]) => void) => {
-      if (event === 'error' || event === 'close') {
-        // Simulate command not found or error for git grep and system grep
-        // to force it to fall back to JS implementation.
-        setTimeout(() => cb(1), 0); // cb(1) for error/close
-      }
-    },
-    stdout: { on: vi.fn() },
-    stderr: { on: vi.fn() },
-  })),
-}));
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    spawn: vi.fn(() => {
+      // Create a proper mock EventEmitter-like child process
+      const listeners: Map<
+        string,
+        Set<(...args: unknown[]) => void>
+      > = new Map();
+
+      const createStream = () => ({
+        on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+          const key = `stream:${event}`;
+          if (!listeners.has(key)) listeners.set(key, new Set());
+          listeners.get(key)!.add(cb);
+        }),
+        removeListener: vi.fn(
+          (event: string, cb: (...args: unknown[]) => void) => {
+            const key = `stream:${event}`;
+            listeners.get(key)?.delete(cb);
+          },
+        ),
+      });
+
+      return {
+        on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+          const key = `child:${event}`;
+          if (!listeners.has(key)) listeners.set(key, new Set());
+          listeners.get(key)!.add(cb);
+
+          // Simulate command not found or error for git grep and system grep
+          // to force it to fall back to JS implementation.
+          if (event === 'error') {
+            setTimeout(() => cb(new Error('Command not found')), 0);
+          } else if (event === 'close') {
+            setTimeout(() => cb(1), 0); // Exit code 1 for error
+          }
+        }),
+        removeListener: vi.fn(
+          (event: string, cb: (...args: unknown[]) => void) => {
+            const key = `child:${event}`;
+            listeners.get(key)?.delete(cb);
+          },
+        ),
+        stdout: createStream(),
+        stderr: createStream(),
+        connected: false,
+        disconnect: vi.fn(),
+      };
+    }),
+    exec: vi.fn(
+      (
+        cmd: string,
+        callback: (error: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        // Mock exec to fail for git grep commands
+        callback(new Error('Command not found'), '', '');
+      },
+    ),
+  };
+});
 
 describe('GrepTool', () => {
   let tempRootDir: string;

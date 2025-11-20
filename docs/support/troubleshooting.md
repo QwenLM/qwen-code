@@ -14,6 +14,13 @@ This guide provides solutions to common issues and debugging tips, including top
   - **Solution:** Set the `NODE_EXTRA_CA_CERTS` environment variable to the absolute path of your corporate root CA certificate file.
     - Example: `export NODE_EXTRA_CA_CERTS=/path/to/your/corporate-ca.crt`
 
+- **Issue: Unable to display UI after authentication failure**
+  - **Cause:** If authentication fails after selecting an authentication type, the `security.auth.selectedType` setting may be persisted in `settings.json`. On restart, the CLI may get stuck trying to authenticate with the failed auth type and fail to display the UI.
+  - **Solution:** Clear the `security.auth.selectedType` configuration item in your `settings.json` file:
+    - Open `~/.qwen/settings.json` (or `./.qwen/settings.json` for project-specific settings)
+    - Remove the `security.auth.selectedType` field
+    - Restart the CLI to allow it to prompt for authentication again
+
 ## Frequently asked questions (FAQs)
 
 - **Q: How do I update Qwen Code to the latest version?**

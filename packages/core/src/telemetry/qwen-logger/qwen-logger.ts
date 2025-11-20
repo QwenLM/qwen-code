@@ -6,6 +6,7 @@
 
 import { Buffer } from 'buffer';
 import * as https from 'https';
+import * as os from 'node:os';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 import type {
@@ -36,6 +37,8 @@ import type {
   ExtensionEnableEvent,
   ModelSlashCommandEvent,
   ExtensionDisableEvent,
+  AuthEvent,
+  RipgrepFallbackEvent,
 } from '../types.js';
 import { EndSessionEvent } from '../types.js';
 import type {
@@ -45,6 +48,7 @@ import type {
   RumResourceEvent,
   RumExceptionEvent,
   RumPayload,
+  RumOS,
 } from './event-types.js';
 import type { Config } from '../../config/config.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
@@ -214,9 +218,17 @@ export class QwenLogger {
     return this.createRumEvent('exception', type, name, properties);
   }
 
+  private getOsMetadata(): RumOS {
+    return {
+      type: os.platform(),
+      version: os.release(),
+    };
+  }
+
   async createRumPayload(): Promise<RumPayload> {
     const authType = this.config?.getAuthType();
     const version = this.config?.getCliVersion() || 'unknown';
+    const osMetadata = this.getOsMetadata();
 
     return {
       app: {
@@ -235,6 +247,7 @@ export class QwenLogger {
         id: this.sessionId,
         name: 'qwen-code-cli',
       },
+      os: osMetadata,
 
       events: this.events.toArray() as RumEvent[],
       properties: {
@@ -735,6 +748,25 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logAuthEvent(event: AuthEvent): void {
+    const snapshots: Record<string, unknown> = {
+      auth_type: event.auth_type,
+      action_type: event.action_type,
+      status: event.status,
+    };
+
+    if (event.error_message) {
+      snapshots['error_message'] = event.error_message;
+    }
+
+    const rumEvent = this.createActionEvent('auth', 'auth', {
+      snapshots: JSON.stringify(snapshots),
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   // misc events
   logFlashFallbackEvent(event: FlashFallbackEvent): void {
     const rumEvent = this.createActionEvent('misc', 'flash_fallback', {
@@ -747,8 +779,16 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
-  logRipgrepFallbackEvent(): void {
-    const rumEvent = this.createActionEvent('misc', 'ripgrep_fallback', {});
+  logRipgrepFallbackEvent(event: RipgrepFallbackEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'ripgrep_fallback', {
+      snapshots: JSON.stringify({
+        platform: process.platform,
+        arch: process.arch,
+        use_ripgrep: event.use_ripgrep,
+        use_builtin_ripgrep: event.use_builtin_ripgrep,
+        error: event.error ?? undefined,
+      }),
+    });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

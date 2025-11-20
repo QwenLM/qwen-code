@@ -11,14 +11,14 @@ import Spinner from 'ink-spinner';
 import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
-import type { DeviceAuthorizationInfo } from '../hooks/useQwenAuth.js';
+import type { DeviceAuthorizationData } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 
 interface QwenOAuthProgressProps {
   onTimeout: () => void;
   onCancel: () => void;
-  deviceAuth?: DeviceAuthorizationInfo;
+  deviceAuth?: DeviceAuthorizationData;
   authStatus?:
     | 'idle'
     | 'polling'
@@ -135,8 +135,8 @@ export function QwenOAuthProgress({
 
   useKeypress(
     (key) => {
-      if (authStatus === 'timeout') {
-        // Any key press in timeout state should trigger cancel to return to auth dialog
+      if (authStatus === 'timeout' || authStatus === 'error') {
+        // Any key press in timeout or error state should trigger cancel to return to auth dialog
         onCancel();
       } else if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         onCancel();
@@ -237,6 +237,35 @@ export function QwenOAuthProgress({
         <Box marginTop={1}>
           <Text color={Colors.Gray}>
             {t('Press any key to return to authentication type selection.')}
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  if (authStatus === 'error') {
+    return (
+      <Box
+        borderStyle="round"
+        borderColor={Colors.AccentRed}
+        flexDirection="column"
+        padding={1}
+        width="100%"
+      >
+        <Text bold color={Colors.AccentRed}>
+          Qwen OAuth Authentication Error
+        </Text>
+
+        <Box marginTop={1}>
+          <Text>
+            {authMessage ||
+              'An error occurred during authentication. Please try again.'}
+          </Text>
+        </Box>
+
+        <Box marginTop={1}>
+          <Text color={Colors.Gray}>
+            Press any key to return to authentication type selection.
           </Text>
         </Box>
       </Box>

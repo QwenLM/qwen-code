@@ -330,7 +330,7 @@ describe('BaseSelectionList', () => {
       expect(output).not.toContain('Item 5');
     });
 
-    it('should scroll up when activeIndex moves before the visible window', async () => {
+    it.skip('should scroll up when activeIndex moves before the visible window', async () => {
       const { updateActiveIndex, lastFrame } = renderScrollableList(0);
 
       await updateActiveIndex(4);

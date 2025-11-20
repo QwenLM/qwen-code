@@ -82,6 +82,7 @@ import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
+import { getErrorMessage } from '../utils/errors.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -280,7 +281,6 @@ export interface ConfigParameters {
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   extensionManagement?: boolean;
-  enablePromptCompletion?: boolean;
   skipLoopDetection?: boolean;
   vlmSwitchMode?: string;
   truncateToolOutputThreshold?: number;
@@ -377,7 +377,6 @@ export class Config {
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
   private readonly extensionManagement: boolean = true;
-  private readonly enablePromptCompletion: boolean = false;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
@@ -495,7 +494,6 @@ export class Config {
     this.useSmartEdit = params.useSmartEdit ?? false;
     this.extensionManagement = params.extensionManagement ?? true;
     this.storage = new Storage(this.targetDir);
-    this.enablePromptCompletion = params.enablePromptCompletion ?? false;
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
@@ -562,7 +560,7 @@ export class Config {
     }
   }
 
-  async refreshAuth(authMethod: AuthType) {
+  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
     // Vertex and Genai have incompatible encryption and sending history with
     // throughtSignature from Genai to Vertex will fail, we need to strip them
     if (
@@ -582,6 +580,7 @@ export class Config {
       newContentGeneratorConfig,
       this,
       this.getSessionId(),
+      isInitialAuth,
     );
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
@@ -1037,10 +1036,6 @@ export class Config {
     return this.accessibility.screenReader ?? false;
   }
 
-  getEnablePromptCompletion(): boolean {
-    return this.enablePromptCompletion;
-  }
-
   getSkipLoopDetection(): boolean {
     return this.skipLoopDetection;
   }
@@ -1153,17 +1148,20 @@ export class Config {
       try {
         useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
       } catch (error: unknown) {
-        errorString = String(error);
+        errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
         registerCoreTool(RipGrepTool, this);
       } else {
-        errorString =
-          errorString ||
-          'Ripgrep is not available. Please install ripgrep globally.';
-
         // Log for telemetry
-        logRipgrepFallback(this, new RipgrepFallbackEvent(errorString));
+        logRipgrepFallback(
+          this,
+          new RipgrepFallbackEvent(
+            this.getUseRipgrep(),
+            this.getUseBuiltinRipgrep(),
+            errorString || 'ripgrep is not available',
+          ),
+        );
         registerCoreTool(GrepTool, this);
       }
     } else {

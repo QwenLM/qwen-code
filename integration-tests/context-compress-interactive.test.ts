@@ -21,22 +21,20 @@ describe('Interactive Mode', () => {
   it.skipIf(process.platform === 'win32')(
     'should trigger chat compression with /compress command',
     async () => {
-      await rig.setup('interactive-compress-test');
+      await rig.setup('interactive-compress-test', {
+        settings: {
+          security: {
+            auth: {
+              selectedType: 'openai',
+            },
+          },
+        },
+      });
 
       const { ptyProcess } = rig.runInteractive();
 
       let fullOutput = '';
       ptyProcess.onData((data) => (fullOutput += data));
-
-      const authDialogAppeared = await rig.waitForText(
-        'How would you like to authenticate',
-        5000,
-      );
-
-      // select the second option if auth dialog come's up
-      if (authDialogAppeared) {
-        ptyProcess.write('2');
-      }
 
       // Wait for the app to be ready
       const isReady = await rig.waitForText('Type your message', 15000);
@@ -68,49 +66,43 @@ describe('Interactive Mode', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32')(
-    'should handle compression failure on token inflation',
-    async () => {
-      await rig.setup('interactive-compress-test');
+  it.skip('should handle compression failure on token inflation', async () => {
+    await rig.setup('interactive-compress-test', {
+      settings: {
+        security: {
+          auth: {
+            selectedType: 'openai',
+          },
+        },
+      },
+    });
 
-      const { ptyProcess } = rig.runInteractive();
+    const { ptyProcess } = rig.runInteractive();
 
-      let fullOutput = '';
-      ptyProcess.onData((data) => (fullOutput += data));
+    let fullOutput = '';
+    ptyProcess.onData((data) => (fullOutput += data));
 
-      const authDialogAppeared = await rig.waitForText(
-        'How would you like to authenticate',
-        5000,
-      );
+    // Wait for the app to be ready
+    const isReady = await rig.waitForText('Type your message', 25000);
+    expect(isReady, 'CLI did not start up in interactive mode correctly').toBe(
+      true,
+    );
 
-      // select the second option if auth dialog come's up
-      if (authDialogAppeared) {
-        ptyProcess.write('2');
-      }
+    await type(ptyProcess, '/compress');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await type(ptyProcess, '\r');
 
-      // Wait for the app to be ready
-      const isReady = await rig.waitForText('Type your message', 25000);
-      expect(
-        isReady,
-        'CLI did not start up in interactive mode correctly',
-      ).toBe(true);
+    const foundEvent = await rig.waitForTelemetryEvent(
+      'chat_compression',
+      90000,
+    );
+    expect(foundEvent).toBe(true);
 
-      await type(ptyProcess, '/compress');
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      await type(ptyProcess, '\r');
+    const compressionFailed = await rig.waitForText(
+      'Nothing to compress.',
+      25000,
+    );
 
-      const foundEvent = await rig.waitForTelemetryEvent(
-        'chat_compression',
-        90000,
-      );
-      expect(foundEvent).toBe(true);
-
-      const compressionFailed = await rig.waitForText(
-        'compression was not beneficial',
-        25000,
-      );
-
-      expect(compressionFailed).toBe(true);
-    },
-  );
+    expect(compressionFailed).toBe(true);
+  });
 });

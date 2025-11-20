@@ -1085,7 +1085,7 @@ describe('setApprovalMode with folder trust', () => {
         expect.any(RipgrepFallbackEvent),
       );
       const event = (logRipgrepFallback as Mock).mock.calls[0][1];
-      expect(event.error).toContain('Ripgrep is not available');
+      expect(event.error).toContain('ripgrep is not available');
     });
 
     it('should fall back to GrepTool and log error when useRipgrep is true and builtin ripgrep is not available', async () => {
@@ -1109,7 +1109,7 @@ describe('setApprovalMode with folder trust', () => {
         expect.any(RipgrepFallbackEvent),
       );
       const event = (logRipgrepFallback as Mock).mock.calls[0][1];
-      expect(event.error).toContain('Ripgrep is not available');
+      expect(event.error).toContain('ripgrep is not available');
     });
 
     it('should fall back to GrepTool and log error when canUseRipgrep throws an error', async () => {
@@ -1133,7 +1133,7 @@ describe('setApprovalMode with folder trust', () => {
         expect.any(RipgrepFallbackEvent),
       );
       const event = (logRipgrepFallback as Mock).mock.calls[0][1];
-      expect(event.error).toBe(String(error));
+      expect(event.error).toBe(`ripGrep check failed`);
     });
 
     it('should register GrepTool when useRipgrep is false', async () => {
