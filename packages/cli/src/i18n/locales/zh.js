@@ -832,6 +832,36 @@ export default {
     '的输入令牌来自缓存，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
     '提示：要查看完整的令牌明细，请运行 `/stats model`',
+  'Model Stats For Nerds': '模型统计（技术细节）',
+  'Tool Stats For Nerds': '工具统计（技术细节）',
+  Metric: '指标',
+  API: 'API',
+  Requests: '请求数',
+  Errors: '错误数',
+  'Avg Latency': '平均延迟',
+  Tokens: '令牌',
+  Total: '总计',
+  Prompt: '提示',
+  Cached: '缓存',
+  Thoughts: '思考',
+  Tool: '工具',
+  Output: '输出',
+  'No API calls have been made in this session.':
+    '本次会话中未进行任何 API 调用',
+  'Tool Name': '工具名称',
+  Calls: '调用次数',
+  'Success Rate': '成功率',
+  'Avg Duration': '平均耗时',
+  'User Decision Summary': '用户决策摘要',
+  'Total Reviewed Suggestions:': '已审核建议总数：',
+  ' » Accepted:': ' » 已接受：',
+  ' » Rejected:': ' » 已拒绝：',
+  ' » Modified:': ' » 已修改：',
+  ' Overall Agreement Rate:': ' 总体同意率：',
+  'No tool calls have been made in this session.':
+    '本次会话中未进行任何工具调用',
+  'Session start time is unavailable, cannot calculate stats.':
+    '会话开始时间不可用，无法计算统计信息',
 
   // ============================================================================
   // Loading Phrases

@@ -28,7 +28,7 @@ export const statsCommand: SlashCommand = {
       context.ui.addItem(
         {
           type: MessageType.ERROR,
-          text: 'Session start time is unavailable, cannot calculate stats.',
+          text: t('Session start time is unavailable, cannot calculate stats.'),
         },
         Date.now(),
       );

@@ -879,6 +879,36 @@ export default {
     'of input tokens were served from the cache, reducing costs.',
   'Tip: For a full token breakdown, run `/stats model`.':
     'Tip: For a full token breakdown, run `/stats model`.',
+  'Model Stats For Nerds': 'Model Stats For Nerds',
+  'Tool Stats For Nerds': 'Tool Stats For Nerds',
+  Metric: 'Metric',
+  API: 'API',
+  Requests: 'Requests',
+  Errors: 'Errors',
+  'Avg Latency': 'Avg Latency',
+  Tokens: 'Tokens',
+  Total: 'Total',
+  Prompt: 'Prompt',
+  Cached: 'Cached',
+  Thoughts: 'Thoughts',
+  Tool: 'Tool',
+  Output: 'Output',
+  'No API calls have been made in this session.':
+    'No API calls have been made in this session.',
+  'Tool Name': 'Tool Name',
+  Calls: 'Calls',
+  'Success Rate': 'Success Rate',
+  'Avg Duration': 'Avg Duration',
+  'User Decision Summary': 'User Decision Summary',
+  'Total Reviewed Suggestions:': 'Total Reviewed Suggestions:',
+  ' » Accepted:': ' » Accepted:',
+  ' » Rejected:': ' » Rejected:',
+  ' » Modified:': ' » Modified:',
+  ' Overall Agreement Rate:': ' Overall Agreement Rate:',
+  'No tool calls have been made in this session.':
+    'No tool calls have been made in this session.',
+  'Session start time is unavailable, cannot calculate stats.':
+    'Session start time is unavailable, cannot calculate stats.',
 
   // ============================================================================
   // Loading Phrases
