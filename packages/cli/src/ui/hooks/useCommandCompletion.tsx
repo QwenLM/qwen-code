@@ -13,11 +13,6 @@ import { isSlashCommand } from '../utils/commandUtils.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import { useAtCompletion } from './useAtCompletion.js';
 import { useSlashCompletion } from './useSlashCompletion.js';
-import type { PromptCompletion } from './usePromptCompletion.js';
-import {
-  usePromptCompletion,
-  PROMPT_COMPLETION_MIN_LENGTH,
-} from './usePromptCompletion.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useCompletion } from './useCompletion.js';
 
@@ -25,7 +20,6 @@ export enum CompletionMode {
   IDLE = 'IDLE',
   AT = 'AT',
   SLASH = 'SLASH',
-  PROMPT = 'PROMPT',
 }
 
 export interface UseCommandCompletionReturn {
@@ -41,7 +35,6 @@ export interface UseCommandCompletionReturn {
   navigateUp: () => void;
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
-  promptCompletion: PromptCompletion;
 }
 
 export function useCommandCompletion(
@@ -126,32 +119,13 @@ export function useCommandCompletion(
         }
       }
 
-      // Check for prompt completion - only if enabled
-      const trimmedText = buffer.text.trim();
-      const isPromptCompletionEnabled =
-        config?.getEnablePromptCompletion() ?? false;
-
-      if (
-        isPromptCompletionEnabled &&
-        trimmedText.length >= PROMPT_COMPLETION_MIN_LENGTH &&
-        !isSlashCommand(trimmedText) &&
-        !trimmedText.includes('@')
-      ) {
-        return {
-          completionMode: CompletionMode.PROMPT,
-          query: trimmedText,
-          completionStart: 0,
-          completionEnd: trimmedText.length,
-        };
-      }
-
       return {
         completionMode: CompletionMode.IDLE,
         query: null,
         completionStart: -1,
         completionEnd: -1,
       };
-    }, [cursorRow, cursorCol, buffer.lines, buffer.text, config]);
+    }, [cursorRow, cursorCol, buffer.lines]);
 
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
@@ -170,12 +144,6 @@ export function useCommandCompletion(
     setSuggestions,
     setIsLoadingSuggestions,
     setIsPerfectMatch,
-  });
-
-  const promptCompletion = usePromptCompletion({
-    buffer,
-    config,
-    enabled: completionMode === CompletionMode.PROMPT,
   });
 
   useEffect(() => {
@@ -264,6 +232,5 @@ export function useCommandCompletion(
     navigateUp,
     navigateDown,
     handleAutocomplete,
-    promptCompletion,
   };
 }
