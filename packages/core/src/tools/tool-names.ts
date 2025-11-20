@@ -25,6 +25,7 @@ export const ToolNames = {
   WEB_SEARCH: 'web_search',
   LS: 'list_directory',
   PROJECT_MANAGEMENT: 'project_management',
+  PDF_READER: 'pdf_reader',
 } as const;
 
 /**
@@ -48,6 +49,7 @@ export const ToolDisplayNames = {
   WEB_SEARCH: 'WebSearch',
   LS: 'ListFiles',
   PROJECT_MANAGEMENT: 'ProjectManagement',
+  PDF_READER: 'PDFReader',
 } as const;
 
 // Migration from old tool names to new tool names

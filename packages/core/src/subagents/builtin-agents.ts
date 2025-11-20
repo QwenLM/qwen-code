@@ -7,6 +7,9 @@
 import type { SubagentConfig } from './types.js';
 import { ProjectManagementAgent } from './project-management-agent.js';
 import { DeepWebSearchAgent } from './deep-web-search-agent.js';
+import { DeepPlannerAgent } from './deep-planner-agent.js';
+import { SoftwareEngineerAgent } from './software-engineer-agent.js';
+import { SoftwareTesterAgent } from './software-tester-agent.js';
 
 /**
  * Registry of built-in subagents that are always available to all users.
@@ -46,6 +49,9 @@ Notes:
     },
     ProjectManagementAgent,
     DeepWebSearchAgent,
+    DeepPlannerAgent,
+    SoftwareEngineerAgent,
+    SoftwareTesterAgent,
   ];
 
   /**

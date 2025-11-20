@@ -57,6 +57,7 @@
     "mnemonist": "^0.40.3",
     "open": "^10.1.2",
     "openai": "5.11.0",
+    "pdf-parse": "^1.1.1",
     "picomatch": "^4.0.1",
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",

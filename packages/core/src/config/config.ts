@@ -60,6 +60,7 @@ import { ProjectManagementTool } from '../tools/project-management.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { PDFReaderTool } from '../tools/pdf-reader.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -1177,6 +1178,7 @@ export class Config {
     }
     registerCoreTool(WriteFileTool, this);
     registerCoreTool(ReadManyFilesTool, this);
+    registerCoreTool(PDFReaderTool, this);
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
