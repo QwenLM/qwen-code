@@ -353,7 +353,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleAuthSelect,
     openAuthDialog,
     cancelAuthentication,
-  } = useAuthCommand(settings, config);
+  } = useAuthCommand(settings, config, historyManager.addItem);
 
   const { proQuotaRequest, handleProQuotaChoice } = useQuotaAndFallback({
     config,

@@ -623,14 +623,16 @@ describe('QwenOAuth2Client', () => {
     });
 
     it('should handle authorization_pending with HTTP 400 according to RFC 8628', async () => {
+      const errorData = {
+        error: 'authorization_pending',
+        error_description: 'The authorization request is still pending',
+      };
       const mockResponse = {
         ok: false,
         status: 400,
         statusText: 'Bad Request',
-        json: async () => ({
-          error: 'authorization_pending',
-          error_description: 'The authorization request is still pending',
-        }),
+        text: async () => JSON.stringify(errorData),
+        json: async () => errorData,
       };
 
       vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
@@ -646,14 +648,16 @@ describe('QwenOAuth2Client', () => {
     });
 
     it('should handle slow_down with HTTP 429 according to RFC 8628', async () => {
+      const errorData = {
+        error: 'slow_down',
+        error_description: 'The client is polling too frequently',
+      };
       const mockResponse = {
         ok: false,
         status: 429,
         statusText: 'Too Many Requests',
-        json: async () => ({
-          error: 'slow_down',
-          error_description: 'The client is polling too frequently',
-        }),
+        text: async () => JSON.stringify(errorData),
+        json: async () => errorData,
       };
 
       vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
@@ -1993,14 +1997,16 @@ describe('Enhanced Error Handling and Edge Cases', () => {
     });
 
     it('should handle authorization_pending with correct status', async () => {
+      const errorData = {
+        error: 'authorization_pending',
+        error_description: 'Authorization request is pending',
+      };
       const mockResponse = {
         ok: false,
         status: 400,
         statusText: 'Bad Request',
-        json: vi.fn().mockResolvedValue({
-          error: 'authorization_pending',
-          error_description: 'Authorization request is pending',
-        }),
+        text: vi.fn().mockResolvedValue(JSON.stringify(errorData)),
+        json: vi.fn().mockResolvedValue(errorData),
       };
 
       vi.mocked(global.fetch).mockResolvedValue(

@@ -4,23 +4,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useEffect } from 'react';
-import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  AuthEvent,
   AuthType,
   clearCachedCredentialFile,
   getErrorMessage,
   logAuth,
-  AuthEvent,
 } from '@qwen-code/qwen-code-core';
-import { AuthState } from '../types.js';
-import { useQwenAuth } from '../hooks/useQwenAuth.js';
+import { useCallback, useEffect, useState } from 'react';
+import type { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
+import { useQwenAuth } from '../hooks/useQwenAuth.js';
+import { AuthState, MessageType } from '../types.js';
+import type { HistoryItem } from '../types.js';
 
 export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 
-export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
+export const useAuthCommand = (
+  settings: LoadedSettings,
+  config: Config,
+  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+) => {
   const unAuthenticated =
     settings.merged.security?.auth?.selectedType === undefined;
 
@@ -117,8 +122,17 @@ export const useAuthCommand = (settings: LoadedSettings, config: Config) => {
       // Log authentication success
       const authEvent = new AuthEvent(authType, 'manual', 'success');
       logAuth(config, authEvent);
+
+      // Show success message
+      addItem(
+        {
+          type: MessageType.INFO,
+          text: `Authenticated successfully with ${authType} credentials.`,
+        },
+        Date.now(),
+      );
     },
-    [settings, handleAuthFailure, config],
+    [settings, handleAuthFailure, config, addItem],
   );
 
   const performAuth = useCallback(
