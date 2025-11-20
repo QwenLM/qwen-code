@@ -1077,6 +1077,17 @@ describe('loadCliConfig telemetry', () => {
     mockExit.mockRestore();
     mockConsoleError.mockRestore();
   });
+
+  it('should parse --append-system-prompt option correctly', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--append-system-prompt',
+      'Custom system instruction',
+    ];
+    const argv = await parseArguments({} as Settings);
+    expect(argv.appendSystemPrompt).toBe('Custom system instruction');
+  });
 });
 
 describe('Hierarchical Memory Loading (config.ts) - Placeholder Suite', () => {

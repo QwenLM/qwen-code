@@ -94,6 +94,9 @@ import { DEFAULT_QWEN_EMBEDDING_MODEL, DEFAULT_QWEN_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 
+// Hooks
+import type { HooksSettings } from '../hooks/HooksSettings.js';
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -290,6 +293,8 @@ export interface ConfigParameters {
   useSmartEdit?: boolean;
   output?: OutputSettings;
   skipStartupContext?: boolean;
+  hooks?: HooksSettings;
+  additionalSystemPrompt?: string;
 }
 
 export class Config {
@@ -375,6 +380,7 @@ export class Config {
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
+  private readonly hooksSettings: HooksSettings | undefined;
   private shellExecutionConfig: ShellExecutionConfig;
   private readonly extensionManagement: boolean = true;
   private readonly skipLoopDetection: boolean;
@@ -389,6 +395,7 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
   private readonly outputSettings: OutputSettings;
+  private readonly additionalSystemPrompt: string | undefined;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId;
@@ -456,6 +463,7 @@ export class Config {
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
+    this.hooksSettings = params.hooks;
     this._generationConfig = {
       model: params.model,
       ...(params.generationConfig || {}),
@@ -500,6 +508,7 @@ export class Config {
     this.outputSettings = {
       format: params.output?.format ?? OutputFormat.TEXT,
     };
+    this.additionalSystemPrompt = params.additionalSystemPrompt;
 
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -755,6 +764,10 @@ export class Config {
 
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
+  }
+
+  getAdditionalSystemPrompt(): string | undefined {
+    return this.additionalSystemPrompt;
   }
 
   getGeminiMdFileCount(): number {
@@ -1190,5 +1203,9 @@ export class Config {
 
     await registry.discoverAllTools();
     return registry;
+  }
+
+  getHooksSettings(): HooksSettings | undefined {
+    return this.hooksSettings;
   }
 }

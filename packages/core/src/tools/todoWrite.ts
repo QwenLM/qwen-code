@@ -20,6 +20,8 @@ export interface TodoItem {
   id: string;
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
+  created_at?: string; // ISO string timestamp for Claude compatibility
+  completed_at?: string | null; // ISO string timestamp for Claude compatibility, null if not completed
 }
 
 export interface TodoWriteParams {
@@ -31,7 +33,7 @@ export interface TodoWriteParams {
 const todoWriteToolSchemaData: FunctionDeclaration = {
   name: 'todo_write',
   description:
-    'Creates and manages a structured task list for your current coding session. This helps track progress, organize complex tasks, and demonstrate thoroughness.',
+    'Creates and manages a structured task list for your current coding session. This helps track progress, organize complex tasks, and demonstrate thoroughness. Includes Claude-compatible timestamps (created_at, completed_at).',
   parametersJsonSchema: {
     type: 'object',
     properties: {
@@ -50,6 +52,17 @@ const todoWriteToolSchemaData: FunctionDeclaration = {
             },
             id: {
               type: 'string',
+            },
+            created_at: {
+              type: 'string',
+              description:
+                'ISO timestamp when the todo was created (Claude compatibility)',
+            },
+            completed_at: {
+              type: 'string',
+              description:
+                'ISO timestamp when the todo was completed, or null if not completed (Claude compatibility)',
+              nullable: true,
             },
           },
           required: ['content', 'status', 'id'],
@@ -261,7 +274,22 @@ async function readTodosFromFile(sessionId?: string): Promise<TodoItem[]> {
     const todoFilePath = getTodoFilePath(sessionId);
     const content = await fs.readFile(todoFilePath, 'utf-8');
     const data = JSON.parse(content);
-    return Array.isArray(data.todos) ? data.todos : [];
+    const todos = Array.isArray(data.todos) ? data.todos : [];
+
+    // Ensure Claude-compatible timestamp fields exist for each todo
+    return todos.map((todo: TodoItem) => {
+      // Ensure created_at exists (if not present, default to current timestamp for backward compatibility)
+      if (!todo.created_at) {
+        todo.created_at = new Date().toISOString();
+      }
+      // Ensure completed_at exists (set to null if status is not completed)
+      if (todo.status === 'completed' && !todo.completed_at) {
+        todo.completed_at = new Date().toISOString();
+      } else if (todo.status !== 'completed') {
+        todo.completed_at = null;
+      }
+      return todo;
+    });
   } catch (err) {
     const error = err as Error & { code?: string };
     if (!(error instanceof Error) || error.code !== 'ENOENT') {
@@ -283,8 +311,27 @@ async function writeTodosToFile(
 
   await fs.mkdir(todoDir, { recursive: true });
 
+  // Process todos to ensure Claude-compatible timestamps
+  const processedTodos = todos.map((todo) => {
+    // If created_at doesn't exist, set it to now (for backward compatibility)
+    const enhancedTodo = {
+      ...todo,
+      created_at: todo.created_at || new Date().toISOString(),
+    };
+
+    // If status is completed and completed_at is not set, set it now
+    if (todo.status === 'completed' && !todo.completed_at) {
+      enhancedTodo.completed_at = new Date().toISOString();
+    } else if (todo.status !== 'completed') {
+      // If status is not completed, ensure completed_at is null
+      enhancedTodo.completed_at = null;
+    }
+
+    return enhancedTodo;
+  });
+
   const data = {
-    todos,
+    todos: processedTodos,
     sessionId: sessionId || 'default',
   };
 
@@ -455,6 +502,21 @@ export class TodoWriteTool extends BaseDeclarativeTool<
       }
       if (!['pending', 'in_progress', 'completed'].includes(todo.status)) {
         return 'Each todo must have a valid "status" (pending, in_progress, completed).';
+      }
+
+      // Validate optional timestamp fields if present
+      if (
+        todo.created_at !== undefined &&
+        typeof todo.created_at !== 'string'
+      ) {
+        return 'Each todo\'s "created_at" field must be a string if provided.';
+      }
+      if (
+        todo.completed_at !== undefined &&
+        todo.completed_at !== null &&
+        typeof todo.completed_at !== 'string'
+      ) {
+        return 'Each todo\'s "completed_at" field must be a string or null if provided.';
       }
     }
 

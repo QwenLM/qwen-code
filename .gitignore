@@ -57,3 +57,11 @@ gha-creds-*.json
 
 # Log files
 patch_output.log
+
+# Map files (build artifacts)
+*.map
+*.js.map
+
+# Qwen documentation
+QWEN.md
+scripts/log/

@@ -332,9 +332,64 @@ export const useGeminiStream = (
       let localQueryToSendToGemini: PartListUnion | null = null;
 
       if (typeof query === 'string') {
-        const trimmedQuery = query.trim();
+        let trimmedQuery = query.trim();
         onDebugMessage(`User query: '${trimmedQuery}'`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+
+        // Execute INPUT_RECEIVED hooks to potentially modify the user input
+        const { HookService } = await import(
+          '../../../../core/src/hooks/HookService.js'
+        );
+        const hookService = new HookService(config);
+        if (hookService) {
+          // Prepare the hook payload with the user query
+          const hookPayload = {
+            id: `input_received_${Date.now()}`,
+            timestamp: Date.now(),
+            params: { input: trimmedQuery },
+            originalQuery: trimmedQuery,
+          };
+
+          try {
+            // Execute INPUT_RECEIVED hooks which may modify the payload
+            const modifiedPayload = await hookService.executeHooks(
+              'input.received',
+              hookPayload,
+            );
+
+            // If the hook modified the input, use the updated value
+            if (
+              modifiedPayload &&
+              (modifiedPayload as Record<string, unknown>)['params'] &&
+              (
+                (modifiedPayload as Record<string, unknown>)[
+                  'params'
+                ] as Record<string, unknown>
+              )?.['input']
+            ) {
+              trimmedQuery =
+                ((
+                  (modifiedPayload as Record<string, unknown>)[
+                    'params'
+                  ] as Record<string, unknown>
+                )?.['input'] as string) || trimmedQuery;
+              onDebugMessage(`Hook modified query to: '${trimmedQuery}'`);
+            } else if (
+              modifiedPayload &&
+              (modifiedPayload as Record<string, unknown>)['updatedInput']
+            ) {
+              // Alternative: check for updatedInput field in response
+              trimmedQuery =
+                ((modifiedPayload as Record<string, unknown>)[
+                  'updatedInput'
+                ] as string) || trimmedQuery;
+              onDebugMessage(`Hook modified query to: '${trimmedQuery}'`);
+            }
+          } catch (error) {
+            console.error('Error executing INPUT_RECEIVED hooks:', error);
+            // Continue with original query if hook execution fails
+          }
+        }
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)

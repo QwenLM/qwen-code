@@ -96,6 +96,18 @@ export async function runNonInteractive(
 
       let currentMessages: Content[] = [{ role: 'user', parts: query }];
 
+      // Output message start event in stream-json format if applicable
+      if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+        const startEvent = {
+          type: 'message_start',
+          message: {
+            id: prompt_id,
+            model: config.getModel() || 'unknown',
+          },
+        };
+        process.stdout.write(JSON.stringify(startEvent) + '\n');
+      }
+
       let turnCount = 0;
       while (true) {
         turnCount++;
@@ -116,17 +128,169 @@ export async function runNonInteractive(
         let responseText = '';
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
+            if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+              const cancelEvent = {
+                type: 'message_stop',
+                stop_reason: 'user_cancel',
+              };
+              process.stdout.write(JSON.stringify(cancelEvent) + '\n');
+            }
             handleCancellationError(config);
           }
 
-          if (event.type === GeminiEventType.Content) {
-            if (config.getOutputFormat() === OutputFormat.JSON) {
-              responseText += event.value;
-            } else {
-              process.stdout.write(event.value);
-            }
-          } else if (event.type === GeminiEventType.ToolCallRequest) {
-            toolCallRequests.push(event.value);
+          switch (event.type) {
+            case GeminiEventType.Content:
+              if (config.getOutputFormat() === OutputFormat.JSON) {
+                responseText += event.value;
+              } else if (
+                config.getOutputFormat() === OutputFormat.STREAM_JSON
+              ) {
+                // Output in Claude-compatible stream-json format
+                const streamEvent = {
+                  type: 'content_block_delta',
+                  text: event.value,
+                };
+                process.stdout.write(JSON.stringify(streamEvent) + '\n');
+              } else {
+                process.stdout.write(event.value);
+              }
+              break;
+
+            case GeminiEventType.ToolCallRequest:
+              toolCallRequests.push(event.value);
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output tool call in stream-json format
+                const toolCallEvent = {
+                  type: 'tool_call',
+                  name: event.value.name,
+                  arguments: event.value.args,
+                };
+                process.stdout.write(JSON.stringify(toolCallEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.Finished:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output finish event in stream-json format
+                const finishEvent = {
+                  type: 'message_delta',
+                  delta: { stop_reason: event.value?.reason || 'end_turn' },
+                  usage: event.value?.usageMetadata || {},
+                };
+                process.stdout.write(JSON.stringify(finishEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.Error:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output error event in stream-json format
+                const errorEvent = {
+                  type: 'error',
+                  error: event.value,
+                };
+                process.stdout.write(JSON.stringify(errorEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.Thought:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output thought event in stream-json format
+                const thoughtEvent = {
+                  type: 'thought',
+                  content: event.value,
+                };
+                process.stdout.write(JSON.stringify(thoughtEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.Citation:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output citation event in stream-json format
+                const citationEvent = {
+                  type: 'citation',
+                  content: event.value,
+                };
+                process.stdout.write(JSON.stringify(citationEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.UserCancelled:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output cancellation event in stream-json format
+                const cancelEvent = {
+                  type: 'message_stop',
+                  stop_reason: 'user_cancel',
+                };
+                process.stdout.write(JSON.stringify(cancelEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.LoopDetected:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output loop detected event in stream-json format
+                const loopEvent = {
+                  type: 'error',
+                  error: 'Loop detected in conversation',
+                };
+                process.stdout.write(JSON.stringify(loopEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.MaxSessionTurns:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output max turns event in stream-json format
+                const maxTurnsEvent = {
+                  type: 'error',
+                  error: 'Maximum session turns exceeded',
+                };
+                process.stdout.write(JSON.stringify(maxTurnsEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.ChatCompressed:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output compression event in stream-json format
+                const compressEvent = {
+                  type: 'info',
+                  message: 'Chat history compressed',
+                  value: event.value,
+                };
+                process.stdout.write(JSON.stringify(compressEvent) + '\n');
+              }
+              break;
+
+            case GeminiEventType.SessionTokenLimitExceeded:
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Output token limit event in stream-json format
+                const tokenLimitEvent = {
+                  type: 'error',
+                  error: event.value,
+                };
+                process.stdout.write(JSON.stringify(tokenLimitEvent) + '\n');
+              }
+              break;
+
+            // Add other event types as needed
+            default:
+              // For any other events, we can log them in stream format only if debugging
+              if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+                // Handle events that may or may not have a value
+                if ('value' in event) {
+                  const genericEvent = {
+                    type: 'unknown_event',
+                    original_type: event.type,
+                    value: event.value,
+                  };
+                  process.stdout.write(JSON.stringify(genericEvent) + '\n');
+                } else {
+                  const genericEvent = {
+                    type: 'unknown_event',
+                    original_type: event.type,
+                  };
+                  process.stdout.write(JSON.stringify(genericEvent) + '\n');
+                }
+              }
+              break;
           }
         }
 
@@ -155,12 +319,28 @@ export async function runNonInteractive(
               toolResponseParts.push(...toolResponse.responseParts);
             }
           }
+          // If in stream-json mode and we're looping for another turn, output a turn delimiter
+          if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+            const turnEvent = {
+              type: 'turn_complete',
+            };
+            process.stdout.write(JSON.stringify(turnEvent) + '\n');
+          }
+
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
           if (config.getOutputFormat() === OutputFormat.JSON) {
             const formatter = new JsonFormatter();
             const stats = uiTelemetryService.getMetrics();
             process.stdout.write(formatter.format(responseText, stats));
+          } else if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+            // Output end of stream event in Claude-compatible format
+            const endEvent = {
+              type: 'message_stop',
+              stop_reason: 'end_turn',
+              usage: uiTelemetryService.getMetrics(),
+            };
+            process.stdout.write(JSON.stringify(endEvent) + '\n');
           } else {
             process.stdout.write('\n'); // Ensure a final newline
           }
@@ -168,6 +348,13 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
+      if (config.getOutputFormat() === OutputFormat.STREAM_JSON) {
+        const errorEvent = {
+          type: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        };
+        process.stdout.write(JSON.stringify(errorEvent) + '\n');
+      }
       handleError(error, config);
     } finally {
       consolePatcher.cleanup();

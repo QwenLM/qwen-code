@@ -1,0 +1,86 @@
+{
+  "toolInputFormatMappings": {
+    "Write": {
+      "claudeFieldMapping": {
+        "file_path": "file_path",
+        "content": "content"
+      },
+      "requiredFields": ["file_path", "content"],
+      "claudeFormat": {
+        "file_path": "string",
+        "content": "string"
+      }
+    },
+    "Edit": {
+      "claudeFieldMapping": {
+        "file_path": "file_path",
+        "old_string": "old_string",
+        "new_string": "new_string"
+      },
+      "requiredFields": ["file_path", "old_string", "new_string"],
+      "claudeFormat": {
+        "file_path": "string",
+        "old_string": "string",
+        "new_string": "string"
+      }
+    },
+    "Bash": {
+      "claudeFieldMapping": {
+        "command": "command",
+        "description": "description"
+      },
+      "requiredFields": ["command"],
+      "claudeFormat": {
+        "command": "string",
+        "description": "string"
+      }
+    },
+    "TodoWrite": {
+      "claudeFieldMapping": {
+        "todos": "todos"
+      },
+      "requiredFields": ["todos"],
+      "claudeFormat": {
+        "todos": "array"
+      }
+    },
+    "Read": {
+      "claudeFieldMapping": {
+        "file_path": "file_path"
+      },
+      "requiredFields": ["file_path"],
+      "claudeFormat": {
+        "file_path": "string"
+      }
+    },
+    "Grep": {
+      "claudeFieldMapping": {
+        "pattern": "pattern",
+        "path": "path"
+      },
+      "requiredFields": ["pattern"],
+      "claudeFormat": {
+        "pattern": "string",
+        "path": "string"
+      }
+    },
+    "Glob": {
+      "claudeFieldMapping": {
+        "pattern": "pattern"
+      },
+      "requiredFields": ["pattern"],
+      "claudeFormat": {
+        "pattern": "string"
+      }
+    },
+    "Ls": {
+      "claudeFieldMapping": {
+        "path": "path"
+      },
+      "requiredFields": ["path"],
+      "claudeFormat": {
+        "path": "string"
+      }
+    }
+  }
+}

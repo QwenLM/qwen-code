@@ -51,6 +51,17 @@ if (existsSync(coreVendorDir)) {
   console.warn(`Warning: Vendor directory not found at ${coreVendorDir}`);
 }
 
+// Copy config directory
+console.log('Copying config directory...');
+const configDir = join(root, 'config');
+if (existsSync(configDir)) {
+  const destConfigDir = join(distDir, 'config');
+  copyRecursiveSync(configDir, destConfigDir);
+  console.log('Copied config directory to dist/');
+} else {
+  console.warn(`Warning: Config directory not found at ${configDir}`);
+}
+
 console.log('\n✅ All bundle assets copied to dist/');
 
 /**

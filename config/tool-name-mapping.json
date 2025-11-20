@@ -1,0 +1,13 @@
+{
+  "Write": "write_file",
+  "Edit": "replace",
+  "Bash": "run_shell_command",
+  "TodoWrite": "todo_write",
+  "NotebookEdit": "edit_notebook",
+  "Read": "read_file",
+  "Grep": "grep",
+  "Glob": "glob",
+  "Ls": "ls",
+  "WebSearch": "web_search",
+  "WebFetch": "web_fetch"
+}

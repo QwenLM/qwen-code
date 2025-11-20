@@ -53,6 +53,7 @@ For detailed setup instructions, see [Authorization](#authorization).
 
 - **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits
 - **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
+- **Extensible Hook System** - Execute custom scripts at key points in the application lifecycle (compatible with Claude Code hooks) for advanced automation, monitoring, and security checks
 - **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
 - **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis
 
@@ -173,6 +174,56 @@ To completely disable vision model support, add to your `.qwen/settings.json`:
 ```
 
 > 💡 **Tip**: In YOLO mode (`--yolo`), vision switching happens automatically without prompts when images are detected.
+
+### Advanced Features
+
+#### Claude Compatibility Mode
+
+Qwen Code includes a Claude-compatible adapter that allows you to use Claude-style commands and arguments:
+
+```bash
+# Install the Claude-compatible alias
+npm run create-alias  # Select option 2 for qwen-alt
+
+# Use Claude-style commands
+qwen-alt --append-system-prompt "Focus on security and performance" "Optimize this code"
+
+# Claude-compatible streaming output
+qwen-alt -p "Explain this function" --output-format stream-json
+```
+
+The `qwen-alt` alias supports most Claude Code CLI arguments and workflows.
+
+#### System Prompt Customization
+
+You can append custom instructions to the default system prompt to guide the AI behavior:
+
+```bash
+# Append a system instruction to guide the AI
+qwen --append-system-prompt "Always respond with detailed explanations" "Explain this codebase"
+
+# Use with print mode for headless operations
+qwen -p "Analyze this file" --append-system-prompt "Focus on potential bugs and security issues"
+```
+
+#### Streaming JSON Output
+
+For programmatic use cases, Qwen Code supports streaming JSON output compatible with Claude's format:
+
+```bash
+# Stream output as newline-delimited JSON objects
+qwen -p "Generate code" --output-format stream-json
+
+# Process streaming output with jq
+qwen -p "List items" --output-format stream-json | jq -c 'select(.type == "content_block_delta") | .text'
+
+# Use for automation and integration
+qwen -p "Write documentation" --output-format stream-json | while read line; do
+  echo "Processing: $line"
+done
+```
+
+The `stream-json` format outputs events like `content_block_delta`, `message_start`, `message_stop`, and `tool_call` as they occur, enabling real-time processing of responses.
 
 ### Authorization
 
@@ -316,6 +367,42 @@ qwen
 > Convert all images in this directory to PNG format
 > Rename all test files to follow the *.test.ts pattern
 > Find and remove all console.log statements
+```
+
+### 🪝 Hook System for Advanced Automation
+
+For more advanced automation, Qwen Code features a powerful hook system that allows you to execute custom scripts at key lifecycle events:
+
+- **Security checks**: Run validation scripts before file operations
+- **Monitoring**: Track and log all tool usage
+- **Automation**: Trigger external tools or CI/CD processes
+- **Claude compatibility**: Use existing Claude Code hooks seamlessly
+
+Configure hooks in your `.qwen/settings.json`:
+
+```json
+{
+  "hooks": {
+    "enabled": true,
+    "timeoutMs": 10000,
+    "hooks": [
+      {
+        "type": "tool.before",
+        "scriptPath": "./hooks/security-check.js",
+        "enabled": true,
+        "priority": 10
+      }
+    ],
+    "claudeHooks": [
+      {
+        "event": "PreToolUse",
+        "matcher": ["Write", "Edit"],
+        "command": "./hooks/security.js",
+        "timeout": 30
+      }
+    ]
+  }
+}
 ```
 
 ### 🐛 Debugging & Analysis
