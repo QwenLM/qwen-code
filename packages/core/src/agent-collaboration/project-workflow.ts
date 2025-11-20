@@ -8,8 +8,11 @@ import type { Config } from '../config/config.js';
 import {
   createAgentCollaborationAPI,
   type AgentCollaborationAPI,
+  type EnhancedAgentCollaborationAPI,
+  createEnhancedAgentCollaborationAPI,
 } from './index.js';
 import type { AgentWorkflowStep } from './agent-orchestration.js';
+import type { EnhancedAgentOrchestrationSystem } from './enhanced-coordination.js';
 
 /**
  * Defines the roles and responsibilities for each agent in the project workflow
@@ -46,21 +49,44 @@ export interface ProjectWorkflowOptions {
   timeline?: string;
   stakeholders?: string[];
   constraints?: string[];
+  enableEnhancedCoordination?: boolean; // Whether to use enhanced coordination
+  collaborationStrategy?:
+    | 'sequential'
+    | 'parallel'
+    | 'round-robin'
+    | 'specialized'
+    | 'hybrid'; // Strategy for agent collaboration
+  enableRecovery?: boolean; // Whether to enable workflow recovery
+  maxRetries?: number; // Maximum number of retries for failed steps
 }
 
 /**
- * A complete project workflow implementation that orchestrates all built-in agents
- * to work together effectively across multiple phases of a software project.
+ * Enhanced project workflow orchestrator with improved team workflow execution
  */
 export class ProjectWorkflowOrchestrator {
   private readonly api: AgentCollaborationAPI;
+  private readonly enhancedApi?: EnhancedAgentCollaborationAPI;
   private readonly config: Config;
   private readonly options: ProjectWorkflowOptions;
 
   constructor(config: Config, options: ProjectWorkflowOptions) {
     this.config = config;
-    this.api = createAgentCollaborationAPI(config);
-    this.options = options;
+    this.options = {
+      enableEnhancedCoordination: false,
+      collaborationStrategy: 'sequential',
+      enableRecovery: true,
+      maxRetries: 3,
+      ...options,
+    };
+
+    // Initialize appropriate API based on options
+    if (this.options.enableEnhancedCoordination) {
+      this.enhancedApi = createEnhancedAgentCollaborationAPI(config);
+      // Use a type assertion since EnhancedAgentCollaborationAPI extends AgentCollaborationAPI
+      this.api = this.enhancedApi as unknown as AgentCollaborationAPI;
+    } else {
+      this.api = createAgentCollaborationAPI(config);
+    }
 
     // Use config to prevent unused variable error
     void this.config;
@@ -76,28 +102,89 @@ export class ProjectWorkflowOrchestrator {
     // Execute all phases in sequence with proper dependencies
     const results: Record<string, unknown> = {};
 
-    // Phase 1: Project Management
-    results['projectPhase'] = await this.executeProjectPhase();
+    try {
+      // Phase 1: Project Management
+      results['projectPhase'] = await this.executeProjectPhase();
 
-    // Phase 2: Planning
-    results['planningPhase'] = await this.executePlanningPhase();
+      // Phase 2: Planning
+      results['planningPhase'] = await this.executePlanningPhase();
 
-    // Phase 3: Research
-    results['researchPhase'] = await this.executeResearchPhase();
+      // Phase 3: Research
+      results['researchPhase'] = await this.executeResearchPhase();
 
-    // Phase 4: Design
-    results['designPhase'] = await this.executeDesignPhase();
+      // Phase 4: Design
+      results['designPhase'] = await this.executeDesignPhase();
 
-    // Phase 5: Implementation
-    results['implementationPhase'] = await this.executeImplementationPhase();
+      // Phase 5: Implementation
+      results['implementationPhase'] = await this.executeImplementationPhase();
 
-    // Phase 6: Testing
-    results['testingPhase'] = await this.executeTestingPhase();
+      // Phase 6: Testing
+      results['testingPhase'] = await this.executeTestingPhase();
 
-    // Final review by supervisor
-    results['review'] = await this.executeFinalReview();
+      // Final review by supervisor
+      results['review'] = await this.executeFinalReview();
+
+      // Update team progress
+      await this.api.memory.updateTeamProgress(
+        this.options.projectName,
+        100,
+        'completed',
+        results,
+      );
+    } catch (error) {
+      console.error('Project workflow failed:', error);
+
+      // Store error in shared memory
+      await this.api.memory.set(`project:${this.options.projectName}:error`, {
+        error: (error as Error).message,
+        timestamp: new Date().toISOString(),
+        phase: Object.keys(results).pop() || 'unknown',
+      });
+
+      // If recovery is enabled and enhanced coordination is available, try to recover
+      if (this.options.enableRecovery && this.enhancedApi) {
+        console.log('Attempting workflow recovery...');
+        return this.recoverFromFailure(results);
+      }
+
+      throw error;
+    }
 
     return results;
+  }
+
+  /**
+   * Attempt to recover from a failed workflow
+   */
+  private async recoverFromFailure(
+    currentResults: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.enhancedApi) {
+      throw new Error('Recovery requires enhanced coordination API');
+    }
+
+    const recoveryResults = { ...currentResults };
+
+    // Use enhanced orchestration for recovery
+    const workflowId = `recovery-${this.options.projectName}-${Date.now()}`;
+
+    try {
+      // Get the failed workflow
+      const recoveryOption: 'retryFailedSteps' | 'skipFailedSteps' =
+        'retryFailedSteps';
+
+      // Attempt recovery using the enhanced orchestration system
+      const recoveryResult =
+        await this.enhancedApi.orchestration.recoverWorkflow(
+          workflowId,
+          recoveryOption,
+        );
+
+      return { ...recoveryResults, recovery: recoveryResult };
+    } catch (recoveryError) {
+      console.error('Recovery failed:', recoveryError);
+      throw recoveryError;
+    }
   }
 
   /**
@@ -146,16 +233,38 @@ export class ProjectWorkflowOrchestrator {
       agents,
       goal: this.options.projectGoal,
       created: new Date().toISOString(),
+      status: 'active',
+      progress: 0,
+      completedTasks: [],
     });
 
-    // Register all agents in their contexts
+    // Register all agents in their contexts with enhanced information
     for (const agent of agents) {
       await this.api.memory.set(`agent:${agent.name}:context`, {
         team: teamName,
         role: agent.role,
         task: this.options.projectGoal,
+        assignedTasks: [],
+        completedTasks: [],
+        dependencies: [], // Tasks this agent is waiting for
+        dependents: [], // Tasks that depend on this agent's work
+        status: 'ready',
       });
     }
+
+    // Initialize the shared context with project-wide information
+    await this.api.memory.set(`project:${teamName}:shared-context`, {
+      projectName: teamName,
+      projectGoal: this.options.projectGoal,
+      timeline: this.options.timeline,
+      stakeholders: this.options.stakeholders,
+      constraints: this.options.constraints,
+      currentPhase: 'initial',
+      progress: 0,
+      lastUpdated: new Date().toISOString(),
+      communicationLog: [],
+      decisions: {},
+    });
   }
 
   /**
@@ -168,7 +277,7 @@ export class ProjectWorkflowOrchestrator {
       Timeline: ${this.options.timeline || 'Not specified'}
       Stakeholders: ${this.options.stakeholders?.join(', ') || 'Not specified'}
       Constraints: ${this.options.constraints?.join(', ') || 'None specified'}
-      
+
       As the project-manager agent, you need to:
       1. Define project scope and objectives
       2. Identify key stakeholders and their needs
@@ -176,6 +285,9 @@ export class ProjectWorkflowOrchestrator {
       4. List required resources and constraints
       5. Create initial project plan
     `;
+
+    // Check for dependencies before starting
+    await this.waitForDependencies(['initial']);
 
     const result = await this.api.coordination
       .getAgentsManager()
@@ -191,6 +303,27 @@ export class ProjectWorkflowOrchestrator {
       result,
       timestamp: new Date().toISOString(),
     });
+
+    // Update team progress
+    await this.api.memory.updateTeamProgress(
+      this.options.projectName,
+      15, // First phase is 15% of progress
+      'project',
+      { plan: result },
+    );
+
+    // Update agent context to indicate completion
+    await this.api.memory.update(`agent:project-manager:context`, {
+      completedTasks: ['project-phase'],
+      status: 'completed',
+    });
+
+    // Add to communication log
+    await this.logCommunication(
+      'project-manager',
+      'project-phase-completed',
+      result,
+    );
 
     return result;
   }
@@ -485,6 +618,79 @@ export class ProjectWorkflowOrchestrator {
   }
 
   /**
+   * Waits for specified dependencies to be completed before proceeding
+   */
+  private async waitForDependencies(dependencies: string[]): Promise<void> {
+    // In a real implementation, this would wait for dependencies to be completed
+    // For now, we'll just check if the expected keys exist in memory
+    for (const dep of dependencies) {
+      if (dep !== 'initial') {
+        // Wait for the dependency to be completed
+        let dependencyCompleted = false;
+        let attempts = 0;
+        const maxAttempts = 10; // Prevent infinite loops
+
+        while (!dependencyCompleted && attempts < maxAttempts) {
+          // Check if the dependency has been completed by looking for its results in memory
+          const depKey = dep.includes('-phase')
+            ? `project:${this.options.projectName}:${dep.replace('-phase', '')}`
+            : `project:${this.options.projectName}:${dep}`;
+
+          const depResult = await this.api.memory.get(depKey);
+          if (depResult) {
+            dependencyCompleted = true;
+          } else {
+            // Wait a bit before checking again
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          attempts++;
+        }
+
+        if (!dependencyCompleted) {
+          console.warn(
+            `Dependency ${dep} not completed after ${maxAttempts} attempts`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Logs communication between agents for traceability
+   */
+  private async logCommunication(
+    agent: string,
+    event: string,
+    data: unknown,
+  ): Promise<void> {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      agent,
+      event,
+      data:
+        typeof data === 'string'
+          ? data.substring(0, 200)
+          : JSON.stringify(data).substring(0, 200),
+    };
+
+    // Add to the project's communication log
+    const logKey = `project:${this.options.projectName}:communication-log`;
+    const currentLog: unknown[] = (await this.api.memory.get(logKey)) || [];
+    currentLog.push(logEntry);
+    await this.api.memory.set(logKey, currentLog);
+
+    // Also add to the shared context
+    const sharedContextKey = `project:${this.options.projectName}:shared-context`;
+    const sharedContext =
+      (await this.api.memory.get<Record<string, unknown>>(sharedContextKey)) ||
+      {};
+    const communicationLog =
+      (sharedContext['communicationLog'] as unknown[]) || [];
+    communicationLog.push(logEntry);
+    await this.api.memory.update(sharedContextKey, { communicationLog });
+  }
+
+  /**
    * Creates a coordinated workflow with all phases
    */
   async createProjectWorkflow(): Promise<AgentWorkflowStep[]> {
@@ -494,6 +700,7 @@ export class ProjectWorkflowOrchestrator {
         id: 'project-phase-start',
         agent: 'project-manager',
         task: `Initialize project management for: ${this.options.projectGoal}`,
+        retryCount: this.options.maxRetries,
       },
 
       // Planning Phase (depends on project phase)
@@ -502,6 +709,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'deep-planner',
         task: `Create master plan for: ${this.options.projectGoal}`,
         dependencies: ['project-phase-start'],
+        retryCount: this.options.maxRetries,
       },
 
       // Research Phase (depends on planning)
@@ -510,6 +718,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'deep-researcher',
         task: `Conduct research for: ${this.options.projectGoal}`,
         dependencies: ['planning-phase'],
+        retryCount: this.options.maxRetries,
       },
       // Also include web research
       {
@@ -517,6 +726,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'deep-web-search',
         task: `Perform web research for: ${this.options.projectGoal}`,
         dependencies: ['research-phase'],
+        retryCount: this.options.maxRetries,
       },
 
       // Design Phase (depends on research)
@@ -525,6 +735,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'software-architecture',
         task: `Design system architecture for: ${this.options.projectGoal}`,
         dependencies: ['web-research-phase'],
+        retryCount: this.options.maxRetries,
       },
 
       // Implementation Phase (depends on design)
@@ -533,6 +744,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'software-engineer',
         task: `Implement solution for: ${this.options.projectGoal}`,
         dependencies: ['design-phase'],
+        retryCount: this.options.maxRetries,
       },
 
       // Testing Phase (depends on implementation)
@@ -541,6 +753,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'software-tester',
         task: `Validate implementation for: ${this.options.projectGoal}`,
         dependencies: ['implementation-phase'],
+        retryCount: this.options.maxRetries,
       },
 
       // Final review (depends on testing)
@@ -549,6 +762,7 @@ export class ProjectWorkflowOrchestrator {
         agent: 'general-purpose',
         task: `Conduct final review for: ${this.options.projectGoal}`,
         dependencies: ['testing-phase'],
+        retryCount: this.options.maxRetries,
       },
     ];
   }
@@ -559,12 +773,26 @@ export class ProjectWorkflowOrchestrator {
   async executeAsWorkflow(): Promise<unknown> {
     const workflowSteps = await this.createProjectWorkflow();
 
-    return this.api.orchestration.executeWorkflow(
-      `workflow-${this.options.projectName}-${Date.now()}`,
-      `Project Workflow: ${this.options.projectName}`,
-      `Complete project workflow for: ${this.options.projectGoal}`,
-      workflowSteps,
-    );
+    // Use enhanced orchestration if available
+    if (this.enhancedApi) {
+      // Type assertion to allow usage of enhanced orchestration
+      const enhancedOrchestration = this.enhancedApi
+        .orchestration as EnhancedAgentOrchestrationSystem;
+      return enhancedOrchestration.executeWorkflowWithTracking(
+        `workflow-${this.options.projectName}-${Date.now()}`,
+        `Project Workflow: ${this.options.projectName}`,
+        `Complete project workflow for: ${this.options.projectGoal}`,
+        workflowSteps,
+      );
+    } else {
+      return this.api.orchestration.executeWorkflow(
+        `workflow-${this.options.projectName}-${Date.now()}`,
+        `Project Workflow: ${this.options.projectName}`,
+        `Complete project workflow for: ${this.options.projectGoal}`,
+        workflowSteps,
+        this.options.collaborationStrategy,
+      );
+    }
   }
 }
 

@@ -9,11 +9,23 @@ import { AgentCoordinationSystem } from './agent-coordination.js';
 import { AgentCommunicationSystem } from './agent-communication.js';
 import { AgentOrchestrationSystem } from './agent-orchestration.js';
 import { AgentSharedMemory } from './shared-memory.js';
+import {
+  EnhancedAgentCoordinationSystem,
+  EnhancedAgentCommunicationSystem,
+  EnhancedAgentOrchestrationSystem,
+} from './enhanced-coordination.js';
 
 export interface AgentCollaborationAPI {
   coordination: AgentCoordinationSystem;
   communication: AgentCommunicationSystem;
   orchestration: AgentOrchestrationSystem;
+  memory: AgentSharedMemory;
+}
+
+export interface EnhancedAgentCollaborationAPI {
+  coordination: EnhancedAgentCoordinationSystem;
+  communication: EnhancedAgentCommunicationSystem;
+  orchestration: EnhancedAgentOrchestrationSystem;
   memory: AgentSharedMemory;
 }
 
@@ -31,7 +43,10 @@ export function createAgentCollaborationAPI(
   config: Config,
   options?: AgentCollaborationOptions,
 ): AgentCollaborationAPI {
-  const memory = new AgentSharedMemory(config);
+  const memory = new AgentSharedMemory(config, {
+    maxSize: 5000,
+    maxAgeMinutes: 60,
+  }); // Custom settings
   const coordination = new AgentCoordinationSystem(
     config,
     options?.coordination,
@@ -41,6 +56,41 @@ export function createAgentCollaborationAPI(
     config,
     options?.orchestration,
   );
+
+  return {
+    coordination,
+    communication,
+    orchestration,
+    memory,
+  };
+}
+
+/**
+ * Create an enhanced collaboration API with advanced features for agent teamwork
+ * @param config The Qwen configuration
+ * @param options Optional configuration for the collaboration systems
+ */
+export function createEnhancedAgentCollaborationAPI(
+  config: Config,
+  options?: AgentCollaborationOptions,
+): EnhancedAgentCollaborationAPI {
+  const memory = new AgentSharedMemory(config, {
+    maxSize: 5000,
+    maxAgeMinutes: 60,
+  }); // Custom settings
+  const communication = new EnhancedAgentCommunicationSystem(config);
+  const coordination = new EnhancedAgentCoordinationSystem(
+    config,
+    communication,
+  );
+  const orchestration = new EnhancedAgentOrchestrationSystem(
+    config,
+    coordination,
+    communication,
+  );
+
+  // Use options parameter (even if just to acknowledge it)
+  void options;
 
   return {
     coordination,
@@ -151,6 +201,32 @@ export async function executeCollaborativeTask(
           result: resultValue,
         } of parallelResults) {
           results[agentKey] = resultValue;
+
+          // Store individual agent's result in shared memory
+          await api.memory.set(`agent:${agentKey}:result:${Date.now()}`, {
+            task,
+            result: resultValue,
+            agent: agentKey,
+            timestamp: new Date().toISOString(),
+          });
+
+          // Send notification about completion
+          await api.communication.sendMessage(
+            agentKey,
+            'broadcast',
+            'notification',
+            {
+              type: 'completed_task',
+              agent: agentKey,
+              task,
+              result_summary:
+                typeof resultValue === 'string'
+                  ? resultValue.substring(0, 100)
+                  : JSON.stringify(resultValue).substring(0, 100),
+              timestamp: new Date().toISOString(),
+            },
+            { requireAck: false },
+          );
         }
       }
       break;
@@ -176,6 +252,20 @@ export async function executeCollaborativeTask(
             taskContext, // context
           );
           results[agentKey] = result;
+
+          // Send an update to other team members about this agent's contribution
+          await api.communication.sendMessage(
+            agentKey,
+            'broadcast',
+            'notification',
+            {
+              type: 'contribution',
+              agent: agentKey,
+              contribution: result,
+              timestamp: new Date().toISOString(),
+            },
+            { requireAck: false }, // For broadcast, we don't require individual acknowledgments
+          );
 
           // Update shared context with the latest result
           const updatedContext = {
@@ -226,10 +316,40 @@ export async function executeCollaborativeTask(
           };
           await api.memory.set('shared-context', updatedContext);
 
+          // Notify other agents about this agent's contribution
+          await api.communication.sendMessage(
+            agentKey,
+            'broadcast',
+            'data',
+            {
+              type: 'round_robin_update',
+              agent: agentKey,
+              contribution: result,
+              next_task: `Continue based on: ${JSON.stringify(result)}. Original task: ${task}`,
+              timestamp: new Date().toISOString(),
+            },
+            { requireAck: false },
+          );
+
           // Create next task based on current result
           currentTask = `Continue the work based on previous results: ${JSON.stringify(result)}. Task: ${task}`;
         } catch (error) {
           results[agentKey] = { error: (error as Error).message };
+
+          // Notify of failure
+          await api.communication.sendMessage(
+            agentKey,
+            'broadcast',
+            'notification',
+            {
+              type: 'error',
+              agent: agentKey,
+              error: (error as Error).message,
+              timestamp: new Date().toISOString(),
+            },
+            { requireAck: false },
+          );
+
           break; // Stop on error
         }
       }
@@ -317,8 +437,41 @@ export async function executeCollaborativeTask(
             completed_agents: [...completedAgents, agentKey],
           };
           await api.memory.set('shared-context', updatedContext);
+
+          // Notify team of this specialized contribution
+          await api.communication.sendMessage(
+            agentKey,
+            'broadcast',
+            'data',
+            {
+              type: 'specialized_contribution',
+              agent: agentKey,
+              role: agentKey,
+              contribution: result,
+              task: agentSpecificTask,
+              timestamp: new Date().toISOString(),
+            },
+            { requireAck: false },
+          );
         } catch (error) {
           results[agentKey] = { error: (error as Error).message };
+
+          // Notify team of failure in specialized role
+          await api.communication.sendMessage(
+            agentKey,
+            'broadcast',
+            'notification',
+            {
+              type: 'error',
+              agent: agentKey,
+              role: agentKey,
+              error: (error as Error).message,
+              task, // Use the original task if agentSpecificTask is not defined
+              timestamp: new Date().toISOString(),
+            },
+            { requireAck: false },
+          );
+
           // Continue with other agents even if one fails
         }
       }
@@ -343,3 +496,4 @@ export async function executeCollaborativeTask(
 // Export the project workflow functionality
 export * from './project-workflow.js';
 export * from './workflow-examples.js';
+export * from './metrics.js';

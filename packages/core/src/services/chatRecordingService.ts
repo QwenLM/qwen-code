@@ -404,9 +404,9 @@ export class ChatRecordingService {
       if (conversation.messages.length === 0) return;
 
       // Only write the file if this change would change the file.
-      if (this.cachedLastConvData !== JSON.stringify(conversation, null, 2)) {
+      const newContent = JSON.stringify(conversation, null, 2);
+      if (this.cachedLastConvData !== newContent) {
         conversation.lastUpdated = new Date().toISOString();
-        const newContent = JSON.stringify(conversation, null, 2);
         this.cachedLastConvData = newContent;
         fs.writeFileSync(this.conversationFile, newContent);
       }

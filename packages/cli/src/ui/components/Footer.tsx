@@ -15,6 +15,7 @@ import { MemoryUsageDisplay } from './MemoryUsageDisplay.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { DebugProfiler } from './DebugProfiler.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { AgentProgressStatus } from './AgentProgressStatus.js';
 
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -152,7 +153,10 @@ export const Footer: React.FC = () => {
             </Text>
             {showMemoryUsage && <MemoryUsageDisplay />}
           </Box>
-          <Box alignItems="center" paddingLeft={2}>
+          <Box alignItems="center" paddingLeft={1}>
+            <AgentProgressStatus />
+          </Box>
+          <Box alignItems="center" paddingLeft={1}>
             {corgiMode && (
               <Text>
                 <Text color={theme.ui.symbol}>| </Text>

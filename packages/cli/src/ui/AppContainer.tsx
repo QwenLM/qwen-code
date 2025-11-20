@@ -98,6 +98,7 @@ import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { ThemeProvider } from './contexts/ThemeContext.js';
+import { AgentStatusProvider } from './contexts/AgentStatusContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -1480,23 +1481,25 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   return (
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <ConfigContext.Provider value={config}>
-          <AppContext.Provider
-            value={{
-              version: props.version,
-              startupWarnings: props.startupWarnings || [],
-            }}
-          >
-            <ShellFocusContext.Provider value={isFocused}>
-              <ThemeProvider>
-                <App />
-              </ThemeProvider>
-            </ShellFocusContext.Provider>
-          </AppContext.Provider>
-        </ConfigContext.Provider>
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
+    <AgentStatusProvider>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          <ConfigContext.Provider value={config}>
+            <AppContext.Provider
+              value={{
+                version: props.version,
+                startupWarnings: props.startupWarnings || [],
+              }}
+            >
+              <ShellFocusContext.Provider value={isFocused}>
+                <ThemeProvider>
+                  <App />
+                </ThemeProvider>
+              </ShellFocusContext.Provider>
+            </AppContext.Provider>
+          </ConfigContext.Provider>
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </AgentStatusProvider>
   );
 };

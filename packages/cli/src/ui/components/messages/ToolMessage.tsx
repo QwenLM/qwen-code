@@ -30,6 +30,7 @@ import {
   TOOL_STATUS,
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
+import { useAgentStatus } from '../../contexts/AgentStatusContext.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -154,14 +155,23 @@ const SubagentExecutionRenderer: React.FC<{
   availableHeight?: number;
   childWidth: number;
   config: Config;
-}> = ({ data, availableHeight, childWidth, config }) => (
-  <AgentExecutionDisplay
-    data={data}
-    availableHeight={availableHeight}
-    childWidth={childWidth}
-    config={config}
-  />
-);
+}> = ({ data, availableHeight, childWidth, config }) => {
+  const { updateAgentFromDisplay } = useAgentStatus();
+
+  // Update agent status when the display changes
+  React.useEffect(() => {
+    updateAgentFromDisplay(data);
+  }, [data, updateAgentFromDisplay]);
+
+  return (
+    <AgentExecutionDisplay
+      data={data}
+      availableHeight={availableHeight}
+      childWidth={childWidth}
+      config={config}
+    />
+  );
+};
 
 /**
  * Component to render string results (markdown or plain text)

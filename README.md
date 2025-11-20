@@ -55,6 +55,7 @@ For detailed setup instructions, see [Authorization](#authorization).
 - **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
 - **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
 - **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis
+- **Advanced Agent Collaboration** - Multi-agent teams with enhanced coordination, communication, and task management capabilities
 
 ## Installation
 
@@ -277,6 +278,20 @@ export OPENAI_MODEL="qwen/qwen3-coder:free"
 </details>
 
 ## Usage Examples
+
+### 🤖 Multi-Agent Collaboration
+
+Qwen Code now supports advanced multi-agent collaboration with enhanced coordination capabilities:
+
+```bash
+# Starting a multi-agent collaboration session
+qwen
+
+# Example collaboration commands
+> Create a development team with researcher, architect, engineer, and tester agents to build a secure API
+> Set up a specialized team to analyze performance, implement improvements, and test the results
+> Coordinate multiple agents to refactor the entire authentication system
+```
 
 ### 🔍 Explore Codebases
 

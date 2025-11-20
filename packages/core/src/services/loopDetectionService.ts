@@ -79,6 +79,7 @@ export class LoopDetectionService {
   // Tool call tracking
   private lastToolCallKey: string | null = null;
   private toolCallRepetitionCount: number = 0;
+  private readonly toolCallArgsCache = new WeakMap<object, string>();
 
   // Content streaming tracking
   private streamContentHistory = '';
@@ -111,7 +112,11 @@ export class LoopDetectionService {
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
-    const argsString = JSON.stringify(toolCall.args);
+    let argsString = this.toolCallArgsCache.get(toolCall.args);
+    if (argsString === undefined) {
+      argsString = JSON.stringify(toolCall.args);
+      this.toolCallArgsCache.set(toolCall.args, argsString);
+    }
     const keyString = `${toolCall.name}:${argsString}`;
     return createHash('sha256').update(keyString).digest('hex');
   }
@@ -470,6 +475,10 @@ export class LoopDetectionService {
   private resetToolCallCount(): void {
     this.lastToolCallKey = null;
     this.toolCallRepetitionCount = 0;
+    // WeakMap doesn't have a clear method, but since the old objects are no longer referenced,
+    // they will be garbage collected automatically
+    // We can create a new WeakMap to effectively clear it
+    this.toolCallArgsCache = new WeakMap<object, string>();
   }
 
   private resetContentTracking(resetHistory = true): void {
