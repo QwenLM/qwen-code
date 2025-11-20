@@ -146,9 +146,9 @@ export function AuthDialog(): React.JSX.Element {
       {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
         <Box marginTop={1}>
           <Text color={Colors.Gray}>
-            Note: Your existing API key in settings.json will not be cleared
-            when using Qwen OAuth. You can switch back to OpenAI authentication
-            later if needed.
+            {t(
+              'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
+            )}
           </Text>
         </Box>
       )}

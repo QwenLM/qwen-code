@@ -718,6 +718,24 @@ export default {
   'Press any key to return to authentication type selection.':
     '按任意键返回认证类型选择',
   'Waiting for Qwen OAuth authentication...': '正在等待 Qwen OAuth 认证...',
+  'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
+    '注意：使用 Qwen OAuth 时，settings.json 中现有的 API 密钥不会被清除。如果需要，您可以稍后切换回 OpenAI 认证。',
+  'Authentication timed out. Please try again.': '认证超时。请重试。',
+  'Waiting for auth... (Press ESC or CTRL+C to cancel)':
+    '正在等待认证...（按 ESC 或 CTRL+C 取消）',
+  'Failed to authenticate. Message: {{message}}': '认证失败。消息：{{message}}',
+  'Authenticated successfully with {{authType}} credentials.':
+    '使用 {{authType}} 凭据成功认证。',
+  'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
+    '无效的 QWEN_DEFAULT_AUTH_TYPE 值："{{value}}"。有效值为：{{validValues}}',
+  'OpenAI Configuration Required': '需要配置 OpenAI',
+  'Please enter your OpenAI configuration. You can get an API key from':
+    '请输入您的 OpenAI 配置。您可以从以下地址获取 API 密钥：',
+  'API Key:': 'API 密钥：',
+  'Invalid credentials: {{errorMessage}}': '凭据无效：{{errorMessage}}',
+  'Failed to validate credentials': '验证凭据失败',
+  'Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel':
+    '按 Enter 继续，Tab/↑↓ 导航，Esc 取消',
 
   // ============================================================================
   // Dialogs - Model

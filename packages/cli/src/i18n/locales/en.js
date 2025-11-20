@@ -762,6 +762,27 @@ export default {
     'Press any key to return to authentication type selection.',
   'Waiting for Qwen OAuth authentication...':
     'Waiting for Qwen OAuth authentication...',
+  'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.':
+    'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
+  'Authentication timed out. Please try again.':
+    'Authentication timed out. Please try again.',
+  'Waiting for auth... (Press ESC or CTRL+C to cancel)':
+    'Waiting for auth... (Press ESC or CTRL+C to cancel)',
+  'Failed to authenticate. Message: {{message}}':
+    'Failed to authenticate. Message: {{message}}',
+  'Authenticated successfully with {{authType}} credentials.':
+    'Authenticated successfully with {{authType}} credentials.',
+  'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}':
+    'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}',
+  'OpenAI Configuration Required': 'OpenAI Configuration Required',
+  'Please enter your OpenAI configuration. You can get an API key from':
+    'Please enter your OpenAI configuration. You can get an API key from',
+  'API Key:': 'API Key:',
+  'Invalid credentials: {{errorMessage}}':
+    'Invalid credentials: {{errorMessage}}',
+  'Failed to validate credentials': 'Failed to validate credentials',
+  'Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel':
+    'Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel',
 
   // ============================================================================
   // Dialogs - Model
