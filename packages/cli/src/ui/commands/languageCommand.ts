@@ -161,9 +161,13 @@ function generateLlmOutputLanguageRuleFile(
     return Promise.resolve({
       type: 'message',
       messageType: 'info',
-      content: t('LLM output language rule file generated at {{path}}', {
-        path: filePath,
-      }),
+      content: [
+        t('LLM output language rule file generated at {{path}}', {
+          path: filePath,
+        }),
+        '',
+        t('Please restart the application for the changes to take effect.'),
+      ].join('\n'),
     });
   } catch (error) {
     return Promise.resolve({

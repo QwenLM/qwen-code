@@ -387,6 +387,8 @@ export default {
   'UI language changed to {{lang}}': 'UI 语言已更改为 {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'LLM 输出语言规则文件已生成于 {{path}}',
+  'Please restart the application for the changes to take effect.':
+    '请重启应用程序以使更改生效。',
   'Failed to generate LLM output language rule file: {{error}}':
     '生成 LLM 输出语言规则文件失败：{{error}}',
   'Invalid command. Available subcommands:': '无效的命令。可用的子命令：',

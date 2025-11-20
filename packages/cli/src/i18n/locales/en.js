@@ -403,6 +403,8 @@ export default {
   'UI language changed to {{lang}}': 'UI language changed to {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'LLM output language rule file generated at {{path}}',
+  'Please restart the application for the changes to take effect.':
+    'Please restart the application for the changes to take effect.',
   'Failed to generate LLM output language rule file: {{error}}':
     'Failed to generate LLM output language rule file: {{error}}',
   'Invalid command. Available subcommands:':
