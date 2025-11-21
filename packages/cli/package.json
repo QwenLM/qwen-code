@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -8,8 +8,15 @@
   },
   "type": "module",
   "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "qwen": "dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
   "scripts": {
     "build": "node ../../scripts/build_package.js",
@@ -26,7 +33,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.2.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.3.0"
   },
   "dependencies": {
     "@google/genai": "1.16.0",

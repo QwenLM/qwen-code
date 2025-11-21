@@ -13,8 +13,9 @@ scripting, automation, CI/CD pipelines, and building AI-powered tools.
   - [Output Formats](#output-formats)
     - [Text Output (Default)](#text-output-default)
     - [JSON Output](#json-output)
-      - [Response Schema](#response-schema)
       - [Example Usage](#example-usage)
+    - [Stream-JSON Output](#stream-json-output)
+    - [Input Format](#input-format)
     - [File Redirection](#file-redirection)
   - [Configuration Options](#configuration-options)
   - [Examples](#examples)
@@ -22,7 +23,7 @@ scripting, automation, CI/CD pipelines, and building AI-powered tools.
     - [Generate commit messages](#generate-commit-messages)
     - [API documentation](#api-documentation)
     - [Batch code analysis](#batch-code-analysis)
-    - [Code review](#code-review-1)
+    - [PR code review](#pr-code-review)
     - [Log analysis](#log-analysis)
     - [Release notes generation](#release-notes-generation)
     - [Model and tool usage tracking](#model-and-tool-usage-tracking)
@@ -66,6 +67,8 @@ cat README.md | qwen --prompt "Summarize this documentation"
 
 ## Output Formats
 
+Qwen Code supports multiple output formats for different use cases:
+
 ### Text Output (Default)
 
 Standard human-readable output:
@@ -82,56 +85,9 @@ The capital of France is Paris.
 
 ### JSON Output
 
-Returns structured data including response, statistics, and metadata. This
-format is ideal for programmatic processing and automation scripts.
+Returns structured data as a JSON array. All messages are buffered and output together when the session completes. This format is ideal for programmatic processing and automation scripts.
 
-#### Response Schema
-
-The JSON output follows this high-level structure:
-
-```json
-{
-  "response": "string", // The main AI-generated content answering your prompt
-  "stats": {
-    // Usage metrics and performance data
-    "models": {
-      // Per-model API and token usage statistics
-      "[model-name]": {
-        "api": {
-          /* request counts, errors, latency */
-        },
-        "tokens": {
-          /* prompt, response, cached, total counts */
-        }
-      }
-    },
-    "tools": {
-      // Tool execution statistics
-      "totalCalls": "number",
-      "totalSuccess": "number",
-      "totalFail": "number",
-      "totalDurationMs": "number",
-      "totalDecisions": {
-        /* accept, reject, modify, auto_accept counts */
-      },
-      "byName": {
-        /* per-tool detailed stats */
-      }
-    },
-    "files": {
-      // File modification statistics
-      "totalLinesAdded": "number",
-      "totalLinesRemoved": "number"
-    }
-  },
-  "error": {
-    // Present only when an error occurred
-    "type": "string", // Error type (e.g., "ApiError", "AuthError")
-    "message": "string", // Human-readable error description
-    "code": "number" // Optional error code
-  }
-}
-```
+The JSON output is an array of message objects. The output includes multiple message types: system messages (session initialization), assistant messages (AI responses), and result messages (execution summary).
 
 #### Example Usage
 
@@ -139,62 +95,80 @@ The JSON output follows this high-level structure:
 qwen -p "What is the capital of France?" --output-format json
 ```
 
-Response:
+Output (at end of execution):
 
 ```json
-{
-  "response": "The capital of France is Paris.",
-  "stats": {
-    "models": {
-      "qwen3-coder-plus": {
-        "api": {
-          "totalRequests": 2,
-          "totalErrors": 0,
-          "totalLatencyMs": 5053
-        },
-        "tokens": {
-          "prompt": 24939,
-          "candidates": 20,
-          "total": 25113,
-          "cached": 21263,
-          "thoughts": 154,
-          "tool": 0
+[
+  {
+    "type": "system",
+    "subtype": "session_start",
+    "uuid": "...",
+    "session_id": "...",
+    "model": "qwen3-coder-plus",
+    ...
+  },
+  {
+    "type": "assistant",
+    "uuid": "...",
+    "session_id": "...",
+    "message": {
+      "id": "...",
+      "type": "message",
+      "role": "assistant",
+      "model": "qwen3-coder-plus",
+      "content": [
+        {
+          "type": "text",
+          "text": "The capital of France is Paris."
         }
-      }
+      ],
+      "usage": {...}
     },
-    "tools": {
-      "totalCalls": 1,
-      "totalSuccess": 1,
-      "totalFail": 0,
-      "totalDurationMs": 1881,
-      "totalDecisions": {
-        "accept": 0,
-        "reject": 0,
-        "modify": 0,
-        "auto_accept": 1
-      },
-      "byName": {
-        "google_web_search": {
-          "count": 1,
-          "success": 1,
-          "fail": 0,
-          "durationMs": 1881,
-          "decisions": {
-            "accept": 0,
-            "reject": 0,
-            "modify": 0,
-            "auto_accept": 1
-          }
-        }
-      }
-    },
-    "files": {
-      "totalLinesAdded": 0,
-      "totalLinesRemoved": 0
-    }
+    "parent_tool_use_id": null
+  },
+  {
+    "type": "result",
+    "subtype": "success",
+    "uuid": "...",
+    "session_id": "...",
+    "is_error": false,
+    "duration_ms": 1234,
+    "result": "The capital of France is Paris.",
+    "usage": {...}
   }
-}
+]
 ```
+
+### Stream-JSON Output
+
+Stream-JSON format emits JSON messages immediately as they occur during execution, enabling real-time monitoring. This format uses line-delimited JSON where each message is a complete JSON object on a single line.
+
+```bash
+qwen -p "Explain TypeScript" --output-format stream-json
+```
+
+Output (streaming as events occur):
+
+```json
+{"type":"system","subtype":"session_start","uuid":"...","session_id":"..."}
+{"type":"assistant","uuid":"...","session_id":"...","message":{...}}
+{"type":"result","subtype":"success","uuid":"...","session_id":"..."}
+```
+
+When combined with `--include-partial-messages`, additional stream events are emitted in real-time (message_start, content_block_delta, etc.) for real-time UI updates.
+
+```bash
+qwen -p "Write a Python script" --output-format stream-json --include-partial-messages
+```
+
+### Input Format
+
+The `--input-format` parameter controls how Qwen Code consumes input from standard input:
+
+- **`text`** (default): Standard text input from stdin or command-line arguments
+- **`stream-json`**: JSON message protocol via stdin for bidirectional communication
+
+> **Note:** Stream-json input mode is currently under construction and is intended for SDK integration. It requires `--output-format stream-json` to be set.
 
 ### File Redirection
 
@@ -212,48 +186,53 @@ qwen -p "Add more details" >> docker-explanation.txt
 qwen -p "What is Kubernetes?" --output-format json | jq '.response'
 qwen -p "Explain microservices" | wc -w
 qwen -p "List programming languages" | grep -i "python"
+
+# Stream-JSON output for real-time processing
+qwen -p "Explain Docker" --output-format stream-json | jq '.type'
+qwen -p "Write code" --output-format stream-json --include-partial-messages | jq '.event.type'
 ```
 
 ## Configuration Options
 
 Key command-line options for headless usage:
 
-| Option                  | Description                        | Example                                          |
-| ----------------------- | ---------------------------------- | ------------------------------------------------ |
-| `--prompt`, `-p`        | Run in headless mode               | `qwen -p "query"`                                |
-| `--output-format`       | Specify output format (text, json) | `qwen -p "query" --output-format json`           |
-| `--model`, `-m`         | Specify the Qwen model             | `qwen -p "query" -m qwen3-coder-plus`            |
-| `--debug`, `-d`         | Enable debug mode                  | `qwen -p "query" --debug`                        |
-| `--all-files`, `-a`     | Include all files in context       | `qwen -p "query" --all-files`                    |
-| `--include-directories` | Include additional directories     | `qwen -p "query" --include-directories src,docs` |
-| `--yolo`, `-y`          | Auto-approve all actions           | `qwen -p "query" --yolo`                         |
-| `--approval-mode`       | Set approval mode                  | `qwen -p "query" --approval-mode auto_edit`      |
+| Option                       | Description                                     | Example                                                                  |
+| ---------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------ |
+| `--prompt`, `-p`             | Run in headless mode                            | `qwen -p "query"`                                                        |
+| `--output-format`, `-o`      | Specify output format (text, json, stream-json) | `qwen -p "query" --output-format json`                                   |
+| `--input-format`             | Specify input format (text, stream-json)        | `qwen --input-format text --output-format stream-json`                   |
+| `--include-partial-messages` | Include partial messages in stream-json output  | `qwen -p "query" --output-format stream-json --include-partial-messages` |
+| `--debug`, `-d`              | Enable debug mode                               | `qwen -p "query" --debug`                                                |
+| `--all-files`, `-a`          | Include all files in context                    | `qwen -p "query" --all-files`                                            |
+| `--include-directories`      | Include additional directories                  | `qwen -p "query" --include-directories src,docs`                         |
+| `--yolo`, `-y`               | Auto-approve all actions                        | `qwen -p "query" --yolo`                                                 |
+| `--approval-mode`            | Set approval mode                               | `qwen -p "query" --approval-mode auto_edit`                              |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](./cli/configuration.md).
 
 ## Examples
 
-#### Code review
+### Code review
 
 ```bash
 cat src/auth.py | qwen -p "Review this authentication code for security issues" > security-review.txt
 ```
 
-#### Generate commit messages
+### Generate commit messages
 
 ```bash
 result=$(git diff --cached | qwen -p "Write a concise commit message for these changes" --output-format json)
 echo "$result" | jq -r '.response'
 ```
 
-#### API documentation
+### API documentation
 
 ```bash
 result=$(cat api/routes.js | qwen -p "Generate OpenAPI spec for these routes" --output-format json)
 echo "$result" | jq -r '.response' > openapi.json
 ```
 
-#### Batch code analysis
+### Batch code analysis
 
 ```bash
 for file in src/*.py; do
@@ -264,20 +243,20 @@ for file in src/*.py; do
 done
 ```
 
-#### Code review
+### PR code review
 
 ```bash
 result=$(git diff origin/main...HEAD | qwen -p "Review these changes for bugs, security issues, and code quality" --output-format json)
 echo "$result" | jq -r '.response' > pr-review.json
 ```
 
-#### Log analysis
+### Log analysis
 
 ```bash
 grep "ERROR" /var/log/app.log | tail -20 | qwen -p "Analyze these errors and suggest root cause and fixes" > error-analysis.txt
 ```
 
-#### Release notes generation
+### Release notes generation
 
 ```bash
 result=$(git log --oneline v1.0.0..HEAD | qwen -p "Generate release notes from these commits" --output-format json)
@@ -286,7 +265,7 @@ echo "$response"
 echo "$response" >> CHANGELOG.md
 ```
 
-#### Model and tool usage tracking
+### Model and tool usage tracking
 
 ```bash
 result=$(qwen -p "Explain this database schema" --include-directories db --output-format json)

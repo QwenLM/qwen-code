@@ -10,7 +10,6 @@ import {
   JsonFormatter,
   parseAndFormatApiError,
   FatalTurnLimitedError,
-  FatalToolExecutionError,
   FatalCancellationError,
 } from '@qwen-code/qwen-code-core';
 
@@ -88,32 +87,29 @@ export function handleError(
 
 /**
  * Handles tool execution errors specifically.
- * In JSON mode, outputs formatted JSON error and exits.
+ * In JSON/STREAM_JSON mode, outputs error message to stderr only and does not exit.
+ * The error will be properly formatted in the tool_result block by the adapter,
+ * allowing the session to continue so the LLM can decide what to do next.
  * In text mode, outputs error message to stderr only.
+ *
+ * @param toolName - Name of the tool that failed
+ * @param toolError - The error that occurred during tool execution
+ * @param config - Configuration object
+ * @param errorCode - Optional error code
+ * @param resultDisplay - Optional display message for the error
  */
 export function handleToolError(
   toolName: string,
   toolError: Error,
   config: Config,
-  errorCode?: string | number,
+  _errorCode?: string | number,
   resultDisplay?: string,
 ): void {
-  const errorMessage = `Error executing tool ${toolName}: ${resultDisplay || toolError.message}`;
-  const toolExecutionError = new FatalToolExecutionError(errorMessage);
-
-  if (config.getOutputFormat() === OutputFormat.JSON) {
-    const formatter = new JsonFormatter();
-    const formattedError = formatter.formatError(
-      toolExecutionError,
-      errorCode ?? toolExecutionError.exitCode,
+  // Always just log to stderr; JSON/streaming formatting happens in the tool_result block elsewhere
+  if (config.getDebugMode()) {
+    console.error(
+      `Error executing tool ${toolName}: ${resultDisplay || toolError.message}`,
     );
-
-    console.error(formattedError);
-    process.exit(
-      typeof errorCode === 'number' ? errorCode : toolExecutionError.exitCode,
-    );
-  } else {
-    console.error(errorMessage);
   }
 }
 

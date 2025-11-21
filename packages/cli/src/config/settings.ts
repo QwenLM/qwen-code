@@ -483,6 +483,27 @@ export class LoadedSettings {
   }
 }
 
+/**
+ * Creates a minimal LoadedSettings instance with empty settings.
+ * Used in stream-json mode where settings are ignored.
+ */
+export function createMinimalSettings(): LoadedSettings {
+  const emptySettingsFile: SettingsFile = {
+    path: '',
+    settings: {},
+    originalSettings: {},
+    rawJson: '{}',
+  };
+  return new LoadedSettings(
+    emptySettingsFile,
+    emptySettingsFile,
+    emptySettingsFile,
+    emptySettingsFile,
+    false,
+    new Set(),
+  );
+}
+
 function findEnvFile(startDir: string): string | null {
   let currentDir = path.resolve(startDir);
   while (true) {

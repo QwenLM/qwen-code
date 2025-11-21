@@ -332,7 +332,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
             ...this.currentToolCalls![toolCallIndex],
             status: event.success ? 'success' : 'failed',
             error: event.error,
-            resultDisplay: event.resultDisplay,
+            responseParts: event.responseParts,
           };
 
           this.updateDisplay(

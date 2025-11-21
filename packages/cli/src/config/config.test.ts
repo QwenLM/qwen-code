@@ -392,6 +392,49 @@ describe('parseArguments', () => {
     mockConsoleError.mockRestore();
   });
 
+  it('should throw an error when include-partial-messages is used without stream-json output', async () => {
+    process.argv = ['node', 'script.js', '--include-partial-messages'];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    const mockConsoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    await expect(parseArguments({} as Settings)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--include-partial-messages requires --output-format stream-json',
+      ),
+    );
+
+    mockExit.mockRestore();
+    mockConsoleError.mockRestore();
+  });
+
+  it('should parse stream-json formats and include-partial-messages flag', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--output-format',
+      'stream-json',
+      '--input-format',
+      'stream-json',
+      '--include-partial-messages',
+    ];
+
+    const argv = await parseArguments({} as Settings);
+
+    expect(argv.outputFormat).toBe('stream-json');
+    expect(argv.inputFormat).toBe('stream-json');
+    expect(argv.includePartialMessages).toBe(true);
+  });
+
   it('should allow --approval-mode without --yolo', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'auto-edit'];
     const argv = await parseArguments({} as Settings);
@@ -471,6 +514,34 @@ describe('loadCliConfig', () => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
     vi.restoreAllMocks();
+  });
+
+  it('should propagate stream-json formats to config', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--output-format',
+      'stream-json',
+      '--input-format',
+      'stream-json',
+      '--include-partial-messages',
+    ];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {};
+    const config = await loadCliConfig(
+      settings,
+      [],
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      'test-session',
+      argv,
+    );
+
+    expect(config.getOutputFormat()).toBe('stream-json');
+    expect(config.getInputFormat()).toBe('stream-json');
+    expect(config.getIncludePartialMessages()).toBe(true);
   });
 
   it('should set showMemoryUsage to true when --show-memory-usage flag is present', async () => {
