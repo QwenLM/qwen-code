@@ -10,6 +10,7 @@ import { RadioButtonSelect } from '../../shared/RadioButtonSelect.js';
 import type { ToolCategory } from '../types.js';
 import { Kind, type Config } from '@qwen-code/qwen-code-core';
 import { theme } from '../../../semantic-colors.js';
+import { t } from '../../../../i18n/index.js';
 
 interface ToolOption {
   label: string;
@@ -45,7 +46,7 @@ export function ToolSelector({
         toolCategories: [
           {
             id: 'all',
-            name: 'All Tools (Default)',
+            name: t('All Tools (Default)'),
             tools: [],
           },
         ],
@@ -89,22 +90,22 @@ export function ToolSelector({
     const toolCategories = [
       {
         id: 'all',
-        name: 'All Tools',
+        name: t('All Tools'),
         tools: [],
       },
       {
         id: 'read',
-        name: 'Read-only Tools',
+        name: t('Read-only Tools'),
         tools: readTools,
       },
       {
         id: 'edit',
-        name: 'Read & Edit Tools',
+        name: t('Read & Edit Tools'),
         tools: [...readTools, ...editTools],
       },
       {
         id: 'execute',
-        name: 'Read & Edit & Execution Tools',
+        name: t('Read & Edit & Execution Tools'),
         tools: [...readTools, ...editTools, ...executeTools],
       },
     ].filter((category) => category.id === 'all' || category.tools.length > 0);
@@ -202,11 +203,11 @@ export function ToolSelector({
         <Box flexDirection="column">
           {currentCategory.id === 'all' ? (
             <Text color={theme.text.secondary}>
-              All tools selected, including MCP tools
+              {t('All tools selected, including MCP tools')}
             </Text>
           ) : currentCategory.tools.length > 0 ? (
             <>
-              <Text color={theme.text.secondary}>Selected tools:</Text>
+              <Text color={theme.text.secondary}>{t('Selected tools:')}</Text>
               <Box flexDirection="column" marginLeft={2}>
                 {(() => {
                   // Filter the already categorized tools to show only those in current category
@@ -224,17 +225,19 @@ export function ToolSelector({
                     <>
                       {categoryReadTools.length > 0 && (
                         <Text color={theme.text.secondary}>
-                          • Read-only tools: {categoryReadTools.join(', ')}
+                          • {t('Read-only tools:')}{' '}
+                          {categoryReadTools.join(', ')}
                         </Text>
                       )}
                       {categoryEditTools.length > 0 && (
                         <Text color={theme.text.secondary}>
-                          • Edit tools: {categoryEditTools.join(', ')}
+                          • {t('Edit tools:')} {categoryEditTools.join(', ')}
                         </Text>
                       )}
                       {categoryExecuteTools.length > 0 && (
                         <Text color={theme.text.secondary}>
-                          • Execution tools: {categoryExecuteTools.join(', ')}
+                          • {t('Execution tools:')}{' '}
+                          {categoryExecuteTools.join(', ')}
                         </Text>
                       )}
                     </>

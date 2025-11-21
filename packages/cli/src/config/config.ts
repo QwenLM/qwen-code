@@ -23,6 +23,7 @@ import {
   WriteFileTool,
   resolveTelemetrySettings,
   FatalConfigError,
+  Storage,
   InputFormat,
   OutputFormat,
 } from '@qwen-code/qwen-code-core';
@@ -601,6 +602,20 @@ export async function loadCliConfig(
   const extensionContextFilePaths = activeExtensions.flatMap(
     (e) => e.contextFiles,
   );
+
+  // Automatically load output-language.md if it exists
+  const outputLanguageFilePath = path.join(
+    Storage.getGlobalQwenDir(),
+    'output-language.md',
+  );
+  if (fs.existsSync(outputLanguageFilePath)) {
+    extensionContextFilePaths.push(outputLanguageFilePath);
+    if (debugMode) {
+      logger.debug(
+        `Found output-language.md, adding to context files: ${outputLanguageFilePath}`,
+      );
+    }
+  }
 
   const fileService = new FileDiscoveryService(cwd);
 

@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
+import { t } from '../../../../i18n/index.js';
 
 interface NavigationState {
   currentBlock: 'project' | 'user' | 'builtin';
@@ -205,9 +206,9 @@ export const AgentSelectionStep = ({
   if (availableAgents.length === 0) {
     return (
       <Box flexDirection="column">
-        <Text color={theme.text.secondary}>No subagents found.</Text>
+        <Text color={theme.text.secondary}>{t('No subagents found.')}</Text>
         <Text color={theme.text.secondary}>
-          Use &apos;/agents create&apos; to create your first subagent.
+          {t("Use '/agents create' to create your first subagent.")}
         </Text>
       </Box>
     );
@@ -237,7 +238,7 @@ export const AgentSelectionStep = ({
           {agent.isBuiltin && (
             <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
               {' '}
-              (built-in)
+              {t('(built-in)')}
             </Text>
           )}
           {agent.level === 'user' && projectNames.has(agent.name) && (
@@ -245,7 +246,7 @@ export const AgentSelectionStep = ({
               color={isSelected ? theme.status.warning : theme.text.secondary}
             >
               {' '}
-              (overridden by project level agent)
+              {t('(overridden by project level agent)')}
             </Text>
           )}
         </Text>
@@ -265,7 +266,9 @@ export const AgentSelectionStep = ({
       {projectAgents.length > 0 && (
         <Box flexDirection="column" marginBottom={1}>
           <Text color={theme.text.primary} bold>
-            Project Level ({projectAgents[0].filePath.replace(/\/[^/]+$/, '')})
+            {t('Project Level ({{path}})', {
+              path: projectAgents[0].filePath.replace(/\/[^/]+$/, ''),
+            })}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {projectAgents.map((agent, index) => {
@@ -285,7 +288,9 @@ export const AgentSelectionStep = ({
           marginBottom={builtinAgents.length > 0 ? 1 : 0}
         >
           <Text color={theme.text.primary} bold>
-            User Level ({userAgents[0].filePath.replace(/\/[^/]+$/, '')})
+            {t('User Level ({{path}})', {
+              path: userAgents[0].filePath.replace(/\/[^/]+$/, ''),
+            })}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {userAgents.map((agent, index) => {
@@ -302,7 +307,7 @@ export const AgentSelectionStep = ({
       {builtinAgents.length > 0 && (
         <Box flexDirection="column">
           <Text color={theme.text.primary} bold>
-            Built-in Agents
+            {t('Built-in Agents')}
           </Text>
           <Box marginTop={1} flexDirection="column">
             {builtinAgents.map((agent, index) => {
@@ -321,7 +326,9 @@ export const AgentSelectionStep = ({
         builtinAgents.length > 0) && (
         <Box marginTop={1}>
           <Text color={theme.text.secondary}>
-            Using: {enabledAgentsCount} agents
+            {t('Using: {{count}} agents', {
+              count: enabledAgentsCount.toString(),
+            })}
           </Text>
         </Box>
       )}

@@ -11,15 +11,16 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { type McpClient, MCPServerStatus } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
 
 export const ConfigInitDisplay = () => {
   const config = useConfig();
-  const [message, setMessage] = useState('Initializing...');
+  const [message, setMessage] = useState(t('Initializing...'));
 
   useEffect(() => {
     const onChange = (clients?: Map<string, McpClient>) => {
       if (!clients || clients.size === 0) {
-        setMessage(`Initializing...`);
+        setMessage(t('Initializing...'));
         return;
       }
       let connected = 0;
@@ -28,7 +29,12 @@ export const ConfigInitDisplay = () => {
           connected++;
         }
       }
-      setMessage(`Connecting to MCP servers... (${connected}/${clients.size})`);
+      setMessage(
+        t('Connecting to MCP servers... ({{connected}}/{{total}})', {
+          connected: String(connected),
+          total: String(clients.size),
+        }),
+      );
     };
 
     appEvents.on('mcp-client-update', onChange);

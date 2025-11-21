@@ -27,6 +27,7 @@ import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
 } from '../utils/highlight.js';
+import { t } from '../../i18n/index.js';
 import {
   clipboardHasImage,
   saveClipboardImage,
@@ -88,7 +89,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   config,
   slashCommands,
   commandContext,
-  placeholder = '  Type your message or @path/to/file',
+  placeholder,
   focus = true,
   suggestionsWidth,
   shellModeActive,
@@ -697,13 +698,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   let statusText = '';
   if (shellModeActive) {
     statusColor = theme.ui.symbol;
-    statusText = 'Shell mode';
+    statusText = t('Shell mode');
   } else if (showYoloStyling) {
     statusColor = theme.status.error;
-    statusText = 'YOLO mode';
+    statusText = t('YOLO mode');
   } else if (showAutoAcceptStyling) {
     statusColor = theme.status.warning;
-    statusText = 'Accepting edits';
+    statusText = t('Accepting edits');
   }
 
   return (

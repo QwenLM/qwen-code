@@ -26,6 +26,7 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 
 function getIdeStatusMessage(ideClient: IdeClient): {
   messageType: 'info' | 'error';
@@ -138,27 +139,35 @@ export const ideCommand = async (): Promise<SlashCommand> => {
   if (!currentIDE) {
     return {
       name: 'ide',
-      description: 'manage IDE integration',
+      get description() {
+        return t('manage IDE integration');
+      },
       kind: CommandKind.BUILT_IN,
       action: (): SlashCommandActionReturn =>
         ({
           type: 'message',
           messageType: 'error',
-          content: `IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.`,
+          content: t(
+            'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.',
+          ),
         }) as const,
     };
   }
 
   const ideSlashCommand: SlashCommand = {
     name: 'ide',
-    description: 'manage IDE integration',
+    get description() {
+      return t('manage IDE integration');
+    },
     kind: CommandKind.BUILT_IN,
     subCommands: [],
   };
 
   const statusCommand: SlashCommand = {
     name: 'status',
-    description: 'check status of IDE integration',
+    get description() {
+      return t('check status of IDE integration');
+    },
     kind: CommandKind.BUILT_IN,
     action: async (): Promise<SlashCommandActionReturn> => {
       const { messageType, content } =
@@ -173,7 +182,12 @@ export const ideCommand = async (): Promise<SlashCommand> => {
 
   const installCommand: SlashCommand = {
     name: 'install',
-    description: `install required IDE companion for ${ideClient.getDetectedIdeDisplayName()}`,
+    get description() {
+      const ideName = ideClient.getDetectedIdeDisplayName() ?? 'IDE';
+      return t('install required IDE companion for {{ideName}}', {
+        ideName,
+      });
+    },
     kind: CommandKind.BUILT_IN,
     action: async (context) => {
       const installer = getIdeInstaller(currentIDE);
@@ -246,7 +260,9 @@ export const ideCommand = async (): Promise<SlashCommand> => {
 
   const enableCommand: SlashCommand = {
     name: 'enable',
-    description: 'enable IDE integration',
+    get description() {
+      return t('enable IDE integration');
+    },
     kind: CommandKind.BUILT_IN,
     action: async (context: CommandContext) => {
       context.services.settings.setValue(
@@ -268,7 +284,9 @@ export const ideCommand = async (): Promise<SlashCommand> => {
 
   const disableCommand: SlashCommand = {
     name: 'disable',
-    description: 'disable IDE integration',
+    get description() {
+      return t('disable IDE integration');
+    },
     kind: CommandKind.BUILT_IN,
     action: async (context: CommandContext) => {
       context.services.settings.setValue(

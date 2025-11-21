@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { Box, Text } from 'ink';
 import { Colors } from '../colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { t } from '../../i18n/index.js';
 
 interface OpenAIKeyPromptProps {
   onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
@@ -64,9 +65,11 @@ export function OpenAIKeyPrompt({
         const errorMessage = error.errors
           .map((e) => `${e.path.join('.')}: ${e.message}`)
           .join(', ');
-        setValidationError(`Invalid credentials: ${errorMessage}`);
+        setValidationError(
+          t('Invalid credentials: {{errorMessage}}', { errorMessage }),
+        );
       } else {
-        setValidationError('Failed to validate credentials');
+        setValidationError(t('Failed to validate credentials'));
       }
     }
   };
@@ -205,7 +208,7 @@ export function OpenAIKeyPrompt({
       width="100%"
     >
       <Text bold color={Colors.AccentBlue}>
-        OpenAI Configuration Required
+        {t('OpenAI Configuration Required')}
       </Text>
       {validationError && (
         <Box marginTop={1}>
@@ -214,7 +217,9 @@ export function OpenAIKeyPrompt({
       )}
       <Box marginTop={1}>
         <Text>
-          Please enter your OpenAI configuration. You can get an API key from{' '}
+          {t(
+            'Please enter your OpenAI configuration. You can get an API key from',
+          )}{' '}
           <Text color={Colors.AccentBlue}>
             https://bailian.console.aliyun.com/?tab=model#/api-key
           </Text>
@@ -225,7 +230,7 @@ export function OpenAIKeyPrompt({
           <Text
             color={currentField === 'apiKey' ? Colors.AccentBlue : Colors.Gray}
           >
-            API Key:
+            {t('API Key:')}
           </Text>
         </Box>
         <Box flexGrow={1}>
@@ -240,7 +245,7 @@ export function OpenAIKeyPrompt({
           <Text
             color={currentField === 'baseUrl' ? Colors.AccentBlue : Colors.Gray}
           >
-            Base URL:
+            {t('Base URL:')}
           </Text>
         </Box>
         <Box flexGrow={1}>
@@ -255,7 +260,7 @@ export function OpenAIKeyPrompt({
           <Text
             color={currentField === 'model' ? Colors.AccentBlue : Colors.Gray}
           >
-            Model:
+            {t('Model:')}
           </Text>
         </Box>
         <Box flexGrow={1}>
@@ -267,7 +272,7 @@ export function OpenAIKeyPrompt({
       </Box>
       <Box marginTop={1}>
         <Text color={Colors.Gray}>
-          Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel
+          {t('Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel')}
         </Text>
       </Box>
     </Box>

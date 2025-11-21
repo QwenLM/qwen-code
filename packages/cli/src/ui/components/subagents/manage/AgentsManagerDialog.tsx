@@ -18,6 +18,7 @@ import { theme } from '../../../semantic-colors.js';
 import { getColorForDisplay, shouldShowColor } from '../utils.js';
 import type { SubagentConfig, Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { t } from '../../../../i18n/index.js';
 
 interface AgentsManagerDialogProps {
   onClose: () => void;
@@ -143,21 +144,21 @@ export function AgentsManagerDialog({
     const getStepHeaderText = () => {
       switch (currentStep) {
         case MANAGEMENT_STEPS.AGENT_SELECTION:
-          return 'Agents';
+          return t('Agents');
         case MANAGEMENT_STEPS.ACTION_SELECTION:
-          return 'Choose Action';
+          return t('Choose Action');
         case MANAGEMENT_STEPS.AGENT_VIEWER:
           return selectedAgent?.name;
         case MANAGEMENT_STEPS.EDIT_OPTIONS:
-          return `Edit ${selectedAgent?.name}`;
+          return t('Edit {{name}}', { name: selectedAgent?.name || '' });
         case MANAGEMENT_STEPS.EDIT_TOOLS:
-          return `Edit Tools: ${selectedAgent?.name}`;
+          return t('Edit Tools: {{name}}', { name: selectedAgent?.name || '' });
         case MANAGEMENT_STEPS.EDIT_COLOR:
-          return `Edit Color: ${selectedAgent?.name}`;
+          return t('Edit Color: {{name}}', { name: selectedAgent?.name || '' });
         case MANAGEMENT_STEPS.DELETE_CONFIRMATION:
-          return `Delete ${selectedAgent?.name}`;
+          return t('Delete {{name}}', { name: selectedAgent?.name || '' });
         default:
-          return 'Unknown Step';
+          return t('Unknown Step');
       }
     };
 
@@ -183,20 +184,20 @@ export function AgentsManagerDialog({
     const getNavigationInstructions = () => {
       if (currentStep === MANAGEMENT_STEPS.AGENT_SELECTION) {
         if (availableAgents.length === 0) {
-          return 'Esc to close';
+          return t('Esc to close');
         }
-        return 'Enter to select, ↑↓ to navigate, Esc to close';
+        return t('Enter to select, ↑↓ to navigate, Esc to close');
       }
 
       if (currentStep === MANAGEMENT_STEPS.AGENT_VIEWER) {
-        return 'Esc to go back';
+        return t('Esc to go back');
       }
 
       if (currentStep === MANAGEMENT_STEPS.DELETE_CONFIRMATION) {
-        return 'Enter to confirm, Esc to cancel';
+        return t('Enter to confirm, Esc to cancel');
       }
 
-      return 'Enter to select, ↑↓ to navigate, Esc to go back';
+      return t('Enter to select, ↑↓ to navigate, Esc to go back');
     };
 
     return (
@@ -295,7 +296,9 @@ export function AgentsManagerDialog({
       default:
         return (
           <Box>
-            <Text color={theme.status.error}>Invalid step: {currentStep}</Text>
+            <Text color={theme.status.error}>
+              {t('Invalid step: {{step}}', { step: currentStep })}
+            </Text>
           </Box>
         );
     }

@@ -24,6 +24,7 @@ import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import { theme } from '../../semantic-colors.js';
+import { t } from '../../../i18n/index.js';
 
 export interface ToolConfirmationMessageProps {
   confirmationDetails: ToolCallConfirmationDetails;
@@ -105,17 +106,17 @@ export const ToolConfirmationMessage: React.FC<
     const compactOptions: Array<RadioSelectItem<ToolConfirmationOutcome>> = [
       {
         key: 'proceed-once',
-        label: 'Yes, allow once',
+        label: t('Yes, allow once'),
         value: ToolConfirmationOutcome.ProceedOnce,
       },
       {
         key: 'proceed-always',
-        label: 'Allow always',
+        label: t('Allow always'),
         value: ToolConfirmationOutcome.ProceedAlways,
       },
       {
         key: 'cancel',
-        label: 'No',
+        label: t('No'),
         value: ToolConfirmationOutcome.Cancel,
       },
     ];
@@ -123,7 +124,7 @@ export const ToolConfirmationMessage: React.FC<
     return (
       <Box flexDirection="column">
         <Box>
-          <Text wrap="truncate">Do you want to proceed?</Text>
+          <Text wrap="truncate">{t('Do you want to proceed?')}</Text>
         </Box>
         <Box>
           <RadioButtonSelect
@@ -185,37 +186,37 @@ export const ToolConfirmationMessage: React.FC<
           padding={1}
           overflow="hidden"
         >
-          <Text color={theme.text.primary}>Modify in progress: </Text>
+          <Text color={theme.text.primary}>{t('Modify in progress:')} </Text>
           <Text color={theme.status.success}>
-            Save and close external editor to continue
+            {t('Save and close external editor to continue')}
           </Text>
         </Box>
       );
     }
 
-    question = `Apply this change?`;
+    question = t('Apply this change?');
     options.push({
-      label: 'Yes, allow once',
+      label: t('Yes, allow once'),
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
     if (isTrustedFolder) {
       options.push({
-        label: 'Yes, allow always',
+        label: t('Yes, allow always'),
         value: ToolConfirmationOutcome.ProceedAlways,
         key: 'Yes, allow always',
       });
     }
     if ((!config.getIdeMode() || !isDiffingEnabled) && preferredEditor) {
       options.push({
-        label: 'Modify with external editor',
+        label: t('Modify with external editor'),
         value: ToolConfirmationOutcome.ModifyWithEditor,
         key: 'Modify with external editor',
       });
     }
 
     options.push({
-      label: 'No, suggest changes (esc)',
+      label: t('No, suggest changes (esc)'),
       value: ToolConfirmationOutcome.Cancel,
       key: 'No, suggest changes (esc)',
     });
@@ -232,21 +233,23 @@ export const ToolConfirmationMessage: React.FC<
     const executionProps =
       confirmationDetails as ToolExecuteConfirmationDetails;
 
-    question = `Allow execution of: '${executionProps.rootCommand}'?`;
+    question = t("Allow execution of: '{{command}}'?", {
+      command: executionProps.rootCommand,
+    });
     options.push({
-      label: 'Yes, allow once',
+      label: t('Yes, allow once'),
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
     if (isTrustedFolder) {
       options.push({
-        label: `Yes, allow always ...`,
+        label: t('Yes, allow always ...'),
         value: ToolConfirmationOutcome.ProceedAlways,
-        key: `Yes, allow always ...`,
+        key: 'Yes, allow always ...',
       });
     }
     options.push({
-      label: 'No, suggest changes (esc)',
+      label: t('No, suggest changes (esc)'),
       value: ToolConfirmationOutcome.Cancel,
       key: 'No, suggest changes (esc)',
     });
@@ -275,17 +278,17 @@ export const ToolConfirmationMessage: React.FC<
     question = planProps.title;
     options.push({
       key: 'proceed-always',
-      label: 'Yes, and auto-accept edits',
+      label: t('Yes, and auto-accept edits'),
       value: ToolConfirmationOutcome.ProceedAlways,
     });
     options.push({
       key: 'proceed-once',
-      label: 'Yes, and manually approve edits',
+      label: t('Yes, and manually approve edits'),
       value: ToolConfirmationOutcome.ProceedOnce,
     });
     options.push({
       key: 'cancel',
-      label: 'No, keep planning (esc)',
+      label: t('No, keep planning (esc)'),
       value: ToolConfirmationOutcome.Cancel,
     });
 
@@ -305,21 +308,21 @@ export const ToolConfirmationMessage: React.FC<
       infoProps.urls &&
       !(infoProps.urls.length === 1 && infoProps.urls[0] === infoProps.prompt);
 
-    question = `Do you want to proceed?`;
+    question = t('Do you want to proceed?');
     options.push({
-      label: 'Yes, allow once',
+      label: t('Yes, allow once'),
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
     if (isTrustedFolder) {
       options.push({
-        label: 'Yes, allow always',
+        label: t('Yes, allow always'),
         value: ToolConfirmationOutcome.ProceedAlways,
         key: 'Yes, allow always',
       });
     }
     options.push({
-      label: 'No, suggest changes (esc)',
+      label: t('No, suggest changes (esc)'),
       value: ToolConfirmationOutcome.Cancel,
       key: 'No, suggest changes (esc)',
     });
@@ -331,7 +334,7 @@ export const ToolConfirmationMessage: React.FC<
         </Text>
         {displayUrls && infoProps.urls && infoProps.urls.length > 0 && (
           <Box flexDirection="column" marginTop={1}>
-            <Text color={theme.text.primary}>URLs to fetch:</Text>
+            <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>
             {infoProps.urls.map((url) => (
               <Text key={url}>
                 {' '}
@@ -348,31 +351,46 @@ export const ToolConfirmationMessage: React.FC<
 
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
-        <Text color={theme.text.link}>MCP Server: {mcpProps.serverName}</Text>
-        <Text color={theme.text.link}>Tool: {mcpProps.toolName}</Text>
+        <Text color={theme.text.link}>
+          {t('MCP Server: {{server}}', { server: mcpProps.serverName })}
+        </Text>
+        <Text color={theme.text.link}>
+          {t('Tool: {{tool}}', { tool: mcpProps.toolName })}
+        </Text>
       </Box>
     );
 
-    question = `Allow execution of MCP tool "${mcpProps.toolName}" from server "${mcpProps.serverName}"?`;
+    question = t(
+      'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?',
+      {
+        tool: mcpProps.toolName,
+        server: mcpProps.serverName,
+      },
+    );
     options.push({
-      label: 'Yes, allow once',
+      label: t('Yes, allow once'),
       value: ToolConfirmationOutcome.ProceedOnce,
       key: 'Yes, allow once',
     });
     if (isTrustedFolder) {
       options.push({
-        label: `Yes, always allow tool "${mcpProps.toolName}" from server "${mcpProps.serverName}"`,
+        label: t('Yes, always allow tool "{{tool}}" from server "{{server}}"', {
+          tool: mcpProps.toolName,
+          server: mcpProps.serverName,
+        }),
         value: ToolConfirmationOutcome.ProceedAlwaysTool, // Cast until types are updated
         key: `Yes, always allow tool "${mcpProps.toolName}" from server "${mcpProps.serverName}"`,
       });
       options.push({
-        label: `Yes, always allow all tools from server "${mcpProps.serverName}"`,
+        label: t('Yes, always allow all tools from server "{{server}}"', {
+          server: mcpProps.serverName,
+        }),
         value: ToolConfirmationOutcome.ProceedAlwaysServer,
         key: `Yes, always allow all tools from server "${mcpProps.serverName}"`,
       });
     }
     options.push({
-      label: 'No, suggest changes (esc)',
+      label: t('No, suggest changes (esc)'),
       value: ToolConfirmationOutcome.Cancel,
       key: 'No, suggest changes (esc)',
     });

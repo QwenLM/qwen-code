@@ -26,7 +26,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:ci": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check-i18n": "tsx ../../scripts/check-i18n.ts"
   },
   "files": [
     "dist"

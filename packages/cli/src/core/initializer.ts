@@ -14,6 +14,7 @@ import {
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
+import { initializeI18n } from '../i18n/index.js';
 
 export interface InitializationResult {
   authError: string | null;
@@ -33,6 +34,13 @@ export async function initializeApp(
   config: Config,
   settings: LoadedSettings,
 ): Promise<InitializationResult> {
+  // Initialize i18n system
+  const languageSetting =
+    process.env['QWEN_CODE_LANG'] ||
+    settings.merged.general?.language ||
+    'auto';
+  await initializeI18n(languageSetting);
+
   const authType = settings.merged.security?.auth?.selectedType;
   const authError = await performInitialAuth(config, authType);
 
@@ -44,7 +52,6 @@ export async function initializeApp(
       undefined,
     );
   }
-
   const themeError = validateTheme(settings);
 
   const shouldOpenAuthDialog =

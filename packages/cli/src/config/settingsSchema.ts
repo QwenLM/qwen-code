@@ -176,6 +176,23 @@ const SETTINGS_SCHEMA = {
         description: 'Enable debug logging of keystrokes to the console.',
         showInDialog: true,
       },
+      language: {
+        type: 'enum',
+        label: 'Language',
+        category: 'General',
+        requiresRestart: false,
+        default: 'auto',
+        description:
+          'The language for the user interface. Use "auto" to detect from system settings. ' +
+          'You can also use custom language codes (e.g., "es", "fr") by placing JS language files ' +
+          'in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js).',
+        showInDialog: true,
+        options: [
+          { value: 'auto', label: 'Auto (detect from system)' },
+          { value: 'en', label: 'English' },
+          { value: 'zh', label: '中文 (Chinese)' },
+        ],
+      },
     },
   },
   output: {

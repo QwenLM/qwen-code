@@ -89,6 +89,7 @@ import { useGitBranchName } from './hooks/useGitBranchName.js';
 import { useExtensionUpdates } from './hooks/useExtensionUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useQuitConfirmation } from './hooks/useQuitConfirmation.js';
+import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -384,7 +385,13 @@ export const AppContainer = (props: AppContainerProps) => {
         settings.merged.security?.auth.selectedType
     ) {
       onAuthError(
-        `Authentication is enforced to be ${settings.merged.security?.auth.enforcedType}, but you are currently using ${settings.merged.security?.auth.selectedType}.`,
+        t(
+          'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.',
+          {
+            enforcedType: settings.merged.security?.auth.enforcedType,
+            currentType: settings.merged.security?.auth.selectedType,
+          },
+        ),
       );
     } else if (
       settings.merged.security?.auth?.selectedType &&

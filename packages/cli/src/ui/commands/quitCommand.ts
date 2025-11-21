@@ -6,10 +6,13 @@
 
 import { formatDuration } from '../utils/formatters.js';
 import { CommandKind, type SlashCommand } from './types.js';
+import { t } from '../../i18n/index.js';
 
 export const quitConfirmCommand: SlashCommand = {
   name: 'quit-confirm',
-  description: 'Show quit confirmation dialog',
+  get description() {
+    return t('Show quit confirmation dialog');
+  },
   kind: CommandKind.BUILT_IN,
   action: (context) => {
     const now = Date.now();
@@ -37,7 +40,9 @@ export const quitConfirmCommand: SlashCommand = {
 export const quitCommand: SlashCommand = {
   name: 'quit',
   altNames: ['exit'],
-  description: 'exit the cli',
+  get description() {
+    return t('exit the cli');
+  },
   kind: CommandKind.BUILT_IN,
   action: (context) => {
     const now = Date.now();

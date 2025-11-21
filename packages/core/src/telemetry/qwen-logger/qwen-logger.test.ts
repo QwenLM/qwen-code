@@ -286,9 +286,9 @@ describe('QwenLogger', () => {
           event_type: 'action',
           type: 'ide',
           name: 'ide_connection',
-          snapshots: JSON.stringify({
+          properties: {
             connection_type: IdeConnectionType.SESSION,
-          }),
+          },
         }),
       );
     });
@@ -307,8 +307,10 @@ describe('QwenLogger', () => {
           type: 'overflow',
           name: 'kitty_sequence_overflow',
           subtype: 'kitty_sequence_overflow',
-          snapshots: JSON.stringify({
+          properties: {
             sequence_length: 1024,
+          },
+          snapshots: JSON.stringify({
             truncated_sequence: 'truncated...',
           }),
         }),
