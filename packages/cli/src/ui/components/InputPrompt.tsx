@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
-import { useCallback, useEffect, useState, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
 import { theme } from '../semantic-colors.js';
@@ -103,7 +102,7 @@ export const calculatePromptWidths = (() => {
   };
 })();
 
-export const InputPrompt: React.FC<InputPromptProps> = ({
+const InputPromptComponent: React.FC<InputPromptProps> = ({
   buffer,
   onSubmit,
   userMessages,
@@ -890,3 +889,33 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     </>
   );
 };
+
+// Apply memoization to prevent unnecessary re-renders when props haven't changed
+export const InputPrompt = React.memo(
+  InputPromptComponent,
+  (prevProps, nextProps) => 
+    // Only re-render if the core props have changed
+     (
+      prevProps.focus === nextProps.focus &&
+      prevProps.shellModeActive === nextProps.shellModeActive &&
+      prevProps.approvalMode === nextProps.approvalMode &&
+      prevProps.isEmbeddedShellFocused === nextProps.isEmbeddedShellFocused &&
+      prevProps.placeholder === nextProps.placeholder &&
+      prevProps.suggestionsWidth === nextProps.suggestionsWidth &&
+      // Check if buffer content has changed
+      prevProps.buffer?.text === nextProps.buffer?.text &&
+      // Check if config has changed (shallow comparison)
+      prevProps.config?.getModel?.() === nextProps.config?.getModel?.() &&
+      // Check if slashCommands array has same length and same command names
+      prevProps.slashCommands?.length === nextProps.slashCommands?.length &&
+      prevProps.slashCommands?.every(
+        (cmd, idx) => cmd.name === nextProps.slashCommands?.[idx]?.name,
+      ) &&
+      // Check if userMessages have changed
+      prevProps.userMessages?.length === nextProps.userMessages?.length &&
+      prevProps.userMessages?.every(
+        (msg, idx) => msg === nextProps.userMessages?.[idx],
+      )
+    )
+  ,
+);

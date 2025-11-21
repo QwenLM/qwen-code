@@ -18,6 +18,9 @@ import { AppHeader } from './AppHeader.js';
 // usage.
 const MAX_GEMINI_MESSAGE_LINES = 65536;
 
+// Maximum number of history items to render at once to prevent performance issues
+const MAX_RENDERED_HISTORY_ITEMS = 100;
+
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
@@ -28,13 +31,16 @@ export const MainContent = () => {
     availableTerminalHeight,
   } = uiState;
 
+  // Only render recent history items to improve performance
+  const recentHistory = uiState.history.slice(-MAX_RENDERED_HISTORY_ITEMS);
+
   return (
     <>
       <Static
         key={uiState.historyRemountKey}
         items={[
           <AppHeader key="app-header" version={version} />,
-          ...uiState.history.map((h) => (
+          ...recentHistory.map((h) => (
             <HistoryItemDisplay
               terminalWidth={mainAreaWidth}
               availableTerminalHeight={staticAreaMaxItemHeight}

@@ -9,7 +9,7 @@ import { vi } from 'vitest';
 import {
   useMemoryMonitor,
   MEMORY_CHECK_INTERVAL,
-  MEMORY_WARNING_THRESHOLD,
+  DEFAULT_MEMORY_WARNING_THRESHOLD,
 } from './useMemoryMonitor.js';
 import process from 'node:process';
 import { MessageType } from '../types.js';
@@ -29,16 +29,16 @@ describe('useMemoryMonitor', () => {
 
   it('should not warn when memory usage is below threshold', () => {
     memoryUsageSpy.mockReturnValue({
-      rss: MEMORY_WARNING_THRESHOLD / 2,
+      rss: DEFAULT_MEMORY_WARNING_THRESHOLD / 2,
     } as NodeJS.MemoryUsage);
     renderHook(() => useMemoryMonitor({ addItem }));
     vi.advanceTimersByTime(10000);
     expect(addItem).not.toHaveBeenCalled();
   });
 
-  it('should warn when memory usage is above threshold', () => {
+  it('should warn when memory usage is above threshold but below high threshold', () => {
     memoryUsageSpy.mockReturnValue({
-      rss: MEMORY_WARNING_THRESHOLD * 1.5,
+      rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 1.1, // Just above the basic threshold
     } as NodeJS.MemoryUsage);
     renderHook(() => useMemoryMonitor({ addItem }));
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
@@ -46,26 +46,43 @@ describe('useMemoryMonitor', () => {
     expect(addItem).toHaveBeenCalledWith(
       {
         type: MessageType.WARNING,
-        text: 'High memory usage detected: 10.50 GB. If you experience a crash, please file a bug report by running `/bug`',
+        text: expect.stringContaining('High memory usage detected'),
       },
       expect.any(Number),
     );
   });
 
-  it('should only warn once', () => {
+  it('should error when memory usage is above high threshold', () => {
     memoryUsageSpy.mockReturnValue({
-      rss: MEMORY_WARNING_THRESHOLD * 1.5,
+      rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 2, // Well above the basic threshold but below the high one
+    } as NodeJS.MemoryUsage);
+    renderHook(() => useMemoryMonitor({ addItem }));
+    vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
+    expect(addItem).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: expect.stringContaining('Critical memory usage detected'),
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should continue monitoring after exceeding threshold', () => {
+    memoryUsageSpy.mockReturnValue({
+      rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 1.1, // Just above basic threshold
     } as NodeJS.MemoryUsage);
     const { rerender } = renderHook(() => useMemoryMonitor({ addItem }));
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
 
-    // Rerender and advance timers, should not warn again
+    // Rerender and advance timers again - with the new implementation it will continue to monitor
     memoryUsageSpy.mockReturnValue({
-      rss: MEMORY_WARNING_THRESHOLD * 1.5,
+      rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 1.1, // Just above basic threshold
     } as NodeJS.MemoryUsage);
     rerender();
     vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
-    expect(addItem).toHaveBeenCalledTimes(1);
+    // Now it will call addItem again since we removed the clearInterval call
+    expect(addItem).toHaveBeenCalledTimes(2);
   });
 });

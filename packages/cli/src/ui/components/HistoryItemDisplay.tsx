@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
-import { useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 import type { HistoryItem } from '../types.js';
 import { UserMessage } from './messages/UserMessage.js';
@@ -141,5 +140,31 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   );
 };
 
+// Apply memoization to prevent unnecessary re-renders when props haven't changed
+const MemoizedHistoryItemDisplay = React.memo(
+  HistoryItemDisplayComponent,
+  (prevProps, nextProps) => 
+    // Only re-render if the core item content has changed
+     (
+      prevProps.item.id === nextProps.item.id &&
+      prevProps.item.type === nextProps.item.type &&
+      prevProps.item.text === nextProps.item.text &&
+      prevProps.isPending === nextProps.isPending &&
+      // Only compare commands if both are provided
+      (prevProps.commands === nextProps.commands ||
+        (Array.isArray(prevProps.commands) &&
+          Array.isArray(nextProps.commands) &&
+          prevProps.commands.length === nextProps.commands.length)) &&
+      prevProps.activeShellPtyId === nextProps.activeShellPtyId &&
+      prevProps.embeddedShellFocused === nextProps.embeddedShellFocused &&
+      prevProps.availableTerminalHeight === nextProps.availableTerminalHeight &&
+      prevProps.terminalWidth === nextProps.terminalWidth &&
+      prevProps.isFocused === nextProps.isFocused &&
+      prevProps.availableTerminalHeightGemini ===
+        nextProps.availableTerminalHeightGemini
+    )
+  ,
+);
+
 // Export alias for backward compatibility
-export { HistoryItemDisplayComponent as HistoryItemDisplay };
+export { MemoizedHistoryItemDisplay as HistoryItemDisplay };

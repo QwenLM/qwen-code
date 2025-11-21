@@ -21,7 +21,11 @@ export interface UseHistoryManagerReturn {
   ) => void;
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
+  trimHistory: (maxItems?: number) => void;
 }
+
+// Maximum number of history items to keep in memory to prevent memory issues
+const MAX_HISTORY_SIZE = 1000;
 
 /**
  * Custom hook to manage the chat history state.
@@ -40,7 +44,9 @@ export function useHistory(): UseHistoryManagerReturn {
   }, []);
 
   const loadHistory = useCallback((newHistory: HistoryItem[]) => {
-    setHistory(newHistory);
+    // Limit loaded history to prevent memory issues
+    const limitedHistory = newHistory.slice(-MAX_HISTORY_SIZE);
+    setHistory(limitedHistory);
   }, []);
 
   // Adds a new item to the history state with a unique ID.
@@ -61,10 +67,15 @@ export function useHistory(): UseHistoryManagerReturn {
             return prevHistory; // Don't add the duplicate
           }
         }
-        // Use a more efficient approach by spreading the new item at the end
-        // This is already optimal, but we can consider a functional update approach for optimization
-        const newHistory = [...prevHistory];
-        newHistory.push(newItem);
+
+        // Create new history array with the new item
+        let newHistory = [...prevHistory, newItem];
+
+        // Trim history if it exceeds the maximum size
+        if (newHistory.length > MAX_HISTORY_SIZE) {
+          newHistory = newHistory.slice(-MAX_HISTORY_SIZE);
+        }
+
         return newHistory;
       });
       return id; // Return the generated ID (even if not added, to keep signature)
@@ -78,7 +89,6 @@ export function useHistory(): UseHistoryManagerReturn {
    * rendering all history items in <Static /> for performance reasons. Only use
    * if ABSOLUTELY NECESSARY
    */
-  //
   const updateItem = useCallback(
     (
       id: number,
@@ -105,11 +115,24 @@ export function useHistory(): UseHistoryManagerReturn {
     messageIdCounterRef.current = 0;
   }, []);
 
+  // Trims history to the specified number of items (defaults to MAX_HISTORY_SIZE)
+  const trimHistory = useCallback((maxItems?: number) => {
+    const limit = maxItems !== undefined ? maxItems : MAX_HISTORY_SIZE;
+    setHistory((prevHistory) => {
+      if (prevHistory.length <= limit) {
+        return prevHistory; // No need to trim if already under the limit
+      }
+      // Keep the most recent items
+      return prevHistory.slice(-limit);
+    });
+  }, []);
+
   return {
     history,
     addItem,
     updateItem,
     clearItems,
     loadHistory,
+    trimHistory,
   };
 }
