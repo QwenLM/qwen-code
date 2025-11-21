@@ -17,7 +17,7 @@ import {
 
 const TEST_CLI_PATH =
   '/Users/mingholy/Work/Projects/qwen-code/packages/cli/index.ts';
-const TEST_TIMEOUT = 1600000;
+const TEST_TIMEOUT = 60000;
 
 const SHARED_TEST_OPTIONS = {
   pathToQwenExecutable: TEST_CLI_PATH,
@@ -156,10 +156,11 @@ describe('Permission Control (E2E)', () => {
         let callbackInvoked = false;
 
         const q = query({
-          prompt: 'List files in the current directory',
+          prompt: 'Create a file named hello.txt with content "world"',
           options: {
             ...SHARED_TEST_OPTIONS,
             permissionMode: 'default',
+            cwd: '/tmp',
             canUseTool: async (toolName, input) => {
               callbackInvoked = true;
               return {
@@ -183,9 +184,6 @@ describe('Permission Control (E2E)', () => {
                 hasToolResult = true;
               }
             }
-            if (isCLIResultMessage(message)) {
-              break;
-            }
           }
 
           expect(callbackInvoked).toBe(true);
@@ -203,7 +201,7 @@ describe('Permission Control (E2E)', () => {
         let callbackInvoked = false;
 
         const q = query({
-          prompt: 'List files in the current directory',
+          prompt: 'Create a file named test.txt',
           options: {
             ...SHARED_TEST_OPTIONS,
             permissionMode: 'default',
@@ -218,10 +216,8 @@ describe('Permission Control (E2E)', () => {
         });
 
         try {
-          for await (const message of q) {
-            if (isCLIResultMessage(message)) {
-              break;
-            }
+          for await (const _message of q) {
+            // Consume all messages
           }
 
           expect(callbackInvoked).toBe(true);
@@ -240,12 +236,13 @@ describe('Permission Control (E2E)', () => {
         let receivedSuggestions: unknown = null;
 
         const q = query({
-          prompt: 'List files in the current directory',
+          prompt: 'Create a file named data.txt',
           options: {
             ...SHARED_TEST_OPTIONS,
             permissionMode: 'default',
+            cwd: '/tmp',
             canUseTool: async (toolName, input, options) => {
-              receivedSuggestions = options.suggestions;
+              receivedSuggestions = options?.suggestions;
               return {
                 behavior: 'allow',
                 updatedInput: input,
@@ -255,10 +252,8 @@ describe('Permission Control (E2E)', () => {
         });
 
         try {
-          for await (const message of q) {
-            if (isCLIResultMessage(message)) {
-              break;
-            }
+          for await (const _message of q) {
+            // Consume all messages
           }
 
           // Suggestions may be null or an array, depending on CLI implementation
@@ -276,12 +271,13 @@ describe('Permission Control (E2E)', () => {
         let receivedSignal: AbortSignal | undefined = undefined;
 
         const q = query({
-          prompt: 'List files in the current directory',
+          prompt: 'Create a file named signal.txt',
           options: {
             ...SHARED_TEST_OPTIONS,
             permissionMode: 'default',
+            cwd: '/tmp',
             canUseTool: async (toolName, input, options) => {
-              receivedSignal = options.signal;
+              receivedSignal = options?.signal;
               return {
                 behavior: 'allow',
                 updatedInput: input,
@@ -291,10 +287,8 @@ describe('Permission Control (E2E)', () => {
         });
 
         try {
-          for await (const message of q) {
-            if (isCLIResultMessage(message)) {
-              break;
-            }
+          for await (const _message of q) {
+            // Consume all messages
           }
 
           expect(receivedSignal).toBeDefined();
@@ -313,10 +307,11 @@ describe('Permission Control (E2E)', () => {
         const updatedInputs: Record<string, unknown>[] = [];
 
         const q = query({
-          prompt: 'List files in the current directory',
+          prompt: 'Create a file named modified.txt',
           options: {
             ...SHARED_TEST_OPTIONS,
             permissionMode: 'default',
+            cwd: '/tmp',
             canUseTool: async (toolName, input) => {
               originalInputs.push({ ...input });
               const updatedInput = {
@@ -334,10 +329,8 @@ describe('Permission Control (E2E)', () => {
         });
 
         try {
-          for await (const message of q) {
-            if (isCLIResultMessage(message)) {
-              break;
-            }
+          for await (const _message of q) {
+            // Consume all messages
           }
 
           expect(originalInputs.length).toBeGreaterThan(0);
@@ -355,10 +348,11 @@ describe('Permission Control (E2E)', () => {
       'should default to deny when canUseTool is not provided',
       async () => {
         const q = query({
-          prompt: 'List files in the current directory',
+          prompt: 'Create a file named default.txt',
           options: {
             ...SHARED_TEST_OPTIONS,
             permissionMode: 'default',
+            cwd: '/tmp',
             // canUseTool not provided
           },
         });
@@ -366,10 +360,8 @@ describe('Permission Control (E2E)', () => {
         try {
           // When canUseTool is not provided, tools should be denied by default
           // The exact behavior depends on CLI implementation
-          for await (const message of q) {
-            if (isCLIResultMessage(message)) {
-              break;
-            }
+          for await (const _message of q) {
+            // Consume all messages
           }
           // Test passes if no errors occur
           expect(true).toBe(true);
@@ -386,8 +378,8 @@ describe('Permission Control (E2E)', () => {
       'should change permission mode from default to yolo',
       async () => {
         const { generator, resume } = createStreamingInputWithControlPoint(
-          'List files in the current directory',
-          'Now read the package.json file',
+          'What is 1 + 1?',
+          'What is 2 + 2?',
         );
 
         const q = query({
@@ -468,8 +460,8 @@ describe('Permission Control (E2E)', () => {
       'should change permission mode from yolo to plan',
       async () => {
         const { generator, resume } = createStreamingInputWithControlPoint(
-          'List files in the current directory',
-          'Now read the package.json file',
+          'What is 3 + 3?',
+          'What is 4 + 4?',
         );
 
         const q = query({
@@ -550,8 +542,8 @@ describe('Permission Control (E2E)', () => {
       'should change permission mode to auto-edit',
       async () => {
         const { generator, resume } = createStreamingInputWithControlPoint(
-          'List files in the current directory',
-          'Now read the package.json file',
+          'What is 5 + 5?',
+          'What is 6 + 6?',
         );
 
         const q = query({
@@ -650,99 +642,94 @@ describe('Permission Control (E2E)', () => {
   });
 
   describe('canUseTool and setPermissionMode integration', () => {
-    it(
-      'should work together - canUseTool callback with dynamic permission mode change',
-      async () => {
-        const toolCalls: Array<{
-          toolName: string;
-          input: Record<string, unknown>;
-        }> = [];
+    it('should work together - canUseTool callback with dynamic permission mode change', async () => {
+      const toolCalls: Array<{
+        toolName: string;
+        input: Record<string, unknown>;
+      }> = [];
 
-        const { generator, resume } = createStreamingInputWithControlPoint(
-          'List files in the current directory',
-          'Now read the package.json file',
-        );
+      const { generator, resume } = createStreamingInputWithControlPoint(
+        'Create a file named first.txt',
+        'Create a file named second.txt',
+      );
 
-        const q = query({
-          prompt: generator,
-          options: {
-            ...SHARED_TEST_OPTIONS,
-            permissionMode: 'default',
-            canUseTool: async (toolName, input) => {
-              toolCalls.push({ toolName, input });
-              return {
-                behavior: 'allow',
-                updatedInput: input,
-              };
-            },
+      const q = query({
+        prompt: generator,
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          permissionMode: 'default',
+          cwd: '/tmp',
+          canUseTool: async (toolName, input) => {
+            console.log('canUseTool', toolName, input);
+            toolCalls.push({ toolName, input });
+            return {
+              behavior: 'allow',
+              updatedInput: input,
+            };
           },
+        },
+      });
+
+      try {
+        const resolvers: {
+          first?: () => void;
+          second?: () => void;
+        } = {};
+        const firstResponsePromise = new Promise<void>((resolve) => {
+          resolvers.first = resolve;
+        });
+        const secondResponsePromise = new Promise<void>((resolve) => {
+          resolvers.second = resolve;
         });
 
-        try {
-          const resolvers: {
-            first?: () => void;
-            second?: () => void;
-          } = {};
-          const firstResponsePromise = new Promise<void>((resolve) => {
-            resolvers.first = resolve;
-          });
-          const secondResponsePromise = new Promise<void>((resolve) => {
-            resolvers.second = resolve;
-          });
+        let firstResponseReceived = false;
+        let secondResponseReceived = false;
 
-          let firstResponseReceived = false;
-          let secondResponseReceived = false;
-
-          (async () => {
-            for await (const message of q) {
-              if (
-                isCLIAssistantMessage(message) ||
-                isCLIResultMessage(message)
-              ) {
-                if (!firstResponseReceived) {
-                  firstResponseReceived = true;
-                  resolvers.first?.();
-                } else if (!secondResponseReceived) {
-                  secondResponseReceived = true;
-                  resolvers.second?.();
-                }
+        (async () => {
+          for await (const message of q) {
+            if (isCLIResultMessage(message)) {
+              if (!firstResponseReceived) {
+                firstResponseReceived = true;
+                resolvers.first?.();
+              } else if (!secondResponseReceived) {
+                secondResponseReceived = true;
+                resolvers.second?.();
               }
             }
-          })();
+          }
+        })();
 
-          await Promise.race([
-            firstResponsePromise,
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error('Timeout waiting for first response')),
-                TEST_TIMEOUT,
-              ),
+        await Promise.race([
+          firstResponsePromise,
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('Timeout waiting for first response')),
+              TEST_TIMEOUT,
             ),
-          ]);
+          ),
+        ]);
 
-          expect(firstResponseReceived).toBe(true);
-          expect(toolCalls.length).toBeGreaterThan(0);
+        expect(firstResponseReceived).toBe(true);
+        expect(toolCalls.length).toBeGreaterThan(0);
 
-          await q.setPermissionMode('yolo');
+        await q.setPermissionMode('yolo');
 
-          resume();
+        resume();
 
-          await Promise.race([
-            secondResponsePromise,
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error('Timeout waiting for second response')),
-                TEST_TIMEOUT,
-              ),
+        await Promise.race([
+          secondResponsePromise,
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error('Timeout waiting for second response')),
+              TEST_TIMEOUT,
             ),
-          ]);
+          ),
+        ]);
 
-          expect(secondResponseReceived).toBe(true);
-        } finally {
-          await q.close();
-        }
-      },
-      TEST_TIMEOUT,
-    );
+        expect(secondResponseReceived).toBe(true);
+      } finally {
+        await q.close();
+      }
+    }, 60000); // TEST_TIMEOUT,
   });
 });

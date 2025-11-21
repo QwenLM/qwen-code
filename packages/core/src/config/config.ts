@@ -293,27 +293,6 @@ export interface ConfigParameters {
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
-  inputFormat?: InputFormat;
-  outputFormat?: OutputFormat;
-}
-
-function normalizeConfigOutputFormat(
-  format: OutputFormat | undefined,
-): OutputFormat | undefined {
-  if (!format) {
-    return undefined;
-  }
-  switch (format) {
-    case 'stream-json':
-      return OutputFormat.STREAM_JSON;
-    case 'json':
-    case OutputFormat.JSON:
-      return OutputFormat.JSON;
-    case 'text':
-    case OutputFormat.TEXT:
-    default:
-      return OutputFormat.TEXT;
-  }
 }
 
 function normalizeConfigOutputFormat(

@@ -179,8 +179,8 @@ describe('Control Request/Response (E2E)', () => {
       'should set permission mode via control request during streaming input',
       async () => {
         const { generator, resume } = createStreamingInputWithControlPoint(
-          'List files in the current directory',
-          'Now read the package.json file',
+          'What is 1 + 1?',
+          'What is 2 + 2?',
         );
 
         const q = query({

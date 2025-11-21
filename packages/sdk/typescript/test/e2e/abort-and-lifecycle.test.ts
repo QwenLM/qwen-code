@@ -236,29 +236,28 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         });
 
         let receivedResponse = false;
+        let endInputCalled = false;
 
         try {
           for await (const message of q) {
-            if (isCLIAssistantMessage(message)) {
+            if (isCLIAssistantMessage(message) && !endInputCalled) {
               const textBlocks = message.message.content.filter(
                 (block: ContentBlock): block is TextBlock =>
                   block.type === 'text',
               );
-              const text = textBlocks
-                .map((b: TextBlock) => b.text)
-                .join('')
-                .slice(0, 100);
+              const text = textBlocks.map((b: TextBlock) => b.text).join('');
 
               expect(text.length).toBeGreaterThan(0);
               receivedResponse = true;
 
               // End input after receiving first response
               q.endInput();
-              break;
+              endInputCalled = true;
             }
           }
 
           expect(receivedResponse).toBe(true);
+          expect(endInputCalled).toBe(true);
         } finally {
           await q.close();
         }
@@ -389,9 +388,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
         try {
           for await (const message of q) {
-            if (isCLIAssistantMessage(message)) {
-              break;
-            }
+            // Consume all messages
           }
         } finally {
           await q.close();

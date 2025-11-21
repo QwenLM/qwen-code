@@ -19,6 +19,7 @@ import type {
   WaitingToolCall,
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
+  ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import {
   InputFormat,
@@ -208,6 +209,7 @@ export class PermissionController extends BaseController {
     }
 
     this.context.permissionMode = mode;
+    this.context.config.setApprovalMode(mode as ApprovalMode);
 
     if (this.context.debugMode) {
       console.error(

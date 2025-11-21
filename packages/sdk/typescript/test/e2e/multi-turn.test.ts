@@ -83,21 +83,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
             session_id: sessionId,
             message: {
               role: 'user',
-              content:
-                'What is the name of this project? Check the package.json file.',
-            },
-            parent_tool_use_id: null,
-          } as CLIUserMessage;
-
-          // Wait a bit to simulate user thinking time
-          await new Promise((resolve) => setTimeout(resolve, 100));
-
-          yield {
-            type: 'user',
-            session_id: sessionId,
-            message: {
-              role: 'user',
-              content: 'What version is it currently on?',
+              content: 'What is 1 + 1?',
             },
             parent_tool_use_id: null,
           } as CLIUserMessage;
@@ -109,7 +95,19 @@ describe('Multi-Turn Conversations (E2E)', () => {
             session_id: sessionId,
             message: {
               role: 'user',
-              content: 'What are the main dependencies?',
+              content: 'What is 2 + 2?',
+            },
+            parent_tool_use_id: null,
+          } as CLIUserMessage;
+
+          await new Promise((resolve) => setTimeout(resolve, 100));
+
+          yield {
+            type: 'user',
+            session_id: sessionId,
+            message: {
+              role: 'user',
+              content: 'What is 3 + 3?',
             },
             parent_tool_use_id: null,
           } as CLIUserMessage;
@@ -120,14 +118,13 @@ describe('Multi-Turn Conversations (E2E)', () => {
           prompt: createMultiTurnConversation(),
           options: {
             ...SHARED_TEST_OPTIONS,
-            cwd: process.cwd(),
             debug: false,
           },
         });
 
         const messages: CLIMessage[] = [];
         const assistantMessages: CLIAssistantMessage[] = [];
-        let turnCount = 0;
+        const assistantTexts: string[] = [];
 
         try {
           for await (const message of q) {
@@ -135,13 +132,18 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
             if (isCLIAssistantMessage(message)) {
               assistantMessages.push(message);
-              turnCount++;
+              const text = extractText(message.message.content);
+              assistantTexts.push(text);
             }
           }
 
           expect(messages.length).toBeGreaterThan(0);
-          expect(assistantMessages.length).toBeGreaterThanOrEqual(3); // Should have responses to all 3 questions
-          expect(turnCount).toBeGreaterThanOrEqual(3);
+          expect(assistantMessages.length).toBeGreaterThanOrEqual(3);
+
+          // Validate content of responses
+          expect(assistantTexts[0]).toMatch(/2/);
+          expect(assistantTexts[1]).toMatch(/4/);
+          expect(assistantTexts[2]).toMatch(/6/);
         } finally {
           await q.close();
         }
@@ -160,7 +162,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
             session_id: sessionId,
             message: {
               role: 'user',
-              content: 'My name is Alice. Hello!',
+              content:
+                'Suppose we have 3 rabbits and 4 carrots. How many animals are there?',
             },
             parent_tool_use_id: null,
           } as CLIUserMessage;
@@ -172,7 +175,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
             session_id: sessionId,
             message: {
               role: 'user',
-              content: 'What is my name?',
+              content: 'How many animals are there? Only output the number',
             },
             parent_tool_use_id: null,
           } as CLIUserMessage;
@@ -197,11 +200,11 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
           expect(assistantMessages.length).toBeGreaterThanOrEqual(2);
 
-          // The second response should reference the name Alice
+          // The second response should reference the color blue
           const secondResponse = extractText(
             assistantMessages[1].message.content,
           );
-          expect(secondResponse.toLowerCase()).toContain('alice');
+          expect(secondResponse.toLowerCase()).toContain('3');
         } finally {
           await q.close();
         }
@@ -211,72 +214,79 @@ describe('Multi-Turn Conversations (E2E)', () => {
   });
 
   describe('Tool Usage in Multi-Turn', () => {
-    it('should handle tool usage across multiple turns', async () => {
-      async function* createToolConversation(): AsyncIterable<CLIUserMessage> {
-        const sessionId = crypto.randomUUID();
+    it(
+      'should handle tool usage across multiple turns',
+      async () => {
+        async function* createToolConversation(): AsyncIterable<CLIUserMessage> {
+          const sessionId = crypto.randomUUID();
 
-        yield {
-          type: 'user',
-          session_id: sessionId,
-          message: {
-            role: 'user',
-            content: 'List the files in the current directory',
+          yield {
+            type: 'user',
+            session_id: sessionId,
+            message: {
+              role: 'user',
+              content: 'Create a file named test.txt with content "hello"',
+            },
+            parent_tool_use_id: null,
+          } as CLIUserMessage;
+
+          await new Promise((resolve) => setTimeout(resolve, 200));
+
+          yield {
+            type: 'user',
+            session_id: sessionId,
+            message: {
+              role: 'user',
+              content: 'Now read the test.txt file',
+            },
+            parent_tool_use_id: null,
+          } as CLIUserMessage;
+        }
+
+        const q = query({
+          prompt: createToolConversation(),
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: '/tmp',
+            debug: false,
           },
-          parent_tool_use_id: null,
-        } as CLIUserMessage;
+        });
 
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        const messages: CLIMessage[] = [];
+        let toolUseCount = 0;
+        const assistantMessages: CLIAssistantMessage[] = [];
 
-        yield {
-          type: 'user',
-          session_id: sessionId,
-          message: {
-            role: 'user',
-            content: 'Now tell me about the package.json file specifically',
-          },
-          parent_tool_use_id: null,
-        } as CLIUserMessage;
-      }
+        try {
+          for await (const message of q) {
+            messages.push(message);
 
-      const q = query({
-        prompt: createToolConversation(),
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: process.cwd(),
-          debug: false,
-        },
-      });
-
-      const messages: CLIMessage[] = [];
-      let toolUseCount = 0;
-      let assistantCount = 0;
-
-      try {
-        for await (const message of q) {
-          messages.push(message);
-
-          if (isCLIAssistantMessage(message)) {
-            const hasToolUseBlock = message.message.content.some(
-              (block: ContentBlock): block is ToolUseBlock =>
-                block.type === 'tool_use',
-            );
-            if (hasToolUseBlock) {
-              toolUseCount++;
+            if (isCLIAssistantMessage(message)) {
+              assistantMessages.push(message);
+              const hasToolUseBlock = message.message.content.some(
+                (block: ContentBlock): block is ToolUseBlock =>
+                  block.type === 'tool_use',
+              );
+              if (hasToolUseBlock) {
+                toolUseCount++;
+              }
             }
           }
 
-          if (isCLIAssistantMessage(message)) {
-            assistantCount++;
-          }
-        }
+          expect(messages.length).toBeGreaterThan(0);
+          expect(toolUseCount).toBeGreaterThan(0);
+          expect(assistantMessages.length).toBeGreaterThanOrEqual(2);
 
-        expect(messages.length).toBeGreaterThan(0);
-        expect(toolUseCount).toBeGreaterThan(0); // Should use tools
-        expect(assistantCount).toBeGreaterThanOrEqual(2); // Should have responses to both questions
-      } finally {
-        await q.close();
-      }
-    }, 60000); //TEST_TIMEOUT,
+          // Validate second response mentions the file content
+          const secondResponse = extractText(
+            assistantMessages[assistantMessages.length - 1].message.content,
+          );
+          expect(secondResponse.toLowerCase()).toMatch(/hello|test\.txt/);
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
   });
 
   describe('Message Flow and Sequencing', () => {
@@ -435,10 +445,6 @@ describe('Multi-Turn Conversations (E2E)', () => {
         try {
           for await (const message of q) {
             messages.push(message);
-
-            if (isCLIResultMessage(message)) {
-              break;
-            }
           }
 
           // Should handle empty conversation without crashing

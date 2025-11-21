@@ -5,6 +5,12 @@
  * Implements AsyncIterator protocol for message consumption.
  */
 
+// Timeout constants (in milliseconds)
+const PERMISSION_CALLBACK_TIMEOUT = 30000; // 30 seconds
+const MCP_REQUEST_TIMEOUT = 30000; // 30 seconds
+const CONTROL_REQUEST_TIMEOUT = 30000; // 30 seconds
+const STREAM_CLOSE_TIMEOUT = 10000; // 10 seconds
+
 import { randomUUID } from 'node:crypto';
 import type {
   CLIMessage,
@@ -373,11 +379,10 @@ export class Query implements AsyncIterable<CLIMessage> {
     }
 
     try {
-      const timeoutMs = 30000;
       const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(
           () => reject(new Error('Permission callback timeout')),
-          timeoutMs,
+          PERMISSION_CALLBACK_TIMEOUT,
         );
       });
 
@@ -484,7 +489,7 @@ export class Query implements AsyncIterable<CLIMessage> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('MCP request timeout'));
-      }, 30000);
+      }, MCP_REQUEST_TIMEOUT);
 
       const messageId = 'id' in message ? message.id : null;
 
@@ -603,7 +608,7 @@ export class Query implements AsyncIterable<CLIMessage> {
         const timeout = setTimeout(() => {
           this.pendingControlRequests.delete(requestId);
           reject(new Error(`Control request timeout: ${subtype}`));
-        }, 300000);
+        }, CONTROL_REQUEST_TIMEOUT);
 
         this.pendingControlRequests.set(requestId, {
           resolve,
@@ -771,8 +776,6 @@ export class Query implements AsyncIterable<CLIMessage> {
         this.sdkMcpTransports.size > 0 &&
         this.firstResultReceivedPromise
       ) {
-        const STREAM_CLOSE_TIMEOUT = 10000;
-
         await Promise.race([
           this.firstResultReceivedPromise,
           new Promise<void>((resolve) => {
