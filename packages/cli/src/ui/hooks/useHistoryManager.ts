@@ -61,7 +61,11 @@ export function useHistory(): UseHistoryManagerReturn {
             return prevHistory; // Don't add the duplicate
           }
         }
-        return [...prevHistory, newItem];
+        // Use a more efficient approach by spreading the new item at the end
+        // This is already optimal, but we can consider a functional update approach for optimization
+        const newHistory = [...prevHistory];
+        newHistory.push(newItem);
+        return newHistory;
       });
       return id; // Return the generated ID (even if not added, to keep signature)
     },

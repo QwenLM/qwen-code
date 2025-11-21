@@ -270,8 +270,16 @@ export const AppContainer = (props: AppContainerProps) => {
       calculatePromptWidths(terminalWidth);
     return { inputWidth, suggestionsWidth };
   }, [terminalWidth]);
-  const mainAreaWidth = Math.floor(terminalWidth * 0.9);
-  const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
+
+  // Memoize other frequently used calculations to avoid recalculation on every render
+  const mainAreaWidth = useMemo(
+    () => Math.floor(terminalWidth * 0.9),
+    [terminalWidth],
+  );
+  const staticAreaMaxItemHeight = useMemo(
+    () => Math.max(terminalHeight * 4, 100),
+    [terminalHeight],
+  );
 
   const isValidPath = useCallback((filePath: string): boolean => {
     try {
@@ -748,25 +756,38 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [buffer, terminalWidth, terminalHeight]);
 
   // Compute available terminal height based on controls measurement
-  const availableTerminalHeight = Math.max(
-    0,
-    terminalHeight - controlsHeight - staticExtraHeight - 2,
+  const availableTerminalHeight = useMemo(
+    () => Math.max(0, terminalHeight - controlsHeight - staticExtraHeight - 2),
+    [terminalHeight, controlsHeight, staticExtraHeight],
   );
 
-  config.setShellExecutionConfig({
-    terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-    terminalHeight: Math.max(
-      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
-      1,
-    ),
-    pager: settings.merged.tools?.shell?.pager,
-    showColor: settings.merged.tools?.shell?.showColor,
-  });
+  // Memoize shell execution configuration to avoid unnecessary updates
+  const shellExecutionConfig = useMemo(
+    () => ({
+      terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
+      terminalHeight: Math.max(
+        Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
+        1,
+      ),
+      pager: settings.merged.tools?.shell?.pager,
+      showColor: settings.merged.tools?.shell?.showColor,
+    }),
+    [
+      terminalWidth,
+      availableTerminalHeight,
+      settings.merged.tools?.shell?.pager,
+      settings.merged.tools?.shell?.showColor,
+    ],
+  );
+
+  useEffect(() => {
+    config.setShellExecutionConfig(shellExecutionConfig);
+  }, [config, shellExecutionConfig]);
 
   const isFocused = useFocus();
   useBracketedPaste();
 
-  // Context file names computation
+  // Context file names computation - Memoize to avoid recalculation
   const contextFileNames = useMemo(() => {
     const fromSettings = settings.merged.context?.fileName;
     return fromSettings
@@ -1163,14 +1184,16 @@ export const AppContainer = (props: AppContainerProps) => {
     return consoleMessages.filter((msg) => msg.type !== 'debug');
   }, [consoleMessages, config]);
 
-  // Computed values
-  const errorCount = useMemo(
-    () =>
-      filteredConsoleMessages
-        .filter((msg) => msg.type === 'error')
-        .reduce((total, msg) => total + msg.count, 0),
-    [filteredConsoleMessages],
-  );
+  // Computed values - Optimized with more efficient calculation
+  const errorCount = useMemo(() => {
+    let count = 0;
+    for (const msg of filteredConsoleMessages) {
+      if (msg.type === 'error') {
+        count += msg.count;
+      }
+    }
+    return count;
+  }, [filteredConsoleMessages]);
 
   const nightly = props.version.includes('nightly');
 
@@ -1198,19 +1221,47 @@ export const AppContainer = (props: AppContainerProps) => {
     isAgentsManagerDialogOpen ||
     isApprovalModeDialogOpen;
 
+  // More efficient concatenation with flat instead of spread operator
   const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    () => [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems].flat(),
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 
-  const uiState: UIState = useMemo(
-    () => ({
+  const uiState: UIState = useMemo(() => {
+    // Group related state properties for better organization and possibly better performance
+    const baseState = {
       history: historyManager.history,
       historyManager,
+      isConfigInitialized,
+      isFocused,
+      nightly,
+      branchName,
+      currentModel,
+      userTier,
+      errorCount,
+      terminalWidth,
+      terminalHeight,
+      mainControlsRef,
+      currentIDE,
+      updateInfo,
+      sessionStats,
+      buffer,
+      inputWidth,
+      suggestionsWidth,
+      isInputActive,
+      dialogsVisible,
+      pendingHistoryItems,
+      availableTerminalHeight,
+      mainAreaWidth,
+      staticAreaMaxItemHeight,
+      staticExtraHeight,
+      extensionsUpdateState, // Add the missing property
+    };
+
+    const dialogState = {
       isThemeDialogOpen,
       themeError,
       isAuthenticating,
-      isConfigInitialized,
       authError,
       isAuthDialogOpen,
       pendingAuthType,
@@ -1218,76 +1269,12 @@ export const AppContainer = (props: AppContainerProps) => {
       qwenAuthState,
       editorError,
       isEditorDialogOpen,
-      corgiMode,
-      debugMessage,
-      quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
-      slashCommands,
-      pendingSlashCommandHistoryItems,
-      commandContext,
-      shellConfirmationRequest,
-      confirmationRequest,
-      confirmUpdateExtensionRequests,
-      loopDetectionConfirmationRequest,
-      quitConfirmationRequest,
-      geminiMdFileCount,
-      streamingState,
-      initError,
-      pendingGeminiHistoryItems,
-      thought,
-      shellModeActive,
-      userMessages,
-      buffer,
-      inputWidth,
-      suggestionsWidth,
-      isInputActive,
-      shouldShowIdePrompt,
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
       isTrustedFolder,
-      constrainHeight,
-      showErrorDetails,
-      filteredConsoleMessages,
-      ideContextState,
-      showToolDescriptions,
-      ctrlCPressedOnce,
-      ctrlDPressedOnce,
-      showEscapePrompt,
-      isFocused,
-      elapsedTime,
-      currentLoadingPhrase,
-      historyRemountKey,
-      messageQueue,
-      showAutoAcceptIndicator,
-      showWorkspaceMigrationDialog,
-      workspaceExtensions,
-      currentModel,
-      userTier,
-      proQuotaRequest,
-      contextFileNames,
-      errorCount,
-      availableTerminalHeight,
-      mainAreaWidth,
-      staticAreaMaxItemHeight,
-      staticExtraHeight,
-      dialogsVisible,
-      pendingHistoryItems,
-      nightly,
-      branchName,
-      sessionStats,
-      terminalWidth,
-      terminalHeight,
-      mainControlsRef,
-      currentIDE,
-      updateInfo,
-      showIdeRestartPrompt,
-      ideTrustRestartReason,
-      isRestarting,
-      extensionsUpdateState,
-      activePtyId,
-      embeddedShellFocused,
       // Vision switch dialog
       isVisionSwitchDialogOpen,
       // Welcome back dialog
@@ -1297,26 +1284,33 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
-    }),
-    [
-      isThemeDialogOpen,
-      themeError,
-      isAuthenticating,
-      isConfigInitialized,
-      authError,
-      isAuthDialogOpen,
-      pendingAuthType,
-      // Qwen OAuth state
-      qwenAuthState,
-      editorError,
-      isEditorDialogOpen,
+      showWorkspaceMigrationDialog,
+      workspaceExtensions,
+      showIdeRestartPrompt,
+      ideTrustRestartReason,
+      isRestarting,
+      extensionsUpdateState, // Add the missing property
+    };
+
+    const uiDisplayState = {
       corgiMode,
       debugMessage,
       quittingMessages,
-      isSettingsDialogOpen,
-      isModelDialogOpen,
-      isPermissionsDialogOpen,
-      isApprovalModeDialogOpen,
+      constrainHeight,
+      showErrorDetails,
+      showToolDescriptions,
+      showEscapePrompt,
+      ctrlCPressedOnce,
+      ctrlDPressedOnce,
+      filteredConsoleMessages,
+      elapsedTime,
+      currentLoadingPhrase,
+      historyRemountKey,
+      messageQueue,
+      showAutoAcceptIndicator,
+    };
+
+    const commandState = {
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1325,73 +1319,124 @@ export const AppContainer = (props: AppContainerProps) => {
       confirmUpdateExtensionRequests,
       loopDetectionConfirmationRequest,
       quitConfirmationRequest,
-      geminiMdFileCount,
+      userMessages,
+    };
+
+    const streamingStateData = {
       streamingState,
       initError,
       pendingGeminiHistoryItems,
       thought,
       shellModeActive,
-      userMessages,
-      buffer,
-      inputWidth,
-      suggestionsWidth,
-      isInputActive,
+      geminiMdFileCount,
       shouldShowIdePrompt,
-      isFolderTrustDialogOpen,
-      isTrustedFolder,
-      constrainHeight,
-      showErrorDetails,
-      filteredConsoleMessages,
       ideContextState,
-      showToolDescriptions,
-      ctrlCPressedOnce,
-      ctrlDPressedOnce,
-      showEscapePrompt,
-      isFocused,
-      elapsedTime,
-      currentLoadingPhrase,
-      historyRemountKey,
-      messageQueue,
-      showAutoAcceptIndicator,
-      showWorkspaceMigrationDialog,
-      workspaceExtensions,
-      userTier,
       proQuotaRequest,
       contextFileNames,
-      errorCount,
-      availableTerminalHeight,
-      mainAreaWidth,
-      staticAreaMaxItemHeight,
-      staticExtraHeight,
-      dialogsVisible,
-      pendingHistoryItems,
-      nightly,
-      branchName,
-      sessionStats,
-      terminalWidth,
-      terminalHeight,
-      mainControlsRef,
-      currentIDE,
-      updateInfo,
-      showIdeRestartPrompt,
-      ideTrustRestartReason,
-      isRestarting,
-      currentModel,
-      extensionsUpdateState,
       activePtyId,
-      historyManager,
       embeddedShellFocused,
-      // Vision switch dialog
-      isVisionSwitchDialogOpen,
-      // Welcome back dialog
-      showWelcomeBackDialog,
-      welcomeBackInfo,
-      welcomeBackChoice,
-      // Subagent dialogs
-      isSubagentCreateDialogOpen,
-      isAgentsManagerDialogOpen,
-    ],
-  );
+    };
+
+    return {
+      ...baseState,
+      ...dialogState,
+      ...uiDisplayState,
+      ...commandState,
+      ...streamingStateData,
+    } as UIState;
+  }, [
+    historyManager,
+    isConfigInitialized,
+    isFocused,
+    nightly,
+    branchName,
+    currentModel,
+    userTier,
+    errorCount,
+    terminalWidth,
+    terminalHeight,
+    mainControlsRef,
+    currentIDE,
+    updateInfo,
+    sessionStats,
+    buffer,
+    inputWidth,
+    suggestionsWidth,
+    isInputActive,
+    dialogsVisible,
+    pendingHistoryItems,
+    availableTerminalHeight,
+    mainAreaWidth,
+    staticAreaMaxItemHeight,
+    staticExtraHeight,
+    isThemeDialogOpen,
+    themeError,
+    isAuthenticating,
+    authError,
+    isAuthDialogOpen,
+    pendingAuthType,
+    // Qwen OAuth state
+    qwenAuthState,
+    editorError,
+    isEditorDialogOpen,
+    isSettingsDialogOpen,
+    isModelDialogOpen,
+    isPermissionsDialogOpen,
+    isApprovalModeDialogOpen,
+    isFolderTrustDialogOpen,
+    isTrustedFolder,
+    // Vision switch dialog
+    isVisionSwitchDialogOpen,
+    // Welcome back dialog
+    showWelcomeBackDialog,
+    welcomeBackInfo,
+    welcomeBackChoice,
+    // Subagent dialogs
+    isSubagentCreateDialogOpen,
+    isAgentsManagerDialogOpen,
+    showWorkspaceMigrationDialog,
+    workspaceExtensions,
+    showIdeRestartPrompt,
+    ideTrustRestartReason,
+    isRestarting,
+    corgiMode,
+    debugMessage,
+    quittingMessages,
+    constrainHeight,
+    showErrorDetails,
+    showToolDescriptions,
+    showEscapePrompt,
+    ctrlCPressedOnce,
+    ctrlDPressedOnce,
+    filteredConsoleMessages,
+    elapsedTime,
+    currentLoadingPhrase,
+    historyRemountKey,
+    messageQueue,
+    showAutoAcceptIndicator,
+    slashCommands,
+    pendingSlashCommandHistoryItems,
+    commandContext,
+    shellConfirmationRequest,
+    confirmationRequest,
+    confirmUpdateExtensionRequests,
+    loopDetectionConfirmationRequest,
+    quitConfirmationRequest,
+    userMessages,
+    streamingState,
+    initError,
+    pendingGeminiHistoryItems,
+    thought,
+    shellModeActive,
+    geminiMdFileCount,
+    shouldShowIdePrompt,
+    ideContextState,
+    proQuotaRequest,
+    contextFileNames,
+    activePtyId,
+    embeddedShellFocused,
+    extensionsUpdateState, // Add the missing dependency
+  ]);
 
   const uiActions: UIActions = useMemo(
     () => ({

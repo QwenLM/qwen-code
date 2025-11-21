@@ -57,29 +57,51 @@ export interface InputPromptProps {
 }
 
 // The input content, input container, and input suggestions list may have different widths
-export const calculatePromptWidths = (terminalWidth: number) => {
-  const widthFraction = 0.9;
-  const FRAME_PADDING_AND_BORDER = 4; // Border (2) + padding (2)
-  const PROMPT_PREFIX_WIDTH = 2; // '> ' or '! '
-  const MIN_CONTENT_WIDTH = 2;
+// Optimized version with memoization for better performance
+export const calculatePromptWidths = (() => {
+  const cache = new Map<
+    number,
+    {
+      inputWidth: number;
+      containerWidth: number;
+      suggestionsWidth: number;
+      frameOverhead: number;
+    }
+  >();
 
-  const innerContentWidth =
-    Math.floor(terminalWidth * widthFraction) -
-    FRAME_PADDING_AND_BORDER -
-    PROMPT_PREFIX_WIDTH;
+  return (terminalWidth: number) => {
+    // Use cached result if available
+    const cached = cache.get(terminalWidth);
+    if (cached) return cached;
 
-  const inputWidth = Math.max(MIN_CONTENT_WIDTH, innerContentWidth);
-  const FRAME_OVERHEAD = FRAME_PADDING_AND_BORDER + PROMPT_PREFIX_WIDTH;
-  const containerWidth = inputWidth + FRAME_OVERHEAD;
-  const suggestionsWidth = Math.max(20, Math.floor(terminalWidth * 1.0));
+    const widthFraction = 0.9;
+    const FRAME_PADDING_AND_BORDER = 4; // Border (2) + padding (2)
+    const PROMPT_PREFIX_WIDTH = 2; // '> ' or '! '
+    const MIN_CONTENT_WIDTH = 2;
 
-  return {
-    inputWidth,
-    containerWidth,
-    suggestionsWidth,
-    frameOverhead: FRAME_OVERHEAD,
-  } as const;
-};
+    const innerContentWidth =
+      Math.floor(terminalWidth * widthFraction) -
+      FRAME_PADDING_AND_BORDER -
+      PROMPT_PREFIX_WIDTH;
+
+    const inputWidth = Math.max(MIN_CONTENT_WIDTH, innerContentWidth);
+    const FRAME_OVERHEAD = FRAME_PADDING_AND_BORDER + PROMPT_PREFIX_WIDTH;
+    const containerWidth = inputWidth + FRAME_OVERHEAD;
+    const suggestionsWidth = Math.max(20, Math.floor(terminalWidth * 1.0));
+
+    const result = {
+      inputWidth,
+      containerWidth,
+      suggestionsWidth,
+      frameOverhead: FRAME_OVERHEAD,
+    } as const;
+
+    // Cache the result
+    cache.set(terminalWidth, result);
+
+    return result;
+  };
+})();
 
 export const InputPrompt: React.FC<InputPromptProps> = ({
   buffer,

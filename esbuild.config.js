@@ -65,7 +65,11 @@ esbuild
     loader: { '.node': 'file' },
     metafile: true,
     write: true,
-    keepNames: true,
+    keepNames: false, // Disable to allow minification of function names
+    minify: true, // Enable minification to reduce bundle size
+    treeShaking: true, // Enable tree-shaking to remove dead code
+    legalComments: 'none', // Remove legal comments to reduce bundle size
+    sourcemap: false, // Disable sourcemaps in production to reduce bundle size
   })
   .then(({ metafile }) => {
     if (process.env.DEV === 'true') {

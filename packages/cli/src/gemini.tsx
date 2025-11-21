@@ -78,17 +78,22 @@ export function validateDnsResolutionOrder(
 }
 
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
-  const totalMemoryMB = os.totalmem() / (1024 * 1024);
+  const totalMemoryMB = Math.floor(os.totalmem() / (1024 * 1024));
   const heapStats = v8.getHeapStatistics();
   const currentMaxOldSpaceSizeMb = Math.floor(
     heapStats.heap_size_limit / 1024 / 1024,
   );
 
-  // Set target to 50% of total memory
-  const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.5);
+  // Set target to 40% of total memory (was 50%, reduced to allow more room for other processes)
+  const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.4);
+
+  // Only adjust if significantly different (at least 512MB difference) to avoid frequent relaunches
+  const memoryDifference = targetMaxOldSpaceSizeInMB - currentMaxOldSpaceSizeMb;
+  const minimumAdjustmentThreshold = 512; // 512MB minimum difference to trigger adjustment
+
   if (isDebugMode) {
     console.debug(
-      `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB`,
+      `Current heap size limit: ${currentMaxOldSpaceSizeMb.toFixed(2)} MB, Target: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB, Difference: ${memoryDifference.toFixed(2)} MB`,
     );
   }
 
@@ -96,10 +101,20 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
     return [];
   }
 
-  if (targetMaxOldSpaceSizeInMB > currentMaxOldSpaceSizeMb) {
+  if (memoryDifference > minimumAdjustmentThreshold) {
     if (isDebugMode) {
       console.debug(
-        `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB`,
+        `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
+      );
+    }
+    return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
+  }
+
+  // If target is significantly smaller than current, consider reducing memory usage
+  if (memoryDifference < -minimumAdjustmentThreshold) {
+    if (isDebugMode) {
+      console.debug(
+        `Reducing memory allocation: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
       );
     }
     return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
@@ -320,7 +335,7 @@ export async function main() {
   }
 
   // We are now past the logic handling potentially launching a child process
-  // to run Gemini CLI. It is now safe to perform expensive initialization that
+  // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
   {
     const extensionEnablementManager = new ExtensionEnablementManager(
@@ -374,7 +389,8 @@ export async function main() {
 
     setMaxSizedBoxDebugging(isDebugMode);
 
-    const initializationResult = await initializeApp(config, settings);
+    // Initialize app in the background to avoid blocking other operations
+    const initializationPromise = initializeApp(config, settings);
 
     if (
       settings.merged.security?.auth?.selectedType ===
@@ -390,19 +406,23 @@ export async function main() {
     }
 
     let input = config.getQuestion();
-    const startupWarnings = [
-      ...(await getStartupWarnings()),
-      ...(await getUserStartupWarnings({
+
+    // Load startup warnings in parallel with other initialization
+    const startupWarningsPromise = Promise.all([
+      getStartupWarnings(),
+      getUserStartupWarnings({
         workspaceRoot: process.cwd(),
         useRipgrep: settings.merged.tools?.useRipgrep ?? true,
         useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
-      })),
-    ];
+      }),
+    ]).then(([warnings1, warnings2]) => [...warnings1, ...warnings2]);
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
+      const initializationResult = await initializationPromise;
+      const startupWarnings = await startupWarningsPromise;
       await startInteractiveUI(
         config,
         settings,
@@ -454,7 +474,7 @@ export async function main() {
 
     if (!input) {
       console.error(
-        `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
+        `No input provided via stdin. Input can be provided by piping data into qwen or using the --prompt option.`,
       );
       process.exit(1);
     }
@@ -471,6 +491,12 @@ export async function main() {
     if (config.getDebugMode()) {
       console.log('Session ID: %s', sessionId);
     }
+
+    // Wait for initialization to complete before processing non-interactive commands
+    await initializationPromise;
+
+    // Process startup warnings if any
+    await startupWarningsPromise;
 
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run
