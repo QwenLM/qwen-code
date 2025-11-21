@@ -29,7 +29,7 @@
 import type { IControlContext } from './ControlContext.js';
 import type { ControlDispatcher } from './ControlDispatcher.js';
 import type {
-  // PermissionServiceAPI,
+  PermissionServiceAPI,
   SystemServiceAPI,
   // McpServiceAPI,
   // HookServiceAPI,
@@ -61,43 +61,43 @@ export class ControlService {
    * Handles tool execution permissions, approval checks, and callbacks.
    * Delegates to the shared PermissionController instance.
    */
-  // get permission(): PermissionServiceAPI {
-  //   const controller = this.dispatcher.permissionController;
-  //   return {
-  //     /**
-  //      * Check if a tool should be allowed based on current permission settings
-  //      *
-  //      * Evaluates permission mode and tool registry to determine if execution
-  //      * should proceed. Can optionally modify tool arguments based on confirmation details.
-  //      *
-  //      * @param toolRequest - Tool call request information
-  //      * @param confirmationDetails - Optional confirmation details for UI
-  //      * @returns Permission decision with optional updated arguments
-  //      */
-  //     shouldAllowTool: controller.shouldAllowTool.bind(controller),
-  //
-  //     /**
-  //      * Build UI suggestions for tool confirmation dialogs
-  //      *
-  //      * Creates actionable permission suggestions based on tool confirmation details.
-  //      *
-  //      * @param confirmationDetails - Tool confirmation details
-  //      * @returns Array of permission suggestions or null
-  //      */
-  //     buildPermissionSuggestions:
-  //       controller.buildPermissionSuggestions.bind(controller),
-  //
-  //     /**
-  //      * Get callback for monitoring tool call status updates
-  //      *
-  //      * Returns callback function for integration with CoreToolScheduler.
-  //      *
-  //      * @returns Callback function for tool call updates
-  //      */
-  //     getToolCallUpdateCallback:
-  //       controller.getToolCallUpdateCallback.bind(controller),
-  //   };
-  // }
+  get permission(): PermissionServiceAPI {
+    const controller = this.dispatcher.permissionController;
+    return {
+      /**
+       * Check if a tool should be allowed based on current permission settings
+       *
+       * Evaluates permission mode and tool registry to determine if execution
+       * should proceed. Can optionally modify tool arguments based on confirmation details.
+       *
+       * @param toolRequest - Tool call request information
+       * @param confirmationDetails - Optional confirmation details for UI
+       * @returns Permission decision with optional updated arguments
+       */
+      shouldAllowTool: controller.shouldAllowTool.bind(controller),
+
+      /**
+       * Build UI suggestions for tool confirmation dialogs
+       *
+       * Creates actionable permission suggestions based on tool confirmation details.
+       *
+       * @param confirmationDetails - Tool confirmation details
+       * @returns Array of permission suggestions or null
+       */
+      buildPermissionSuggestions:
+        controller.buildPermissionSuggestions.bind(controller),
+
+      /**
+       * Get callback for monitoring tool call status updates
+       *
+       * Returns callback function for integration with CoreToolScheduler.
+       *
+       * @returns Callback function for tool call updates
+       */
+      getToolCallUpdateCallback:
+        controller.getToolCallUpdateCallback.bind(controller),
+    };
+  }
 
   /**
    * System Domain API

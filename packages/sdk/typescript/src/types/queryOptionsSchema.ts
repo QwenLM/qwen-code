@@ -3,7 +3,7 @@
  */
 
 import { z } from 'zod';
-import type { PermissionCallback } from './config.js';
+import type { CanUseTool } from './config.js';
 
 /**
  * Schema for external MCP server configuration
@@ -35,7 +35,7 @@ export const QueryOptionsSchema = z
     env: z.record(z.string(), z.string()).optional(),
     permissionMode: z.enum(['default', 'plan', 'auto-edit', 'yolo']).optional(),
     canUseTool: z
-      .custom<PermissionCallback>((val) => typeof val === 'function', {
+      .custom<CanUseTool>((val) => typeof val === 'function', {
         message: 'canUseTool must be a function',
       })
       .optional(),

@@ -79,7 +79,6 @@
         "--",
         "-p",
         "${input:prompt}",
-        "-y",
         "--output-format",
         "stream-json"
       ],

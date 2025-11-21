@@ -160,8 +160,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
             session_id: sessionId,
             message: {
               role: 'user',
-              content:
-                'My name is Alice. Remember this during our current conversation.',
+              content: 'My name is Alice. Hello!',
             },
             parent_tool_use_id: null,
           } as CLIUserMessage;
@@ -212,80 +211,72 @@ describe('Multi-Turn Conversations (E2E)', () => {
   });
 
   describe('Tool Usage in Multi-Turn', () => {
-    it(
-      'should handle tool usage across multiple turns',
-      async () => {
-        async function* createToolConversation(): AsyncIterable<CLIUserMessage> {
-          const sessionId = crypto.randomUUID();
+    it('should handle tool usage across multiple turns', async () => {
+      async function* createToolConversation(): AsyncIterable<CLIUserMessage> {
+        const sessionId = crypto.randomUUID();
 
-          yield {
-            type: 'user',
-            session_id: sessionId,
-            message: {
-              role: 'user',
-              content: 'List the files in the current directory',
-            },
-            parent_tool_use_id: null,
-          } as CLIUserMessage;
-
-          await new Promise((resolve) => setTimeout(resolve, 200));
-
-          yield {
-            type: 'user',
-            session_id: sessionId,
-            message: {
-              role: 'user',
-              content: 'Now tell me about the package.json file specifically',
-            },
-            parent_tool_use_id: null,
-          } as CLIUserMessage;
-        }
-
-        const q = query({
-          prompt: createToolConversation(),
-          options: {
-            ...SHARED_TEST_OPTIONS,
-            cwd: process.cwd(),
-            debug: false,
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            content: 'List the files in the current directory',
           },
-        });
+          parent_tool_use_id: null,
+        } as CLIUserMessage;
 
-        const messages: CLIMessage[] = [];
-        let toolUseCount = 0;
-        let assistantCount = 0;
+        await new Promise((resolve) => setTimeout(resolve, 200));
 
-        try {
-          for await (const message of q) {
-            messages.push(message);
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            content: 'Now tell me about the package.json file specifically',
+          },
+          parent_tool_use_id: null,
+        } as CLIUserMessage;
+      }
 
-            if (isCLIAssistantMessage(message)) {
-              const hasToolUseBlock = message.message.content.some(
-                (block: ContentBlock): block is ToolUseBlock =>
-                  block.type === 'tool_use',
-              );
-              if (hasToolUseBlock) {
-                toolUseCount++;
-              }
-            }
+      const q = query({
+        prompt: createToolConversation(),
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: process.cwd(),
+          debug: false,
+        },
+      });
 
-            if (isCLIAssistantMessage(message)) {
-              assistantCount++;
-            }
+      const messages: CLIMessage[] = [];
+      let toolUseCount = 0;
+      let assistantCount = 0;
 
-            if (isCLIResultMessage(message)) {
-              break;
+      try {
+        for await (const message of q) {
+          messages.push(message);
+
+          if (isCLIAssistantMessage(message)) {
+            const hasToolUseBlock = message.message.content.some(
+              (block: ContentBlock): block is ToolUseBlock =>
+                block.type === 'tool_use',
+            );
+            if (hasToolUseBlock) {
+              toolUseCount++;
             }
           }
 
-          expect(messages.length).toBeGreaterThan(0);
-          expect(toolUseCount).toBeGreaterThan(0); // Should use tools
-          expect(assistantCount).toBeGreaterThanOrEqual(2); // Should have responses to both questions
-        } finally {
-          await q.close();
+          if (isCLIAssistantMessage(message)) {
+            assistantCount++;
+          }
         }
-      },
-      TEST_TIMEOUT,
-    );
+
+        expect(messages.length).toBeGreaterThan(0);
+        expect(toolUseCount).toBeGreaterThan(0); // Should use tools
+        expect(assistantCount).toBeGreaterThanOrEqual(2); // Should have responses to both questions
+      } finally {
+        await q.close();
+      }
+    }, 60000); //TEST_TIMEOUT,
   });
 
   describe('Message Flow and Sequencing', () => {

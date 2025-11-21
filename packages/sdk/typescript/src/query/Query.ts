@@ -12,7 +12,6 @@ import type {
   CLIControlRequest,
   CLIControlResponse,
   ControlCancelRequest,
-  PermissionApproval,
   PermissionSuggestion,
 } from '../types/protocol.js';
 import {
@@ -299,7 +298,7 @@ export class Query implements AsyncIterable<CLIMessage> {
       return;
     }
 
-    if (process.env['DEBUG_SDK']) {
+    if (process.env['DEBUG']) {
       console.warn('[Query] Unknown message type:', message);
     }
     this.inputStream.enqueue(message as CLIMessage);
@@ -320,12 +319,12 @@ export class Query implements AsyncIterable<CLIMessage> {
 
       switch (payload.subtype) {
         case 'can_use_tool':
-          response = (await this.handlePermissionRequest(
+          response = await this.handlePermissionRequest(
             payload.tool_name,
             payload.input as Record<string, unknown>,
             payload.permission_suggestions,
             requestAbortController.signal,
-          )) as unknown as Record<string, unknown>;
+          );
           break;
 
         case 'mcp_message':
@@ -360,15 +359,17 @@ export class Query implements AsyncIterable<CLIMessage> {
 
   /**
    * Handle permission request (can_use_tool)
+   * Converts PermissionResult to CLI-expected format: { behavior: 'allow', updatedInput: ... } or { behavior: 'deny', message: ... }
    */
   private async handlePermissionRequest(
     toolName: string,
     toolInput: Record<string, unknown>,
     permissionSuggestions: PermissionSuggestion[] | null,
     signal: AbortSignal,
-  ): Promise<PermissionApproval> {
+  ): Promise<Record<string, unknown>> {
+    /* Default deny all wildcard tool requests */
     if (!this.options.canUseTool) {
-      return { allowed: true };
+      return { behavior: 'deny', message: 'Denied' };
     }
 
     try {
@@ -390,21 +391,51 @@ export class Query implements AsyncIterable<CLIMessage> {
         timeoutPromise,
       ]);
 
+      // Handle boolean return (backward compatibility)
       if (typeof result === 'boolean') {
-        return { allowed: result };
+        return result
+          ? { behavior: 'allow', updatedInput: toolInput }
+          : { behavior: 'deny', message: 'Denied' };
       }
-      return result as PermissionApproval;
+
+      // Handle PermissionResult format
+      const permissionResult = result as {
+        behavior: 'allow' | 'deny';
+        updatedInput?: Record<string, unknown>;
+        message?: string;
+        interrupt?: boolean;
+      };
+
+      if (permissionResult.behavior === 'allow') {
+        return {
+          behavior: 'allow',
+          updatedInput: permissionResult.updatedInput ?? toolInput,
+        };
+      } else {
+        return {
+          behavior: 'deny',
+          message: permissionResult.message ?? 'Denied',
+          ...(permissionResult.interrupt !== undefined
+            ? { interrupt: permissionResult.interrupt }
+            : {}),
+        };
+      }
     } catch (error) {
       /**
        * Timeout or error → deny (fail-safe).
        * This ensures that any issues with the permission callback
        * result in a safe default of denying access.
        */
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
       console.warn(
         '[Query] Permission callback error (denying by default):',
-        error instanceof Error ? error.message : String(error),
+        errorMessage,
       );
-      return { allowed: false };
+      return {
+        behavior: 'deny',
+        message: `Permission check failed: ${errorMessage}`,
+      };
     }
   }
 

@@ -3,7 +3,7 @@
  */
 
 import type { ToolDefinition as ToolDef } from './mcp.js';
-import type { PermissionMode } from './protocol.js';
+import type { PermissionMode, PermissionSuggestion } from './protocol.js';
 import type { ExternalMcpServerConfig } from './queryOptionsSchema.js';
 
 export type { ToolDef as ToolDefinition };
@@ -161,14 +161,15 @@ type ToolInput = Record<string, unknown>;
  *
  * @param toolName - Name of the tool being executed
  * @param input - Input parameters for the tool
- * @param options - Options including abort signal
+ * @param options - Options including abort signal and suggestions
  * @returns Promise with permission result
  */
-type CanUseTool = (
+export type CanUseTool = (
   toolName: string,
   input: ToolInput,
   options: {
     signal: AbortSignal;
+    suggestions?: PermissionSuggestion[] | null;
   },
 ) => Promise<PermissionResult>;
 

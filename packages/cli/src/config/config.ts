@@ -758,8 +758,14 @@ export async function loadCliConfig(
     interactive = false;
   }
   // In non-interactive mode, exclude tools that require a prompt.
+  // However, if stream-json input is used, control can be requested via JSON messages,
+  // so tools should not be excluded in that case.
   const extraExcludes: string[] = [];
-  if (!interactive && !argv.experimentalAcp) {
+  if (
+    !interactive &&
+    !argv.experimentalAcp &&
+    inputFormat !== InputFormat.STREAM_JSON
+  ) {
     switch (approvalMode) {
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:

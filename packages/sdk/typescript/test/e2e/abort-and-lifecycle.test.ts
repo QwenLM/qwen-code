@@ -81,7 +81,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         const controller = new AbortController();
 
         const q = query({
-          prompt: 'Write a detailed explanation about TypeScript',
+          prompt: 'Hello',
           options: {
             ...SHARED_TEST_OPTIONS,
             abortController: controller,

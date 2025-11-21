@@ -17,6 +17,8 @@
 import type {
   ToolCallRequestInfo,
   WaitingToolCall,
+  ToolExecuteConfirmationDetails,
+  ToolMcpConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
   InputFormat,
@@ -430,17 +432,14 @@ export class PermissionController extends BaseController {
         toolCall.confirmationDetails,
       );
 
-      const response = await this.sendControlRequest(
-        {
-          subtype: 'can_use_tool',
-          tool_name: toolCall.request.name,
-          tool_use_id: toolCall.request.callId,
-          input: toolCall.request.args,
-          permission_suggestions: permissionSuggestions,
-          blocked_path: null,
-        } as CLIControlPermissionRequest,
-        30000,
-      );
+      const response = await this.sendControlRequest({
+        subtype: 'can_use_tool',
+        tool_name: toolCall.request.name,
+        tool_use_id: toolCall.request.callId,
+        input: toolCall.request.args,
+        permission_suggestions: permissionSuggestions,
+        blocked_path: null,
+      } as CLIControlPermissionRequest);
 
       if (response.subtype !== 'success') {
         await toolCall.confirmationDetails.onConfirm(
@@ -462,8 +461,15 @@ export class PermissionController extends BaseController {
           ToolConfirmationOutcome.ProceedOnce,
         );
       } else {
+        // Extract cancel message from response if available
+        const cancelMessage =
+          typeof payload['message'] === 'string'
+            ? payload['message']
+            : undefined;
+
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          cancelMessage ? { cancelMessage } : undefined,
         );
       }
     } catch (error) {
@@ -473,9 +479,23 @@ export class PermissionController extends BaseController {
           error,
         );
       }
-      await toolCall.confirmationDetails.onConfirm(
-        ToolConfirmationOutcome.Cancel,
-      );
+      // On error, use default cancel message
+      // Only pass payload for exec and mcp types that support it
+      const confirmationType = toolCall.confirmationDetails.type;
+      if (confirmationType === 'exec' || confirmationType === 'mcp') {
+        const execOrMcpDetails = toolCall.confirmationDetails as
+          | ToolExecuteConfirmationDetails
+          | ToolMcpConfirmationDetails;
+        await execOrMcpDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          undefined,
+        );
+      } else {
+        // For other types, don't pass payload (backward compatible)
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+        );
+      }
     } finally {
       this.pendingOutgoingRequests.delete(toolCall.request.callId);
     }

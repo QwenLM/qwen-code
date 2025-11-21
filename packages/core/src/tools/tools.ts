@@ -531,13 +531,18 @@ export interface ToolEditConfirmationDetails {
 export interface ToolConfirmationPayload {
   // used to override `modifiedProposedContent` for modifiable tools in the
   // inline modify flow
-  newContent: string;
+  newContent?: string;
+  // used to provide custom cancellation message when outcome is Cancel
+  cancelMessage?: string;
 }
 
 export interface ToolExecuteConfirmationDetails {
   type: 'exec';
   title: string;
-  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
   command: string;
   rootCommand: string;
 }
@@ -548,7 +553,10 @@ export interface ToolMcpConfirmationDetails {
   serverName: string;
   toolName: string;
   toolDisplayName: string;
-  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
 }
 
 export interface ToolInfoConfirmationDetails {
@@ -573,6 +581,11 @@ export interface ToolPlanConfirmationDetails {
   onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
 }
 
+/**
+ * TODO:
+ * 1. support explicit denied outcome
+ * 2. support proceed with modified input
+ */
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
   ProceedAlways = 'proceed_always',

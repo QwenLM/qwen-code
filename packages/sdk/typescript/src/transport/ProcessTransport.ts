@@ -283,6 +283,10 @@ export class ProcessTransport implements Transport {
       throw new Error('Cannot write to closed transport');
     }
 
+    if (this.childStdin.writableEnded) {
+      throw new Error('Cannot write to ended stream');
+    }
+
     if (this.childProcess?.killed || this.childProcess?.exitCode !== null) {
       throw new Error('Cannot write to terminated process');
     }
@@ -293,17 +297,21 @@ export class ProcessTransport implements Transport {
       );
     }
 
-    if (process.env['DEBUG_SDK']) {
+    if (process.env['DEBUG']) {
       this.logForDebugging(
-        `[ProcessTransport] Writing to stdin: ${message.substring(0, 100)}`,
+        `[ProcessTransport] Writing to stdin (${message.length} bytes): ${message.substring(0, 100)}`,
       );
     }
 
     try {
       const written = this.childStdin.write(message);
-      if (!written && process.env['DEBUG_SDK']) {
+      if (!written) {
         this.logForDebugging(
-          '[ProcessTransport] Write buffer full, data queued',
+          `[ProcessTransport] Write buffer full (${message.length} bytes), data queued. Waiting for drain event...`,
+        );
+      } else if (process.env['DEBUG']) {
+        this.logForDebugging(
+          `[ProcessTransport] Write successful (${message.length} bytes)`,
         );
       }
     } catch (error) {
@@ -322,6 +330,7 @@ export class ProcessTransport implements Transport {
     const rl = readline.createInterface({
       input: this.childStdout,
       crlfDelay: Infinity,
+      terminal: false,
     });
 
     try {

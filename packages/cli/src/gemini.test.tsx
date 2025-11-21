@@ -479,6 +479,10 @@ describe('gemini.tsx main function kitty protocol', () => {
       inputFormat: undefined,
       outputFormat: undefined,
       includePartialMessages: undefined,
+      coreTools: undefined,
+      excludeTools: undefined,
+      authType: undefined,
+      maxSessionTurns: undefined,
     });
 
     await main();
