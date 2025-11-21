@@ -12,7 +12,13 @@ describe('JSON output', () => {
 
   beforeEach(async () => {
     rig = new TestRig();
-    await rig.setup('json-output-test');
+    await rig.setup('json-output-test', {
+      settings: {
+        security: {
+          authType: 'openai',
+        },
+      },
+    });
   });
 
   afterEach(async () => {
