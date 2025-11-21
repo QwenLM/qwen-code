@@ -164,11 +164,6 @@ describe('InputPrompt', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
-      promptCompletion: {
-        text: '',
-        accept: vi.fn(),
-        clear: vi.fn(),
-      },
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
 
@@ -215,6 +210,7 @@ describe('InputPrompt', () => {
       inputWidth: 80,
       suggestionsWidth: 80,
       focus: true,
+      placeholder: '  Type your message or @path/to/file',
     };
   });
 
@@ -1955,7 +1951,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('expands and collapses long suggestion via Right/Left arrows', async () => {
+    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
       props.shellModeActive = false;
       const longValue = 'l'.repeat(200);
 

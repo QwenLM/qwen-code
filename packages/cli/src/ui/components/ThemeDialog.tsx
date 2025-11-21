@@ -17,6 +17,7 @@ import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
+import { t } from '../../i18n/index.js';
 
 interface ThemeDialogProps {
   /** Callback function when a theme is selected */
@@ -198,7 +199,8 @@ export function ThemeDialog({
           {/* Left Column: Selection */}
           <Box flexDirection="column" width="45%" paddingRight={2}>
             <Text bold={mode === 'theme'} wrap="truncate">
-              {mode === 'theme' ? '> ' : '  '}Select Theme{' '}
+              {mode === 'theme' ? '> ' : '  '}
+              {t('Select Theme')}{' '}
               <Text color={theme.text.secondary}>
                 {otherScopeModifiedMessage}
               </Text>
@@ -218,7 +220,7 @@ export function ThemeDialog({
           {/* Right Column: Preview */}
           <Box flexDirection="column" width="55%" paddingLeft={2}>
             <Text bold color={theme.text.primary}>
-              Preview
+              {t('Preview')}
             </Text>
             {/* Get the Theme object for the highlighted theme, fall back to default if not found */}
             {(() => {
@@ -274,8 +276,9 @@ def fibonacci(n):
       )}
       <Box marginTop={1}>
         <Text color={theme.text.secondary} wrap="truncate">
-          (Use Enter to {mode === 'theme' ? 'select' : 'apply scope'}, Tab to{' '}
-          {mode === 'theme' ? 'configure scope' : 'select theme'})
+          {mode === 'theme'
+            ? t('(Use Enter to select, Tab to configure scope)')
+            : t('(Use Enter to apply scope, Tab to select theme)')}
         </Text>
       </Box>
     </Box>

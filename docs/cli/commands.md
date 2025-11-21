@@ -195,6 +195,16 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/init`**
   - **Description:** Analyzes the current directory and creates a `QWEN.md` context file by default (or the filename specified by `contextFileName`). If a non-empty file already exists, no changes are made. The command seeds an empty file and prompts the model to populate it with project-specific instructions.
 
+- [**`/language`**](./language.md)
+  - **Description:** View or change the language setting for both UI and LLM output.
+  - **Sub-commands:**
+    - **`ui`**: Set the UI language (zh-CN or en-US)
+    - **`output`**: Set the LLM output language
+  - **Usage:** `/language [ui|output] [language]`
+  - **Examples:**
+    - `/language ui zh-CN` (set UI language to Simplified Chinese)
+    - `/language output English` (set LLM output language to English)
+
 ### Custom Commands
 
 For a quick start, see the [example](#example-a-pure-function-refactoring-command) below.

@@ -99,13 +99,13 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         data.toolCalls && data.toolCalls.length > MAX_TOOL_CALLS;
 
       if (hasMoreToolCalls || hasMoreLines) {
-        return 'Press ctrl+r to show less, ctrl+e to show more.';
+        return 'Press ctrl+e to show less, ctrl+f to show more.';
       }
-      return 'Press ctrl+r to show less.';
+      return 'Press ctrl+e to show less.';
     }
 
     if (displayMode === 'verbose') {
-      return 'Press ctrl+e to show less.';
+      return 'Press ctrl+f to show less.';
     }
 
     return '';
@@ -114,13 +114,13 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   // Handle keyboard shortcuts to control display mode
   useKeypress(
     (key) => {
-      if (key.ctrl && key.name === 'r') {
-        // ctrl+r toggles between compact and default
+      if (key.ctrl && key.name === 'e') {
+        // ctrl+e toggles between compact and default
         setDisplayMode((current) =>
           current === 'compact' ? 'default' : 'compact',
         );
-      } else if (key.ctrl && key.name === 'e') {
-        // ctrl+e toggles between default and verbose
+      } else if (key.ctrl && key.name === 'f') {
+        // ctrl+f toggles between default and verbose
         setDisplayMode((current) =>
           current === 'default' ? 'verbose' : 'default',
         );
@@ -157,7 +157,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
                 {data.toolCalls.length > 1 && !data.pendingConfirmation && (
                   <Box flexDirection="row" paddingLeft={4}>
                     <Text color={theme.text.secondary}>
-                      +{data.toolCalls.length - 1} more tool calls (ctrl+r to
+                      +{data.toolCalls.length - 1} more tool calls (ctrl+e to
                       expand)
                     </Text>
                   </Box>

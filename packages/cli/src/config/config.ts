@@ -24,6 +24,7 @@ import {
   WriteFileTool,
   resolveTelemetrySettings,
   FatalConfigError,
+  Storage,
   InputFormat,
   OutputFormat,
 } from '@qwen-code/qwen-code-core';
@@ -632,6 +633,20 @@ export async function loadCliConfig(
     (e) => e.contextFiles,
   );
 
+  // Automatically load output-language.md if it exists
+  const outputLanguageFilePath = path.join(
+    Storage.getGlobalQwenDir(),
+    'output-language.md',
+  );
+  if (fs.existsSync(outputLanguageFilePath)) {
+    extensionContextFilePaths.push(outputLanguageFilePath);
+    if (debugMode) {
+      logger.debug(
+        `Found output-language.md, adding to context files: ${outputLanguageFilePath}`,
+      );
+    }
+  }
+
   const fileService = new FileDiscoveryService(cwd);
 
   const fileFiltering = {
@@ -904,7 +919,6 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
-    enablePromptCompletion: settings.general?.enablePromptCompletion ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? false,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     vlmSwitchMode,

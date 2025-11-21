@@ -5,6 +5,7 @@
  */
 
 import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 export type AvailableModel = {
   id: string;
@@ -20,14 +21,20 @@ export const AVAILABLE_MODELS_QWEN: AvailableModel[] = [
   {
     id: MAINLINE_CODER,
     label: MAINLINE_CODER,
-    description:
-      'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
+    get description() {
+      return t(
+        'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
+      );
+    },
   },
   {
     id: MAINLINE_VLM,
     label: MAINLINE_VLM,
-    description:
-      'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
+    get description() {
+      return t(
+        'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
+      );
+    },
     isVision: true,
   },
 ];

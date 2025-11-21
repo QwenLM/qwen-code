@@ -345,44 +345,47 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
     });
 
     if (!response.ok) {
-      // Parse the response as JSON to check for OAuth RFC 8628 standard errors
+      // Read response body as text first (can only be read once)
+      const responseText = await response.text();
+
+      // Try to parse as JSON to check for OAuth RFC 8628 standard errors
+      let errorData: ErrorData | null = null;
       try {
-        const errorData = (await response.json()) as ErrorData;
-
-        // According to OAuth RFC 8628, handle standard polling responses
-        if (
-          response.status === 400 &&
-          errorData.error === 'authorization_pending'
-        ) {
-          // User has not yet approved the authorization request. Continue polling.
-          return { status: 'pending' } as DeviceTokenPendingData;
-        }
-
-        if (response.status === 429 && errorData.error === 'slow_down') {
-          // Client is polling too frequently. Return pending with slowDown flag.
-          return {
-            status: 'pending',
-            slowDown: true,
-          } as DeviceTokenPendingData;
-        }
-
-        // Handle other 400 errors (access_denied, expired_token, etc.) as real errors
-
-        // For other errors, throw with proper error information
-        const error = new Error(
-          `Device token poll failed: ${errorData.error || 'Unknown error'} - ${errorData.error_description || 'No details provided'}`,
-        );
-        (error as Error & { status?: number }).status = response.status;
-        throw error;
+        errorData = JSON.parse(responseText) as ErrorData;
       } catch (_parseError) {
-        // If JSON parsing fails, fall back to text response
-        const errorData = await response.text();
+        // If JSON parsing fails, use text response
         const error = new Error(
-          `Device token poll failed: ${response.status} ${response.statusText}. Response: ${errorData}`,
+          `Device token poll failed: ${response.status} ${response.statusText}. Response: ${responseText}`,
         );
         (error as Error & { status?: number }).status = response.status;
         throw error;
       }
+
+      // According to OAuth RFC 8628, handle standard polling responses
+      if (
+        response.status === 400 &&
+        errorData.error === 'authorization_pending'
+      ) {
+        // User has not yet approved the authorization request. Continue polling.
+        return { status: 'pending' } as DeviceTokenPendingData;
+      }
+
+      if (response.status === 429 && errorData.error === 'slow_down') {
+        // Client is polling too frequently. Return pending with slowDown flag.
+        return {
+          status: 'pending',
+          slowDown: true,
+        } as DeviceTokenPendingData;
+      }
+
+      // Handle other 400 errors (access_denied, expired_token, etc.) as real errors
+
+      // For other errors, throw with proper error information
+      const error = new Error(
+        `Device token poll failed: ${errorData.error || 'Unknown error'} - ${errorData.error_description}`,
+      );
+      (error as Error & { status?: number }).status = response.status;
+      throw error;
     }
 
     return (await response.json()) as DeviceTokenResponse;

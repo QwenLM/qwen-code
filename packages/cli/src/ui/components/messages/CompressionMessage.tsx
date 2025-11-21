@@ -10,6 +10,7 @@ import Spinner from 'ink-spinner';
 import { theme } from '../../semantic-colors.js';
 import { SCREEN_READER_MODEL_PREFIX } from '../../textConstants.js';
 import { CompressionStatus } from '@qwen-code/qwen-code-core';
+import { t } from '../../../i18n/index.js';
 
 export interface CompressionDisplayProps {
   compression: CompressionProps;
@@ -30,22 +31,32 @@ export function CompressionMessage({
 
   const getCompressionText = () => {
     if (isPending) {
-      return 'Compressing chat history';
+      return t('Compressing chat history');
     }
 
     switch (compressionStatus) {
       case CompressionStatus.COMPRESSED:
-        return `Chat history compressed from ${originalTokens} to ${newTokens} tokens.`;
+        return t(
+          'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
+          {
+            originalTokens: String(originalTokens),
+            newTokens: String(newTokens),
+          },
+        );
       case CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT:
         // For smaller histories (< 50k tokens), compression overhead likely exceeds benefits
         if (originalTokens < 50000) {
-          return 'Compression was not beneficial for this history size.';
+          return t('Compression was not beneficial for this history size.');
         }
         // For larger histories where compression should work but didn't,
         // this suggests an issue with the compression process itself
-        return 'Chat history compression did not reduce size. This may indicate issues with the compression prompt.';
+        return t(
+          'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
+        );
       case CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR:
-        return 'Could not compress chat history due to a token counting error.';
+        return t(
+          'Could not compress chat history due to a token counting error.',
+        );
       case CompressionStatus.NOOP:
         return 'Nothing to compress.';
       default:

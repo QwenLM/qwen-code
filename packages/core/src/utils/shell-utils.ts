@@ -10,7 +10,12 @@ import os from 'node:os';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
-import { spawn, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import {
+  execFile,
+  execFileSync,
+  type ExecFileOptions,
+} from 'node:child_process';
+import { accessSync, constants as fsConstants } from 'node:fs';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
 
@@ -455,46 +460,101 @@ export function checkCommandPermissions(
 }
 
 /**
- * Determines whether a given shell command is allowed to execute based on
- * the tool's configuration including allowlists and blocklists.
+ * Executes a command with the given arguments without using a shell.
  *
- * This function operates in "default allow" mode. It is a wrapper around
- * `checkCommandPermissions`.
+ * This is a wrapper around Node.js's `execFile`, which spawns a process
+ * directly without invoking a shell, making it safer than `exec`.
+ * It's suitable for short-running commands with limited output.
  *
- * @param command The shell command string to validate.
- * @param config The application configuration.
- * @returns An object with 'allowed' boolean and optional 'reason' string if not allowed.
+ * @param command The command to execute (e.g., 'git', 'osascript').
+ * @param args Array of arguments to pass to the command.
+ * @param options Optional spawn options including:
+ *   - preserveOutputOnError: If false (default), rejects on error.
+ *                           If true, resolves with output and error code.
+ *   - Other standard spawn options (e.g., cwd, env).
+ * @returns A promise that resolves with stdout, stderr strings, and exit code.
+ * @throws Rejects with an error if the command fails (unless preserveOutputOnError is true).
  */
-export const spawnAsync = (
+export function execCommand(
   command: string,
   args: string[],
-  options?: SpawnOptionsWithoutStdio,
-): Promise<{ stdout: string; stderr: string }> =>
-  new Promise((resolve, reject) => {
-    const child = spawn(command, args, options);
-    let stdout = '';
-    let stderr = '';
-
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
-
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
-
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(`Command failed with exit code ${code}:\n${stderr}`));
-      }
-    });
-
-    child.on('error', (err) => {
-      reject(err);
-    });
+  options: { preserveOutputOnError?: boolean } & ExecFileOptions = {},
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(
+      command,
+      args,
+      { encoding: 'utf8', ...options },
+      (error, stdout, stderr) => {
+        if (error) {
+          if (!options.preserveOutputOnError) {
+            reject(error);
+          } else {
+            resolve({
+              stdout: stdout ?? '',
+              stderr: stderr ?? '',
+              code: typeof error.code === 'number' ? error.code : 1,
+            });
+          }
+          return;
+        }
+        resolve({ stdout: stdout ?? '', stderr: stderr ?? '', code: 0 });
+      },
+    );
+    child.on('error', reject);
   });
+}
+
+/**
+ * Resolves the path of a command in the system's PATH.
+ * @param {string} command The command name (e.g., 'git', 'grep').
+ * @returns {path: string | null; error?: Error} The path of the command, or null if it is not found and any error that occurred.
+ */
+export function resolveCommandPath(command: string): {
+  path: string | null;
+  error?: Error;
+} {
+  try {
+    const isWin = process.platform === 'win32';
+
+    const checkCommand = isWin ? 'where' : 'command';
+    const checkArgs = isWin ? [command] : ['-v', command];
+
+    let result: string | null = null;
+    try {
+      result = execFileSync(checkCommand, checkArgs, {
+        encoding: 'utf8',
+        shell: isWin,
+      }).trim();
+    } catch {
+      console.warn(`Command ${checkCommand} not found`);
+    }
+
+    if (!result) return { path: null, error: undefined };
+    if (!isWin) {
+      accessSync(result, fsConstants.X_OK);
+    }
+    return { path: result, error: undefined };
+  } catch (error) {
+    return {
+      path: null,
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
+/**
+ * Checks if a command is available in the system's PATH.
+ * @param {string} command The command name (e.g., 'git', 'grep').
+ * @returns {available: boolean; error?: Error} The availability of the command and any error that occurred.
+ */
+export function isCommandAvailable(command: string): {
+  available: boolean;
+  error?: Error;
+} {
+  const { path, error } = resolveCommandPath(command);
+  return { available: path !== null, error };
+}
 
 export function isCommandAllowed(
   command: string,
