@@ -17,14 +17,14 @@ export function debounce<T extends (...args: unknown[]) => unknown>(
   func: T,
   wait: number,
   immediate: boolean = false,
-): (...args: Parameters<T>) => ReturnType<T> | undefined {
+): (...args: Parameters<T>) => unknown {
   let timeoutId: NodeJS.Timeout | null = null;
-  let result: ReturnType<T> | undefined = undefined;
+  let result: unknown = undefined;
 
   return function executedFunction(
     this: unknown,
     ...args: Parameters<T>
-  ): ReturnType<T> | undefined {
+  ): unknown {
     const callNow = immediate && !timeoutId;
 
     if (timeoutId) {
