@@ -7,18 +7,28 @@
 import { useEffect } from 'react';
 import process from 'node:process';
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 export const DEFAULT_MEMORY_WARNING_THRESHOLD = 7 * 1024 * 1024 * 1024; // 7GB in bytes
-export const MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
+export const DEFAULT_MEMORY_CHECK_INTERVAL = 60 * 1000; // one minute
 export const MEMORY_WARNING_THRESHOLD_HIGH = 10 * 1024 * 1024 * 1024; // 10GB in bytes
 
 interface MemoryMonitorOptions {
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
+  settings: LoadedSettings;
 }
 
-export const useMemoryMonitor = ({ addItem }: MemoryMonitorOptions) => {
-  // Use the default memory warning threshold
-  const memoryWarningThreshold = DEFAULT_MEMORY_WARNING_THRESHOLD;
+export const useMemoryMonitor = ({
+  addItem,
+  settings,
+}: MemoryMonitorOptions) => {
+  // Use configurable thresholds from settings
+  const memoryWarningThreshold =
+    settings.merged.performance?.memoryWarningThreshold ||
+    DEFAULT_MEMORY_WARNING_THRESHOLD;
+  const memoryCheckInterval =
+    settings.merged.performance?.memoryCheckInterval ||
+    DEFAULT_MEMORY_CHECK_INTERVAL;
 
   useEffect(() => {
     const intervalId = setInterval(() => {
@@ -57,8 +67,8 @@ export const useMemoryMonitor = ({ addItem }: MemoryMonitorOptions) => {
           Date.now(),
         );
       }
-    }, MEMORY_CHECK_INTERVAL);
+    }, memoryCheckInterval);
 
     return () => clearInterval(intervalId);
-  }, [addItem, memoryWarningThreshold]);
+  }, [addItem, memoryWarningThreshold, memoryCheckInterval]);
 };

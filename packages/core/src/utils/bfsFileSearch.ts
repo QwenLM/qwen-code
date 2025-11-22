@@ -22,6 +22,7 @@ interface BfsFileSearchOptions {
   debug?: boolean;
   fileService?: FileDiscoveryService;
   fileFilteringOptions?: FileFilteringOptions;
+  parallelBatchSize?: number;
 }
 
 /**
@@ -51,8 +52,8 @@ export async function bfsFileSearch(
   // Convert ignoreDirs array to Set for O(1) lookup performance
   const ignoreDirsSet = new Set(ignoreDirs);
 
-  // Process directories in parallel batches for maximum performance
-  const PARALLEL_BATCH_SIZE = 15; // Parallel processing batch size for optimal performance
+  // Process directories in configurable parallel batches for maximum performance
+  const PARALLEL_BATCH_SIZE = options.parallelBatchSize || 15; // Configurable parallel processing batch size
 
   while (queueHead < queue.length && scannedDirCount < maxDirs) {
     // Fill batch with unvisited directories up to the desired size

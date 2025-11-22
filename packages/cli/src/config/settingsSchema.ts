@@ -1209,6 +1209,56 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  performance: {
+    type: 'object',
+    label: 'Performance',
+    category: 'Performance',
+    requiresRestart: false,
+    default: {},
+    description: 'Performance-related settings.',
+    showInDialog: false,
+    properties: {
+      memoryWarningThreshold: {
+        type: 'number',
+        label: 'Memory Warning Threshold',
+        category: 'Performance',
+        requiresRestart: false,
+        default: 7 * 1024 * 1024 * 1024, // 7GB in bytes
+        description:
+          'Memory usage threshold (in bytes) at which to show a warning.',
+        showInDialog: false,
+      },
+      memoryCheckInterval: {
+        type: 'number',
+        label: 'Memory Check Interval',
+        category: 'Performance',
+        requiresRestart: false,
+        default: 60 * 1000, // one minute in ms
+        description: 'How often to check memory usage (in milliseconds).',
+        showInDialog: false,
+      },
+      memoryFileConcurrencyLimit: {
+        type: 'number',
+        label: 'Memory File Concurrency Limit',
+        category: 'Performance',
+        requiresRestart: false,
+        default: 50,
+        description:
+          'Maximum number of concurrent file reads when loading memory files.',
+        showInDialog: false,
+      },
+      bfsParallelBatchSize: {
+        type: 'number',
+        label: 'BFS Parallel Batch Size',
+        category: 'Performance',
+        requiresRestart: false,
+        default: 15,
+        description:
+          'Parallel processing batch size for breadth-first search operations.',
+        showInDialog: false,
+      },
+    },
+  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;

@@ -8,11 +8,22 @@ import { renderHook } from '@testing-library/react';
 import { vi } from 'vitest';
 import {
   useMemoryMonitor,
-  MEMORY_CHECK_INTERVAL,
+  DEFAULT_MEMORY_CHECK_INTERVAL,
   DEFAULT_MEMORY_WARNING_THRESHOLD,
 } from './useMemoryMonitor.js';
 import process from 'node:process';
 import { MessageType } from '../types.js';
+import type { LoadedSettings } from '../../config/settings.js';
+
+// Mock settings object
+const mockSettings: LoadedSettings = {
+  merged: {
+    performance: {
+      memoryCheckInterval: DEFAULT_MEMORY_CHECK_INTERVAL,
+      memoryWarningThreshold: DEFAULT_MEMORY_WARNING_THRESHOLD,
+    },
+  },
+} as LoadedSettings;
 
 describe('useMemoryMonitor', () => {
   const memoryUsageSpy = vi.spyOn(process, 'memoryUsage');
@@ -31,7 +42,7 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: DEFAULT_MEMORY_WARNING_THRESHOLD / 2,
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem }));
+    renderHook(() => useMemoryMonitor({ addItem, settings: mockSettings }));
     vi.advanceTimersByTime(10000);
     expect(addItem).not.toHaveBeenCalled();
   });
@@ -40,8 +51,8 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 1.1, // Just above the basic threshold
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem }));
-    vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
+    renderHook(() => useMemoryMonitor({ addItem, settings: mockSettings }));
+    vi.advanceTimersByTime(DEFAULT_MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledWith(
       {
@@ -56,8 +67,8 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 2, // Well above the basic threshold but below the high one
     } as NodeJS.MemoryUsage);
-    renderHook(() => useMemoryMonitor({ addItem }));
-    vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
+    renderHook(() => useMemoryMonitor({ addItem, settings: mockSettings }));
+    vi.advanceTimersByTime(DEFAULT_MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledWith(
       {
@@ -72,8 +83,10 @@ describe('useMemoryMonitor', () => {
     memoryUsageSpy.mockReturnValue({
       rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 1.1, // Just above basic threshold
     } as NodeJS.MemoryUsage);
-    const { rerender } = renderHook(() => useMemoryMonitor({ addItem }));
-    vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
+    const { rerender } = renderHook(() =>
+      useMemoryMonitor({ addItem, settings: mockSettings }),
+    );
+    vi.advanceTimersByTime(DEFAULT_MEMORY_CHECK_INTERVAL);
     expect(addItem).toHaveBeenCalledTimes(1);
 
     // Rerender and advance timers again - with the new implementation it will continue to monitor
@@ -81,7 +94,7 @@ describe('useMemoryMonitor', () => {
       rss: DEFAULT_MEMORY_WARNING_THRESHOLD * 1.1, // Just above basic threshold
     } as NodeJS.MemoryUsage);
     rerender();
-    vi.advanceTimersByTime(MEMORY_CHECK_INTERVAL);
+    vi.advanceTimersByTime(DEFAULT_MEMORY_CHECK_INTERVAL);
     // Now it will call addItem again since we removed the clearInterval call
     expect(addItem).toHaveBeenCalledTimes(2);
   });

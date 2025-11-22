@@ -549,6 +549,8 @@ export async function loadHierarchicalGeminiMemory(
     memoryImportFormat,
     fileFilteringOptions,
     settings.context?.discoveryMaxDirs,
+    settings.performance?.memoryFileConcurrencyLimit,
+    settings,
   );
 }
 

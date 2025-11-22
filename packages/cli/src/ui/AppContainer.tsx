@@ -136,7 +136,7 @@ const SHELL_HEIGHT_PADDING = 10;
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
-  useMemoryMonitor(historyManager);
+  useMemoryMonitor({ addItem: historyManager.addItem, settings });
   useAutoTrimHistory({ historyManager });
   const [corgiMode, setCorgiMode] = useState(false);
   const [debugMessage, setDebugMessage] = useState<string>('');
@@ -1223,9 +1223,9 @@ export const AppContainer = (props: AppContainerProps) => {
     isAgentsManagerDialogOpen ||
     isApprovalModeDialogOpen;
 
-  // More efficient concatenation with flat instead of spread operator
+  // More efficient concatenation without flat() since we have exactly 2 arrays
   const pendingHistoryItems = useMemo(
-    () => [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems].flat(),
+    () => pendingSlashCommandHistoryItems.concat(pendingGeminiHistoryItems),
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 

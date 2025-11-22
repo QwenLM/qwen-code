@@ -16,6 +16,13 @@ import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_MEMORY_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { QWEN_DIR } from './paths.js';
 
+// Cache to prevent redundant file system operations
+const memoryFileCache = new Map<
+  string,
+  { content: string; timestamp: number }
+>();
+const DEFAULT_CACHE_TTL = 30000; // 30 seconds TTL
+
 // Simple console logger, similar to the one previously in CLI's config.ts
 // TODO: Integrate with a more robust server-side logger if available/appropriate.
 const logger = {
@@ -88,6 +95,7 @@ async function getGeminiMdFilePathsInternal(
   folderTrust: boolean,
   fileFilteringOptions: FileFilteringOptions,
   maxDirs: number,
+  settings?: { performance?: { bfsParallelBatchSize?: number } },
 ): Promise<string[]> {
   const dirs = new Set<string>([
     ...includeDirectoriesToReadGemini,
@@ -111,6 +119,7 @@ async function getGeminiMdFilePathsInternal(
         folderTrust,
         fileFilteringOptions,
         maxDirs,
+        settings,
       ),
     );
 
@@ -141,6 +150,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
   folderTrust: boolean,
   fileFilteringOptions: FileFilteringOptions,
   maxDirs: number,
+  settings?: { performance?: { bfsParallelBatchSize?: number } },
 ): Promise<string[]> {
   const allPaths = new Set<string>();
   const geminiMdFilenames = getAllGeminiMdFilenames();
@@ -237,6 +247,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
         debug: debugMode,
         fileService,
         fileFilteringOptions: mergedOptions,
+        parallelBatchSize: settings?.performance?.bfsParallelBatchSize,
       });
       downwardPaths.sort();
       for (const dPath of downwardPaths) {
@@ -261,13 +272,24 @@ async function getGeminiMdFilePathsInternalForEachDir(
   return finalPaths;
 }
 
+// Clear expired cache entries
+function cleanupExpiredCacheEntries(): void {
+  const now = Date.now();
+  for (const [filePath, entry] of memoryFileCache.entries()) {
+    if (now - entry.timestamp > DEFAULT_CACHE_TTL) {
+      memoryFileCache.delete(filePath);
+    }
+  }
+}
+
 async function readGeminiMdFiles(
   filePaths: string[],
   debugMode: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
+  concurrencyLimit: number = 50,
 ): Promise<GeminiFileContent[]> {
-  // Process files in parallel with concurrency limit to prevent EMFILE errors
-  const CONCURRENT_LIMIT = 50; // Increased from 20 to improve throughput for file reads
+  // Process files in parallel with configurable concurrency limit to prevent EMFILE errors
+  const CONCURRENT_LIMIT = concurrencyLimit; // Configurable from settings
   const results: GeminiFileContent[] = [];
 
   for (let i = 0; i < filePaths.length; i += CONCURRENT_LIMIT) {
@@ -275,6 +297,28 @@ async function readGeminiMdFiles(
     const batchPromises = batch.map(
       async (filePath): Promise<GeminiFileContent> => {
         try {
+          // Check cache first
+          const cached = memoryFileCache.get(filePath);
+          if (cached && Date.now() - cached.timestamp <= DEFAULT_CACHE_TTL) {
+            if (debugMode)
+              logger.debug(
+                `Cache hit for: ${filePath} (Length: ${cached.content.length})`,
+              );
+
+            // Process imports for cached content
+            const processedResult = await processImports(
+              cached.content,
+              path.dirname(filePath),
+              debugMode,
+              undefined,
+              undefined,
+              importFormat,
+            );
+
+            return { filePath, content: processedResult.content };
+          }
+
+          // Read from file system
           const content = await fs.readFile(filePath, 'utf-8');
 
           // Process imports in the content
@@ -286,6 +330,13 @@ async function readGeminiMdFiles(
             undefined,
             importFormat,
           );
+
+          // Cache the result
+          memoryFileCache.set(filePath, {
+            content,
+            timestamp: Date.now(),
+          });
+
           if (debugMode)
             logger.debug(
               `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
@@ -322,6 +373,9 @@ async function readGeminiMdFiles(
       }
     }
   }
+
+  // Clean up expired entries periodically
+  cleanupExpiredCacheEntries();
 
   return results;
 }
@@ -366,6 +420,8 @@ export async function loadServerHierarchicalMemory(
   importFormat: 'flat' | 'tree' = 'tree',
   fileFilteringOptions?: FileFilteringOptions,
   maxDirs: number = 200,
+  concurrencyLimit: number = 50,
+  settings?: { performance?: { bfsParallelBatchSize?: number } },
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   if (debugMode)
     logger.debug(
@@ -385,6 +441,7 @@ export async function loadServerHierarchicalMemory(
     folderTrust,
     fileFilteringOptions || DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
     maxDirs,
+    settings,
   );
   if (filePaths.length === 0) {
     if (debugMode) logger.debug('No QWEN.md files found in hierarchy.');
@@ -394,6 +451,7 @@ export async function loadServerHierarchicalMemory(
     filePaths,
     debugMode,
     importFormat,
+    concurrencyLimit,
   );
   // Pass CWD for relative path display in concatenated content
   const combinedInstructions = concatenateInstructions(

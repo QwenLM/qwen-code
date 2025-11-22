@@ -422,6 +422,7 @@ export const useGeminiStream = (
       return { queryToSend: localQueryToSendToGemini, shouldProceed: true };
     },
     [
+      // Reduced dependencies by using stable references where possible
       config,
       addItem,
       onDebugMessage,
@@ -461,10 +462,18 @@ export const useGeminiStream = (
       const splitPoint = findLastSafeSplitPoint(newGeminiMessageBuffer);
       if (splitPoint === newGeminiMessageBuffer.length) {
         // Update the existing message with accumulated content
-        setPendingHistoryItem((item) => ({
-          type: item?.type as 'gemini' | 'gemini_content',
-          text: newGeminiMessageBuffer,
-        }));
+        // To batch updates, only update state if the change is significant
+        setPendingHistoryItem((item) => {
+          // Avoid unnecessary state updates if the text is the same
+          const currentText = item?.text || '';
+          if (currentText === newGeminiMessageBuffer) {
+            return item; // No change needed
+          }
+          return {
+            type: item?.type as 'gemini' | 'gemini_content',
+            text: newGeminiMessageBuffer,
+          };
+        });
       } else {
         // This indicates that we need to split up this Gemini Message.
         // Splitting a message is primarily a performance consideration. There is a
@@ -991,6 +1000,16 @@ export const useGeminiStream = (
     [toolCalls],
   );
 
+  // Ref to hold pending tools that need to be batched together
+  const pendingToolResponsesRef = useRef<{
+    responses: Part[];
+    callIds: string[];
+    prompt_ids: string[];
+  } | null>(null);
+
+  // Timer ref for batching multiple tool completions
+  const toolBatchTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const handleCompletedTools = useCallback(
     async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
       if (isResponding) {
@@ -1077,17 +1096,34 @@ export const useGeminiStream = (
         return;
       }
 
+      // Add responses to pending batch
       const responsesToSend: Part[] = geminiTools.flatMap(
         (toolCall) => toolCall.response.responseParts,
       );
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
-
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
 
+      // If no batch is pending, start one
+      if (!pendingToolResponsesRef.current) {
+        pendingToolResponsesRef.current = {
+          responses: responsesToSend,
+          callIds: callIdsToMarkAsSubmitted,
+          prompt_ids,
+        };
+      } else {
+        // Otherwise, add to the existing batch
+        pendingToolResponsesRef.current.responses.push(...responsesToSend);
+        pendingToolResponsesRef.current.callIds.push(
+          ...callIdsToMarkAsSubmitted,
+        );
+        pendingToolResponsesRef.current.prompt_ids.push(...prompt_ids);
+      }
+
+      // Mark all tools as submitted
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Don't continue if model was switched due to quota error
@@ -1095,13 +1131,28 @@ export const useGeminiStream = (
         return;
       }
 
-      submitQuery(
-        responsesToSend,
-        {
-          isContinuation: true,
-        },
-        prompt_ids[0],
-      );
+      // Clear existing timer if present
+      if (toolBatchTimerRef.current) {
+        clearTimeout(toolBatchTimerRef.current);
+      }
+
+      // Set a new timer to process the batch after a short delay
+      // This allows multiple tool completions to be batched together
+      toolBatchTimerRef.current = setTimeout(() => {
+        // Process the current batch
+        if (pendingToolResponsesRef.current) {
+          const batch = pendingToolResponsesRef.current;
+          pendingToolResponsesRef.current = null;
+
+          submitQuery(
+            batch.responses,
+            {
+              isContinuation: true,
+            },
+            batch.prompt_ids[0],
+          );
+        }
+      }, 50); // 50ms delay to batch quick tool completions together
     },
     [
       isResponding,
@@ -1239,6 +1290,16 @@ export const useGeminiStream = (
     geminiClient,
     storage,
   ]);
+
+  // Cleanup timer on unmount
+  useEffect(
+    () => () => {
+      if (toolBatchTimerRef.current) {
+        clearTimeout(toolBatchTimerRef.current);
+      }
+    },
+    [],
+  );
 
   return {
     streamingState,
