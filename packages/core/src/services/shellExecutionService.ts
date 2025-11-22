@@ -20,6 +20,9 @@ import {
 } from '../utils/terminalSerializer.js';
 const { Terminal } = pkg;
 
+import { recordShellExecutionLatency } from '../telemetry/metrics.js';
+import type { Config } from '../config/config.js';
+
 const SIGKILL_TIMEOUT_MS = 200;
 
 /** A structured result from a shell command execution. */
@@ -123,12 +126,16 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
+    // Add config parameter for telemetry (optional for backward compatibility)
+    config?: Config,
   ): Promise<ShellExecutionHandle> {
+    const startTime = performance.now();
+
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
       if (ptyInfo) {
         try {
-          return this.executeWithPty(
+          const handle = await this.executeWithPty(
             commandToExecute,
             cwd,
             onOutputEvent,
@@ -136,18 +143,62 @@ export class ShellExecutionService {
             shellExecutionConfig,
             ptyInfo,
           );
+
+          // Record the execution time after the process completes
+          handle.result
+            .then((result) => {
+              if (config) {
+                recordShellExecutionLatency(
+                  config,
+                  performance.now() - startTime,
+                  {
+                    command: commandToExecute,
+                    execution_method:
+                      result.executionMethod === 'none'
+                        ? 'child_process'
+                        : result.executionMethod,
+                    exit_code: result.exitCode ?? -1,
+                  },
+                );
+              }
+            })
+            .catch(() => {
+              // Ignore if we can't record the metric
+            });
+
+          return handle;
         } catch (_e) {
           // Fallback to child_process
         }
       }
     }
 
-    return this.childProcessFallback(
+    const handle = this.childProcessFallback(
       commandToExecute,
       cwd,
       onOutputEvent,
       abortSignal,
     );
+
+    // Record the execution time after the process completes
+    handle.result
+      .then((result) => {
+        if (config) {
+          recordShellExecutionLatency(config, performance.now() - startTime, {
+            command: commandToExecute,
+            execution_method:
+              result.executionMethod === 'none'
+                ? 'child_process'
+                : result.executionMethod,
+            exit_code: result.exitCode ?? -1,
+          });
+        }
+      })
+      .catch(() => {
+        // Ignore if we can't record the metric
+      });
+
+    return handle;
   }
 
   private static childProcessFallback(

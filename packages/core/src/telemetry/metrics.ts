@@ -35,6 +35,9 @@ const PERFORMANCE_SCORE = `${SERVICE_NAME}.performance.score`;
 const REGRESSION_DETECTION = `${SERVICE_NAME}.performance.regression`;
 const REGRESSION_PERCENTAGE_CHANGE = `${SERVICE_NAME}.performance.regression.percentage_change`;
 const BASELINE_COMPARISON = `${SERVICE_NAME}.performance.baseline.comparison`;
+const FILE_READ_LATENCY = `${SERVICE_NAME}.file.read.latency`;
+const CONCURRENT_FILE_READ_COUNT = `${SERVICE_NAME}.file.concurrent_read.count`;
+const SHELL_EXECUTION_LATENCY = `${SERVICE_NAME}.shell.execution.latency`;
 
 const baseMetricDefinition = {
   getCommonAttributes: (config: Config): Attributes => ({
@@ -269,6 +272,42 @@ const PERFORMANCE_HISTOGRAM_DEFINITIONS = {
       baseline_value: number;
     },
   },
+  [FILE_READ_LATENCY]: {
+    description: 'File read operation latency in milliseconds.',
+    unit: 'ms',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (fileReadLatencyHistogram = h),
+    attributes: {} as {
+      file_type:
+        | 'text'
+        | 'binary'
+        | 'image'
+        | 'pdf'
+        | 'svg'
+        | 'audio'
+        | 'video';
+      file_size: 'small' | 'medium' | 'large';
+      file_extension: string;
+    },
+  },
+  [CONCURRENT_FILE_READ_COUNT]: {
+    description: 'Number of concurrent file read operations.',
+    unit: 'count',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (concurrentFileReadGauge = h),
+    attributes: {} as Record<string, never>,
+  },
+  [SHELL_EXECUTION_LATENCY]: {
+    description: 'Shell command execution latency in milliseconds.',
+    unit: 'ms',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (shellExecutionLatencyHistogram = h),
+    attributes: {} as {
+      command: string;
+      execution_method: 'lydell-node-pty' | 'node-pty' | 'child_process';
+      exit_code: number;
+    },
+  },
 } as const;
 
 type AllMetricDefs = typeof COUNTER_DEFINITIONS &
@@ -345,6 +384,9 @@ let performanceScoreGauge: Histogram | undefined;
 let regressionDetectionCounter: Counter | undefined;
 let regressionPercentageChangeHistogram: Histogram | undefined;
 let baselineComparisonHistogram: Histogram | undefined;
+let fileReadLatencyHistogram: Histogram | undefined;
+let concurrentFileReadGauge: Histogram | undefined;
+let shellExecutionLatencyHistogram: Histogram | undefined;
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
 
@@ -746,4 +788,53 @@ export function recordSubagentExecutionMetrics(
   }
 
   subagentExecutionCounter.add(1, attributes);
+}
+
+/**
+ * Records file read operation latency.
+ */
+export function recordFileReadLatency(
+  config: Config,
+  durationMs: number,
+  attributes: MetricDefinitions[typeof FILE_READ_LATENCY]['attributes'],
+): void {
+  if (!fileReadLatencyHistogram || !isMetricsInitialized) return;
+
+  const metricAttributes: Attributes = {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
+  };
+
+  fileReadLatencyHistogram.record(durationMs, metricAttributes);
+}
+
+/**
+ * Records concurrent file read count.
+ */
+export function recordConcurrentFileRead(config: Config, count: number): void {
+  if (!concurrentFileReadGauge || !isMetricsInitialized) return;
+
+  const metricAttributes: Attributes = {
+    ...baseMetricDefinition.getCommonAttributes(config),
+  };
+
+  concurrentFileReadGauge.record(count, metricAttributes);
+}
+
+/**
+ * Records shell execution latency.
+ */
+export function recordShellExecutionLatency(
+  config: Config,
+  durationMs: number,
+  attributes: MetricDefinitions[typeof SHELL_EXECUTION_LATENCY]['attributes'],
+): void {
+  if (!shellExecutionLatencyHistogram || !isMetricsInitialized) return;
+
+  const metricAttributes: Attributes = {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
+  };
+
+  shellExecutionLatencyHistogram.record(durationMs, metricAttributes);
 }

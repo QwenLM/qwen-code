@@ -24,6 +24,7 @@ export interface FileSearchOptions {
   enableRecursiveFileSearch: boolean;
   disableFuzzySearch: boolean;
   maxDepth?: number;
+  concurrency?: number;
 }
 
 export class AbortError extends Error {
@@ -178,7 +179,10 @@ class RecursiveFileSearch implements FileSearch {
   }
 
   private buildResultCache(): void {
-    this.resultCache = new ResultCache(this.allFiles);
+    this.resultCache = new ResultCache(this.allFiles, {
+      maxEntries: 100,
+      ttlMs: this.options.cacheTtl ?? 5 * 60 * 1000, // Use the cacheTtl from options or default to 5 minutes
+    });
     if (!this.options.disableFuzzySearch) {
       // The v1 algorithm is much faster since it only looks at the first
       // occurence of the pattern. We use it for search spaces that have >20k

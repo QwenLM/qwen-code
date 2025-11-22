@@ -13,6 +13,8 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 
+import { recordFileReadLatency } from '../telemetry/metrics.js';
+
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
 
@@ -313,6 +315,7 @@ export async function processSingleFileContent(
   offset?: number,
   limit?: number,
 ): Promise<ProcessedFileReadResult> {
+  const startTime = performance.now();
   const rootDirectory = config.getTargetDir();
   try {
     if (!fs.existsSync(filePath)) {
@@ -351,8 +354,23 @@ export async function processSingleFileContent(
       .relative(rootDirectory, filePath)
       .replace(/\\/g, '/');
 
+    // Determine file size category for metrics
+    const fileSizeCategory =
+      stats.size < 1024 * 1024
+        ? 'small'
+        : stats.size < 10 * 1024 * 1024
+          ? 'medium'
+          : 'large';
+    const fileExtension = path.extname(filePath).toLowerCase();
+
     switch (fileType) {
       case 'binary': {
+        // Record performance metrics
+        recordFileReadLatency(config, performance.now() - startTime, {
+          file_type: fileType,
+          file_size: fileSizeCategory,
+          file_extension: fileExtension,
+        });
         return {
           llmContent: `Cannot display content of binary file: ${relativePathForDisplay}`,
           returnDisplay: `Skipped binary file: ${relativePathForDisplay}`,
@@ -361,12 +379,24 @@ export async function processSingleFileContent(
       case 'svg': {
         const SVG_MAX_SIZE_BYTES = 1 * 1024 * 1024;
         if (stats.size > SVG_MAX_SIZE_BYTES) {
+          // Record performance metrics
+          recordFileReadLatency(config, performance.now() - startTime, {
+            file_type: fileType,
+            file_size: fileSizeCategory,
+            file_extension: fileExtension,
+          });
           return {
             llmContent: `Cannot display content of SVG file larger than 1MB: ${relativePathForDisplay}`,
             returnDisplay: `Skipped large SVG file (>1MB): ${relativePathForDisplay}`,
           };
         }
         const content = await readFileWithEncoding(filePath);
+        // Record performance metrics
+        recordFileReadLatency(config, performance.now() - startTime, {
+          file_type: fileType,
+          file_size: fileSizeCategory,
+          file_extension: fileExtension,
+        });
         return {
           llmContent: content,
           returnDisplay: `Read SVG as text: ${relativePathForDisplay}`,
@@ -447,6 +477,12 @@ export async function processSingleFileContent(
           }
         }
 
+        // Record performance metrics
+        recordFileReadLatency(config, performance.now() - startTime, {
+          file_type: fileType,
+          file_size: fileSizeCategory,
+          file_extension: fileExtension,
+        });
         return {
           llmContent,
           returnDisplay,
@@ -461,6 +497,12 @@ export async function processSingleFileContent(
       case 'video': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
+        // Record performance metrics
+        recordFileReadLatency(config, performance.now() - startTime, {
+          file_type: fileType,
+          file_size: fileSizeCategory,
+          file_extension: fileExtension,
+        });
         return {
           llmContent: {
             inlineData: {
@@ -474,6 +516,12 @@ export async function processSingleFileContent(
       default: {
         // Should not happen with current detectFileType logic
         const exhaustiveCheck: never = fileType;
+        // Record performance metrics
+        recordFileReadLatency(config, performance.now() - startTime, {
+          file_type: 'text', // Use 'text' as default since 'unknown' is not a valid type
+          file_size: 'small', // Use 'small' as default since 'unknown' is not a valid type
+          file_extension: fileExtension,
+        });
         return {
           llmContent: `Unhandled file type: ${exhaustiveCheck}`,
           returnDisplay: `Skipped unhandled file type: ${relativePathForDisplay}`,
@@ -482,6 +530,12 @@ export async function processSingleFileContent(
       }
     }
   } catch (error) {
+    // Record performance metrics in case of error
+    recordFileReadLatency(config, performance.now() - startTime, {
+      file_type: 'text', // Default to text since we don't know the actual type after an error
+      file_size: 'small', // Use 'small' as default since 'unknown' is not a valid type
+      file_extension: path.extname(filePath),
+    });
     const errorMessage = error instanceof Error ? error.message : String(error);
     const displayPath = path
       .relative(rootDirectory, filePath)

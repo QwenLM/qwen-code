@@ -21,6 +21,8 @@ export interface CrawlOptions {
   // Caching options.
   cache: boolean;
   cacheTtl: number;
+  // Optional concurrency for file system operations (default: fdir's default)
+  concurrency?: number;
 }
 
 function toPosixPath(p: string) {
