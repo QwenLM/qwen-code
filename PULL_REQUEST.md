@@ -92,9 +92,9 @@ start.sh (executable)      - One-command launcher
 - ✅ Multi-user capable
 - ✅ Cloud-deployable
 
-**Files Created (31 files, 4500+ lines):**
+**Files Created (32 files, 4500+ lines):**
 
-Backend (Python):
+Backend (Python - 10 files):
 ```
 backend/
   main.py (300 lines)                - FastAPI app
@@ -113,7 +113,7 @@ backend/
   .env.example                       - Config template
 ```
 
-Frontend (Next.js):
+Frontend (Next.js - 17 files):
 ```
 frontend/
   app/
@@ -121,7 +121,9 @@ frontend/
     layout.tsx (20 lines)            - Root layout
     globals.css (400 lines)          - Cyberpunk theme
   components/
-    chat/ChatPanel.tsx (280 lines)   - Chat + SSE
+    chat/
+      ChatPanel.tsx (280 lines)      - Chat + SSE
+      MessageBubble.tsx              - Message component
     artifact/ArtifactPanel.tsx       - Artifact renderer
     pgi/Dashboard.tsx (550 lines)    - Recharts dashboard
     components/PlanWithPhotos.tsx (400 lines) - Photo GPS viewer
@@ -129,9 +131,15 @@ frontend/
   types/artifact.ts                  - TypeScript types
   package.json                       - Node deps
   tailwind.config.ts                 - Tailwind + theme
+  tsconfig.json                      - TypeScript config
   next.config.js                     - Next.js config
+  postcss.config.js                  - PostCSS config
+  .env.example                       - Config template
+```
 
-Automation (Webapp Root):
+Automation (Webapp Root - 5 files):
+```
+README.md                            - Complete webapp documentation
 QUICKSTART.md (250 lines)            - 5-minute setup guide
 install.sh (executable)              - Backend + frontend installer
 start.sh (executable)                - Parallel service launcher
@@ -166,10 +174,10 @@ start.sh (executable)                - Parallel service launcher
 ## 📊 Statistics
 
 ### Overall
-- **Total Files**: 43 new files
+- **Total Files**: 44 new files
 - **Total Lines**: 8,700+ lines of code
 - **Languages**: TypeScript, Python, JavaScript, HTML, CSS, Shell
-- **Commits**: 6 comprehensive commits
+- **Commits**: 11 comprehensive commits
 
 ### Electron App
 - Files: 12
@@ -179,7 +187,7 @@ start.sh (executable)                - Parallel service launcher
 - Automation: ✅ install.sh, start.sh, QUICKSTART.md, .gitignore
 
 ### Web App
-- Files: 31
+- Files: 32
 - Lines: 4,500+ (code) + 1,000+ (docs/automation)
 - Languages: TypeScript, Python, Bash
 - Dependencies: 40+ (FastAPI, Next.js, Recharts, etc.)
