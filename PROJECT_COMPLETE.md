@@ -45,24 +45,22 @@ Following the autonomous agent mode directive to **"finish the projet to the end
 
 **Complete File List (32 files):**
 
-**Backend (Python - 10 files):**
+**Backend (Python - 11 files):**
 ```
 ✅ backend/main.py (300 lines)                    - FastAPI application
 ✅ backend/api/stream.py (180 lines)              - SSE streaming
 ✅ backend/api/pgi.py (130 lines)                 - PGI data API
 ✅ backend/api/photos.py (120 lines)              - Photo GPS API
 ✅ backend/api/plans.py (100 lines)               - Plans management
-✅ backend/api/compliance.py (90 lines)           - Compliance checker
 ✅ backend/services/ai_service.py (280 lines)     - AI integration
 ✅ backend/services/pgi_detector.py (500 lines)   - Auto PGI detection
 ✅ backend/services/photo_gps.py (400 lines)      - GPS extraction
 ✅ backend/data/sample_pgi_data.json              - Sample project data
 ✅ backend/requirements.txt                       - Python dependencies
 ✅ backend/.env.example                           - Configuration template
-✅ backend/README.md                              - Backend documentation
 ```
 
-**Frontend (Next.js - 17 files):**
+**Frontend (Next.js - 16 files):**
 ```
 ✅ frontend/app/page.tsx (80 lines)                        - Split-pane layout
 ✅ frontend/app/layout.tsx (20 lines)                      - Root layout
@@ -71,7 +69,7 @@ Following the autonomous agent mode directive to **"finish the projet to the end
 ✅ frontend/components/chat/MessageBubble.tsx              - Message component
 ✅ frontend/components/artifact/ArtifactPanel.tsx          - Artifact renderer
 ✅ frontend/components/pgi/Dashboard.tsx (550 lines)       - Recharts dashboard
-✅ frontend/components/pgi/PlanWithPhotos.tsx (400 lines)  - Photo GPS viewer
+✅ frontend/components/components/PlanWithPhotos.tsx (400) - Photo GPS viewer
 ✅ frontend/components/layout/Header.tsx                   - Application header
 ✅ frontend/types/artifact.ts                              - TypeScript types
 ✅ frontend/package.json                                   - Node dependencies
@@ -80,11 +78,11 @@ Following the autonomous agent mode directive to **"finish the projet to the end
 ✅ frontend/next.config.js                                 - Next.js config
 ✅ frontend/postcss.config.js                              - PostCSS config
 ✅ frontend/.env.example                                   - Config template
-✅ frontend/README.md                                      - Frontend docs (if exists)
 ```
 
 **Automation (5 files):**
 ```
+✅ README.md                       - Complete webapp documentation
 ✅ QUICKSTART.md (250 lines)       - Complete setup guide
 ✅ install.sh (executable)         - Backend + frontend installer
 ✅ start.sh (executable)           - Parallel service launcher

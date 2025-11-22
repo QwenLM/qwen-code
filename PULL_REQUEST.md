@@ -94,7 +94,7 @@ start.sh (executable)      - One-command launcher
 
 **Files Created (32 files, 4500+ lines):**
 
-Backend (Python - 10 files):
+Backend (Python - 11 files):
 ```
 backend/
   main.py (300 lines)                - FastAPI app
@@ -104,7 +104,7 @@ backend/
     photos.py (120 lines)            - Photo GPS API
     plans.py (100 lines)             - Plans API
   services/
-    ai_service.py (280 lines)        - OpenAI/Anthropic
+    ai_service.py (280 lines)        - AI integration
     pgi_detector.py (500 lines)      - PGI detection
     photo_gps.py (400 lines)         - GPS extraction
   data/
@@ -113,7 +113,7 @@ backend/
   .env.example                       - Config template
 ```
 
-Frontend (Next.js - 17 files):
+Frontend (Next.js - 16 files):
 ```
 frontend/
   app/
