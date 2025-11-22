@@ -31,7 +31,7 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
   }
 
   /**
-   * Calculate tokens for a request using serial processing
+   * Calculate tokens for a request using parallel processing
    */
   async calculateTokens(
     request: CountTokensParameters,
@@ -67,11 +67,14 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
         };
       }
 
-      // Calculate tokens for each content type serially
-      const textTokens = await this.calculateTextTokens(textContents);
-      const imageTokens = await this.calculateImageTokens(imageContents);
-      const audioTokens = await this.calculateAudioTokens(audioContents);
-      const otherTokens = await this.calculateOtherTokens(otherContents);
+      // Calculate tokens for each content type in parallel
+      const [textTokens, imageTokens, audioTokens, otherTokens] =
+        await Promise.all([
+          this.calculateTextTokens(textContents),
+          this.calculateImageTokens(imageContents),
+          this.calculateAudioTokens(audioContents),
+          this.calculateOtherTokens(otherContents),
+        ]);
 
       const totalTokens = textTokens + imageTokens + audioTokens + otherTokens;
       const processingTime = performance.now() - startTime;

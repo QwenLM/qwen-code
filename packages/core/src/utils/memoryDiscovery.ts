@@ -95,7 +95,7 @@ async function getGeminiMdFilePathsInternal(
   ]);
 
   // Process directories in parallel with concurrency limit to prevent EMFILE errors
-  const CONCURRENT_LIMIT = 10;
+  const CONCURRENT_LIMIT = 20; // Increased from 10 to improve throughput
   const dirsArray = Array.from(dirs);
   const pathsArrays: string[][] = [];
 
@@ -267,7 +267,7 @@ async function readGeminiMdFiles(
   importFormat: 'flat' | 'tree' = 'tree',
 ): Promise<GeminiFileContent[]> {
   // Process files in parallel with concurrency limit to prevent EMFILE errors
-  const CONCURRENT_LIMIT = 20; // Higher limit for file reads as they're typically faster
+  const CONCURRENT_LIMIT = 50; // Increased from 20 to improve throughput for file reads
   const results: GeminiFileContent[] = [];
 
   for (let i = 0; i < filePaths.length; i += CONCURRENT_LIMIT) {

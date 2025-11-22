@@ -389,8 +389,18 @@ export async function main() {
 
     setMaxSizedBoxDebugging(isDebugMode);
 
-    // Initialize app in the background to avoid blocking other operations
-    const initializationPromise = initializeApp(config, settings);
+    // Initialize app concurrently with startup warnings to optimize startup time
+    const [initializationResult, startupWarnings] = await Promise.all([
+      initializeApp(config, settings),
+      Promise.all([
+        getStartupWarnings(),
+        getUserStartupWarnings({
+          workspaceRoot: process.cwd(),
+          useRipgrep: settings.merged.tools?.useRipgrep ?? true,
+          useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
+        }),
+      ]).then(([warnings1, warnings2]) => [...warnings1, ...warnings2]),
+    ]);
 
     if (
       settings.merged.security?.auth?.selectedType ===
@@ -407,22 +417,10 @@ export async function main() {
 
     let input = config.getQuestion();
 
-    // Load startup warnings in parallel with other initialization
-    const startupWarningsPromise = Promise.all([
-      getStartupWarnings(),
-      getUserStartupWarnings({
-        workspaceRoot: process.cwd(),
-        useRipgrep: settings.merged.tools?.useRipgrep ?? true,
-        useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
-      }),
-    ]).then(([warnings1, warnings2]) => [...warnings1, ...warnings2]);
-
     // Render UI, passing necessary config values. Check that there is no command line question.
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
-      const initializationResult = await initializationPromise;
-      const startupWarnings = await startupWarningsPromise;
       await startInteractiveUI(
         config,
         settings,
@@ -492,12 +490,7 @@ export async function main() {
       console.log('Session ID: %s', sessionId);
     }
 
-    // Wait for initialization to complete before processing non-interactive commands
-    await initializationPromise;
-
-    // Process startup warnings if any
-    await startupWarningsPromise;
-
+    // Use the already awaited initialization result and startup warnings
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run
     await runExitCleanup();
