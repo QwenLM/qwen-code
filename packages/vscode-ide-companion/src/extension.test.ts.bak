@@ -343,7 +343,7 @@ describe('extension commands', () => {
         },
         name: 'test-workspace',
         index: 0,
-      } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+      } as any, // eslint-disable-line @typescript-eslint/no-explicit-any // eslint-disable-line @typescript-eslint/no-explicit-any
     ] as any; // eslint-disable-line @typescript-eslint/no-explicit-any
     vi.mocked(vscode.workspace).workspaceFolders = mockWorkspaceFolders;
     vi.mocked(vscode.window.createTerminal).mockReturnValue({
@@ -354,21 +354,19 @@ describe('extension commands', () => {
     await activate(context);
 
     // Get the registered command for qwen-code.runQwenCode
-    const runQwenCodeCommand = vi
-      .mocked(vscode.commands.registerCommand)
-      .mock.calls.find((call) => call[0] === 'qwen-code.runQwenCode')?.[1];
+    const runQwenCodeCommand = vi.mocked(vscode.commands.registerCommand)
+      .mock.calls
+      .find(call => call[0] === 'qwen-code.runQwenCode')?.[1];
 
     if (runQwenCodeCommand) {
       await runQwenCodeCommand();
-
+      
       expect(vscode.window.createTerminal).toHaveBeenCalledWith({
         name: 'Qwen Code (test-workspace)',
         cwd: '/test/workspace',
       });
       expect(vscode.window.createTerminal().show).toHaveBeenCalled();
-      expect(vscode.window.createTerminal().sendText).toHaveBeenCalledWith(
-        'qwen',
-      );
+      expect(vscode.window.createTerminal().sendText).toHaveBeenCalledWith('qwen');
     }
   });
 
@@ -379,15 +377,15 @@ describe('extension commands', () => {
     await activate(context);
 
     // Get the registered command for qwen-code.runQwenCode
-    const runQwenCodeCommand = vi
-      .mocked(vscode.commands.registerCommand)
-      .mock.calls.find((call) => call[0] === 'qwen-code.runQwenCode')?.[1];
+    const runQwenCodeCommand = vi.mocked(vscode.commands.registerCommand)
+      .mock.calls
+      .find(call => call[0] === 'qwen-code.runQwenCode')?.[1];
 
     if (runQwenCodeCommand) {
       await runQwenCodeCommand();
-
+      
       expect(showInfoMessageSpy).toHaveBeenCalledWith(
-        'No folder open. Please open a folder to run Qwen Code.',
+        'No folder open. Please open a folder to run Qwen Code.'
       );
     }
   });
@@ -421,11 +419,11 @@ describe('extension commands', () => {
         },
         name: 'workspace2',
         index: 1,
-      } as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+      } as any, // eslint-disable-line @typescript-eslint/no-explicit-any // eslint-disable-line @typescript-eslint/no-explicit-any
     ] as any; // eslint-disable-line @typescript-eslint/no-explicit-any
     vi.mocked(vscode.workspace).workspaceFolders = mockWorkspaceFolders;
     vi.mocked(vscode.window.showWorkspaceFolderPick).mockResolvedValue(
-      mockWorkspaceFolders[0] as any, // eslint-disable-line @typescript-eslint/no-explicit-any
+      mockWorkspaceFolders[0] as any // eslint-disable-line @typescript-eslint/no-explicit-any
     );
     vi.mocked(vscode.window.createTerminal).mockReturnValue({
       show: vi.fn(),
@@ -435,13 +433,13 @@ describe('extension commands', () => {
     await activate(context);
 
     // Get the registered command for qwen-code.runQwenCode
-    const runQwenCodeCommand = vi
-      .mocked(vscode.commands.registerCommand)
-      .mock.calls.find((call) => call[0] === 'qwen-code.runQwenCode')?.[1];
+    const runQwenCodeCommand = vi.mocked(vscode.commands.registerCommand)
+      .mock.calls
+      .find(call => call[0] === 'qwen-code.runQwenCode')?.[1];
 
     if (runQwenCodeCommand) {
       await runQwenCodeCommand();
-
+      
       expect(vscode.window.showWorkspaceFolderPick).toHaveBeenCalled();
       expect(vscode.window.createTerminal).toHaveBeenCalledWith({
         name: 'Qwen Code (workspace1)',
@@ -461,16 +459,16 @@ describe('extension commands', () => {
     await activate(context);
 
     // Get the registered command for qwen-code.showNotices
-    const showNoticesCommand = vi
-      .mocked(vscode.commands.registerCommand)
-      .mock.calls.find((call) => call[0] === 'qwen-code.showNotices')?.[1];
+    const showNoticesCommand = vi.mocked(vscode.commands.registerCommand)
+      .mock.calls
+      .find(call => call[0] === 'qwen-code.showNotices')?.[1];
 
     if (showNoticesCommand) {
       await showNoticesCommand();
-
+      
       expect(vscode.Uri.joinPath).toHaveBeenCalledWith(
         context.extensionUri,
-        'NOTICES.txt',
+        'NOTICES.txt'
       );
       expect(vscode.window.showTextDocument).toHaveBeenCalledWith(mockUri);
     }

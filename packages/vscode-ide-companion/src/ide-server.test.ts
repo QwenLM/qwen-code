@@ -559,3 +559,97 @@ describe('IDEServer HTTP endpoints', () => {
     expect(response.statusCode).toBe(400);
   });
 });
+
+describe('IDEServer error handling', () => {
+  let ideServer: IDEServer;
+  let mockContext: vscode.ExtensionContext;
+  let mockLog: (message: string) => void;
+  let mockDiffManager: DiffManager;
+
+  beforeEach(() => {
+    mockLog = vi.fn();
+    mockDiffManager = {
+      onDidChange: vi.fn(() => ({ dispose: vi.fn() })),
+    } as unknown as DiffManager;
+    ideServer = new IDEServer(mockLog, mockDiffManager);
+    mockContext = {
+      subscriptions: [],
+      environmentVariableCollection: {
+        replace: vi.fn(),
+        clear: vi.fn(),
+      },
+    } as unknown as vscode.ExtensionContext;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('should handle error during server shutdown in stop method', async () => {
+    await ideServer.start(mockContext);
+
+    // Mock the server close method to throw an error
+    const mockServer = (ideServer as any).server; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const originalClose = mockServer.close;
+    mockServer.close = (callback: (err?: Error) => void) => {
+      callback(new Error('Server close error'));
+    };
+
+    await expect(ideServer.stop()).rejects.toThrow('Server close error');
+    expect(mockLog).toHaveBeenCalledWith(
+      'Error shutting down IDE server: Server close error',
+    );
+
+    // Restore the original close method
+    mockServer.close = originalClose;
+  });
+
+  it('should handle error when unlinking port file fails', async () => {
+    // Mock unlink to throw an error
+    vi.mocked(fs.unlink).mockImplementation(() => {
+      throw new Error('unlink error');
+    });
+
+    await ideServer.start(mockContext);
+    const replaceMock = mockContext.environmentVariableCollection.replace;
+    const port = getPortFromMock(replaceMock);
+    const portFile = path.join('/tmp', `qwen-code-ide-server-${port}.json`);
+    const ppidPortFile = path.join(
+      '/tmp',
+      `qwen-code-ide-server-${process.ppid}.json`,
+    );
+
+    await ideServer.stop();
+
+    // The error should be silently ignored (caught in try-catch)
+    expect(fs.unlink).toHaveBeenCalledWith(portFile);
+    expect(fs.unlink).toHaveBeenCalledWith(ppidPortFile);
+  });
+
+  it('should handle error when unlinking ppid port file fails', async () => {
+    // Mock unlink to throw an error only for the second call (ppid file)
+    let callCount = 0;
+    vi.mocked(fs.unlink).mockImplementation(() => {
+      callCount++;
+      if (callCount === 2) {
+        throw new Error('ppid unlink error');
+      }
+      return Promise.resolve();
+    });
+
+    await ideServer.start(mockContext);
+    const replaceMock = mockContext.environmentVariableCollection.replace;
+    const port = getPortFromMock(replaceMock);
+    const portFile = path.join('/tmp', `qwen-code-ide-server-${port}.json`);
+    const ppidPortFile = path.join(
+      '/tmp',
+      `qwen-code-ide-server-${process.ppid}.json`,
+    );
+
+    await ideServer.stop();
+
+    // The error should be silently ignored (caught in try-catch)
+    expect(fs.unlink).toHaveBeenCalledWith(portFile);
+    expect(fs.unlink).toHaveBeenCalledWith(ppidPortFile);
+  });
+});
