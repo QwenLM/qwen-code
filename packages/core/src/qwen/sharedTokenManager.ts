@@ -26,7 +26,8 @@ const QWEN_LOCK_FILENAME = 'oauth_creds.lock';
 // Token and Cache Configuration
 const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // 30 seconds
 const LOCK_TIMEOUT_MS = 10000; // 10 seconds lock timeout
-const CACHE_CHECK_INTERVAL_MS = 5000; // 5 seconds cache check interval (increased from 1 second)
+const CACHE_CHECK_INTERVAL_MS = 10000; // 10 seconds cache check interval (increased from 5 seconds to reduce I/O)
+const MINIMUM_TOKEN_REFRESH_INTERVAL = 2000; // 2 seconds minimum interval between refresh attempts to prevent excessive API calls
 
 // Lock acquisition configuration (can be overridden for testing)
 interface LockConfig {
@@ -37,8 +38,8 @@ interface LockConfig {
 }
 
 const DEFAULT_LOCK_CONFIG: LockConfig = {
-  maxAttempts: 20, // Reduced from 50 to prevent excessive waiting
-  attemptInterval: 100, // Reduced from 200ms to check more frequently
+  maxAttempts: 10, // Reduced from 20 to prevent excessive waiting
+  attemptInterval: 200, // Increased from 100ms to reduce CPU spinning
   maxInterval: 2000, // Maximum interval for exponential backoff
 };
 
@@ -136,6 +137,11 @@ export class SharedTokenManager {
   private checkPromise: Promise<void> | null = null;
 
   /**
+   * Track the last time a token refresh was attempted to prevent excessive API calls
+   */
+  private lastRefreshAttempt: number = 0;
+
+  /**
    * Whether cleanup handlers have been registered
    */
   private cleanupHandlersRegistered = false;
@@ -208,6 +214,8 @@ export class SharedTokenManager {
     forceRefresh = false,
   ): Promise<QwenCredentials> {
     try {
+      const now = Date.now();
+
       // Check if credentials file has been updated by other sessions
       await this.checkAndReloadIfNeeded(qwenClient);
 
@@ -220,10 +228,26 @@ export class SharedTokenManager {
         return this.memoryCache.credentials;
       }
 
+      // Check if we're trying to refresh too frequently
+      if (
+        !forceRefresh &&
+        now - this.lastRefreshAttempt < MINIMUM_TOKEN_REFRESH_INTERVAL
+      ) {
+        // If we can't refresh yet and don't have valid credentials, return cached ones anyway
+        if (this.memoryCache.credentials) {
+          console.debug(
+            'Skipping token refresh due to minimum interval enforcement',
+          );
+          return this.memoryCache.credentials;
+        }
+      }
+
       // Use a local promise variable to avoid race conditions
       let currentRefreshPromise = this.refreshPromise;
 
       if (!currentRefreshPromise) {
+        // Update the last refresh attempt time
+        this.lastRefreshAttempt = now;
         // Start new refresh operation with distributed locking
         currentRefreshPromise = this.performTokenRefresh(
           qwenClient,
@@ -463,6 +487,7 @@ export class SharedTokenManager {
   ): Promise<QwenCredentials> {
     const startTime = Date.now();
     const lockPath = this.getLockFilePath();
+    const maxOperationTime = 30000; // 30 seconds maximum for the entire operation
 
     try {
       // Check if we have a refresh token before attempting refresh
@@ -475,8 +500,12 @@ export class SharedTokenManager {
         );
       }
 
-      // Acquire distributed file lock
-      await this.acquireLock(lockPath);
+      // Acquire distributed file lock with timeout
+      await this.withTimeout(
+        this.acquireLock(lockPath),
+        15000, // 15 seconds maximum for lock acquisition
+        'Lock acquisition',
+      );
 
       // Check if the operation is taking too long
       const lockAcquisitionTime = Date.now() - startTime;
@@ -501,8 +530,12 @@ export class SharedTokenManager {
         return this.memoryCache.credentials;
       }
 
-      // Perform the actual token refresh
-      const response = await qwenClient.refreshAccessToken();
+      // Perform the actual token refresh with timeout
+      const response = await this.withTimeout(
+        qwenClient.refreshAccessToken(),
+        12000, // 12 seconds maximum for the refresh call
+        'Token refresh API call',
+      );
 
       // Check if the token refresh is taking too long
       const totalOperationTime = Date.now() - startTime;
@@ -591,6 +624,14 @@ export class SharedTokenManager {
     } finally {
       // Always release the file lock
       await this.releaseLock(lockPath);
+
+      // Check if operation exceeded maximum time and log a warning
+      const totalTime = Date.now() - startTime;
+      if (totalTime > maxOperationTime) {
+        console.warn(
+          `Token refresh exceeded maximum operation time: ${totalTime}ms > ${maxOperationTime}ms`,
+        );
+      }
     }
   }
 

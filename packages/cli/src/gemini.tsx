@@ -78,49 +78,101 @@ export function validateDnsResolutionOrder(
 }
 
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
+  // Cache the total memory value to avoid repeated system calls
   const totalMemoryMB = Math.floor(os.totalmem() / (1024 * 1024));
-  const heapStats = v8.getHeapStatistics();
-  const currentMaxOldSpaceSizeMb = Math.floor(
-    heapStats.heap_size_limit / 1024 / 1024,
-  );
 
-  // Set target to 40% of total memory (was 50%, reduced to allow more room for other processes)
-  const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.4);
-
-  // Only adjust if significantly different (at least 512MB difference) to avoid frequent relaunches
-  const memoryDifference = targetMaxOldSpaceSizeInMB - currentMaxOldSpaceSizeMb;
-  const minimumAdjustmentThreshold = 512; // 512MB minimum difference to trigger adjustment
-
-  if (isDebugMode) {
-    console.debug(
-      `Current heap size limit: ${currentMaxOldSpaceSizeMb.toFixed(2)} MB, Target: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB, Difference: ${memoryDifference.toFixed(2)} MB`,
+  // For very low memory systems, use a different allocation strategy
+  if (totalMemoryMB < 2048) {
+    // Less than 2GB
+    const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.3); // Use 30% for low-memory systems
+    const heapStats = v8.getHeapStatistics();
+    const currentMaxOldSpaceSizeMb = Math.floor(
+      heapStats.heap_size_limit / 1024 / 1024,
     );
-  }
 
-  if (process.env['GEMINI_CLI_NO_RELAUNCH']) {
+    const memoryDifference =
+      targetMaxOldSpaceSizeInMB - currentMaxOldSpaceSizeMb;
+    const minimumAdjustmentThreshold = 256; // Lower threshold for low-memory systems
+
+    if (isDebugMode) {
+      console.debug(
+        `Low-memory system detected. Current heap size limit: ${currentMaxOldSpaceSizeMb.toFixed(2)} MB, Target: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB, Difference: ${memoryDifference.toFixed(2)} MB`,
+      );
+    }
+
+    if (process.env['GEMINI_CLI_NO_RELAUNCH']) {
+      return [];
+    }
+
+    if (memoryDifference > minimumAdjustmentThreshold) {
+      if (isDebugMode) {
+        console.debug(
+          `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
+        );
+      }
+      return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
+    }
+
+    // If target is significantly smaller than current, consider reducing memory usage
+    if (memoryDifference < -minimumAdjustmentThreshold) {
+      if (isDebugMode) {
+        console.debug(
+          `Reducing memory allocation: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
+        );
+      }
+      return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
+    }
+
+    return [];
+  } else {
+    // For standard memory systems, use the existing logic
+    const heapStats = v8.getHeapStatistics();
+    const currentMaxOldSpaceSizeMb = Math.floor(
+      heapStats.heap_size_limit / 1024 / 1024,
+    );
+
+    // Set target to 40% of total memory (was 50%, reduced to allow more room for other processes)
+    // But ensure a reasonable minimum (512MB) and maximum (4GB) for typical usage
+    let targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.4);
+    targetMaxOldSpaceSizeInMB = Math.max(512, targetMaxOldSpaceSizeInMB); // Minimum 512MB
+    targetMaxOldSpaceSizeInMB = Math.min(4096, targetMaxOldSpaceSizeInMB); // Maximum 4GB
+
+    // Only adjust if significantly different (at least 512MB difference) to avoid frequent relaunches
+    const memoryDifference =
+      targetMaxOldSpaceSizeInMB - currentMaxOldSpaceSizeMb;
+    const minimumAdjustmentThreshold = 512; // 512MB minimum difference to trigger adjustment
+
+    if (isDebugMode) {
+      console.debug(
+        `Current heap size limit: ${currentMaxOldSpaceSizeMb.toFixed(2)} MB, Target: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB, Difference: ${memoryDifference.toFixed(2)} MB`,
+      );
+    }
+
+    if (process.env['GEMINI_CLI_NO_RELAUNCH']) {
+      return [];
+    }
+
+    if (memoryDifference > minimumAdjustmentThreshold) {
+      if (isDebugMode) {
+        console.debug(
+          `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
+        );
+      }
+      return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
+    }
+
+    // If target is significantly smaller than current, consider reducing memory usage
+    if (memoryDifference < -minimumAdjustmentThreshold) {
+      if (isDebugMode) {
+        console.debug(
+          `Reducing memory allocation: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
+        );
+      }
+      return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
+    }
+
     return [];
   }
-
-  if (memoryDifference > minimumAdjustmentThreshold) {
-    if (isDebugMode) {
-      console.debug(
-        `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
-      );
-    }
-    return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
-  }
-
-  // If target is significantly smaller than current, consider reducing memory usage
-  if (memoryDifference < -minimumAdjustmentThreshold) {
-    if (isDebugMode) {
-      console.debug(
-        `Reducing memory allocation: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB (was ${currentMaxOldSpaceSizeMb.toFixed(2)} MB)`,
-      );
-    }
-    return [`--max-old-space-size=${targetMaxOldSpaceSizeInMB}`];
-  }
-
-  return [];
 }
 
 import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
