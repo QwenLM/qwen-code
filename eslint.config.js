@@ -110,6 +110,7 @@ export default tseslint.config(
         {
           allow: [
             'react-dom/test-utils',
+            'react-dom/client',
             'memfs/lib/volume.js',
             'yargs/**',
             'msw/node',

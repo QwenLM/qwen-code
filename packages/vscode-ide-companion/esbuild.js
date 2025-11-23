@@ -31,8 +31,30 @@ const esbuildProblemMatcherPlugin = {
   },
 };
 
+/**
+ * @type {import('esbuild').Plugin}
+ */
+const cssInjectPlugin = {
+  name: 'css-inject',
+  setup(build) {
+    build.onLoad({ filter: /\.css$/ }, async (args) => {
+      const fs = await import('fs');
+      const css = await fs.promises.readFile(args.path, 'utf8');
+      return {
+        contents: `
+          const style = document.createElement('style');
+          style.textContent = ${JSON.stringify(css)};
+          document.head.appendChild(style);
+        `,
+        loader: 'js',
+      };
+    });
+  },
+};
+
 async function main() {
-  const ctx = await esbuild.context({
+  // Build extension
+  const extensionCtx = await esbuild.context({
     entryPoints: ['src/extension.ts'],
     bundle: true,
     format: 'cjs',
@@ -55,11 +77,29 @@ async function main() {
     ],
     loader: { '.node': 'file' },
   });
+
+  // Build webview
+  const webviewCtx = await esbuild.context({
+    entryPoints: ['src/webview/index.tsx'],
+    bundle: true,
+    format: 'iife',
+    minify: production,
+    sourcemap: !production,
+    sourcesContent: false,
+    platform: 'browser',
+    outfile: 'dist/webview.js',
+    logLevel: 'silent',
+    plugins: [cssInjectPlugin, esbuildProblemMatcherPlugin],
+    define: {
+      'process.env.NODE_ENV': production ? '"production"' : '"development"',
+    },
+  });
+
   if (watch) {
-    await ctx.watch();
+    await Promise.all([extensionCtx.watch(), webviewCtx.watch()]);
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild()]);
+    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose()]);
   }
 }
 

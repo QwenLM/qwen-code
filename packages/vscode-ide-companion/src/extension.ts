@@ -14,6 +14,7 @@ import {
   IDE_DEFINITIONS,
   type IdeInfo,
 } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
+import { WebViewProvider } from './WebViewProvider.js';
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
@@ -31,6 +32,7 @@ const HIDE_INSTALLATION_GREETING_IDES: ReadonlySet<IdeInfo['name']> = new Set([
 
 let ideServer: IDEServer;
 let logger: vscode.OutputChannel;
+let webViewProvider: WebViewProvider;
 
 let log: (message: string) => void = () => {};
 
@@ -110,6 +112,9 @@ export async function activate(context: vscode.ExtensionContext) {
   const diffContentProvider = new DiffContentProvider();
   const diffManager = new DiffManager(log, diffContentProvider);
 
+  // Initialize WebView Provider
+  webViewProvider = new WebViewProvider(context, context.extensionUri);
+
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
       if (doc.uri.scheme === DIFF_SCHEME) {
@@ -131,6 +136,9 @@ export async function activate(context: vscode.ExtensionContext) {
       if (docUri && docUri.scheme === DIFF_SCHEME) {
         diffManager.cancelDiff(docUri);
       }
+    }),
+    vscode.commands.registerCommand('qwenCode.openChat', () => {
+      webViewProvider.show();
     }),
   );
 
@@ -203,6 +211,9 @@ export async function deactivate(): Promise<void> {
   try {
     if (ideServer) {
       await ideServer.stop();
+    }
+    if (webViewProvider) {
+      webViewProvider.dispose();
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

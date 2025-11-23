@@ -54,8 +54,48 @@
       {
         "command": "qwen-code.showNotices",
         "title": "Qwen Code: View Third-Party Notices"
+      },
+      {
+        "command": "qwenCode.openChat",
+        "title": "Qwen Code: Open Chat",
+        "icon": "./assets/icon.png"
       }
     ],
+    "configuration": {
+      "title": "Qwen Code",
+      "properties": {
+        "qwenCode.qwen.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Qwen agent integration"
+        },
+        "qwenCode.qwen.cliPath": {
+          "type": "string",
+          "default": "qwen",
+          "description": "Path to Qwen CLI executable"
+        },
+        "qwenCode.qwen.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for Qwen (optional, if not using Code Assist)"
+        },
+        "qwenCode.qwen.openaiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI base URL for custom endpoints (optional)"
+        },
+        "qwenCode.qwen.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model to use (optional)"
+        },
+        "qwenCode.qwen.proxy": {
+          "type": "string",
+          "default": "",
+          "description": "Proxy for Qwen client (format: schema://user:password@host:port, e.g., http://127.0.0.1:7890)"
+        }
+      }
+    },
     "menus": {
       "commandPalette": [
         {
@@ -77,6 +117,10 @@
           "command": "qwen.diff.cancel",
           "when": "qwen.diff.isVisible",
           "group": "navigation"
+        },
+        {
+          "command": "qwenCode.openChat",
+          "group": "navigation"
         }
       ]
     },
@@ -90,6 +134,11 @@
         "command": "qwen.diff.accept",
         "key": "cmd+s",
         "when": "qwen.diff.isVisible"
+      },
+      {
+        "command": "qwenCode.openChat",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
       }
     ]
   },
@@ -116,6 +165,8 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/node": "20.x",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
     "@types/vscode": "^1.99.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
@@ -130,6 +181,8 @@
     "@modelcontextprotocol/sdk": "^1.15.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
     "zod": "^3.25.76"
   }
 }
