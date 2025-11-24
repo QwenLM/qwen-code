@@ -17,7 +17,6 @@ import { t } from '../../i18n/index.js';
 export enum QuitChoice {
   CANCEL = 'cancel',
   QUIT = 'quit',
-  SAVE_AND_QUIT = 'save_and_quit',
   SUMMARY_AND_QUIT = 'summary_and_quit',
 }
 
@@ -47,11 +46,6 @@ export const QuitConfirmationDialog: React.FC<QuitConfirmationDialogProps> = ({
       key: 'summary-and-quit',
       label: t('Generate summary and quit (/summary)'),
       value: QuitChoice.SUMMARY_AND_QUIT,
-    },
-    {
-      key: 'save-and-quit',
-      label: t('Save conversation and quit (/chat save)'),
-      value: QuitChoice.SAVE_AND_QUIT,
     },
     {
       key: 'cancel',

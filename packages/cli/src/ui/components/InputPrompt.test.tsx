@@ -66,20 +66,6 @@ const mockSlashCommands: SlashCommand[] = [
       },
     ],
   },
-  {
-    name: 'chat',
-    description: 'Manage chats',
-    kind: CommandKind.BUILT_IN,
-    subCommands: [
-      {
-        name: 'resume',
-        description: 'Resume a chat',
-        kind: CommandKind.BUILT_IN,
-        action: vi.fn(),
-        completion: async () => ['fix-foo', 'fix-bar'],
-      },
-    ],
-  },
 ];
 
 describe('InputPrompt', () => {
@@ -571,14 +557,14 @@ describe('InputPrompt', () => {
   });
 
   it('should complete a partial argument for a command', async () => {
-    // SCENARIO: /chat resume fi- -> Tab
+    // SCENARIO: /memory add fi- -> Tab
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
       suggestions: [{ label: 'fix-foo', value: 'fix-foo' }],
       activeSuggestionIndex: 0,
     });
-    props.buffer.setText('/chat resume fi-');
+    props.buffer.setText('/memory add fi-');
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();

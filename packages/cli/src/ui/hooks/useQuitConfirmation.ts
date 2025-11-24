@@ -21,8 +21,6 @@ export const useQuitConfirmation = () => {
       return { shouldQuit: false, action: 'cancel' };
     } else if (choice === QuitChoice.QUIT) {
       return { shouldQuit: true, action: 'quit' };
-    } else if (choice === QuitChoice.SAVE_AND_QUIT) {
-      return { shouldQuit: true, action: 'save_and_quit' };
     } else if (choice === QuitChoice.SUMMARY_AND_QUIT) {
       return { shouldQuit: true, action: 'summary_and_quit' };
     }

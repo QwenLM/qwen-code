@@ -135,8 +135,6 @@ export const DialogManager = ({
             uiState.quitConfirmationRequest?.onConfirm(false, 'cancel');
           } else if (choice === QuitChoice.QUIT) {
             uiState.quitConfirmationRequest?.onConfirm(true, 'quit');
-          } else if (choice === QuitChoice.SAVE_AND_QUIT) {
-            uiState.quitConfirmationRequest?.onConfirm(true, 'save_and_quit');
           } else if (choice === QuitChoice.SUMMARY_AND_QUIT) {
             uiState.quitConfirmationRequest?.onConfirm(
               true,

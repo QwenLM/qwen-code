@@ -428,15 +428,7 @@ export const useSlashCommandProcessor = (
                         return;
                       }
                       if (shouldQuit) {
-                        if (action === 'save_and_quit') {
-                          // First save conversation with auto-generated tag, then quit
-                          const timestamp = new Date()
-                            .toISOString()
-                            .replace(/[:.]/g, '-');
-                          const autoSaveTag = `auto-save chat ${timestamp}`;
-                          handleSlashCommand(`/chat save "${autoSaveTag}"`);
-                          setTimeout(() => handleSlashCommand('/quit'), 100);
-                        } else if (action === 'summary_and_quit') {
+                        if (action === 'summary_and_quit') {
                           // Generate summary and then quit
                           handleSlashCommand('/summary')
                             .then(() => {
