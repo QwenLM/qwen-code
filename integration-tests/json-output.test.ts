@@ -54,6 +54,7 @@ describe('JSON output', () => {
   });
 
   it('should return a JSON error for enforced auth mismatch before running', async () => {
+    const originalOpenaiApiKey = process.env['OPENAI_API_KEY'];
     process.env['OPENAI_API_KEY'] = 'test-key';
     await rig.setup('json-output-auth-mismatch', {
       settings: {
@@ -68,7 +69,7 @@ describe('JSON output', () => {
     } catch (e) {
       thrown = e as Error;
     } finally {
-      delete process.env['OPENAI_API_KEY'];
+      process.env['OPENAI_API_KEY'] = originalOpenaiApiKey;
     }
 
     expect(thrown).toBeDefined();
