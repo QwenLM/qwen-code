@@ -126,7 +126,7 @@ export const useGeminiStream = (
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const { startNewPrompt, getPromptCount } = useSessionStats();
   const storage = config.storage;
-  const logger = useLogger(storage);
+  const logger = useLogger(storage, config.getSessionId());
   const gitService = useMemo(() => {
     if (!config.getProjectRoot()) {
       return;

@@ -19,7 +19,7 @@ import type {
   ModelMetrics,
   ToolCallStats,
 } from '@qwen-code/qwen-code-core';
-import { uiTelemetryService, sessionId } from '@qwen-code/qwen-code-core';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 export enum ToolCallDecision {
   ACCEPT = 'accept',
@@ -180,11 +180,12 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
 
 // --- Provider Component ---
 
-export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => {
+export const SessionStatsProvider: React.FC<{
+  sessionId?: string;
+  children: React.ReactNode;
+}> = ({ sessionId, children }) => {
   const [stats, setStats] = useState<SessionStatsState>({
-    sessionId,
+    sessionId: sessionId ?? '',
     sessionStartTime: new Date(),
     metrics: uiTelemetryService.getMetrics(),
     lastPromptTokenCount: 0,

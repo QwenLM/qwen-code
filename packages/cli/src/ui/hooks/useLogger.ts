@@ -6,12 +6,12 @@
 
 import { useState, useEffect } from 'react';
 import type { Storage } from '@qwen-code/qwen-code-core';
-import { sessionId, Logger } from '@qwen-code/qwen-code-core';
+import { Logger } from '@qwen-code/qwen-code-core';
 
 /**
  * Hook to manage the logger instance.
  */
-export const useLogger = (storage: Storage) => {
+export const useLogger = (storage: Storage, sessionId: string) => {
   const [logger, setLogger] = useState<Logger | null>(null);
 
   useEffect(() => {
@@ -27,7 +27,7 @@ export const useLogger = (storage: Storage) => {
         setLogger(newLogger);
       })
       .catch(() => {});
-  }, [storage]);
+  }, [storage, sessionId]);
 
   return logger;
 };

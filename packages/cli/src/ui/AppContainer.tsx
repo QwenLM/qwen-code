@@ -196,7 +196,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
-  const logger = useLogger(config.storage);
+  const logger = useLogger(config.storage, config.getSessionId());
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
   // Terminal and layout hooks
