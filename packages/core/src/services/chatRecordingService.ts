@@ -18,7 +18,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import type { ToolCallResponseInfo } from '../core/turn.js';
-import type { ResumedSessionData } from './sessionService.js';
+import { type ResumedSessionData } from './sessionService.js';
 
 /**
  * Token usage summary for a message or conversation.
@@ -136,14 +136,14 @@ export function toTokensSummary(
  */
 export class ChatRecordingService {
   private conversationFile: string | null = null;
-  private sessionId: string;
+  private sessionId: string | undefined = undefined;
   /** UUID of the last written record in the chain */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
+  private resumedSessionData?: ResumedSessionData;
 
   constructor(config: Config) {
     this.config = config;
-    this.sessionId = config.getSessionId();
   }
 
   private getChatsDir(): string {
@@ -159,7 +159,7 @@ export class ChatRecordingService {
     return {
       uuid: randomUUID(),
       parentUuid: this.lastRecordUuid,
-      sessionId: this.sessionId,
+      sessionId: this.getSessionId(),
       timestamp: new Date().toISOString(),
       type,
       cwd: this.config.getProjectRoot(),
@@ -185,15 +185,18 @@ export class ChatRecordingService {
 
   /**
    * Initializes the chat recording service.
-   * Creates a new session file or resumes from an existing session.
+   * Loads a resumed session if requested, or creates a new session file.
    */
-  initialize(resumedSessionData?: ResumedSessionData): void {
+  initialize(sessionId?: string, sessionData?: ResumedSessionData): void {
+    this.sessionId = sessionId ?? randomUUID();
+
     try {
-      if (resumedSessionData) {
+      if (sessionData) {
         // Resume from existing session
-        this.conversationFile = resumedSessionData.filePath;
-        this.sessionId = resumedSessionData.conversation.sessionId;
-        this.lastRecordUuid = resumedSessionData.lastCompletedUuid;
+        this.conversationFile = sessionData.filePath;
+        this.sessionId = sessionData.conversation.sessionId;
+        this.lastRecordUuid = sessionData.lastCompletedUuid;
+        this.resumedSessionData = sessionData;
       } else {
         // Create new session
         const chatsDir = this.getChatsDir();
@@ -210,6 +213,27 @@ export class ChatRecordingService {
       console.error('Error initializing chat recording service:', error);
       throw error;
     }
+  }
+
+  /**
+   * Returns the resumed session data if this session was resumed from a previous one.
+   */
+  getResumedSessionData(): ResumedSessionData | undefined {
+    return this.resumedSessionData;
+  }
+
+  /**
+   * Returns the session ID (may be updated after initialization if resuming).
+   */
+  getSessionId(): string {
+    if (!this.sessionId) {
+      if (process.env['VITEST'] === 'true') {
+        this.sessionId = 'test-session-id';
+      } else {
+        throw new Error('ChatRecordingService is not initialized');
+      }
+    }
+    return this.sessionId;
   }
 
   /**

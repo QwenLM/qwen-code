@@ -55,9 +55,7 @@ describe('SubagentManager', () => {
     } as unknown as ToolRegistry;
 
     // Create mock Config object using test utility
-    mockConfig = makeFakeConfig({
-      sessionId: 'test-session-id',
-    });
+    mockConfig = makeFakeConfig({});
 
     // Mock the tool registry and project root methods
     vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue(mockToolRegistry);

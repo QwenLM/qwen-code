@@ -37,7 +37,7 @@ export interface CommandContext {
     config: Config | null;
     settings: LoadedSettings;
     git: GitService | undefined;
-    logger: Logger;
+    logger: Logger | null;
   };
   // UI state and history management
   ui: {

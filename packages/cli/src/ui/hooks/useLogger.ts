@@ -15,6 +15,10 @@ export const useLogger = (storage: Storage, sessionId: string) => {
   const [logger, setLogger] = useState<Logger | null>(null);
 
   useEffect(() => {
+    if (!sessionId) {
+      return;
+    }
+
     const newLogger = new Logger(sessionId, storage);
     /**
      * Start async initialization, no need to await. Using await slows down the

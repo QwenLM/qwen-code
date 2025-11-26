@@ -308,9 +308,11 @@ describe('SessionService', () => {
         cwd: '/different/project',
       };
       vi.mocked(jsonl.readLines).mockResolvedValue([differentProjectRecord]);
-      vi.mocked(getProjectHash).mockImplementation((cwd: string) => cwd === '/test/project/root'
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
           ? 'test-project-hash'
-          : 'other-project-hash');
+          : 'other-project-hash',
+      );
 
       const result = await sessionService.listSessions();
 
@@ -357,15 +359,15 @@ describe('SessionService', () => {
       expect(loaded?.lastCompletedUuid).toBe('b2');
     });
 
-    it('should return null when session file is empty', async () => {
+    it('should return undefined when session file is empty', async () => {
       vi.mocked(jsonl.read).mockResolvedValue([]);
 
       const loaded = await sessionService.loadSession('nonexistent');
 
-      expect(loaded).toBeNull();
+      expect(loaded).toBeUndefined();
     });
 
-    it('should return null when session belongs to different project', async () => {
+    it('should return undefined when session belongs to different project', async () => {
       const now = Date.now();
       statSyncSpy.mockReturnValue({
         mtimeMs: now,
@@ -377,13 +379,15 @@ describe('SessionService', () => {
         cwd: '/different/project',
       };
       vi.mocked(jsonl.read).mockResolvedValue([differentProjectRecord]);
-      vi.mocked(getProjectHash).mockImplementation((cwd: string) => cwd === '/test/project/root'
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
           ? 'test-project-hash'
-          : 'other-project-hash');
+          : 'other-project-hash',
+      );
 
       const loaded = await sessionService.loadSession(sessionIdA);
 
-      expect(loaded).toBeNull();
+      expect(loaded).toBeUndefined();
     });
 
     it('should reconstruct tree-structured history correctly', async () => {
@@ -530,9 +534,11 @@ describe('SessionService', () => {
         cwd: '/different/project',
       };
       vi.mocked(jsonl.readLines).mockResolvedValue([differentProjectRecord]);
-      vi.mocked(getProjectHash).mockImplementation((cwd: string) => cwd === '/test/project/root'
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
           ? 'test-project-hash'
-          : 'other-project-hash');
+          : 'other-project-hash',
+      );
 
       const result = await sessionService.removeSession(sessionIdA);
 
@@ -586,12 +592,12 @@ describe('SessionService', () => {
       expect(latest?.conversation.sessionId).toBe(sessionIdB);
     });
 
-    it('should return null when no sessions exist', async () => {
+    it('should return undefined when no sessions exist', async () => {
       readdirSyncSpy.mockReturnValue([]);
 
       const latest = await sessionService.getLatestSession();
 
-      expect(latest).toBeNull();
+      expect(latest).toBeUndefined();
     });
   });
 
@@ -628,12 +634,12 @@ describe('SessionService', () => {
       expect(latest?.conversation.sessionId).toBe(sessionIdB);
     });
 
-    it('should return null when no sessions exist', async () => {
+    it('should return undefined when no sessions exist', async () => {
       readdirSyncSpy.mockReturnValue([]);
 
       const latest = await sessionService.loadLastSession();
 
-      expect(latest).toBeNull();
+      expect(latest).toBeUndefined();
     });
   });
 
@@ -662,9 +668,11 @@ describe('SessionService', () => {
         cwd: '/different/project',
       };
       vi.mocked(jsonl.readLines).mockResolvedValue([differentProjectRecord]);
-      vi.mocked(getProjectHash).mockImplementation((cwd: string) => cwd === '/test/project/root'
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
           ? 'test-project-hash'
-          : 'other-project-hash');
+          : 'other-project-hash',
+      );
 
       const exists = await sessionService.sessionExists(sessionIdA);
 

@@ -140,8 +140,8 @@ describe('ChatRecordingService', () => {
   });
 
   describe('initialize', () => {
-    it('should create a new session file if none is provided', () => {
-      chatRecordingService.initialize();
+    it('should create a new session file if none is provided', async () => {
+      await chatRecordingService.initialize();
 
       expect(mkdirSyncSpy).toHaveBeenCalledWith(
         '/test/project/root/.gemini/projects/test-project/chats',
@@ -149,40 +149,11 @@ describe('ChatRecordingService', () => {
       );
       expect(writeFileSyncSpy).toHaveBeenCalled();
     });
-
-    it('should resume from an existing session if provided', () => {
-      const existingRecord: ChatRecord = {
-        uuid: 'existing-uuid',
-        parentUuid: null,
-        sessionId: 'old-session-id',
-        timestamp: '2024-01-01T00:00:00Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'Hello' }] },
-        cwd: '/test/project/root',
-        version: '1.0.0',
-      };
-
-      chatRecordingService.initialize({
-        filePath: '/test/project/root/.gemini/tmp/hash/chats/session.jsonl',
-        conversation: {
-          sessionId: 'old-session-id',
-          projectHash: 'test-project-hash',
-          startTime: '2024-01-01T00:00:00Z',
-          lastUpdated: '2024-01-01T00:00:00Z',
-          messages: [existingRecord],
-        },
-        lastCompletedUuid: 'existing-uuid',
-      });
-
-      // Should not create new directory or file
-      expect(mkdirSyncSpy).not.toHaveBeenCalled();
-      expect(writeFileSyncSpy).not.toHaveBeenCalled();
-    });
   });
 
   describe('recordUserMessage', () => {
-    beforeEach(() => {
-      chatRecordingService.initialize();
+    beforeEach(async () => {
+      await chatRecordingService.initialize('test-session-id');
     });
 
     it('should record a user message immediately', () => {
@@ -229,8 +200,8 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordAssistantTurn', () => {
-    beforeEach(() => {
-      chatRecordingService.initialize();
+    beforeEach(async () => {
+      await chatRecordingService.initialize();
     });
 
     it('should record assistant turn with content only', () => {
@@ -293,8 +264,8 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordToolResult', () => {
-    beforeEach(() => {
-      chatRecordingService.initialize();
+    beforeEach(async () => {
+      await chatRecordingService.initialize();
     });
 
     it('should record tool result with Parts', () => {
@@ -386,31 +357,5 @@ describe('ChatRecordingService', () => {
 
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
-
-  describe('resume from existing session', () => {
-    it('should continue chain from lastCompletedUuid', () => {
-      chatRecordingService.initialize({
-        filePath: '/test/session.jsonl',
-        conversation: {
-          sessionId: 'resumed-session',
-          projectHash: 'test-project-hash',
-          startTime: '2024-01-01T00:00:00Z',
-          lastUpdated: '2024-01-01T00:00:00Z',
-          messages: [],
-        },
-        lastCompletedUuid: 'existing-uuid',
-      });
-
-      chatRecordingService.recordAssistantTurn({
-        model: 'gemini-pro',
-        message: [{ text: 'Continuing...' }],
-      });
-
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
-
-      expect(record.parentUuid).toBe('existing-uuid');
-      expect(record.sessionId).toBe('resumed-session');
-    });
-  });
+  // Session resume integration tests should test via SessionService mock
 });

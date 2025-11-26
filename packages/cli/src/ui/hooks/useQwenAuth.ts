@@ -27,6 +27,7 @@ export interface QwenAuthState {
 export const useQwenAuth = (
   pendingAuthType: AuthType | undefined,
   isAuthenticating: boolean,
+  isConfigInitialized: boolean = true,
 ) => {
   const [qwenAuthState, setQwenAuthState] = useState<QwenAuthState>({
     deviceAuth: null,
@@ -38,6 +39,10 @@ export const useQwenAuth = (
 
   // Set up event listeners when authentication starts
   useEffect(() => {
+    if (!isConfigInitialized) {
+      return;
+    }
+
     if (!isQwenAuth || !isAuthenticating) {
       // Reset state when not authenticating or not Qwen auth
       setQwenAuthState({
@@ -88,7 +93,7 @@ export const useQwenAuth = (
       qwenOAuth2Events.off(QwenOAuth2Event.AuthUri, handleDeviceAuth);
       qwenOAuth2Events.off(QwenOAuth2Event.AuthProgress, handleAuthProgress);
     };
-  }, [isQwenAuth, isAuthenticating]);
+  }, [isQwenAuth, isAuthenticating, isConfigInitialized]);
 
   const cancelQwenAuth = useCallback(() => {
     // Emit cancel event to stop polling

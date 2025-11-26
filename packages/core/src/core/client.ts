@@ -95,7 +95,7 @@ export class GeminiClient {
   private sessionTurnCount = 0;
 
   private readonly loopDetector: LoopDetectionService;
-  private lastPromptId: string;
+  private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
 
@@ -107,11 +107,23 @@ export class GeminiClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
-    this.lastPromptId = this.config.getSessionId();
   }
 
   async initialize() {
-    this.chat = await this.startChat();
+    this.lastPromptId = this.config.getSessionId();
+
+    // Check if we're resuming from a previous session
+    const resumedSessionData = this.config.getResumedSessionData();
+    if (resumedSessionData) {
+      // Convert resumed session to API history format
+      // Each ChatRecord's message field is already a Content object
+      const resumedHistory = resumedSessionData.conversation.messages
+        .filter((record) => record.message)
+        .map((record) => record.message!);
+      this.chat = await this.startChat(resumedHistory);
+    } else {
+      this.chat = await this.startChat();
+    }
   }
 
   private getContentGeneratorOrFail(): ContentGenerator {
@@ -620,7 +632,7 @@ export class GeminiClient {
             config: requestConfig,
             contents,
           },
-          this.lastPromptId,
+          this.lastPromptId!,
         );
       };
       const onPersistent429Callback = async (

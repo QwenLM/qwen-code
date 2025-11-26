@@ -124,9 +124,13 @@ export const useGeminiStream = (
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
-  const { startNewPrompt, getPromptCount } = useSessionStats();
+  const {
+    startNewPrompt,
+    getPromptCount,
+    stats: sessionStates,
+  } = useSessionStats();
   const storage = config.storage;
-  const logger = useLogger(storage, config.getSessionId());
+  const logger = useLogger(storage, sessionStates.sessionId);
   const gitService = useMemo(() => {
     if (!config.getProjectRoot()) {
       return;

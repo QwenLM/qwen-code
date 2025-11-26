@@ -197,7 +197,6 @@ describe('Server Config (config.ts)', () => {
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
-  const SESSION_ID = 'test-session-id';
   const baseParams: ConfigParameters = {
     cwd: '/tmp',
     embeddingModel: EMBEDDING_MODEL,
@@ -208,7 +207,6 @@ describe('Server Config (config.ts)', () => {
     fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
-    sessionId: SESSION_ID,
     model: MODEL,
     usageStatisticsEnabled: false,
   };
@@ -956,7 +954,6 @@ describe('Server Config (config.ts)', () => {
 
 describe('setApprovalMode with folder trust', () => {
   const baseParams: ConfigParameters = {
-    sessionId: 'test',
     targetDir: '.',
     debugMode: false,
     model: 'test-model',
@@ -987,7 +984,6 @@ describe('setApprovalMode with folder trust', () => {
 
   it('should NOT throw an error when setting PLAN mode in an untrusted folder', () => {
     const config = new Config({
-      sessionId: 'test',
       targetDir: '.',
       debugMode: false,
       model: 'test-model',
@@ -1168,7 +1164,6 @@ describe('BaseLlmClient Lifecycle', () => {
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
-  const SESSION_ID = 'test-session-id';
   const baseParams: ConfigParameters = {
     cwd: '/tmp',
     embeddingModel: EMBEDDING_MODEL,
@@ -1179,7 +1174,6 @@ describe('BaseLlmClient Lifecycle', () => {
     fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
-    sessionId: SESSION_ID,
     model: MODEL,
     usageStatisticsEnabled: false,
   };

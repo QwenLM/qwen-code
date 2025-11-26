@@ -40,6 +40,7 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
 } from '@qwen-code/qwen-code-core';
+import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import process from 'node:process';
@@ -196,7 +197,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
-  const logger = useLogger(config.storage, config.getSessionId());
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
   // Terminal and layout hooks
@@ -205,7 +205,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stdout } = useStdout();
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats } = useSessionStats();
+  const { stats: sessionStats, startNewSession } = useSessionStats();
+  const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
 
   // Layout measurements
@@ -216,6 +217,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const lastTitleRef = useRef<string | null>(null);
   const staticExtraHeight = 3;
 
+  // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
       // Note: the program will not work if this fails so let errors be
@@ -228,6 +230,20 @@ export const AppContainer = (props: AppContainerProps) => {
       await ideClient.disconnect();
     });
   }, [config]);
+
+  // Load resumed session history after config is initialized
+  useEffect(() => {
+    if (!isConfigInitialized) return;
+
+    startNewSession(config.getSessionId());
+
+    const resumedSessionData = config.getResumedSessionData();
+    if (resumedSessionData) {
+      const historyItems = buildResumedHistoryItems(resumedSessionData);
+      historyManager.loadHistory(historyItems);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConfigInitialized]);
 
   useEffect(
     () => setUpdateHandler(historyManager.addItem, setUpdateInfo),
@@ -354,7 +370,12 @@ export const AppContainer = (props: AppContainerProps) => {
     handleAuthSelect,
     openAuthDialog,
     cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem);
+  } = useAuthCommand(
+    settings,
+    config,
+    historyManager.addItem,
+    isConfigInitialized,
+  );
 
   const { proQuotaRequest, handleProQuotaChoice } = useQuotaAndFallback({
     config,
@@ -522,6 +543,7 @@ export const AppContainer = (props: AppContainerProps) => {
     slashCommandActions,
     extensionsUpdateStateInternal,
     isConfigInitialized,
+    logger,
   );
 
   // Vision switch handlers

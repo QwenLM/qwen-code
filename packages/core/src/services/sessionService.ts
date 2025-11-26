@@ -353,26 +353,28 @@ export class SessionService {
    * @param sessionId The session ID to load
    * @returns Session data for resumption, or null if not found
    */
-  async loadSession(sessionId: string): Promise<ResumedSessionData | null> {
+  async loadSession(
+    sessionId: string,
+  ): Promise<ResumedSessionData | undefined> {
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
     const records = await this.readAllRecords(filePath);
     if (records.length === 0) {
-      return null;
+      return;
     }
 
     // Verify this session belongs to the current project
     const firstRecord = records[0];
     const recordProjectHash = getProjectHash(firstRecord.cwd);
     if (recordProjectHash !== this.projectHash) {
-      return null;
+      return;
     }
 
     // Reconstruct linear history
     const messages = this.reconstructHistory(records);
     if (messages.length === 0) {
-      return null;
+      return;
     }
 
     const lastMessage = messages[messages.length - 1];
@@ -428,10 +430,10 @@ export class SessionService {
   /**
    * Gets the most recent session for the current project.
    *
-   * @returns Session data for resumption, or null if no sessions exist
+   * @returns Session data for resumption, or undefined if no sessions exist
    * @deprecated Use {@link loadLastSession} instead
    */
-  async getLatestSession(): Promise<ResumedSessionData | null> {
+  async getLatestSession(): Promise<ResumedSessionData | undefined> {
     return this.loadLastSession();
   }
 
@@ -439,12 +441,12 @@ export class SessionService {
    * Loads the most recent session for the current project.
    * Combines listSessions and loadSession for convenience.
    *
-   * @returns Session data for resumption, or null if no sessions exist
+   * @returns Session data for resumption, or undefined if no sessions exist
    */
-  async loadLastSession(): Promise<ResumedSessionData | null> {
+  async loadLastSession(): Promise<ResumedSessionData | undefined> {
     const result = await this.listSessions({ size: 1 });
     if (result.items.length === 0) {
-      return null;
+      return;
     }
     return this.loadSession(result.items[0].sessionId);
   }

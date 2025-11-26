@@ -168,6 +168,7 @@ export interface ComputedSessionStats {
 // and the functions to update it.
 interface SessionStatsContextValue {
   stats: SessionStatsState;
+  startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
 }
@@ -178,6 +179,14 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
   undefined,
 );
 
+const defaultStats: SessionStatsState = {
+  sessionId: '',
+  sessionStartTime: new Date(),
+  metrics: uiTelemetryService.getMetrics(),
+  lastPromptTokenCount: 0,
+  promptCount: 0,
+};
+
 // --- Provider Component ---
 
 export const SessionStatsProvider: React.FC<{
@@ -185,11 +194,8 @@ export const SessionStatsProvider: React.FC<{
   children: React.ReactNode;
 }> = ({ sessionId, children }) => {
   const [stats, setStats] = useState<SessionStatsState>({
+    ...defaultStats,
     sessionId: sessionId ?? '',
-    sessionStartTime: new Date(),
-    metrics: uiTelemetryService.getMetrics(),
-    lastPromptTokenCount: 0,
-    promptCount: 0,
   });
 
   useEffect(() => {
@@ -227,6 +233,13 @@ export const SessionStatsProvider: React.FC<{
     };
   }, []);
 
+  const startNewSession = useCallback((sessionId: string) => {
+    setStats({
+      ...defaultStats,
+      sessionId,
+    });
+  }, []);
+
   const startNewPrompt = useCallback(() => {
     setStats((prevState) => ({
       ...prevState,
@@ -242,10 +255,11 @@ export const SessionStatsProvider: React.FC<{
   const value = useMemo(
     () => ({
       stats,
+      startNewSession,
       startNewPrompt,
       getPromptCount,
     }),
-    [stats, startNewPrompt, getPromptCount],
+    [stats, startNewSession, startNewPrompt, getPromptCount],
   );
 
   return (

@@ -49,7 +49,6 @@ import { SettingScope } from '../config/settings.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
-import { randomUUID } from 'node:crypto';
 import { getErrorMessage } from '../utils/errors.js';
 import { ExtensionStorage, type Extension } from '../config/extension.js';
 import type { CliArgs } from '../config/config.js';
@@ -173,8 +172,8 @@ class GeminiAgent {
     cwd,
     mcpServers,
   }: acp.NewSessionRequest): Promise<acp.NewSessionResponse> {
-    const sessionId = this.config.getSessionId() || randomUUID();
-    const config = await this.newSessionConfig(sessionId, cwd, mcpServers);
+    const config = await this.newSessionConfig(cwd, mcpServers);
+    const sessionId = config.getSessionId();
 
     let isAuthenticated = false;
     if (this.settings.merged.security?.auth?.selectedType) {
@@ -224,7 +223,6 @@ class GeminiAgent {
   }
 
   async newSessionConfig(
-    sessionId: string,
     cwd: string,
     mcpServers: acp.McpServer[],
   ): Promise<Config> {
@@ -247,7 +245,6 @@ class GeminiAgent {
         ExtensionStorage.getUserExtensionsDir(),
         this.argv.extensions,
       ),
-      sessionId,
       this.argv,
       cwd,
     );

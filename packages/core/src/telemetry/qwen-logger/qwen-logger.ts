@@ -102,7 +102,6 @@ export class QwenLogger {
   private lastFlushTime: number = Date.now();
 
   private userId: string;
-  private sessionId: string;
 
   /**
    * The value is true when there is a pending flush happening. This prevents
@@ -122,10 +121,6 @@ export class QwenLogger {
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
     this.installationManager = new InstallationManager();
     this.userId = this.generateUserId();
-    this.sessionId =
-      typeof this.config?.getSessionId === 'function'
-        ? this.config.getSessionId()
-        : '';
   }
 
   private generateUserId(): string {
@@ -241,10 +236,10 @@ export class QwenLogger {
         id: this.userId,
       },
       session: {
-        id: this.sessionId,
+        id: this.config?.getSessionId(),
       },
       view: {
-        id: this.sessionId,
+        id: this.config?.getSessionId(),
         name: 'qwen-code-cli',
       },
       os: osMetadata,

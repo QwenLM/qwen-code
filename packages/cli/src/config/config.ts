@@ -4,11 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  FileFilteringOptions,
-  MCPServerConfig,
-} from '@qwen-code/qwen-code-core';
-import { extensionsCommand } from '../commands/extensions.js';
 import {
   ApprovalMode,
   Config,
@@ -26,7 +21,10 @@ import {
   Storage,
   InputFormat,
   OutputFormat,
+  type FileFilteringOptions,
+  type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
+import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
 import yargs, { type Argv } from 'yargs';
 import { hideBin } from 'yargs/helpers';
@@ -129,6 +127,10 @@ export interface CliArgs {
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
+  /** Resume the most recent session for the current project */
+  continue: boolean | undefined;
+  /** Resume a specific session by its ID */
+  resume: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -396,6 +398,16 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             'Include partial assistant messages when using stream-json output.',
           default: false,
         })
+        .option('continue', {
+          type: 'boolean',
+          description:
+            'Resume the most recent session for the current project.',
+          default: false,
+        })
+        .option('resume', {
+          type: 'string',
+          description: 'Resume a specific session by its ID.',
+        })
         .deprecateOption(
           'show-memory-usage',
           'Use the "ui.showMemoryUsage" setting in settings.json instead. This flag will be removed in a future version.',
@@ -450,6 +462,9 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             argv['outputFormat'] !== OutputFormat.STREAM_JSON
           ) {
             return '--input-format stream-json requires --output-format stream-json';
+          }
+          if (argv['continue'] && argv['resume']) {
+            return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
           }
           return true;
         }),
@@ -565,7 +580,6 @@ export async function loadCliConfig(
   settings: Settings,
   extensions: Extension[],
   extensionEnablementManager: ExtensionEnablementManager,
-  sessionId: string,
   argv: CliArgs,
   cwd: string = process.cwd(),
 ): Promise<Config> {
@@ -797,8 +811,8 @@ export async function loadCliConfig(
 
   const vlmSwitchMode =
     argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
+
   return new Config({
-    sessionId,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -896,6 +910,8 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
+    continueSession: argv.continue || false,
+    resumeSessionId: argv.resume,
   });
 }
 

@@ -6,17 +6,15 @@
 
 import { useCallback, useMemo, useEffect, useState } from 'react';
 import { type PartListUnion } from '@google/genai';
-import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import type { Config } from '@qwen-code/qwen-code-core';
 import {
+  type Logger,
+  type Config,
   GitService,
-  Logger,
   logSlashCommand,
   makeSlashCommandEvent,
   SlashCommandStatus,
   ToolConfirmationOutcome,
-  Storage,
   IdeClient,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
@@ -75,6 +73,7 @@ export const useSlashCommandProcessor = (
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
+  logger: Logger | null,
 ) => {
   const session = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -108,16 +107,6 @@ export const useSlashCommandProcessor = (
       return;
     }
     return new GitService(config.getProjectRoot(), config.storage);
-  }, [config]);
-
-  const logger = useMemo(() => {
-    const l = new Logger(
-      config?.getSessionId() || '',
-      config?.storage ?? new Storage(process.cwd()),
-    );
-    // The logger's initialize is async, but we can create the instance
-    // synchronously. Commands that use it will await its initialization.
-    return l;
   }, [config]);
 
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(

@@ -12,7 +12,6 @@ import {
   logUserPrompt,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
-import { randomUUID } from 'node:crypto';
 import dns from 'node:dns';
 import os from 'node:os';
 import { basename } from 'node:path';
@@ -158,7 +157,7 @@ export async function startInteractiveUI(
             process.platform === 'win32' || nodeMajorVersion < 20
           }
         >
-          <SessionStatsProvider sessionId={config.getSessionId()}>
+          <SessionStatsProvider>
             <VimModeProvider settings={settings}>
               <AppContainer
                 config={config}
@@ -207,7 +206,6 @@ export async function main() {
   const settings = loadSettings();
   migrateDeprecatedSettings(settings);
   await cleanupCheckpoints();
-  const sessionId = randomUUID();
 
   const argv = await parseArguments(settings.merged);
 
@@ -253,7 +251,6 @@ export async function main() {
         settings.merged,
         [],
         new ExtensionEnablementManager(ExtensionStorage.getUserExtensionsDir()),
-        sessionId,
         argv,
       );
 
@@ -332,7 +329,6 @@ export async function main() {
       settings.merged,
       extensions,
       extensionEnablementManager,
-      sessionId,
       argv,
     );
 
@@ -469,7 +465,7 @@ export async function main() {
     });
 
     if (config.getDebugMode()) {
-      console.log('Session ID: %s', sessionId);
+      console.log('Session ID: %s', config.getSessionId());
     }
 
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);

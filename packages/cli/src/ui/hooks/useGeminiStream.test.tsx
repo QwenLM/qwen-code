@@ -152,6 +152,9 @@ vi.mock('../contexts/SessionContext.js', () => ({
     startNewPrompt: mockStartNewPrompt,
     addUsage: mockAddUsage,
     getPromptCount: vi.fn(() => 5),
+    stats: {
+      sessionId: 'test-session-id',
+    },
   })),
 }));
 

@@ -94,6 +94,10 @@ import { DEFAULT_QWEN_EMBEDDING_MODEL, DEFAULT_QWEN_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
+import {
+  SessionService,
+  type ResumedSessionData,
+} from '../services/sessionService.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -212,7 +216,6 @@ export interface SandboxConfig {
 }
 
 export interface ConfigParameters {
-  sessionId: string;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -294,6 +297,10 @@ export interface ConfigParameters {
   skipStartupContext?: boolean;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
+  /** Continue from the most recent session (--continue flag) */
+  continueSession?: boolean;
+  /** Resume a specific session by ID (--resume flag) */
+  resumeSessionId?: string;
 }
 
 function normalizeConfigOutputFormat(
@@ -319,7 +326,6 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
-  private readonly sessionId: string;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGenerator!: ContentGenerator;
@@ -359,6 +365,7 @@ export class Config {
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private gitService: GitService | undefined = undefined;
+  private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
@@ -415,9 +422,10 @@ export class Config {
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
+  private readonly continueSession: boolean;
+  private readonly resumeSessionId?: string;
 
   constructor(params: ConfigParameters) {
-    this.sessionId = params.sessionId;
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
@@ -530,6 +538,8 @@ export class Config {
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+    this.continueSession = params.continueSession ?? false;
+    this.resumeSessionId = params.resumeSessionId;
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -553,6 +563,8 @@ export class Config {
     }
     this.initialized = true;
 
+    await this.initializeSession();
+
     // Initialize centralized FileDiscoveryService
     this.getFileService();
     if (this.getCheckpointingEnabled()) {
@@ -562,9 +574,33 @@ export class Config {
     this.subagentManager = new SubagentManager(this);
     this.toolRegistry = await this.createToolRegistry();
 
-    this.getChatRecordingService();
-
     await this.geminiClient.initialize();
+  }
+
+  private async initializeSession(): Promise<void> {
+    let sessionId: string | undefined = undefined;
+    let sessionData: ResumedSessionData | undefined = undefined;
+
+    if (this.continueSession) {
+      sessionData = await this.getSessionService().loadLastSession();
+      if (sessionData) {
+        sessionId = sessionData.conversation.sessionId;
+      }
+    }
+
+    if (this.resumeSessionId) {
+      sessionId = this.resumeSessionId;
+      sessionData = await this.getSessionService().loadSession(
+        this.resumeSessionId,
+      );
+      if (!sessionData) {
+        throw new Error(
+          `No saved session found with ID ${this.resumeSessionId}. Run \`qwen resume\` without an ID to choose from existing sessions.`,
+        );
+      }
+    }
+
+    this.getChatRecordingService().initialize(sessionId, sessionData);
   }
 
   getContentGenerator(): ContentGenerator {
@@ -610,7 +646,6 @@ export class Config {
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
-      this.getSessionId(),
       isInitialAuth,
     );
     // Only assign to instance properties after successful initialization
@@ -647,7 +682,7 @@ export class Config {
   }
 
   getSessionId(): string {
-    return this.sessionId;
+    return this.getChatRecordingService().getSessionId();
   }
 
   shouldLoadMemoryFromIncludeDirectories(): boolean {
@@ -1132,12 +1167,31 @@ export class Config {
     return this.gitService;
   }
 
+  /**
+   * Returns the chat recording service.
+   */
   getChatRecordingService(): ChatRecordingService {
     if (!this.chatRecordingService) {
       this.chatRecordingService = new ChatRecordingService(this);
-      this.chatRecordingService.initialize();
     }
     return this.chatRecordingService;
+  }
+
+  /**
+   * Gets or creates a SessionService for managing chat sessions.
+   */
+  getSessionService(): SessionService {
+    if (!this.sessionService) {
+      this.sessionService = new SessionService(this);
+    }
+    return this.sessionService;
+  }
+
+  /**
+   * Returns the resumed session data if this session was resumed from a previous one.
+   */
+  getResumedSessionData(): ResumedSessionData | undefined {
+    return this.getChatRecordingService().getResumedSessionData();
   }
 
   getFileExclusions(): FileExclusions {
