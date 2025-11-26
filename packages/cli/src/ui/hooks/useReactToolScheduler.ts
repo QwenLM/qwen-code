@@ -134,9 +134,7 @@ export function useReactToolScheduler(
     () =>
       new CoreToolScheduler({
         config,
-        chatRecordingService: config
-          .getGeminiClient()
-          ?.getChatRecordingService(),
+        chatRecordingService: config.getChatRecordingService(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,

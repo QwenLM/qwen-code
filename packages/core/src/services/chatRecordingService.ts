@@ -5,18 +5,20 @@
  */
 
 import { type Config } from '../config/config.js';
-import { type Status } from '../core/coreToolScheduler.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type {
-  PartListUnion,
-  Content,
-  GenerateContentResponseUsageMetadata,
+import {
+  type PartListUnion,
+  type Content,
+  type GenerateContentResponseUsageMetadata,
+  createUserContent,
+  createModelContent,
 } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
+import type { ToolCallResponseInfo } from '../core/turn.js';
 
 /**
  * Token usage summary for a message or conversation.
@@ -29,24 +31,6 @@ export interface UsageMetadata {
   tool?: number; // toolUsePromptTokenCount
   total: number; // totalTokenCount
 }
-
-/**
- * Record of a tool call execution within a conversation.
- */
-export interface ToolCallRecord {
-  id: string;
-  name: string;
-  args: Record<string, unknown>;
-  result?: PartListUnion | null;
-  status: Status;
-  timestamp: string;
-  // UI-specific fields for display purposes
-  displayName?: string;
-  description?: string;
-  resultDisplay?: string;
-  renderOutputAsMarkdown?: boolean;
-}
-
 /**
  * A single record stored in the JSONL file.
  * Forms a tree structure via uuid/parentUuid for future checkpointing support.
@@ -94,7 +78,7 @@ export interface ChatRecord {
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
    */
-  toolCallsMetadata?: ToolCallRecord[];
+  toolCallResult?: Partial<ToolCallResponseInfo>;
 }
 
 /**
@@ -223,22 +207,6 @@ export class ChatRecordingService {
   }
 
   /**
-   * Enriches tool calls with metadata from the ToolRegistry.
-   */
-  private enrichToolCalls(toolCalls: ToolCallRecord[]): ToolCallRecord[] {
-    const toolRegistry = this.config.getToolRegistry();
-    return toolCalls.map((toolCall) => {
-      const toolInstance = toolRegistry.getTool(toolCall.name);
-      return {
-        ...toolCall,
-        displayName: toolInstance?.displayName || toolCall.name,
-        description: toolInstance?.description || '',
-        renderOutputAsMarkdown: toolInstance?.isOutputMarkdown || false,
-      };
-    });
-  }
-
-  /**
    * Initializes the chat recording service.
    * Creates a new session file or resumes from an existing session.
    */
@@ -271,15 +239,15 @@ export class ChatRecordingService {
    * Records a user message.
    * Writes immediately to disk.
    *
-   * @param content The raw Content object (role + parts) as used with the API
+   * @param message The raw PartListUnion object as used with the API
    */
-  recordUserMessage(content: Content): void {
+  recordUserMessage(message: PartListUnion): void {
     if (!this.conversationFile) return;
 
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
-        message: content,
+        message: createUserContent(message),
       };
       this.appendRecord(record);
     } catch (error) {
@@ -292,16 +260,15 @@ export class ChatRecordingService {
    * Records an assistant turn with all available data.
    * Writes immediately to disk.
    *
-   * @param data.content The raw Content object (role + parts) from the model response
+   * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
    * @param data.tokens Token usage statistics
    * @param data.toolCallsMetadata Enriched tool call info for UI recovery
    */
   recordAssistantTurn(data: {
     model: string;
-    content?: Content;
+    message?: PartListUnion;
     tokens?: UsageMetadata;
-    toolCallsMetadata?: ToolCallRecord[];
   }): void {
     if (!this.conversationFile) return;
 
@@ -311,16 +278,12 @@ export class ChatRecordingService {
         model: data.model,
       };
 
-      if (data.content !== undefined) {
-        record.message = data.content;
+      if (data.message !== undefined) {
+        record.message = createModelContent(data.message);
       }
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
-      }
-
-      if (data.toolCallsMetadata && data.toolCallsMetadata.length > 0) {
-        record.toolCallsMetadata = this.enrichToolCalls(data.toolCallsMetadata);
       }
 
       this.appendRecord(record);
@@ -334,23 +297,23 @@ export class ChatRecordingService {
    * Records tool results (function responses) sent back to the model.
    * Writes immediately to disk.
    *
-   * @param content The raw Content object with functionResponse parts
-   * @param toolCallsMetadata Optional enriched tool call info for UI recovery
+   * @param message The raw PartListUnion object with functionResponse parts
+   * @param toolCallResult Optional tool call result info for UI recovery
    */
   recordToolResult(
-    content: Content,
-    toolCallsMetadata?: ToolCallRecord[],
+    message: PartListUnion,
+    toolCallResult?: Partial<ToolCallResponseInfo>,
   ): void {
     if (!this.conversationFile) return;
 
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
-        message: content,
+        message: createUserContent(message),
       };
 
-      if (toolCallsMetadata && toolCallsMetadata.length > 0) {
-        record.toolCallsMetadata = this.enrichToolCalls(toolCallsMetadata);
+      if (toolCallResult) {
+        record.toolCallResult = toolCallResult;
       }
 
       this.appendRecord(record);
@@ -419,11 +382,10 @@ export class ChatRecordingService {
       }
 
       // Merge toolCallsMetadata (concatenate arrays)
-      if (record.toolCallsMetadata) {
-        if (!base.toolCallsMetadata) {
-          base.toolCallsMetadata = [];
+      if (record.toolCallResult) {
+        if (!base.toolCallResult) {
+          base.toolCallResult = record.toolCallResult;
         }
-        base.toolCallsMetadata.push(...record.toolCallsMetadata);
       }
 
       // Merge model (take the first non-empty one)

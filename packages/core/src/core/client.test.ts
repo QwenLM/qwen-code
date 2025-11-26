@@ -378,6 +378,7 @@ describe('Gemini Client (client.ts)', () => {
       }),
       getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      getChatRecordingService: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);

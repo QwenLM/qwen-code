@@ -39,7 +39,6 @@ import {
 } from './turn.js';
 
 // Services
-import { ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   COMPRESSION_PRESERVE_THRESHOLD,
@@ -96,7 +95,6 @@ export class GeminiClient {
   private sessionTurnCount = 0;
 
   private readonly loopDetector: LoopDetectionService;
-  private readonly chatRecordingService: ChatRecordingService;
   private lastPromptId: string;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
@@ -109,12 +107,10 @@ export class GeminiClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
-    this.chatRecordingService = new ChatRecordingService(config);
     this.lastPromptId = this.config.getSessionId();
   }
 
   async initialize() {
-    this.chatRecordingService.initialize();
     this.chat = await this.startChat();
   }
 
@@ -164,10 +160,6 @@ export class GeminiClient {
     this.chat = await this.startChat();
   }
 
-  getChatRecordingService(): ChatRecordingService {
-    return this.chatRecordingService;
-  }
-
   getLoopDetectionService(): LoopDetectionService {
     return this.loopDetector;
   }
@@ -215,7 +207,7 @@ export class GeminiClient {
           tools,
         },
         history,
-        this.chatRecordingService,
+        this.config.getChatRecordingService(),
       );
     } catch (error) {
       await reportError(

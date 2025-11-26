@@ -264,7 +264,7 @@ export class GeminiChat {
     // Record user input (but NOT function responses - those are recorded separately
     // after tool execution where we have access to resultDisplay and other metadata)
     if (!isFunctionResponse(userContent)) {
-      this.chatRecordingService?.recordUserMessage(userContent);
+      this.chatRecordingService?.recordUserMessage(userContent.parts || []);
     }
 
     // Add user content to history ONCE before any attempts.
@@ -566,14 +566,18 @@ export class GeminiChat {
       .join('')
       .trim();
 
-    // Build the raw Content for recording (includes all parts including thoughts)
-    const modelContent: Content = { role: 'model', parts: allModelParts };
-
     // Record assistant turn with raw Content and metadata
-    if (allModelParts.length > 0 || collectedTokens) {
+    if (responseText || hasToolCall || collectedTokens) {
       this.chatRecordingService?.recordAssistantTurn({
         model,
-        content: modelContent,
+        message: [
+          ...(responseText ? [{ text: responseText }] : []),
+          ...(hasToolCall
+            ? historyParts
+                .filter((part) => part.functionCall)
+                .map((part) => ({ functionCall: part.functionCall }))
+            : []),
+        ],
         tokens: collectedTokens,
       });
     }

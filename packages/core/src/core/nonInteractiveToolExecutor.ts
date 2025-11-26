@@ -34,7 +34,7 @@ export async function executeToolCall(
   return new Promise<ToolCallResponseInfo>((resolve, reject) => {
     new CoreToolScheduler({
       config,
-      chatRecordingService: config.getGeminiClient()?.getChatRecordingService(),
+      chatRecordingService: config.getChatRecordingService(),
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
         if (options.onAllToolCallsComplete) {

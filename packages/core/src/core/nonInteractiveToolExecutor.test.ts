@@ -62,6 +62,7 @@ describe('executeToolCall', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     abortController = new AbortController();

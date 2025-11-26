@@ -93,6 +93,7 @@ import {
 import { DEFAULT_QWEN_EMBEDDING_MODEL, DEFAULT_QWEN_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { ChatRecordingService } from '../services/chatRecordingService.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -358,6 +359,7 @@ export class Config {
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private gitService: GitService | undefined = undefined;
+  private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
@@ -559,6 +561,8 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.subagentManager = new SubagentManager(this);
     this.toolRegistry = await this.createToolRegistry();
+
+    this.getChatRecordingService();
 
     await this.geminiClient.initialize();
   }
@@ -1126,6 +1130,14 @@ export class Config {
       await this.gitService.initialize();
     }
     return this.gitService;
+  }
+
+  getChatRecordingService(): ChatRecordingService {
+    if (!this.chatRecordingService) {
+      this.chatRecordingService = new ChatRecordingService(this);
+      this.chatRecordingService.initialize();
+    }
+    return this.chatRecordingService;
   }
 
   getFileExclusions(): FileExclusions {

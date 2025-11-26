@@ -22,10 +22,11 @@ import { getProjectHash } from '../utils/paths.js';
 import {
   ChatRecordingService,
   type ChatRecord,
-  type ToolCallRecord,
   toTokensSummary,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { Part } from '@google/genai';
+import type { ToolCallResponseInfo } from '../core/turn.js';
 
 vi.mock('node:fs');
 vi.mock('node:path');
@@ -199,8 +200,8 @@ describe('ChatRecordingService', () => {
     });
 
     it('should record a user message immediately', () => {
-      const userContent = { role: 'user', parts: [{ text: 'Hello, world!' }] };
-      chatRecordingService.recordUserMessage(userContent);
+      const userParts: Part[] = [{ text: 'Hello, world!' }];
+      chatRecordingService.recordUserMessage(userParts);
 
       expect(jsonl.writeLineSync).toHaveBeenCalledTimes(1);
       const record = vi.mocked(jsonl.writeLineSync).mock
@@ -209,7 +210,8 @@ describe('ChatRecordingService', () => {
       expect(record.uuid).toBe('00000000-0000-0000-0000-000000000001');
       expect(record.parentUuid).toBeNull();
       expect(record.type).toBe('user');
-      expect(record.message).toEqual(userContent);
+      // The service wraps parts in a Content object using createUserContent
+      expect(record.message).toEqual({ role: 'user', parts: userParts });
       expect(record.sessionId).toBe('test-session-id');
       expect(record.cwd).toBe('/test/project/root');
       expect(record.version).toBe('1.0.0');
@@ -217,18 +219,12 @@ describe('ChatRecordingService', () => {
     });
 
     it('should chain messages correctly with parentUuid', () => {
-      chatRecordingService.recordUserMessage({
-        role: 'user',
-        parts: [{ text: 'First message' }],
-      });
+      chatRecordingService.recordUserMessage([{ text: 'First message' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        content: { role: 'model', parts: [{ text: 'Response' }] },
+        message: [{ text: 'Response' }],
       });
-      chatRecordingService.recordUserMessage({
-        role: 'user',
-        parts: [{ text: 'Second message' }],
-      });
+      chatRecordingService.recordUserMessage([{ text: 'Second message' }]);
 
       const calls = vi.mocked(jsonl.writeLineSync).mock.calls;
       const user1 = calls[0][1] as ChatRecord;
@@ -252,10 +248,10 @@ describe('ChatRecordingService', () => {
     });
 
     it('should record assistant turn with content only', () => {
-      const content = { role: 'model', parts: [{ text: 'Hello!' }] };
+      const parts: Part[] = [{ text: 'Hello!' }];
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        content,
+        message: parts,
       });
 
       expect(jsonl.writeLineSync).toHaveBeenCalledTimes(1);
@@ -263,49 +259,37 @@ describe('ChatRecordingService', () => {
         .calls[0][1] as ChatRecord;
 
       expect(record.type).toBe('assistant');
-      expect(record.message).toEqual(content);
+      // The service wraps parts in a Content object using createModelContent
+      expect(record.message).toEqual({ role: 'model', parts });
       expect(record.model).toBe('gemini-pro');
       expect(record.usageMetadata).toBeUndefined();
-      expect(record.toolCallsMetadata).toBeUndefined();
+      expect(record.toolCallResult).toBeUndefined();
     });
 
     it('should record assistant turn with all data', () => {
-      const content = {
-        role: 'model',
-        parts: [
-          { thought: true, text: 'Thinking...' },
-          { text: 'Here is the result.' },
-          { functionCall: { name: 'read_file', args: { path: '/test.txt' } } },
-        ],
-      };
+      const parts: Part[] = [
+        { thought: true, text: 'Thinking...' },
+        { text: 'Here is the result.' },
+        { functionCall: { name: 'read_file', args: { path: '/test.txt' } } },
+      ];
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        content,
+        message: parts,
         tokens: {
           input: 100,
           output: 50,
           cached: 10,
           total: 160,
         },
-        toolCallsMetadata: [
-          {
-            id: 'tool-1',
-            name: 'read_file',
-            args: { path: '/test.txt' },
-            status: 'success',
-            timestamp: '2024-01-01T00:00:00Z',
-          },
-        ],
       });
 
       const record = vi.mocked(jsonl.writeLineSync).mock
         .calls[0][1] as ChatRecord;
 
-      expect(record.message).toEqual(content);
+      // The service wraps parts in a Content object using createModelContent
+      expect(record.message).toEqual({ role: 'model', parts });
       expect(record.model).toBe('gemini-pro');
       expect(record.usageMetadata?.total).toBe(160);
-      expect(record.toolCallsMetadata).toHaveLength(1);
-      expect(record.toolCallsMetadata?.[0].displayName).toBe('Test Tool'); // Enriched
     });
 
     it('should record assistant turn with only tokens', () => {
@@ -320,27 +304,6 @@ describe('ChatRecordingService', () => {
       expect(record.message).toBeUndefined();
       expect(record.usageMetadata?.total).toBe(30);
     });
-
-    it('should record assistant turn with only toolCallsMetadata', () => {
-      chatRecordingService.recordAssistantTurn({
-        model: 'gemini-pro',
-        toolCallsMetadata: [
-          {
-            id: 'tool-1',
-            name: 'shell',
-            args: { command: 'ls' },
-            status: 'success',
-            timestamp: '2024-01-01T00:00:00Z',
-          },
-        ],
-      });
-
-      const record = vi.mocked(jsonl.writeLineSync).mock
-        .calls[0][1] as ChatRecord;
-
-      expect(record.message).toBeUndefined();
-      expect(record.toolCallsMetadata).toHaveLength(1);
-    });
   });
 
   describe('recordToolResult', () => {
@@ -348,99 +311,79 @@ describe('ChatRecordingService', () => {
       chatRecordingService.initialize();
     });
 
-    it('should record tool result with Content', () => {
+    it('should record tool result with Parts', () => {
       // First record a user and assistant message to set up the chain
-      chatRecordingService.recordUserMessage({
-        role: 'user',
-        parts: [{ text: 'Hello' }],
-      });
+      chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        content: {
-          role: 'model',
-          parts: [{ functionCall: { name: 'shell', args: { command: 'ls' } } }],
-        },
+        message: [{ functionCall: { name: 'shell', args: { command: 'ls' } } }],
       });
 
-      // Now record the tool result (Content with functionResponse parts)
-      const toolResultContent = {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'shell',
-              response: { output: 'file1.txt\nfile2.txt' },
-            },
+      // Now record the tool result (Parts with functionResponse)
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'file1.txt\nfile2.txt' },
           },
-        ],
-      };
-      chatRecordingService.recordToolResult(toolResultContent);
+        },
+      ];
+      chatRecordingService.recordToolResult(toolResultParts);
 
       expect(jsonl.writeLineSync).toHaveBeenCalledTimes(3);
       const record = vi.mocked(jsonl.writeLineSync).mock
         .calls[2][1] as ChatRecord;
 
       expect(record.type).toBe('tool_result');
-      expect(record.message).toEqual(toolResultContent);
+      // The service wraps parts in a Content object using createUserContent
+      expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
     });
 
-    it('should record tool result with toolCallsMetadata', () => {
-      const toolResultContent = {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'shell',
-              response: { output: 'result' },
-            },
-          },
-        ],
-      };
-      const metadata: ToolCallRecord[] = [
+    it('should record tool result with toolCallResult metadata', () => {
+      const toolResultParts: Part[] = [
         {
-          id: 'call-1',
-          name: 'shell',
-          args: { command: 'ls' },
-          result: 'result',
-          status: 'success',
-          timestamp: '2024-01-01T00:00:00Z',
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'result' },
+          },
         },
       ];
+      const metadata: Partial<ToolCallResponseInfo> = {
+        callId: 'call-1',
+        responseParts: toolResultParts,
+        resultDisplay: undefined,
+      };
 
-      chatRecordingService.recordToolResult(toolResultContent, metadata);
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
 
       const record = vi.mocked(jsonl.writeLineSync).mock
         .calls[0][1] as ChatRecord;
 
       expect(record.type).toBe('tool_result');
-      expect(record.message).toEqual(toolResultContent);
-      expect(record.toolCallsMetadata).toHaveLength(1);
-      expect(record.toolCallsMetadata?.[0].displayName).toBe('Test Tool'); // Enriched
+      // The service wraps parts in a Content object using createUserContent
+      expect(record.message).toEqual({ role: 'user', parts: toolResultParts });
+      expect(record.toolCallResult).toBeDefined();
+      expect(record.toolCallResult?.callId).toBe('call-1');
     });
 
     it('should chain tool result correctly with parentUuid', () => {
-      chatRecordingService.recordUserMessage({
-        role: 'user',
-        parts: [{ text: 'Hello' }],
-      });
+      chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        content: { role: 'model', parts: [{ text: 'Using tool' }] },
+        message: [{ text: 'Using tool' }],
       });
-      chatRecordingService.recordToolResult({
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'shell',
-              response: { output: 'done' },
-            },
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'done' },
           },
-        ],
-      });
+        },
+      ];
+      chatRecordingService.recordToolResult(toolResultParts);
 
       const userRecord = vi.mocked(jsonl.writeLineSync).mock
         .calls[0][1] as ChatRecord;
@@ -756,7 +699,7 @@ describe('ChatRecordingService', () => {
 
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        content: { role: 'model', parts: [{ text: 'Continuing...' }] },
+        message: [{ text: 'Continuing...' }],
       });
 
       const record = vi.mocked(jsonl.writeLineSync).mock

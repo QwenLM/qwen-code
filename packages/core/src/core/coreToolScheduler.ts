@@ -16,7 +16,6 @@ import type {
   ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
-  ToolCallRecord,
   ChatRecordingService,
 } from '../index.js';
 import {
@@ -1250,28 +1249,14 @@ export class CoreToolScheduler {
 
     if (responseParts.length === 0) return;
 
-    const toolResultContent = {
-      role: 'user' as const,
-      parts: responseParts,
-    };
-
-    const toolCallsMetadata: ToolCallRecord[] = completedCalls.map((call) => ({
-      id: call.request.callId,
-      name: call.request.name,
-      args: call.request.args,
-      result: call.response.responseParts,
-      status: call.status,
-      timestamp: new Date().toISOString(),
-      resultDisplay:
-        typeof call.response.resultDisplay === 'string'
-          ? call.response.resultDisplay
-          : JSON.stringify(call.response.resultDisplay),
-    }));
-
-    this.chatRecordingService.recordToolResult(
-      toolResultContent,
-      toolCallsMetadata,
-    );
+    // Record each tool result individually
+    for (const call of completedCalls) {
+      this.chatRecordingService.recordToolResult(call.response.responseParts, {
+        resultDisplay: call.response.resultDisplay,
+        error: call.response.error,
+        errorType: call.response.errorType,
+      });
+    }
   }
 
   private notifyToolCallsUpdate(): void {
