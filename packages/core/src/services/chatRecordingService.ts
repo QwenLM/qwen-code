@@ -5,7 +5,6 @@
  */
 
 import { type Config } from '../config/config.js';
-import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -19,6 +18,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import type { ToolCallResponseInfo } from '../core/turn.js';
+import type { ResumedSessionData } from './sessionService.js';
 
 /**
  * Token usage summary for a message or conversation.
@@ -82,19 +82,6 @@ export interface ChatRecord {
 }
 
 /**
- * Lightweight metadata about a recorded session.
- * Extracted from the first and last records of a session file.
- */
-export interface SessionMetadata {
-  sessionId: string;
-  startTime: string;
-  lastUpdated: string;
-  messageCount: number;
-  projectHash: string;
-  filePath: string;
-}
-
-/**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
  */
@@ -105,16 +92,6 @@ export interface ConversationRecord {
   lastUpdated: string;
   /** Messages in chronological order (reconstructed from tree) */
   messages: ChatRecord[];
-}
-
-/**
- * Data structure for resuming an existing session.
- */
-export interface ResumedSessionData {
-  conversation: ConversationRecord;
-  filePath: string;
-  /** UUID of the last completed message - new messages should use this as parentUuid */
-  lastCompletedUuid: string | null;
 }
 
 /**
@@ -134,7 +111,7 @@ export function toTokensSummary(
 }
 
 /**
- * Service for automatically recording chat conversations to disk.
+ * Service for recording the current chat session to disk.
  *
  * This service provides comprehensive conversation recording that captures:
  * - All user and assistant messages
@@ -145,6 +122,7 @@ export function toTokensSummary(
  * **API Design:**
  * - `recordUserMessage()` - Records a user message (immediate write)
  * - `recordAssistantTurn()` - Records an assistant turn with all data (immediate write)
+ * - `recordToolResult()` - Records tool results (immediate write)
  *
  * **Storage Format:** JSONL files with tree-structured records.
  * Each record has uuid/parentUuid fields enabling:
@@ -153,20 +131,19 @@ export function toTokensSummary(
  * - Future checkpointing (branch from any historical point)
  *
  * File location: ~/.qwen/tmp/<project_id>/chats/
+ *
+ * For session management (list, load, remove), use SessionService.
  */
 export class ChatRecordingService {
   private conversationFile: string | null = null;
   private sessionId: string;
-  private projectHash: string;
   /** UUID of the last written record in the chain */
   private lastRecordUuid: string | null = null;
-  private config: Config;
-  private sessionListCache: SessionMetadata[] | null = null;
+  private readonly config: Config;
 
   constructor(config: Config) {
     this.config = config;
     this.sessionId = config.getSessionId();
-    this.projectHash = getProjectHash(config.getProjectRoot());
   }
 
   private getChatsDir(): string {
@@ -321,290 +298,5 @@ export class ChatRecordingService {
       console.error('Error saving tool result:', error);
       throw error;
     }
-  }
-
-  // ============================================================
-  // Session loading and management
-  // ============================================================
-
-  /**
-   * Reads all records from a session file.
-   */
-  private async readAllRecords(filePath: string): Promise<ChatRecord[]> {
-    try {
-      return await jsonl.read<ChatRecord>(filePath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error('Error reading session file:', error);
-      }
-      return [];
-    }
-  }
-
-  /**
-   * Aggregates multiple records with the same uuid into a single ChatRecord.
-   * Merges content fields (message, tokens, model, toolCallsMetadata).
-   *
-   * For message aggregation: If multiple records have Content, we merge the parts.
-   * This supports streaming scenarios where parts arrive separately.
-   */
-  private aggregateRecords(records: ChatRecord[]): ChatRecord {
-    if (records.length === 0) {
-      throw new Error('Cannot aggregate empty records array');
-    }
-
-    // Start with the first record as base
-    const base = { ...records[0] };
-
-    // Merge content fields from all records
-    for (let i = 1; i < records.length; i++) {
-      const record = records[i];
-
-      // Merge message (Content objects)
-      if (record.message !== undefined) {
-        if (base.message === undefined) {
-          base.message = record.message;
-        } else {
-          // Merge parts from both Content objects
-          base.message = {
-            role: base.message.role,
-            parts: [
-              ...(base.message.parts || []),
-              ...(record.message.parts || []),
-            ],
-          };
-        }
-      }
-
-      // Merge tokens (take the latest/most complete one)
-      if (record.usageMetadata) {
-        base.usageMetadata = record.usageMetadata;
-      }
-
-      // Merge toolCallsMetadata (concatenate arrays)
-      if (record.toolCallResult) {
-        if (!base.toolCallResult) {
-          base.toolCallResult = record.toolCallResult;
-        }
-      }
-
-      // Merge model (take the first non-empty one)
-      if (record.model && !base.model) {
-        base.model = record.model;
-      }
-
-      // Update timestamp to the latest
-      if (record.timestamp > base.timestamp) {
-        base.timestamp = record.timestamp;
-      }
-    }
-
-    return base;
-  }
-
-  /**
-   * Reconstructs a linear conversation from tree-structured records.
-   * Follows parentUuid chain from the latest record back to root,
-   * aggregating records with the same uuid.
-   *
-   * @param records All records from the file
-   * @param leafUuid Optional: start from a specific record (for checkpointing)
-   * @returns Aggregated messages in chronological order (root first)
-   */
-  private reconstructHistory(
-    records: ChatRecord[],
-    leafUuid?: string,
-  ): ChatRecord[] {
-    if (records.length === 0) return [];
-
-    // Build uuid -> records[] map for aggregation
-    const recordsByUuid = new Map<string, ChatRecord[]>();
-    for (const record of records) {
-      const existing = recordsByUuid.get(record.uuid) || [];
-      existing.push(record);
-      recordsByUuid.set(record.uuid, existing);
-    }
-
-    // Find the leaf (latest message uuid or specified checkpoint)
-    let currentUuid: string | null;
-    if (leafUuid) {
-      currentUuid = leafUuid;
-    } else {
-      // Default to the uuid of the last record in the file
-      currentUuid = records[records.length - 1].uuid;
-    }
-
-    // Follow parentUuid chain to root, collecting unique uuids
-    const uuidChain: string[] = [];
-    const visited = new Set<string>();
-
-    while (currentUuid && !visited.has(currentUuid)) {
-      visited.add(currentUuid);
-      uuidChain.push(currentUuid);
-
-      // Get the first record with this uuid to find parentUuid
-      const recordsForUuid = recordsByUuid.get(currentUuid);
-      if (!recordsForUuid || recordsForUuid.length === 0) break;
-      currentUuid = recordsForUuid[0].parentUuid;
-    }
-
-    // Reverse to get chronological order and aggregate
-    uuidChain.reverse();
-    const messages: ChatRecord[] = [];
-    for (const uuid of uuidChain) {
-      const recordsForUuid = recordsByUuid.get(uuid);
-      if (recordsForUuid && recordsForUuid.length > 0) {
-        messages.push(this.aggregateRecords(recordsForUuid));
-      }
-    }
-
-    return messages;
-  }
-
-  /**
-   * Extracts session metadata from records.
-   */
-  private extractMetadata(
-    records: ChatRecord[],
-    filePath: string,
-  ): SessionMetadata | null {
-    if (records.length === 0) return null;
-
-    // Count unique uuids for message count
-    const uniqueUuids = new Set(records.map((r) => r.uuid));
-
-    const first = records[0];
-    const last = records[records.length - 1];
-
-    return {
-      sessionId: first.sessionId,
-      startTime: first.timestamp,
-      lastUpdated: last.timestamp,
-      messageCount: uniqueUuids.size,
-      projectHash: this.projectHash,
-      filePath,
-    };
-  }
-
-  /**
-   * Deletes a session file by session ID.
-   */
-  async deleteSession(sessionId: string): Promise<void> {
-    try {
-      const sessions = await this.listSessions();
-      const match = sessions.find((session) => session.sessionId === sessionId);
-      if (!match) {
-        return;
-      }
-      fs.unlinkSync(match.filePath);
-
-      // Remove from cache
-      if (this.sessionListCache) {
-        this.sessionListCache = this.sessionListCache.filter(
-          (s) => s.sessionId !== sessionId,
-        );
-      }
-    } catch (error) {
-      console.error('Error deleting session:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Lists all recorded sessions for the current project, sorted by lastUpdated descending.
-   * @param forceReload - If true, bypasses cache and reloads from disk
-   */
-  async listSessions(forceReload = false): Promise<SessionMetadata[]> {
-    // Return cached list if available and not forcing reload
-    if (!forceReload && this.sessionListCache) {
-      return this.sessionListCache;
-    }
-
-    const sessions: SessionMetadata[] = [];
-    const chatsDir = this.getChatsDir();
-    let files: string[] = [];
-    try {
-      files = fs.readdirSync(chatsDir);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        this.sessionListCache = [];
-        return [];
-      }
-      console.error('Error listing sessions:', error);
-      throw error;
-    }
-
-    for (const file of files) {
-      if (!file.endsWith('.jsonl')) continue;
-      const filePath = path.join(chatsDir, file);
-
-      // Read all records for metadata extraction
-      const records = await this.readAllRecords(filePath);
-      const metadata = this.extractMetadata(records, filePath);
-
-      if (!metadata) continue;
-      if (metadata.projectHash !== this.projectHash) continue;
-
-      sessions.push(metadata);
-    }
-
-    sessions.sort(
-      (a, b) =>
-        new Date(b.lastUpdated).getTime() - new Date(a.lastUpdated).getTime(),
-    );
-
-    // Cache the result
-    this.sessionListCache = sessions;
-    return sessions;
-  }
-
-  /**
-   * Loads a specific session by session ID.
-   * Reconstructs the conversation from tree-structured records.
-   */
-  async loadSession(sessionId: string): Promise<ResumedSessionData | null> {
-    // Use cached session list to find the session
-    const sessions = await this.listSessions();
-    const session = sessions.find((s) => s.sessionId === sessionId);
-
-    if (!session) {
-      return null;
-    }
-
-    const records = await this.readAllRecords(session.filePath);
-    if (records.length === 0) {
-      return null;
-    }
-
-    // Reconstruct linear history from tree
-    const messages = this.reconstructHistory(records);
-    if (messages.length === 0) {
-      return null;
-    }
-
-    const lastMessage = messages[messages.length - 1];
-
-    const conversation: ConversationRecord = {
-      sessionId: session.sessionId,
-      projectHash: session.projectHash,
-      startTime: session.startTime,
-      lastUpdated: session.lastUpdated,
-      messages,
-    };
-
-    return {
-      conversation,
-      filePath: session.filePath,
-      lastCompletedUuid: lastMessage.uuid,
-    };
-  }
-
-  /**
-   * Convenience helper to get the newest session.
-   */
-  async getLatestSession(): Promise<ResumedSessionData | null> {
-    const sessions = await this.listSessions();
-    if (sessions.length === 0) return null;
-    return await this.loadSession(sessions[0].sessionId);
   }
 }

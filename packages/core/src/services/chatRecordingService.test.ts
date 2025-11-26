@@ -18,7 +18,6 @@ import {
   vi,
 } from 'vitest';
 import type { Config } from '../config/config.js';
-import { getProjectHash } from '../utils/paths.js';
 import {
   ChatRecordingService,
   type ChatRecord,
@@ -39,7 +38,6 @@ vi.mock('node:crypto', () => ({
     })),
   })),
 }));
-vi.mock('../utils/paths.js');
 vi.mock('../utils/jsonl-utils.js');
 
 describe('ChatRecordingService', () => {
@@ -48,8 +46,6 @@ describe('ChatRecordingService', () => {
 
   let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
   let writeFileSyncSpy: MockInstance<typeof fs.writeFileSync>;
-  let readdirSyncSpy: MockInstance<typeof fs.readdirSync>;
-  let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
   let uuidCounter = 0;
 
   beforeEach(() => {
@@ -78,7 +74,6 @@ describe('ChatRecordingService', () => {
       }),
     } as unknown as Config;
 
-    vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
     vi.mocked(randomUUID).mockImplementation(
       () =>
         `00000000-0000-0000-0000-00000000000${++uuidCounter}` as `${string}-${string}-${string}-${string}-${string}`,
@@ -101,17 +96,8 @@ describe('ChatRecordingService', () => {
       .spyOn(fs, 'writeFileSync')
       .mockImplementation(() => undefined);
 
-    readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
-    unlinkSyncSpy = vi
-      .spyOn(fs, 'unlinkSync')
-      .mockImplementation(() => undefined);
-
     // Mock jsonl-utils
-    vi.mocked(jsonl.exists).mockReturnValue(false);
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
-    vi.mocked(jsonl.write).mockImplementation(() => undefined);
-    vi.mocked(jsonl.read).mockResolvedValue([]);
-    vi.mocked(jsonl.readLines).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -398,290 +384,8 @@ describe('ChatRecordingService', () => {
     });
   });
 
-  describe('deleteSession', () => {
-    it('should delete the session file', async () => {
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['file-a.jsonl']);
-      const filePath =
-        '/test/project/root/.gemini/projects/test-project/chats/file-a.jsonl';
-
-      vi.mocked(jsonl.read).mockResolvedValue([
-        {
-          uuid: 'record-1',
-          parentUuid: null,
-          sessionId: 'test-session-id',
-          timestamp: '2024-01-01T00:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Hello' }] },
-          cwd: '/test/project/root',
-          version: '1.0.0',
-        } as ChatRecord,
-      ]);
-
-      await chatRecordingService.deleteSession('test-session-id');
-      expect(unlinkSyncSpy).toHaveBeenCalledWith(filePath);
-    });
-  });
-
-  describe('record aggregation', () => {
-    it('should aggregate multiple records with same uuid by merging Content parts', async () => {
-      const records: ChatRecord[] = [
-        {
-          uuid: 'u1',
-          parentUuid: null,
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Hello' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        // Multiple records for the same assistant message (streaming scenario)
-        {
-          uuid: 'a1',
-          parentUuid: 'u1',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:01:00Z',
-          type: 'assistant',
-          message: {
-            role: 'model',
-            parts: [{ thought: true, text: 'Thinking...' }],
-          },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        {
-          uuid: 'a1',
-          parentUuid: 'u1',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:01:01Z',
-          type: 'assistant',
-          usageMetadata: { input: 10, output: 20, cached: 0, total: 30 },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        {
-          uuid: 'a1',
-          parentUuid: 'u1',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:01:02Z',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Hi there!' }] },
-          model: 'gemini-pro',
-          cwd: '/test',
-          version: '1.0.0',
-        },
-      ];
-
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['test.jsonl']);
-      vi.mocked(jsonl.read).mockResolvedValue(records);
-
-      const loaded = await chatRecordingService.loadSession('test');
-
-      // Should have 2 messages: user and aggregated assistant
-      expect(loaded?.conversation.messages).toHaveLength(2);
-
-      const assistantMsg = loaded?.conversation.messages[1];
-      expect(assistantMsg?.uuid).toBe('a1');
-      // Parts should be merged from all records
-      expect(assistantMsg?.message?.parts).toHaveLength(2);
-      expect(assistantMsg?.usageMetadata?.total).toBe(30);
-      expect(assistantMsg?.model).toBe('gemini-pro');
-    });
-  });
-
-  describe('session listing and loading', () => {
-    const recordA1: ChatRecord = {
-      uuid: 'a1',
-      parentUuid: null,
-      sessionId: 'session-a',
-      timestamp: '2024-01-01T00:00:00Z',
-      type: 'user',
-      message: { role: 'user', parts: [{ text: 'hello' }] },
-      cwd: '/test/project/root',
-      version: '1.0.0',
-    };
-
-    const recordB1: ChatRecord = {
-      uuid: 'b1',
-      parentUuid: null,
-      sessionId: 'session-b',
-      timestamp: '2024-01-02T00:00:00Z',
-      type: 'user',
-      message: { role: 'user', parts: [{ text: 'hi' }] },
-      cwd: '/test/project/root',
-      version: '1.0.0',
-    };
-
-    const recordB2: ChatRecord = {
-      uuid: 'b2',
-      parentUuid: 'b1',
-      sessionId: 'session-b',
-      timestamp: '2024-01-02T02:00:00Z',
-      type: 'assistant',
-      message: { role: 'model', parts: [{ text: 'hey' }] },
-      cwd: '/test/project/root',
-      version: '1.0.0',
-    };
-
-    it('should list sessions sorted by lastUpdated desc', async () => {
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['session-a.jsonl', 'session-b.jsonl']);
-
-      vi.mocked(jsonl.read).mockImplementation(async (filePath: string) => {
-        if (filePath.includes('session-a')) {
-          return [recordA1];
-        }
-        return [recordB1, recordB2];
-      });
-
-      const sessions = await chatRecordingService.listSessions();
-      expect(sessions.map((s) => s.sessionId)).toEqual([
-        'session-b',
-        'session-a',
-      ]);
-    });
-
-    it('should load a session by id and reconstruct history', async () => {
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['session-b.jsonl']);
-
-      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
-
-      const loaded = await chatRecordingService.loadSession('session-b');
-
-      expect(loaded?.conversation.sessionId).toBe('session-b');
-      expect(loaded?.conversation.messages).toHaveLength(2);
-      expect(loaded?.conversation.messages[0].uuid).toBe('b1');
-      expect(loaded?.conversation.messages[1].uuid).toBe('b2');
-      expect(loaded?.lastCompletedUuid).toBe('b2');
-    });
-
-    it('should return null when session id is not found', async () => {
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['session-a.jsonl']);
-
-      vi.mocked(jsonl.read).mockResolvedValue([recordA1]);
-
-      const loaded = await chatRecordingService.loadSession('missing');
-      expect(loaded).toBeNull();
-    });
-
-    it('should return the latest session', async () => {
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['session-a.jsonl', 'session-b.jsonl']);
-
-      vi.mocked(jsonl.read).mockImplementation(async (filePath: string) => {
-        if (filePath.includes('session-a')) {
-          return [recordA1];
-        }
-        return [recordB1, recordB2];
-      });
-
-      const latest = await chatRecordingService.getLatestSession();
-      expect(latest?.conversation.sessionId).toBe('session-b');
-    });
-  });
-
-  describe('tree reconstruction', () => {
-    it('should reconstruct linear history from tree-structured records', async () => {
-      const records: ChatRecord[] = [
-        {
-          uuid: 'r1',
-          parentUuid: null,
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'First' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        {
-          uuid: 'r2',
-          parentUuid: 'r1',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:01:00Z',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Second' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        {
-          uuid: 'r3',
-          parentUuid: 'r2',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:02:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'Third' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-      ];
-
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['test.jsonl']);
-      vi.mocked(jsonl.read).mockResolvedValue(records);
-
-      const loaded = await chatRecordingService.loadSession('test');
-
-      expect(loaded?.conversation.messages).toHaveLength(3);
-      expect(loaded?.conversation.messages.map((m) => m.uuid)).toEqual([
-        'r1',
-        'r2',
-        'r3',
-      ]);
-    });
-
-    it('should handle branching (checkpointing scenario)', async () => {
-      const records: ChatRecord[] = [
-        {
-          uuid: 'r1',
-          parentUuid: null,
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:00:00Z',
-          type: 'user',
-          message: { role: 'user', parts: [{ text: 'First' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        {
-          uuid: 'r2',
-          parentUuid: 'r1',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:01:00Z',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'Original response' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-        // Branch: new response from r1
-        {
-          uuid: 'r3',
-          parentUuid: 'r1',
-          sessionId: 'test',
-          timestamp: '2024-01-01T00:02:00Z',
-          type: 'assistant',
-          message: { role: 'model', parts: [{ text: 'New branch response' }] },
-          cwd: '/test',
-          version: '1.0.0',
-        },
-      ];
-
-      // @ts-expect-error - Mocking fs.readdirSync with string array for simplicity
-      readdirSyncSpy.mockReturnValue(['test.jsonl']);
-      vi.mocked(jsonl.read).mockResolvedValue(records);
-
-      const loaded = await chatRecordingService.loadSession('test');
-
-      // Should follow from r3 (last in file) back to r1
-      expect(loaded?.conversation.messages).toHaveLength(2);
-      expect(loaded?.conversation.messages.map((m) => m.uuid)).toEqual([
-        'r1',
-        'r3',
-      ]);
-    });
-  });
+  // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
+  // have been moved to sessionService.test.ts
 
   describe('resume from existing session', () => {
     it('should continue chain from lastCompletedUuid', () => {
