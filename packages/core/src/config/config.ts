@@ -1161,12 +1161,23 @@ export class Config {
       if (isToolEnabled(toolName, coreToolsConfig, excludeToolsConfig)) {
         try {
           registry.registerTool(new ToolClass(...args));
+          if (this.debugMode) {
+            console.debug(
+              `[Config] Registered tool: ${className} (${toolName})`,
+            );
+          }
         } catch (error) {
           console.error(
             `[Config] Failed to register tool ${className} (${toolName}):`,
             error,
           );
           throw error; // Re-throw after logging context
+        }
+      } else {
+        if (this.debugMode) {
+          console.debug(
+            `[Config] Tool ${className} (${toolName}) is disabled by configuration`,
+          );
         }
       }
     };
