@@ -572,6 +572,7 @@ export class SubAgentScope {
     const responded = new Set<string>();
     let resolveBatch: (() => void) | null = null;
     const scheduler = new CoreToolScheduler({
+      config: this.runtimeContext,
       outputUpdateHandler: undefined,
       onAllToolCallsComplete: async (completedCalls) => {
         for (const call of completedCalls) {
@@ -710,7 +711,6 @@ export class SubAgentScope {
         }
       },
       getPreferredEditor: () => undefined,
-      config: this.runtimeContext,
       onEditorClose: () => {},
     });
 

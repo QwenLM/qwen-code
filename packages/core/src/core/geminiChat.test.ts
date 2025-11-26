@@ -43,6 +43,7 @@ vi.mock('node:fs', () => {
       });
     }),
     existsSync: vi.fn((path: string) => mockFileSystem.has(path)),
+    appendFileSync: vi.fn(),
   };
 
   return {
@@ -120,6 +121,7 @@ describe('GeminiChat', () => {
       setQuotaErrorOccurred: vi.fn(),
       flashFallbackHandler: undefined,
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
+      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
       },

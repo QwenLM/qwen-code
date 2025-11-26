@@ -32,6 +32,7 @@ vi.mock('node:fs', () => {
       });
     }),
     existsSync: vi.fn((path: string) => mockFileSystem.has(path)),
+    appendFileSync: vi.fn(),
   };
 
   return {

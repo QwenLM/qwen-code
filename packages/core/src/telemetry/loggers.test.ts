@@ -498,6 +498,7 @@ describe('loggers', () => {
     const cfg2 = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
+      getProjectRoot: () => '/test/project/root',
       getProxy: () => 'http://test.proxy.com:8080',
       getContentGeneratorConfig: () =>
         ({ model: 'test-model' }) as ContentGeneratorConfig,
