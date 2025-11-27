@@ -4,30 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
+  altNames: ['reset', 'new'],
   get description() {
-    return t('clear the screen and conversation history');
+    return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
   action: async (context, _args) => {
-    const geminiClient = context.services.config?.getGeminiClient();
+    const { config } = context.services;
 
-    if (geminiClient) {
-      context.ui.setDebugMessage(t('Clearing terminal and resetting chat.'));
-      // If resetChat fails, the exception will propagate and halt the command,
-      // which is the correct behavior to signal a failure to the user.
-      await geminiClient.resetChat();
+    if (config) {
+      const newSessionId = config.startNewSession();
+
+      if (newSessionId && context.session.startNewSession) {
+        context.session.startNewSession(newSessionId);
+      }
+
+      const geminiClient = config.getGeminiClient();
+      if (geminiClient) {
+        context.ui.setDebugMessage(
+          t('Starting a new session, resetting chat, and clearing terminal.'),
+        );
+        // If resetChat fails, the exception will propagate and halt the command,
+        // which is the correct behavior to signal a failure to the user.
+        await geminiClient.resetChat();
+      } else {
+        context.ui.setDebugMessage(t('Starting a new session and clearing.'));
+      }
     } else {
-      context.ui.setDebugMessage(t('Clearing terminal.'));
+      context.ui.setDebugMessage(t('Starting a new session and clearing.'));
     }
 
-    uiTelemetryService.setLastPromptTokenCount(0);
     context.ui.clear();
   },
 };

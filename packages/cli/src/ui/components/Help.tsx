@@ -67,7 +67,7 @@ export const Help: React.FC<Help> = ({ commands }) => (
           <Text color={theme.text.primary}>
             <Text bold color={theme.text.accent}>
               {' '}
-              /{command.name}
+              {formatCommandLabel(command, '/')}
             </Text>
             {command.kind === CommandKind.MCP_PROMPT && (
               <Text color={theme.text.secondary}> [MCP]</Text>
@@ -81,7 +81,7 @@ export const Help: React.FC<Help> = ({ commands }) => (
                 <Text key={subCommand.name} color={theme.text.primary}>
                   <Text bold color={theme.text.accent}>
                     {'   '}
-                    {subCommand.name}
+                    {formatCommandLabel(subCommand)}
                   </Text>
                   {subCommand.description && ' - ' + subCommand.description}
                 </Text>
@@ -171,3 +171,17 @@ export const Help: React.FC<Help> = ({ commands }) => (
     </Text>
   </Box>
 );
+
+/**
+ * Builds a display label for a slash command, including any alternate names.
+ */
+function formatCommandLabel(command: SlashCommand, prefix = ''): string {
+  const altNames = command.altNames?.filter(Boolean);
+  const baseLabel = `${prefix}${command.name}`;
+
+  if (!altNames || altNames.length === 0) {
+    return baseLabel;
+  }
+
+  return `${baseLabel} (${altNames.join(', ')})`;
+}

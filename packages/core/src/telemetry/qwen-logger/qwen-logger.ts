@@ -39,8 +39,8 @@ import type {
   ExtensionDisableEvent,
   AuthEvent,
   RipgrepFallbackEvent,
+  EndSessionEvent,
 } from '../types.js';
-import { EndSessionEvent } from '../types.js';
 import type {
   RumEvent,
   RumViewEvent,
@@ -114,8 +114,6 @@ export class QwenLogger {
    */
   private pendingFlush: boolean = false;
 
-  private isShutdown: boolean = false;
-
   private constructor(config?: Config) {
     this.config = config;
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
@@ -134,10 +132,6 @@ export class QwenLogger {
       return undefined;
     if (!QwenLogger.instance) {
       QwenLogger.instance = new QwenLogger(config);
-      process.on(
-        'exit',
-        QwenLogger.instance.shutdown.bind(QwenLogger.instance),
-      );
     }
 
     return QwenLogger.instance;
@@ -845,14 +839,6 @@ export class QwenLogger {
     } else {
       throw new Error('Unsupported proxy type');
     }
-  }
-
-  shutdown() {
-    if (this.isShutdown) return;
-
-    this.isShutdown = true;
-    const event = new EndSessionEvent(this.config);
-    this.logEndSessionEvent(event);
   }
 
   private requeueFailedEvents(eventsToSend: RumEvent[]): void {

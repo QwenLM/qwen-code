@@ -69,7 +69,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
   initializeTelemetry,
-  logCliConfiguration,
+  logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
   StartSessionEvent,
@@ -323,7 +323,7 @@ function normalizeConfigOutputFormat(
 
 export class Config {
   private sessionId: string;
-  private readonly sessionData?: ResumedSessionData;
+  private sessionData?: ResumedSessionData;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
@@ -573,6 +573,8 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry();
 
     await this.geminiClient.initialize();
+
+    logStartSession(this, new StartSessionEvent(this));
   }
 
   getContentGenerator(): ContentGenerator {
@@ -628,9 +630,6 @@ export class Config {
 
     // Reset the session flag since we're explicitly changing auth and using default model
     this.inFallbackMode = false;
-
-    // Logging the cli configuration here as the auth related configuration params would have been loaded by this point
-    logCliConfiguration(this, new StartSessionEvent(this, this.toolRegistry));
   }
 
   /**
@@ -654,6 +653,19 @@ export class Config {
   }
 
   getSessionId(): string {
+    return this.sessionId;
+  }
+
+  /**
+   * Starts a new session and resets session-scoped services.
+   */
+  startNewSession(sessionId?: string): string {
+    this.sessionId = sessionId ?? randomUUID();
+    this.sessionData = undefined;
+    this.chatRecordingService = new ChatRecordingService(this);
+    if (this.initialized) {
+      logStartSession(this, new StartSessionEvent(this));
+    }
     return this.sessionId;
   }
 

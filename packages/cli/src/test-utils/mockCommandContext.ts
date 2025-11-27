@@ -9,6 +9,7 @@ import type { CommandContext } from '../ui/commands/types.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { GitService } from '@qwen-code/qwen-code-core';
 import type { SessionStatsState } from '../ui/contexts/SessionContext.js';
+import { ToolCallDecision } from '../ui/contexts/SessionContext.js';
 
 // A utility type to make all properties of an object, and its nested objects, partial.
 type DeepPartial<T> = T extends object
@@ -63,7 +64,9 @@ export const createMockCommandContext = (
     } as any,
     session: {
       sessionShellAllowlist: new Set<string>(),
+      startNewSession: vi.fn(),
       stats: {
+        sessionId: '',
         sessionStartTime: new Date(),
         lastPromptTokenCount: 0,
         metrics: {
@@ -73,9 +76,15 @@ export const createMockCommandContext = (
             totalSuccess: 0,
             totalFail: 0,
             totalDurationMs: 0,
-            totalDecisions: { accept: 0, reject: 0, modify: 0 },
+            totalDecisions: {
+              [ToolCallDecision.ACCEPT]: 0,
+              [ToolCallDecision.REJECT]: 0,
+              [ToolCallDecision.MODIFY]: 0,
+              [ToolCallDecision.AUTO_ACCEPT]: 0,
+            },
             byName: {},
           },
+          files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
         },
         promptCount: 0,
       } as SessionStatsState,

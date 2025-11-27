@@ -179,13 +179,13 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
   undefined,
 );
 
-const defaultStats: SessionStatsState = {
-  sessionId: '',
+const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
+  sessionId,
   sessionStartTime: new Date(),
   metrics: uiTelemetryService.getMetrics(),
   lastPromptTokenCount: 0,
   promptCount: 0,
-};
+});
 
 // --- Provider Component ---
 
@@ -193,10 +193,9 @@ export const SessionStatsProvider: React.FC<{
   sessionId?: string;
   children: React.ReactNode;
 }> = ({ sessionId, children }) => {
-  const [stats, setStats] = useState<SessionStatsState>({
-    ...defaultStats,
-    sessionId: sessionId ?? '',
-  });
+  const [stats, setStats] = useState<SessionStatsState>(() =>
+    createDefaultStats(sessionId ?? ''),
+  );
 
   useEffect(() => {
     const handleUpdate = ({
@@ -234,10 +233,11 @@ export const SessionStatsProvider: React.FC<{
   }, []);
 
   const startNewSession = useCallback((sessionId: string) => {
-    setStats({
-      ...defaultStats,
+    setStats((stats) => ({
+      ...stats,
       sessionId,
-    });
+      promptCount: 0,
+    }));
   }, []);
 
   const startNewPrompt = useCallback(() => {

@@ -59,6 +59,7 @@ const makeFakeConfig = (overrides: Partial<Config> = {}): Config => {
     getTelemetryLogPromptsEnabled: () => false,
     getFileFilteringRespectGitIgnore: () => true,
     getOutputFormat: () => 'text',
+    getToolRegistry: () => undefined,
     ...overrides,
   };
   return defaults as Config;

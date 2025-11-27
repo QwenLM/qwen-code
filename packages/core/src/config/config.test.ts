@@ -465,7 +465,7 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         usageStatisticsEnabled: true,
       });
-      await config.refreshAuth(AuthType.USE_GEMINI);
+      await config.initialize();
 
       expect(QwenLogger.prototype.logStartSessionEvent).toHaveBeenCalledOnce();
     });

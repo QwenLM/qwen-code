@@ -34,8 +34,8 @@ Slash commands provide meta-level control over the CLI itself.
       - **Description** Writes the current conversation to a provided Markdown or JSON file.
       - **Usage** `/chat share file.md` or `/chat share file.json`. If no filename is provided, then the CLI will generate one.
 
-- **`/clear`**
-  - **Description:** Clear the terminal screen, including the visible session history and scrollback within the CLI. The underlying session data (for history recall) might be preserved depending on the exact implementation, but the visual display is cleared.
+- **`/clear`** (aliases: `reset`, `new`)
+  - **Description:** Clear conversation history and free up context by starting a fresh session. Also clears the terminal output and scrollback within the CLI.
   - **Keyboard shortcut:** Press **Ctrl+L** at any time to perform a clear action.
 
 - **`/summary`**

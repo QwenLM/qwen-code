@@ -72,7 +72,7 @@ Create or edit `.qwen/settings.json` in your home directory:
 #### Session Commands
 
 - **`/compress`** - Compress conversation history to continue within token limits
-- **`/clear`** - Clear all conversation history and start fresh
+- **`/clear`** (aliases: `/reset`, `/new`) - Clear conversation history, start a fresh session, and free up context
 - **`/stats`** - Check current token usage and limits
 
 > 📝 **Note**: Session token limit applies to a single conversation, not cumulative API calls.
@@ -332,7 +332,7 @@ qwen
 ### Session Commands
 
 - `/help` - Display available commands
-- `/clear` - Clear conversation history
+- `/clear` (aliases: `/reset`, `/new`) - Clear conversation history and start a fresh session
 - `/compress` - Compress history to save tokens
 - `/stats` - Show current session information
 - `/exit` or `/quit` - Exit Qwen Code

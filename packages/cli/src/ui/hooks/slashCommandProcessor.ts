@@ -75,7 +75,7 @@ export const useSlashCommandProcessor = (
   isConfigInitialized: boolean,
   logger: Logger | null,
 ) => {
-  const session = useSessionStats();
+  const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
   const [reloadTrigger, setReloadTrigger] = useState(0);
 
@@ -207,8 +207,9 @@ export const useSlashCommandProcessor = (
           actions.addConfirmUpdateExtensionRequest,
       },
       session: {
-        stats: session.stats,
+        stats: sessionStats,
         sessionShellAllowlist,
+        startNewSession,
       },
     }),
     [
@@ -220,7 +221,8 @@ export const useSlashCommandProcessor = (
       addItem,
       clearItems,
       refreshStatic,
-      session.stats,
+      sessionStats,
+      startNewSession,
       actions,
       pendingItem,
       setPendingItem,
@@ -447,7 +449,7 @@ export const useSlashCommandProcessor = (
                         } else {
                           // Just quit immediately - trigger the actual quit action
                           const now = Date.now();
-                          const { sessionStartTime } = session.stats;
+                          const { sessionStartTime } = sessionStats;
                           const wallDuration = now - sessionStartTime.getTime();
 
                           actions.quit([
@@ -618,7 +620,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
-      session.stats,
+      sessionStats,
     ],
   );
 

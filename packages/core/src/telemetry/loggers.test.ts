@@ -41,7 +41,7 @@ import {
 import {
   logApiRequest,
   logApiResponse,
-  logCliConfiguration,
+  logStartSession,
   logUserPrompt,
   logToolCall,
   logFlashFallback,
@@ -177,10 +177,11 @@ describe('loggers', () => {
         getTargetDir: () => 'target-dir',
         getProxy: () => 'http://test.proxy.com:8080',
         getOutputFormat: () => OutputFormat.JSON,
+        getToolRegistry: () => undefined,
       } as unknown as Config;
 
       const startSessionEvent = new StartSessionEvent(mockConfig);
-      logCliConfiguration(mockConfig, startSessionEvent);
+      logStartSession(mockConfig, startSessionEvent);
 
       expect(mockLogger.emit).toHaveBeenCalledWith({
         body: 'CLI configuration loaded.',

@@ -186,7 +186,11 @@ describe('useSlashCompletion', () => {
           altNames: ['usage'],
           description: 'check session stats. Usage: /stats [model|tools]',
         }),
-        createTestCommand({ name: 'clear', description: 'Clear the screen' }),
+        createTestCommand({
+          name: 'clear',
+          altNames: ['reset', 'new'],
+          description: 'Clear the screen',
+        }),
         createTestCommand({
           name: 'memory',
           description: 'Manage memory',
@@ -207,7 +211,13 @@ describe('useSlashCompletion', () => {
 
       expect(result.current.suggestions.length).toBe(slashCommands.length);
       expect(result.current.suggestions.map((s) => s.label)).toEqual(
-        expect.arrayContaining(['help', 'clear', 'memory', 'chat', 'stats']),
+        expect.arrayContaining([
+          'help (?)',
+          'clear (reset, new)',
+          'memory',
+          'chat',
+          'stats (usage)',
+        ]),
       );
     });
 
@@ -256,7 +266,7 @@ describe('useSlashCompletion', () => {
       await waitFor(() => {
         expect(result.current.suggestions).toEqual([
           {
-            label: 'stats',
+            label: 'stats (usage)',
             value: 'stats',
             description: 'check session stats. Usage: /stats [model|tools]',
             commandKind: CommandKind.BUILT_IN,

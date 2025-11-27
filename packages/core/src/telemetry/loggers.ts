@@ -101,7 +101,7 @@ function getCommonAttributes(config: Config): LogAttributes {
   };
 }
 
-export function logCliConfiguration(
+export function logStartSession(
   config: Config,
   event: StartSessionEvent,
 ): void {

@@ -17,7 +17,6 @@ import {
 } from './tool-call-decision.js';
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
-import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { OutputFormat } from '../output/types.js';
 
 export interface BaseTelemetryEvent {
@@ -48,9 +47,10 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   mcp_tools?: string;
   output_format: OutputFormat;
 
-  constructor(config: Config, toolRegistry?: ToolRegistry) {
+  constructor(config: Config) {
     const generatorConfig = config.getContentGeneratorConfig();
     const mcpServers = config.getMcpServers();
+    const toolRegistry = config.getToolRegistry();
 
     let useGemini = false;
     let useVertex = false;
