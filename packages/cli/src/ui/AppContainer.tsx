@@ -205,7 +205,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stdout } = useStdout();
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats, startNewSession } = useSessionStats();
+  const { stats: sessionStats } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
 
@@ -224,26 +224,22 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       await config.initialize();
       setConfigInitialized(true);
+
+      const resumedSessionData = config.getResumedSessionData();
+      if (resumedSessionData) {
+        const historyItems = buildResumedHistoryItems(
+          resumedSessionData,
+          config,
+        );
+        historyManager.loadHistory(historyItems);
+      }
     })();
     registerCleanup(async () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
     });
-  }, [config]);
-
-  // Load resumed session history after config is initialized
-  useEffect(() => {
-    if (!isConfigInitialized) return;
-
-    startNewSession(config.getSessionId());
-
-    const resumedSessionData = config.getResumedSessionData();
-    if (resumedSessionData) {
-      const historyItems = buildResumedHistoryItems(resumedSessionData, config);
-      historyManager.loadHistory(historyItems);
-    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConfigInitialized]);
+  }, [config]);
 
   useEffect(
     () => setUpdateHandler(historyManager.addItem, setUpdateInfo),
@@ -370,12 +366,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleAuthSelect,
     openAuthDialog,
     cancelAuthentication,
-  } = useAuthCommand(
-    settings,
-    config,
-    historyManager.addItem,
-    isConfigInitialized,
-  );
+  } = useAuthCommand(settings, config, historyManager.addItem);
 
   const { proQuotaRequest, handleProQuotaChoice } = useQuotaAndFallback({
     config,

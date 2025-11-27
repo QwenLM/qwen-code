@@ -26,7 +26,6 @@ export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
-  isConfigInitialized: boolean,
 ) => {
   const unAuthenticated =
     settings.merged.security?.auth?.selectedType === undefined;
@@ -46,7 +45,6 @@ export const useAuthCommand = (
   const { qwenAuthState, cancelQwenAuth } = useQwenAuth(
     pendingAuthType,
     isAuthenticating,
-    isConfigInitialized,
   );
 
   const onAuthError = useCallback(

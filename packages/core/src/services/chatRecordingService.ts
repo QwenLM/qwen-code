@@ -19,7 +19,6 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import type { ToolCallResponseInfo } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
-import { type ResumedSessionData } from './sessionService.js';
 
 /**
  * Token usage summary for a message or conversation.
@@ -136,19 +135,74 @@ export function toTokensSummary(
  * For session management (list, load, remove), use SessionService.
  */
 export class ChatRecordingService {
-  private conversationFile: string | null = null;
-  private sessionId: string | undefined = undefined;
   /** UUID of the last written record in the chain */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
-  private resumedSessionData?: ResumedSessionData;
 
   constructor(config: Config) {
     this.config = config;
+    this.lastRecordUuid =
+      config.getResumedSessionData()?.lastCompletedUuid ?? null;
   }
 
-  private getChatsDir(): string {
-    return path.join(this.config.storage.getProjectDir(), 'chats');
+  /**
+   * Returns the session ID.
+   * @returns The session ID.
+   */
+  private getSessionId(): string {
+    return this.config.getSessionId();
+  }
+
+  /**
+   * Ensures the chats directory exists, creating it if it doesn't exist.
+   * @returns The path to the chats directory.
+   * @throws Error if the directory cannot be created.
+   */
+  private ensureChatsDir(): string {
+    const projectDir = this.config.storage.getProjectDir();
+    const chatsDir = path.join(projectDir, 'chats');
+
+    try {
+      fs.mkdirSync(chatsDir, { recursive: true });
+    } catch {
+      // Ignore errors - directory will be created if it doesn't exist
+    }
+
+    return chatsDir;
+  }
+
+  /**
+   * Ensures the conversation file exists, creating it if it doesn't exist.
+   * Uses atomic file creation to avoid race conditions.
+   * @returns The path to the conversation file.
+   * @throws Error if the file cannot be created or accessed.
+   */
+  private ensureConversationFile(): string {
+    const chatsDir = this.ensureChatsDir();
+    const sessionId = this.getSessionId();
+    const safeFilename = `${sessionId}.jsonl`;
+    const conversationFile = path.join(chatsDir, safeFilename);
+
+    if (fs.existsSync(conversationFile)) {
+      return conversationFile;
+    }
+
+    try {
+      // Use 'wx' flag for exclusive creation - atomic operation that fails if file exists
+      // This avoids the TOCTOU race condition of existsSync + writeFileSync
+      fs.writeFileSync(conversationFile, '', { flag: 'wx', encoding: 'utf8' });
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      // EEXIST means file already exists, which is expected and fine
+      if (nodeError.code !== 'EEXIST') {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Failed to create conversation file at ${conversationFile}: ${message}`,
+        );
+      }
+    }
+
+    return conversationFile;
   }
 
   /**
@@ -173,76 +227,15 @@ export class ChatRecordingService {
    * Appends a record to the session file and updates lastRecordUuid.
    */
   private appendRecord(record: ChatRecord): void {
-    if (!this.conversationFile) return;
-
     try {
-      // Ensure file exists before writing (deferred file creation)
-      if (!fs.existsSync(this.conversationFile)) {
-        fs.writeFileSync(this.conversationFile, '', 'utf8');
-      }
-      jsonl.writeLineSync(this.conversationFile, record);
+      const conversationFile = this.ensureConversationFile();
+
+      jsonl.writeLineSync(conversationFile, record);
       this.lastRecordUuid = record.uuid;
     } catch (error) {
       console.error('Error appending record:', error);
       throw error;
     }
-  }
-
-  /**
-   * Initializes the chat recording service.
-   * Loads a resumed session if requested, or creates a new session file.
-   */
-  initialize(sessionId?: string, sessionData?: ResumedSessionData): void {
-    this.sessionId = sessionId ?? randomUUID();
-
-    try {
-      if (sessionData) {
-        // Resume from existing session
-        this.conversationFile = sessionData.filePath;
-        this.sessionId = sessionData.conversation.sessionId;
-        this.lastRecordUuid = sessionData.lastCompletedUuid;
-        this.resumedSessionData = sessionData;
-      } else {
-        // Create new session
-        const chatsDir = this.getChatsDir();
-
-        const filename = `${this.sessionId}.jsonl`;
-        this.conversationFile = path.join(chatsDir, filename);
-        this.lastRecordUuid = null;
-
-        if (process.env['VITEST'] === 'true') {
-          return;
-        }
-
-        // Create the chats directory if it doesn't exist
-        fs.mkdirSync(chatsDir, { recursive: true });
-        // File creation is deferred until first write operation
-      }
-    } catch (error) {
-      console.error('Error initializing chat recording service:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Returns the resumed session data if this session was resumed from a previous one.
-   */
-  getResumedSessionData(): ResumedSessionData | undefined {
-    return this.resumedSessionData;
-  }
-
-  /**
-   * Returns the session ID (may be updated after initialization if resuming).
-   */
-  getSessionId(): string {
-    if (!this.sessionId) {
-      if (process.env['VITEST'] === 'true') {
-        this.sessionId = 'test-session-id';
-      } else {
-        throw new Error('ChatRecordingService is not initialized');
-      }
-    }
-    return this.sessionId;
   }
 
   /**
@@ -252,8 +245,6 @@ export class ChatRecordingService {
    * @param message The raw PartListUnion object as used with the API
    */
   recordUserMessage(message: PartListUnion): void {
-    if (!this.conversationFile) return;
-
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
@@ -280,8 +271,6 @@ export class ChatRecordingService {
     message?: PartListUnion;
     tokens?: UsageMetadata;
   }): void {
-    if (!this.conversationFile) return;
-
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('assistant'),
@@ -314,8 +303,6 @@ export class ChatRecordingService {
     message: PartListUnion,
     toolCallResult?: Partial<ToolCallResponseInfo> & { status: Status },
   ): void {
-    if (!this.conversationFile) return;
-
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),

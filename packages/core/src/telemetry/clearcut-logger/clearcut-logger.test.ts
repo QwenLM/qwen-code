@@ -142,6 +142,7 @@ describe('ClearcutLogger', () => {
 
     const loggerConfig = makeFakeConfig({
       ...config,
+      sessionId: 'test-session-id',
     });
     ClearcutLogger.clearInstance();
 

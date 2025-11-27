@@ -5,18 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  type MockInstance,
-  vi,
-} from 'vitest';
+import fs from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
@@ -42,8 +34,6 @@ describe('ChatRecordingService', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
 
-  let mkdirSyncSpy: MockInstance<typeof fs.mkdirSync>;
-  let writeFileSyncSpy: MockInstance<typeof fs.writeFileSync>;
   let uuidCounter = 0;
 
   beforeEach(() => {
@@ -70,6 +60,7 @@ describe('ChatRecordingService', () => {
           isOutputMarkdown: false,
         }),
       }),
+      getResumedSessionData: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     vi.mocked(randomUUID).mockImplementation(
@@ -83,16 +74,11 @@ describe('ChatRecordingService', () => {
       return parts.join('/');
     });
     vi.mocked(execSync).mockReturnValue('main\n');
+    vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
     chatRecordingService = new ChatRecordingService(mockConfig);
-
-    mkdirSyncSpy = vi
-      .spyOn(fs, 'mkdirSync')
-      .mockImplementation(() => undefined);
-
-    writeFileSyncSpy = vi
-      .spyOn(fs, 'writeFileSync')
-      .mockImplementation(() => undefined);
 
     // Mock jsonl-utils
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
@@ -137,26 +123,7 @@ describe('ChatRecordingService', () => {
     });
   });
 
-  describe('initialize', () => {
-    it('should create a new session file if none is provided', async () => {
-      vi.stubEnv('VITEST', 'false');
-
-      await chatRecordingService.initialize();
-
-      expect(mkdirSyncSpy).toHaveBeenCalledWith(
-        '/test/project/root/.gemini/projects/test-project/chats',
-        { recursive: true },
-      );
-      // File creation is deferred until first write operation
-      expect(writeFileSyncSpy).not.toHaveBeenCalled();
-    });
-  });
-
   describe('recordUserMessage', () => {
-    beforeEach(async () => {
-      await chatRecordingService.initialize('test-session-id');
-    });
-
     it('should record a user message immediately', () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
       chatRecordingService.recordUserMessage(userParts);
@@ -201,10 +168,6 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordAssistantTurn', () => {
-    beforeEach(async () => {
-      await chatRecordingService.initialize();
-    });
-
     it('should record assistant turn with content only', () => {
       const parts: Part[] = [{ text: 'Hello!' }];
       chatRecordingService.recordAssistantTurn({
@@ -265,10 +228,6 @@ describe('ChatRecordingService', () => {
   });
 
   describe('recordToolResult', () => {
-    beforeEach(async () => {
-      await chatRecordingService.initialize();
-    });
-
     it('should record tool result with Parts', () => {
       // First record a user and assistant message to set up the chain
       chatRecordingService.recordUserMessage([{ text: 'Hello' }]);

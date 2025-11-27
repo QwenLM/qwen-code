@@ -116,7 +116,7 @@ describe('loggers', () => {
     });
 
     it('logs the chat compression event to QwenLogger', () => {
-      const mockConfig = makeFakeConfig();
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
 
       const event = makeChatCompressionEvent({
         tokens_before: 9001,
@@ -131,7 +131,7 @@ describe('loggers', () => {
     });
 
     it('records the chat compression event to OTEL', () => {
-      const mockConfig = makeFakeConfig();
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
 
       logChatCompression(
         mockConfig,
@@ -1030,7 +1030,7 @@ describe('loggers', () => {
     });
 
     it('logs the event to Clearcut and OTEL', () => {
-      const mockConfig = makeFakeConfig();
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
       const event = new MalformedJsonResponseEvent('test-model');
 
       logMalformedJsonResponse(mockConfig, event);

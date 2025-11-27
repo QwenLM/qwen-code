@@ -157,7 +157,7 @@ export async function startInteractiveUI(
             process.platform === 'win32' || nodeMajorVersion < 20
           }
         >
-          <SessionStatsProvider>
+          <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
               <AppContainer
                 config={config}

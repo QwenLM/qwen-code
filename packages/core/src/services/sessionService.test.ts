@@ -15,7 +15,6 @@ import {
   type MockInstance,
   vi,
 } from 'vitest';
-import type { Config } from '../config/config.js';
 import { getProjectHash } from '../utils/paths.js';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -27,27 +26,12 @@ vi.mock('../utils/jsonl-utils.js');
 
 describe('SessionService', () => {
   let sessionService: SessionService;
-  let mockConfig: Config;
 
   let readdirSyncSpy: MockInstance<typeof fs.readdirSync>;
   let statSyncSpy: MockInstance<typeof fs.statSync>;
   let unlinkSyncSpy: MockInstance<typeof fs.unlinkSync>;
 
   beforeEach(() => {
-    mockConfig = {
-      getSessionId: vi.fn().mockReturnValue('test-session-id'),
-      getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
-      getCliVersion: vi.fn().mockReturnValue('1.0.0'),
-      storage: {
-        getProjectTempDir: vi
-          .fn()
-          .mockReturnValue('/test/project/root/.gemini/tmp/hash'),
-        getProjectDir: vi
-          .fn()
-          .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
-      },
-    } as unknown as Config;
-
     vi.mocked(getProjectHash).mockReturnValue('test-project-hash');
     vi.mocked(path.join).mockImplementation((...args) => args.join('/'));
     vi.mocked(path.dirname).mockImplementation((p) => {
@@ -56,7 +40,7 @@ describe('SessionService', () => {
       return parts.join('/');
     });
 
-    sessionService = new SessionService(mockConfig);
+    sessionService = new SessionService('/test/project/root');
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(

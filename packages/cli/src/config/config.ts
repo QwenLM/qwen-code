@@ -21,6 +21,8 @@ import {
   Storage,
   InputFormat,
   OutputFormat,
+  SessionService,
+  type ResumedSessionData,
   type FileFilteringOptions,
   type MCPServerConfig,
 } from '@qwen-code/qwen-code-core';
@@ -812,7 +814,31 @@ export async function loadCliConfig(
   const vlmSwitchMode =
     argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
 
+  let sessionId: string | undefined;
+  let sessionData: ResumedSessionData | undefined;
+  if (argv.continue || argv.resume) {
+    const sessionService = new SessionService(cwd);
+    if (argv.continue) {
+      sessionData = await sessionService.loadLastSession();
+      if (sessionData) {
+        sessionId = sessionData.conversation.sessionId;
+      }
+    }
+
+    if (argv.resume) {
+      sessionId = argv.resume;
+      sessionData = await sessionService.loadSession(argv.resume);
+      if (!sessionData) {
+        const message = `No saved session found with ID ${argv.resume}. Run \`qwen resume\` without an ID to choose from existing sessions.`;
+        console.log(message);
+        process.exit(1);
+      }
+    }
+  }
+
   return new Config({
+    sessionId,
+    sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -910,8 +936,6 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
-    continueSession: argv.continue || false,
-    resumeSessionId: argv.resume,
   });
 }
 

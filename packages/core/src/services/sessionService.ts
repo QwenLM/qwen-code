@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -100,16 +100,16 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
  * File location: ~/.qwen/tmp/<project_id>/chats/
  */
 export class SessionService {
-  private readonly config: Config;
+  private readonly storage: Storage;
   private readonly projectHash: string;
 
-  constructor(config: Config) {
-    this.config = config;
-    this.projectHash = getProjectHash(config.getProjectRoot());
+  constructor(cwd: string) {
+    this.storage = new Storage(cwd);
+    this.projectHash = getProjectHash(cwd);
   }
 
   private getChatsDir(): string {
-    return path.join(this.config.storage.getProjectDir(), 'chats');
+    return path.join(this.storage.getProjectDir(), 'chats');
   }
 
   /**

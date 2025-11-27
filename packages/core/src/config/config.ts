@@ -98,6 +98,7 @@ import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
+import { randomUUID } from 'node:crypto';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -216,6 +217,8 @@ export interface SandboxConfig {
 }
 
 export interface ConfigParameters {
+  sessionId?: string;
+  sessionData?: ResumedSessionData;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -297,10 +300,6 @@ export interface ConfigParameters {
   skipStartupContext?: boolean;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
-  /** Continue from the most recent session (--continue flag) */
-  continueSession?: boolean;
-  /** Resume a specific session by ID (--resume flag) */
-  resumeSessionId?: string;
 }
 
 function normalizeConfigOutputFormat(
@@ -323,6 +322,8 @@ function normalizeConfigOutputFormat(
 }
 
 export class Config {
+  private sessionId: string;
+  private readonly sessionData?: ResumedSessionData;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
@@ -422,10 +423,10 @@ export class Config {
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
-  private readonly continueSession: boolean;
-  private readonly resumeSessionId?: string;
 
   constructor(params: ConfigParameters) {
+    this.sessionId = params.sessionId ?? randomUUID();
+    this.sessionData = params.sessionData;
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
@@ -538,8 +539,6 @@ export class Config {
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
-    this.continueSession = params.continueSession ?? false;
-    this.resumeSessionId = params.resumeSessionId;
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -552,6 +551,7 @@ export class Config {
       setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
     }
     this.geminiClient = new GeminiClient(this);
+    this.chatRecordingService = new ChatRecordingService(this);
   }
 
   /**
@@ -563,8 +563,6 @@ export class Config {
     }
     this.initialized = true;
 
-    await this.initializeSession();
-
     // Initialize centralized FileDiscoveryService
     this.getFileService();
     if (this.getCheckpointingEnabled()) {
@@ -575,32 +573,6 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry();
 
     await this.geminiClient.initialize();
-  }
-
-  private async initializeSession(): Promise<void> {
-    let sessionId: string | undefined = undefined;
-    let sessionData: ResumedSessionData | undefined = undefined;
-
-    if (this.continueSession) {
-      sessionData = await this.getSessionService().loadLastSession();
-      if (sessionData) {
-        sessionId = sessionData.conversation.sessionId;
-      }
-    }
-
-    if (this.resumeSessionId) {
-      sessionId = this.resumeSessionId;
-      sessionData = await this.getSessionService().loadSession(
-        this.resumeSessionId,
-      );
-      if (!sessionData) {
-        throw new Error(
-          `No saved session found with ID ${this.resumeSessionId}. Run \`qwen resume\` without an ID to choose from existing sessions.`,
-        );
-      }
-    }
-
-    this.getChatRecordingService().initialize(sessionId, sessionData);
   }
 
   getContentGenerator(): ContentGenerator {
@@ -682,7 +654,14 @@ export class Config {
   }
 
   getSessionId(): string {
-    return this.getChatRecordingService().getSessionId();
+    return this.sessionId;
+  }
+
+  /**
+   * Returns the resumed session data if this session was resumed from a previous one.
+   */
+  getResumedSessionData(): ResumedSessionData | undefined {
+    return this.sessionData;
   }
 
   shouldLoadMemoryFromIncludeDirectories(): boolean {
@@ -1182,16 +1161,9 @@ export class Config {
    */
   getSessionService(): SessionService {
     if (!this.sessionService) {
-      this.sessionService = new SessionService(this);
+      this.sessionService = new SessionService(this.targetDir);
     }
     return this.sessionService;
-  }
-
-  /**
-   * Returns the resumed session data if this session was resumed from a previous one.
-   */
-  getResumedSessionData(): ResumedSessionData | undefined {
-    return this.getChatRecordingService().getResumedSessionData();
   }
 
   getFileExclusions(): FileExclusions {
