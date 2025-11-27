@@ -31,6 +31,8 @@ export interface SessionListItem {
   gitBranch?: string;
   /** Full path to the session file */
   filePath: string;
+  /** Number of messages in the session (unique message UUIDs) */
+  messageCount: number;
 }
 
 /**
@@ -130,6 +132,26 @@ export class SessionService {
   }
 
   /**
+   * Counts unique message UUIDs in a session file.
+   * This gives the number of logical messages in the session.
+   */
+  private async countSessionMessages(filePath: string): Promise<number> {
+    try {
+      const records = await jsonl.read<ChatRecord>(filePath);
+      const uniqueUuids = new Set<string>();
+      for (const record of records) {
+        // Only count user and assistant messages, not tool results
+        if (record.type === 'user' || record.type === 'assistant') {
+          uniqueUuids.add(record.uuid);
+        }
+      }
+      return uniqueUuids.size;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Lists sessions for the current project with pagination.
    *
    * Sessions are ordered by file modification time (most recent first).
@@ -213,6 +235,9 @@ export class SessionService {
       const recordProjectHash = getProjectHash(firstRecord.cwd);
       if (recordProjectHash !== this.projectHash) continue;
 
+      // Count messages for this session
+      const messageCount = await this.countSessionMessages(filePath);
+
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
@@ -221,6 +246,7 @@ export class SessionService {
         prompt: this.extractPromptText(firstRecord.message),
         gitBranch: firstRecord.gitBranch,
         filePath,
+        messageCount,
       });
     }
 

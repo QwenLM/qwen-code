@@ -58,6 +58,7 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
+import { showResumeSessionPicker } from './ui/components/ResumeSessionPicker.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -207,7 +208,7 @@ export async function main() {
   migrateDeprecatedSettings(settings);
   await cleanupCheckpoints();
 
-  const argv = await parseArguments(settings.merged);
+  let argv = await parseArguments(settings.merged);
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -215,6 +216,17 @@ export async function main() {
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
     process.exit(1);
+  }
+
+  // Handle --resume without a session ID by showing the session picker
+  if (argv.resume === '') {
+    const selectedSessionId = await showResumeSessionPicker();
+    if (!selectedSessionId) {
+      // User cancelled or no sessions available
+      process.exit(0);
+    }
+    // Update argv with the selected session ID
+    argv = { ...argv, resume: selectedSessionId };
   }
 
   const isDebugMode = cliConfig.isDebugMode(argv);

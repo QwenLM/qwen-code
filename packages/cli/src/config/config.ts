@@ -408,7 +408,8 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('resume', {
           type: 'string',
-          description: 'Resume a specific session by its ID.',
+          description:
+            'Resume a specific session by its ID. Use without an ID to show session picker.',
         })
         .deprecateOption(
           'show-memory-usage',
@@ -816,6 +817,7 @@ export async function loadCliConfig(
 
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
+
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
     if (argv.continue) {
@@ -829,7 +831,7 @@ export async function loadCliConfig(
       sessionId = argv.resume;
       sessionData = await sessionService.loadSession(argv.resume);
       if (!sessionData) {
-        const message = `No saved session found with ID ${argv.resume}. Run \`qwen resume\` without an ID to choose from existing sessions.`;
+        const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
         console.log(message);
         process.exit(1);
       }
