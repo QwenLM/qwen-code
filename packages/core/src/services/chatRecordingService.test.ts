@@ -25,7 +25,6 @@ import {
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
-import type { ToolCallResponseInfo } from '../core/turn.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -148,7 +147,8 @@ describe('ChatRecordingService', () => {
         '/test/project/root/.gemini/projects/test-project/chats',
         { recursive: true },
       );
-      expect(writeFileSyncSpy).toHaveBeenCalled();
+      // File creation is deferred until first write operation
+      expect(writeFileSyncSpy).not.toHaveBeenCalled();
     });
   });
 
@@ -308,11 +308,13 @@ describe('ChatRecordingService', () => {
           },
         },
       ];
-      const metadata: Partial<ToolCallResponseInfo> = {
+      const metadata = {
         callId: 'call-1',
+        status: 'success',
         responseParts: toolResultParts,
         resultDisplay: undefined,
-      };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
 
       chatRecordingService.recordToolResult(toolResultParts, metadata);
 

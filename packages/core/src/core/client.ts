@@ -404,12 +404,15 @@ export class GeminiClient {
     request: PartListUnion,
     signal: AbortSignal,
     prompt_id: string,
+    options?: { isContinuation: boolean },
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
-    const isNewPrompt = this.lastPromptId !== prompt_id;
-    if (isNewPrompt) {
+    if (!options?.isContinuation) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+
+      // record user message for session management
+      this.config.getChatRecordingService()?.recordUserMessage(request);
     }
     this.sessionTurnCount++;
     if (
@@ -518,7 +521,7 @@ export class GeminiClient {
 
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
-    if (isNewPrompt) {
+    if (!options?.isContinuation) {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
@@ -588,6 +591,7 @@ export class GeminiClient {
           nextRequest,
           signal,
           prompt_id,
+          options,
           boundedTurns - 1,
         );
       }

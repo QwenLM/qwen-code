@@ -1252,6 +1252,8 @@ export class CoreToolScheduler {
     // Record each tool result individually
     for (const call of completedCalls) {
       this.chatRecordingService.recordToolResult(call.response.responseParts, {
+        callId: call.request.callId,
+        status: call.status,
         resultDisplay: call.response.resultDisplay,
         error: call.response.error,
         errorType: call.response.errorType,

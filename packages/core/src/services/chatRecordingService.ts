@@ -18,6 +18,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import type { ToolCallResponseInfo } from '../core/turn.js';
+import type { Status } from '../core/coreToolScheduler.js';
 import { type ResumedSessionData } from './sessionService.js';
 
 /**
@@ -175,6 +176,10 @@ export class ChatRecordingService {
     if (!this.conversationFile) return;
 
     try {
+      // Ensure file exists before writing (deferred file creation)
+      if (!fs.existsSync(this.conversationFile)) {
+        fs.writeFileSync(this.conversationFile, '', 'utf8');
+      }
       jsonl.writeLineSync(this.conversationFile, record);
       this.lastRecordUuid = record.uuid;
     } catch (error) {
@@ -211,8 +216,7 @@ export class ChatRecordingService {
 
         // Create the chats directory if it doesn't exist
         fs.mkdirSync(chatsDir, { recursive: true });
-        // Touch the file to create it (empty file until first message)
-        fs.writeFileSync(this.conversationFile, '', 'utf8');
+        // File creation is deferred until first write operation
       }
     } catch (error) {
       console.error('Error initializing chat recording service:', error);
@@ -308,7 +312,7 @@ export class ChatRecordingService {
    */
   recordToolResult(
     message: PartListUnion,
-    toolCallResult?: Partial<ToolCallResponseInfo>,
+    toolCallResult?: Partial<ToolCallResponseInfo> & { status: Status },
   ): void {
     if (!this.conversationFile) return;
 

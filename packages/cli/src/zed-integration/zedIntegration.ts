@@ -319,6 +319,9 @@ class Session {
       ),
     );
 
+    // record user message for session management
+    this.config.getChatRecordingService()?.recordUserMessage(promptText);
+
     // Check if the input contains a slash command
     // Extract text from the first text block if present
     const firstTextBlock = params.prompt.find((block) => block.type === 'text');

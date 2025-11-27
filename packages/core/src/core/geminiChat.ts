@@ -38,7 +38,6 @@ import {
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import { handleFallback } from '../fallback/handler.js';
-import { isFunctionResponse } from '../utils/messageInspectors.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 export enum StreamEventType {
@@ -260,12 +259,6 @@ export class GeminiChat {
     this.sendPromise = streamDonePromise;
 
     const userContent = createUserContent(params.message);
-
-    // Record user input (but NOT function responses - those are recorded separately
-    // after tool execution where we have access to resultDisplay and other metadata)
-    if (!isFunctionResponse(userContent)) {
-      this.chatRecordingService?.recordUserMessage(userContent.parts || []);
-    }
 
     // Add user content to history ONCE before any attempts.
     this.history.push(userContent);

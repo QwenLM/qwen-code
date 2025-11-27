@@ -239,7 +239,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
     const resumedSessionData = config.getResumedSessionData();
     if (resumedSessionData) {
-      const historyItems = buildResumedHistoryItems(resumedSessionData);
+      const historyItems = buildResumedHistoryItems(resumedSessionData, config);
       historyManager.loadHistory(historyItems);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

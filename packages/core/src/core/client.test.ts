@@ -1519,6 +1519,7 @@ ${JSON.stringify(
         [{ text: 'Start conversation' }],
         signal,
         'prompt-id-3',
+        { isContinuation: false },
         Number.MAX_SAFE_INTEGER, // Bypass the MAX_TURNS protection
       );
 

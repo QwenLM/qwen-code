@@ -22,6 +22,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import readline from 'node:readline';
 import { Mutex } from 'async-mutex';
 
@@ -116,6 +117,11 @@ export async function writeLine(
   const lock = getFileLock(filePath);
   await lock.runExclusive(() => {
     const line = `${JSON.stringify(data)}\n`;
+    // Ensure directory exists before writing
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
     fs.appendFileSync(filePath, line, 'utf8');
   });
 }
@@ -126,6 +132,11 @@ export async function writeLine(
  */
 export function writeLineSync(filePath: string, data: unknown): void {
   const line = `${JSON.stringify(data)}\n`;
+  // Ensure directory exists before writing
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
   fs.appendFileSync(filePath, line, 'utf8');
 }
 
@@ -135,6 +146,11 @@ export function writeLineSync(filePath: string, data: unknown): void {
  */
 export function write(filePath: string, data: unknown[]): void {
   const lines = data.map((item) => JSON.stringify(item)).join('\n');
+  // Ensure directory exists before writing
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
   fs.writeFileSync(filePath, `${lines}\n`, 'utf8');
 }
 
