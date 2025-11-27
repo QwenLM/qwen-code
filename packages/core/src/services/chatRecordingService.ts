@@ -200,12 +200,17 @@ export class ChatRecordingService {
       } else {
         // Create new session
         const chatsDir = this.getChatsDir();
-        fs.mkdirSync(chatsDir, { recursive: true });
 
         const filename = `${this.sessionId}.jsonl`;
         this.conversationFile = path.join(chatsDir, filename);
         this.lastRecordUuid = null;
 
+        if (process.env['VITEST'] === 'true') {
+          return;
+        }
+
+        // Create the chats directory if it doesn't exist
+        fs.mkdirSync(chatsDir, { recursive: true });
         // Touch the file to create it (empty file until first message)
         fs.writeFileSync(this.conversationFile, '', 'utf8');
       }

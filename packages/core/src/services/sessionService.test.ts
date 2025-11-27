@@ -21,7 +21,6 @@ import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
-vi.mock('node:fs');
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/jsonl-utils.js');

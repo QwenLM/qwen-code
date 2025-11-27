@@ -27,7 +27,6 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
 import type { ToolCallResponseInfo } from '../core/turn.js';
 
-vi.mock('node:fs');
 vi.mock('node:path');
 vi.mock('node:child_process');
 vi.mock('node:crypto', () => ({
@@ -141,6 +140,8 @@ describe('ChatRecordingService', () => {
 
   describe('initialize', () => {
     it('should create a new session file if none is provided', async () => {
+      vi.stubEnv('VITEST', 'false');
+
       await chatRecordingService.initialize();
 
       expect(mkdirSyncSpy).toHaveBeenCalledWith(
