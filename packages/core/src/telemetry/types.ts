@@ -30,6 +30,7 @@ type CommonFields = keyof BaseTelemetryEvent;
 export class StartSessionEvent implements BaseTelemetryEvent {
   'event.name': 'cli_config';
   'event.timestamp': string;
+  session_id: string;
   model: string;
   embedding_model: string;
   sandbox_enabled: boolean;
@@ -60,6 +61,7 @@ export class StartSessionEvent implements BaseTelemetryEvent {
     }
 
     this['event.name'] = 'cli_config';
+    this.session_id = config.getSessionId();
     this.model = config.getModel();
     this.embedding_model = config.getEmbeddingModel();
     this.sandbox_enabled =

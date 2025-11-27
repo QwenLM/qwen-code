@@ -103,6 +103,8 @@ export class QwenLogger {
 
   private userId: string;
 
+  private sessionId: string;
+
   /**
    * The value is true when there is a pending flush happening. This prevents
    * concurrent flush operations.
@@ -114,11 +116,12 @@ export class QwenLogger {
    */
   private pendingFlush: boolean = false;
 
-  private constructor(config?: Config) {
+  private constructor(config: Config) {
     this.config = config;
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
     this.installationManager = new InstallationManager();
     this.userId = this.generateUserId();
+    this.sessionId = config.getSessionId();
   }
 
   private generateUserId(): string {
@@ -230,10 +233,10 @@ export class QwenLogger {
         id: this.userId,
       },
       session: {
-        id: this.config?.getSessionId(),
+        id: this.sessionId || this.config?.getSessionId(),
       },
       view: {
-        id: this.config?.getSessionId(),
+        id: this.sessionId || this.config?.getSessionId(),
         name: 'qwen-code-cli',
       },
       os: osMetadata,
@@ -353,7 +356,24 @@ export class QwenLogger {
   }
 
   // session events
-  logStartSessionEvent(event: StartSessionEvent): void {
+  async logStartSessionEvent(event: StartSessionEvent): Promise<void> {
+    // Flush all pending events with the old session ID first.
+    // If flush fails, discard the pending events to avoid mixing sessions.
+    await this.flushToRum().catch((error: unknown) => {
+      if (this.config?.getDebugMode()) {
+        console.debug(
+          'Error flushing pending events before session start:',
+          error,
+        );
+      }
+    });
+
+    // Clear any remaining events (discard if flush failed)
+    this.events.clear();
+
+    // Now set the new session ID
+    this.sessionId = event.session_id;
+
     const applicationEvent = this.createViewEvent('session', 'session_start', {
       properties: {
         model: event.model,

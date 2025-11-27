@@ -206,7 +206,7 @@ describe('Server Config (config.ts)', () => {
     // Reset mocks if necessary
     vi.clearAllMocks();
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
-      () => undefined,
+      async () => undefined,
     );
   });
 
