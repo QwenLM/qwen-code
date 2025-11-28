@@ -218,17 +218,6 @@ export async function main() {
     process.exit(1);
   }
 
-  // Handle --resume without a session ID by showing the session picker
-  if (argv.resume === '') {
-    const selectedSessionId = await showResumeSessionPicker();
-    if (!selectedSessionId) {
-      // User cancelled or no sessions available
-      process.exit(0);
-    }
-    // Update argv with the selected session ID
-    argv = { ...argv, resume: selectedSessionId };
-  }
-
   const isDebugMode = cliConfig.isDebugMode(argv);
 
   dns.setDefaultResultOrder(
@@ -326,6 +315,18 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, []);
     }
+  }
+
+  // Handle --resume without a session ID by showing the session picker
+  if (argv.resume === '') {
+    const selectedSessionId = await showResumeSessionPicker();
+    if (!selectedSessionId) {
+      // User cancelled or no sessions available
+      process.exit(0);
+    }
+
+    // Update argv with the selected session ID
+    argv = { ...argv, resume: selectedSessionId };
   }
 
   // We are now past the logic handling potentially launching a child process

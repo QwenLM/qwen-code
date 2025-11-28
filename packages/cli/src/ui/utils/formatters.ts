@@ -21,6 +21,40 @@ export const formatMemoryUsage = (bytes: number): string => {
  * @param milliseconds The duration in milliseconds.
  * @returns A formatted string representing the duration.
  */
+/**
+ * Formats a timestamp into a human-readable relative time string.
+ * @param timestamp The timestamp in milliseconds since epoch.
+ * @returns A formatted string like "just now", "5 minutes ago", "2 days ago".
+ */
+export const formatRelativeTime = (timestamp: number): string => {
+  const now = Date.now();
+  const diffMs = now - timestamp;
+
+  const seconds = Math.floor(diffMs / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  const weeks = Math.floor(days / 7);
+  const months = Math.floor(days / 30);
+
+  if (months > 0) {
+    return months === 1 ? '1 month ago' : `${months} months ago`;
+  }
+  if (weeks > 0) {
+    return weeks === 1 ? '1 week ago' : `${weeks} weeks ago`;
+  }
+  if (days > 0) {
+    return days === 1 ? '1 day ago' : `${days} days ago`;
+  }
+  if (hours > 0) {
+    return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
+  }
+  if (minutes > 0) {
+    return minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
+  }
+  return 'just now';
+};
+
 export const formatDuration = (milliseconds: number): string => {
   if (milliseconds <= 0) {
     return '0s';

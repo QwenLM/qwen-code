@@ -11,44 +11,14 @@ import {
   type SessionListItem,
   getGitBranch,
 } from '@qwen-code/qwen-code-core';
+import { theme } from '../semantic-colors.js';
+import { formatRelativeTime } from '../utils/formatters.js';
 
 interface SessionPickerProps {
   sessions: SessionListItem[];
   currentBranch?: string;
   onSelect: (sessionId: string) => void;
   onCancel: () => void;
-}
-
-/**
- * Formats a timestamp into a human-readable relative time string.
- */
-function formatRelativeTime(timestamp: number): string {
-  const now = Date.now();
-  const diffMs = now - timestamp;
-
-  const seconds = Math.floor(diffMs / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-  const weeks = Math.floor(days / 7);
-  const months = Math.floor(days / 30);
-
-  if (months > 0) {
-    return months === 1 ? '1 month ago' : `${months} months ago`;
-  }
-  if (weeks > 0) {
-    return weeks === 1 ? '1 week ago' : `${weeks} weeks ago`;
-  }
-  if (days > 0) {
-    return days === 1 ? '1 day ago' : `${days} days ago`;
-  }
-  if (hours > 0) {
-    return hours === 1 ? '1 hour ago' : `${hours} hours ago`;
-  }
-  if (minutes > 0) {
-    return minutes === 1 ? '1 minute ago' : `${minutes} minutes ago`;
-  }
-  return 'just now';
 }
 
 /**
@@ -69,6 +39,7 @@ function SessionPicker({
   const { exit } = useApp();
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [filterByBranch, setFilterByBranch] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
   const [terminalSize, setTerminalSize] = useState({
     width: process.stdout.columns || 80,
     height: process.stdout.rows || 24,
@@ -127,7 +98,14 @@ function SessionPicker({
 
   // Handle keyboard input
   useInput((input, key) => {
-    if (key.escape) {
+    // Ignore input if already exiting
+    if (isExiting) {
+      return;
+    }
+
+    // Escape or Ctrl+C to cancel
+    if (key.escape || (key.ctrl && input === 'c')) {
+      setIsExiting(true);
       onCancel();
       exit();
       return;
@@ -136,6 +114,7 @@ function SessionPicker({
     if (key.return) {
       const session = filteredSessions[selectedIndex];
       if (session) {
+        setIsExiting(true);
         onSelect(session.sessionId);
         exit();
       }
@@ -176,50 +155,57 @@ function SessionPicker({
   const contentWidth = terminalSize.width - 4;
   const promptMaxWidth = contentWidth - 4; // Account for "› " prefix
 
+  // Return empty while exiting to prevent visual glitches
+  if (isExiting) {
+    return <Box />;
+  }
+
   return (
     <Box
       flexDirection="column"
       width={terminalSize.width}
-      height={terminalSize.height}
+      height={terminalSize.height - 1}
     >
       {/* Main container with single border */}
       <Box
         flexDirection="column"
         borderStyle="round"
-        borderColor="gray"
+        borderColor={theme.border.default}
         width={terminalSize.width}
         minHeight={terminalSize.height - 1}
       >
         {/* Header row */}
         <Box justifyContent="space-between" paddingX={1}>
-          <Text bold color="white">
+          <Text bold color={theme.text.primary}>
             Resume Session
           </Text>
-          <Text dimColor>
+          <Text color={theme.text.secondary}>
             {filteredSessions.length}{' '}
             {filteredSessions.length === 1 ? 'session' : 'sessions'}
             {filterByBranch && currentBranch && (
-              <Text color="cyan"> ({currentBranch})</Text>
+              <Text color={theme.text.accent}> ({currentBranch})</Text>
             )}
           </Text>
         </Box>
 
         {/* Separator line */}
         <Box>
-          <Text dimColor>{'─'.repeat(terminalSize.width - 2)}</Text>
+          <Text color={theme.border.default}>
+            {'─'.repeat(terminalSize.width - 2)}
+          </Text>
         </Box>
 
         {/* Session list */}
         <Box flexDirection="column" flexGrow={1} paddingX={1}>
           {showScrollUp && (
             <Box justifyContent="center" width="100%">
-              <Text dimColor>↑ more</Text>
+              <Text color={theme.text.secondary}>↑ more</Text>
             </Box>
           )}
 
           {filteredSessions.length === 0 ? (
             <Box paddingY={1} justifyContent="center">
-              <Text dimColor>
+              <Text color={theme.text.secondary}>
                 {filterByBranch
                   ? `No sessions found for branch "${currentBranch}"`
                   : 'No sessions found'}
@@ -229,6 +215,7 @@ function SessionPicker({
             visibleSessions.map((session, visibleIndex) => {
               const actualIndex = scrollOffset + visibleIndex;
               const isSelected = actualIndex === selectedIndex;
+              const isLast = visibleIndex === visibleSessions.length - 1;
               const timeAgo = formatRelativeTime(session.mtime);
               const messageText =
                 session.messageCount === 1
@@ -236,15 +223,21 @@ function SessionPicker({
                   : `${session.messageCount} messages`;
 
               return (
-                <Box key={session.sessionId} flexDirection="column">
+                <Box
+                  key={session.sessionId}
+                  flexDirection="column"
+                  marginBottom={isLast ? 0 : 1}
+                >
                   {/* First line: selector + prompt text */}
                   <Box>
-                    <Text color={isSelected ? 'green' : undefined}>
+                    <Text color={isSelected ? theme.text.accent : undefined}>
                       {isSelected ? '› ' : '  '}
                     </Text>
                     <Text
                       bold={isSelected}
-                      color={isSelected ? 'white' : undefined}
+                      color={
+                        isSelected ? theme.text.accent : theme.text.primary
+                      }
                       wrap="truncate"
                     >
                       {truncateText(
@@ -257,14 +250,9 @@ function SessionPicker({
                   {/* Second line: metadata (aligned with prompt text) */}
                   <Box>
                     <Text>{'  '}</Text>
-                    <Text dimColor>
+                    <Text color={theme.text.secondary}>
                       {timeAgo} · {messageText}
-                      {session.gitBranch && (
-                        <>
-                          {' · '}
-                          <Text color="magenta">{session.gitBranch}</Text>
-                        </>
-                      )}
+                      {session.gitBranch && ` · ${session.gitBranch}`}
                     </Text>
                   </Box>
                 </Box>
@@ -274,31 +262,33 @@ function SessionPicker({
 
           {showScrollDown && (
             <Box justifyContent="center" width="100%">
-              <Text dimColor>↓ more</Text>
+              <Text color={theme.text.secondary}>↓ more</Text>
             </Box>
           )}
         </Box>
 
         {/* Separator line */}
         <Box>
-          <Text dimColor>{'─'.repeat(terminalSize.width - 2)}</Text>
+          <Text color={theme.border.default}>
+            {'─'.repeat(terminalSize.width - 2)}
+          </Text>
         </Box>
 
         {/* Footer with keyboard shortcuts */}
-        <Box justifyContent="center" paddingX={1}>
-          <Text dimColor>
+        <Box paddingX={1}>
+          <Text color={theme.text.secondary}>
             {currentBranch && (
               <>
                 <Text
                   bold={filterByBranch}
-                  color={filterByBranch ? 'cyan' : undefined}
+                  color={filterByBranch ? theme.text.accent : undefined}
                 >
                   B
                 </Text>
                 {' to toggle branch · '}
               </>
             )}
-            {'↑↓ to navigate · Enter to select · Esc to cancel'}
+            {'↑↓ to navigate · Esc to cancel'}
           </Text>
         </Box>
       </Box>
@@ -334,7 +324,7 @@ export async function showResumeSessionPicker(
   // Clear the screen before showing the picker for a clean fullscreen experience
   clearScreen();
 
-  // Enable raw mode for keyboard input
+  // Enable raw mode for keyboard input if not already enabled
   const wasRaw = process.stdin.isRaw;
   if (process.stdin.isTTY && !wasRaw) {
     process.stdin.setRawMode(true);
@@ -361,12 +351,16 @@ export async function showResumeSessionPicker(
 
     waitUntilExit().then(() => {
       unmount();
-      // Clear screen after picker closes
+
+      // Clear the screen after the picker closes for a clean fullscreen experience
       clearScreen();
-      // Restore raw mode state
-      if (process.stdin.isTTY && !wasRaw) {
+
+      // Restore raw mode state only if we changed it and user cancelled
+      // (if user selected a session, main app will handle raw mode)
+      if (process.stdin.isTTY && !wasRaw && !selectedId) {
         process.stdin.setRawMode(false);
       }
+
       resolve(selectedId);
     });
   });
