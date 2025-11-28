@@ -38,6 +38,7 @@ The headless mode provides a headless interface to Qwen Code that:
 - Supports file redirection and piping
 - Enables automation and scripting workflows
 - Provides consistent exit codes for error handling
+- Can resume previous sessions scoped to the current project for multi-step automation
 
 ## Basic Usage
 
@@ -64,6 +65,23 @@ Read from files and process with Qwen Code:
 ```bash
 cat README.md | qwen --prompt "Summarize this documentation"
 ```
+
+### Resume Previous Sessions (Headless)
+
+Reuse conversation context from the current project in headless scripts:
+
+```bash
+# Continue the most recent session for this project and run a new prompt
+qwen --continue -p "Run the tests again and summarize failures"
+
+# Resume a specific session ID directly (no UI)
+qwen --resume 123e4567-e89b-12d3-a456-426614174000 -p "Apply the follow-up refactor"
+```
+
+Notes:
+
+- Session data is project-scoped JSONL under `~/.qwen/projects/<sanitized-cwd>/chats`.
+- Restores conversation history, tool outputs, and chat-compression checkpoints before sending the new prompt.
 
 ## Output Formats
 
@@ -196,17 +214,19 @@ qwen -p "Write code" --output-format stream-json --include-partial-messages | jq
 
 Key command-line options for headless usage:
 
-| Option                       | Description                                     | Example                                                                  |
-| ---------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------ |
-| `--prompt`, `-p`             | Run in headless mode                            | `qwen -p "query"`                                                        |
-| `--output-format`, `-o`      | Specify output format (text, json, stream-json) | `qwen -p "query" --output-format json`                                   |
-| `--input-format`             | Specify input format (text, stream-json)        | `qwen --input-format text --output-format stream-json`                   |
-| `--include-partial-messages` | Include partial messages in stream-json output  | `qwen -p "query" --output-format stream-json --include-partial-messages` |
-| `--debug`, `-d`              | Enable debug mode                               | `qwen -p "query" --debug`                                                |
-| `--all-files`, `-a`          | Include all files in context                    | `qwen -p "query" --all-files`                                            |
-| `--include-directories`      | Include additional directories                  | `qwen -p "query" --include-directories src,docs`                         |
-| `--yolo`, `-y`               | Auto-approve all actions                        | `qwen -p "query" --yolo`                                                 |
-| `--approval-mode`            | Set approval mode                               | `qwen -p "query" --approval-mode auto_edit`                              |
+| Option                       | Description                                         | Example                                                                  |
+| ---------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------ |
+| `--prompt`, `-p`             | Run in headless mode                                | `qwen -p "query"`                                                        |
+| `--output-format`, `-o`      | Specify output format (text, json, stream-json)     | `qwen -p "query" --output-format json`                                   |
+| `--input-format`             | Specify input format (text, stream-json)            | `qwen --input-format text --output-format stream-json`                   |
+| `--include-partial-messages` | Include partial messages in stream-json output      | `qwen -p "query" --output-format stream-json --include-partial-messages` |
+| `--debug`, `-d`              | Enable debug mode                                   | `qwen -p "query" --debug`                                                |
+| `--all-files`, `-a`          | Include all files in context                        | `qwen -p "query" --all-files`                                            |
+| `--include-directories`      | Include additional directories                      | `qwen -p "query" --include-directories src,docs`                         |
+| `--yolo`, `-y`               | Auto-approve all actions                            | `qwen -p "query" --yolo`                                                 |
+| `--approval-mode`            | Set approval mode                                   | `qwen -p "query" --approval-mode auto_edit`                              |
+| `--continue`                 | Resume the most recent session for this project     | `qwen --continue -p "Pick up where we left off"`                         |
+| `--resume [sessionId]`       | Resume a specific session (or choose interactively) | `qwen --resume 123e... -p "Finish the refactor"`                         |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](./cli/configuration.md).
 

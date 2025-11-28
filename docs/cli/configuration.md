@@ -548,6 +548,12 @@ Arguments passed directly when running the CLI can override other configurations
   - The prompt is processed within the interactive session, not before it.
   - Cannot be used when piping input from stdin.
   - Example: `qwen -i "explain this code"`
+- **`--continue`**:
+  - Resume the most recent session for the current project (current working directory).
+  - Works in interactive and headless modes (e.g., `qwen --continue -p "Keep going"`).
+- **`--resume [sessionId]`**:
+  - Resume a specific session for the current project. When called without an ID, an interactive picker lists only this project's sessions with prompt preview, timestamps, message count, and optional git branch.
+  - If an ID is provided and not found for this project, the CLI exits with an error.
 - **`--output-format <format>`** (**`-o <format>`**):
   - **Description:** Specifies the format of the CLI output for non-interactive mode.
   - **Values:**
