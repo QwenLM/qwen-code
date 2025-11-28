@@ -54,12 +54,17 @@ import {
   NextSpeakerCheckEvent,
   logNextSpeakerCheck,
 } from '../telemetry/index.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 // Utilities
 import {
   getDirectoryContextString,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
+import {
+  buildApiHistoryFromConversation,
+  getResumePromptTokenCount,
+} from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
@@ -117,10 +122,16 @@ export class GeminiClient {
     if (resumedSessionData) {
       // Convert resumed session to API history format
       // Each ChatRecord's message field is already a Content object
-      const resumedHistory = resumedSessionData.conversation.messages
-        .filter((record) => record.message)
-        .map((record) => record.message!);
+      const resumedHistory = buildApiHistoryFromConversation(
+        resumedSessionData.conversation,
+      );
       this.chat = await this.startChat(resumedHistory);
+      const resumePromptTokens = getResumePromptTokenCount(
+        resumedSessionData.conversation,
+      );
+      if (resumePromptTokens !== undefined) {
+        uiTelemetryService.setLastPromptTokenCount(resumePromptTokens);
+      }
     } else {
       this.chat = await this.startChat();
     }
@@ -690,7 +701,14 @@ export class GeminiClient {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       // Success: update chat with new compressed history
       if (newHistory) {
+        const chatRecordingService = this.config.getChatRecordingService();
+        chatRecordingService?.recordChatCompression({
+          info,
+          compressedHistory: newHistory,
+        });
+
         this.chat = await this.startChat(newHistory);
+        uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }
     } else if (

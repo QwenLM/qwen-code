@@ -17,7 +17,10 @@ import {
 } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
-import type { ToolCallResponseInfo } from '../core/turn.js';
+import type {
+  ChatCompressionInfo,
+  ToolCallResponseInfo,
+} from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
 
 /**
@@ -49,8 +52,14 @@ export interface ChatRecord {
   sessionId: string;
   /** ISO 8601 timestamp of when the record was created */
   timestamp: string;
-  /** Message type: user input, assistant response, or tool result */
-  type: 'user' | 'assistant' | 'tool_result';
+  /**
+   * Message type: user input, assistant response, tool result, or system event.
+   * System records are append-only events that can alter how history is reconstructed
+   * (e.g., chat compression checkpoints) while keeping the original UI history intact.
+   */
+  type: 'user' | 'assistant' | 'tool_result' | 'system';
+  /** Optional system subtype for distinguishing system behaviors */
+  subtype?: 'chat_compression';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -79,6 +88,27 @@ export interface ChatRecord {
    * Contains enriched info (displayName, status, result, etc.) not in API format.
    */
   toolCallResult?: Partial<ToolCallResponseInfo>;
+
+  /**
+   * Payload for system records. For chat compression, this stores all data needed
+   * to reconstruct the compressed history without mutating the original UI list.
+   */
+  systemPayload?: ChatCompressionRecordPayload;
+}
+
+/**
+ * Stored payload for chat compression checkpoints. This allows us to rebuild the
+ * effective chat history on resume while keeping the original UI-visible history.
+ */
+export interface ChatCompressionRecordPayload {
+  /** Compression metrics/status returned by the compression service */
+  info: ChatCompressionInfo;
+  /**
+   * Snapshot of the new history contents that the model should see after
+   * compression (summary turns + retained tail). Stored as Content[] for
+   * resume reconstruction.
+   */
+  compressedHistory: Content[];
 }
 
 /**
@@ -209,7 +239,7 @@ export class ChatRecordingService {
    * Creates base fields for a ChatRecord.
    */
   private createBaseRecord(
-    type: 'user' | 'assistant' | 'tool_result',
+    type: ChatRecord['type'],
   ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
     return {
       uuid: randomUUID(),
@@ -316,6 +346,27 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving tool result:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Records a chat compression checkpoint as a system record. This keeps the UI
+   * history immutable while allowing resume/continue flows to reconstruct the
+   * compressed model-facing history from the stored snapshot.
+   */
+  recordChatCompression(payload: ChatCompressionRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: payload,
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      console.error('Error saving chat compression record:', error);
       throw error;
     }
   }

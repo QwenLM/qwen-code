@@ -112,6 +112,9 @@ function convertToHistoryItems(
   }> = [];
 
   for (const record of conversation.messages) {
+    if (record.type === 'system') {
+      continue;
+    }
     switch (record.type) {
       case 'user': {
         // Flush any pending tool group before user message

@@ -16,8 +16,12 @@ import {
   vi,
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
-import { SessionService } from './sessionService.js';
-import type { ChatRecord } from './chatRecordingService.js';
+import {
+  SessionService,
+  buildApiHistoryFromConversation,
+} from './sessionService.js';
+import { CompressionStatus } from '../core/turn.js';
+import type { ChatRecord, ConversationRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
 vi.mock('node:path');
@@ -660,6 +664,94 @@ describe('SessionService', () => {
       const exists = await sessionService.sessionExists(sessionIdA);
 
       expect(exists).toBe(false);
+    });
+  });
+
+  describe('buildApiHistoryFromConversation', () => {
+    it('should return linear messages when no compression checkpoint exists', () => {
+      const assistantA1: ChatRecord = {
+        ...recordB2,
+        sessionId: sessionIdA,
+        parentUuid: recordA1.uuid,
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [recordA1, assistantA1],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('should use compressedHistory snapshot and append subsequent records after compression', () => {
+      const compressionRecord: ChatRecord = {
+        uuid: 'c1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'Got it. Thanks for the additional context!' }],
+            },
+            recordB2.message!,
+          ],
+        },
+      };
+
+      const postCompressionRecord: ChatRecord = {
+        uuid: 'c2',
+        parentUuid: 'c1',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T04:00:00Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'new question' }] },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+      };
+
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T04:00:00Z',
+        messages: [
+          recordA1,
+          recordB2,
+          compressionRecord,
+          postCompressionRecord,
+        ],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([
+        { role: 'user', parts: [{ text: 'summary' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+        },
+        recordB2.message,
+        postCompressionRecord.message,
+      ]);
     });
   });
 });

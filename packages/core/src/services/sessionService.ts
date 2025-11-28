@@ -140,7 +140,7 @@ export class SessionService {
       const records = await jsonl.read<ChatRecord>(filePath);
       const uniqueUuids = new Set<string>();
       for (const record of records) {
-        // Only count user and assistant messages, not tool results
+        // Only count user and assistant messages, not tool or system results
         if (record.type === 'user' || record.type === 'assistant') {
           uniqueUuids.add(record.uuid);
         }
@@ -498,4 +498,83 @@ export class SessionService {
       return false;
     }
   }
+}
+
+/**
+ * Builds the model-facing chat history (Content[]) from a reconstructed
+ * conversation. This keeps UI history intact while applying chat compression
+ * checkpoints for the API history used on resume.
+ *
+ * Strategy:
+ * - Find the latest system/chat_compression record (if any).
+ * - Use its compressedHistory snapshot as the base history.
+ * - Append all messages after that checkpoint (skipping system records).
+ * - If no checkpoint exists, return the linear message list (message field only).
+ */
+export function buildApiHistoryFromConversation(
+  conversation: ConversationRecord,
+): Content[] {
+  const { messages } = conversation;
+
+  let lastCompressionIndex = -1;
+  let compressedHistory: Content[] | undefined;
+
+  messages.forEach((record, index) => {
+    if (record.type === 'system' && record.subtype === 'chat_compression') {
+      lastCompressionIndex = index;
+      compressedHistory = record.systemPayload?.compressedHistory;
+    }
+  });
+
+  if (compressedHistory && lastCompressionIndex >= 0) {
+    const baseHistory: Content[] = structuredClone(compressedHistory);
+
+    // Append everything after the compression record (newer turns)
+    for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
+      const record = messages[i];
+      if (record.type === 'system') continue;
+      if (record.message) {
+        baseHistory.push(structuredClone(record.message as Content));
+      }
+    }
+
+    return baseHistory;
+  }
+
+  // Fallback: return linear messages as Content[]
+  return messages
+    .map((record) => record.message)
+    .filter((message): message is Content => message !== undefined)
+    .map((message) => structuredClone(message));
+}
+
+/**
+ * Returns the best available prompt token count for resuming telemetry:
+ * - If a chat compression checkpoint exists, use its new token count.
+ * - Otherwise, use the last assistant usageMetadata input (fallback to total).
+ */
+export function getResumePromptTokenCount(
+  conversation: ConversationRecord,
+): number | undefined {
+  let fallback: number | undefined;
+
+  for (let i = conversation.messages.length - 1; i >= 0; i--) {
+    const record = conversation.messages[i];
+    if (
+      record.type === 'system' &&
+      record.subtype === 'chat_compression' &&
+      record.systemPayload?.info
+    ) {
+      return record.systemPayload.info.newTokenCount;
+    }
+
+    if (fallback === undefined && record.type === 'assistant') {
+      const usage = record.usageMetadata;
+      if (usage) {
+        fallback = usage.total ?? usage.input;
+      }
+    }
+  }
+
+  return fallback;
 }
