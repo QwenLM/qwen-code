@@ -110,6 +110,9 @@ describe('useSlashCommandProcessor', () => {
   const mockSetQuittingMessages = vi.fn();
 
   const mockConfig = makeFakeConfig({});
+  mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+    recordSlashCommand: vi.fn(),
+  });
   const mockSettings = {} as LoadedSettings;
 
   beforeEach(() => {

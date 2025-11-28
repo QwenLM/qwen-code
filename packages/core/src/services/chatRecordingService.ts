@@ -22,6 +22,7 @@ import type {
   ToolCallResponseInfo,
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
+import type { TaskResultDisplay } from '../tools/tools.js';
 
 /**
  * A single record stored in the JSONL file.
@@ -312,7 +313,24 @@ export class ChatRecordingService {
       };
 
       if (toolCallResult) {
-        record.toolCallResult = toolCallResult;
+        // special case for task executions - we don't want to record the tool calls
+        if (
+          typeof toolCallResult.resultDisplay === 'object' &&
+          toolCallResult.resultDisplay !== null &&
+          'type' in toolCallResult.resultDisplay &&
+          toolCallResult.resultDisplay.type === 'task_execution'
+        ) {
+          const taskResult = toolCallResult.resultDisplay as TaskResultDisplay;
+          record.toolCallResult = {
+            ...toolCallResult,
+            resultDisplay: {
+              ...taskResult,
+              toolCalls: [],
+            },
+          };
+        } else {
+          record.toolCallResult = toolCallResult;
+        }
       }
 
       this.appendRecord(record);
