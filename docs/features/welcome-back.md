@@ -75,9 +75,9 @@ Add to your `.qwen/settings.json`:
 
 ### Project Summary Generation
 
-The Welcome Back feature works seamlessly with the `/chat summary` command:
+The Welcome Back feature works seamlessly with the `/summary` command:
 
-1. **Generate Summary:** Use `/chat summary` to create a project summary
+1. **Generate Summary:** Use `/summary` to create a project summary
 2. **Automatic Detection:** Next time you start Qwen Code in this project, Welcome Back will detect the summary
 3. **Resume Work:** Choose to continue and the summary will be loaded as context
 
