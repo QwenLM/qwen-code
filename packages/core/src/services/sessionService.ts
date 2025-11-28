@@ -10,7 +10,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { ChatRecord, ConversationRecord } from './chatRecordingService.js';
+import type { ChatRecord } from './chatRecordingService.js';
 
 /**
  * Session item for list display.
@@ -65,6 +65,19 @@ export interface ListSessionsResult {
   nextCursor?: number;
   /** Whether there are more items after this page */
   hasMore: boolean;
+}
+
+/**
+ * Complete conversation reconstructed from ChatRecords.
+ * Used for resuming sessions and API compatibility.
+ */
+export interface ConversationRecord {
+  sessionId: string;
+  projectHash: string;
+  startTime: string;
+  lastUpdated: string;
+  /** Messages in chronological order (reconstructed from tree) */
+  messages: ChatRecord[];
 }
 
 /**

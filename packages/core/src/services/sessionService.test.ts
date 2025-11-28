@@ -19,9 +19,10 @@ import { getProjectHash } from '../utils/paths.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
-import type { ChatRecord, ConversationRecord } from './chatRecordingService.js';
+import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
 vi.mock('node:path');

@@ -70,9 +70,12 @@ function SessionPicker({
     setSelectedIndex(0);
   }, [filterByBranch]);
 
-  // Calculate visible items - reserve space for header (1), footer (1), separators (2), borders (2)
+  // Calculate visible items
+  // Reserved space: header (1), footer (1), separators (2), borders (2)
   const reservedLines = 6;
-  const itemHeight = 2;
+  // Each item takes 2 lines (prompt + metadata) + 1 line margin between items
+  // On average, this is ~3 lines per item, but the last item has no margin
+  const itemHeight = 3;
   const maxVisibleItems = Math.max(
     1,
     Math.floor((terminalSize.height - reservedLines) / itemHeight),
@@ -165,6 +168,7 @@ function SessionPicker({
       flexDirection="column"
       width={terminalSize.width}
       height={terminalSize.height - 1}
+      overflow="hidden"
     >
       {/* Main container with single border */}
       <Box
@@ -172,7 +176,8 @@ function SessionPicker({
         borderStyle="round"
         borderColor={theme.border.default}
         width={terminalSize.width}
-        minHeight={terminalSize.height - 1}
+        height={terminalSize.height - 1}
+        overflow="hidden"
       >
         {/* Header row */}
         <Box justifyContent="space-between" paddingX={1}>
@@ -195,14 +200,8 @@ function SessionPicker({
           </Text>
         </Box>
 
-        {/* Session list */}
-        <Box flexDirection="column" flexGrow={1} paddingX={1}>
-          {showScrollUp && (
-            <Box justifyContent="center" width="100%">
-              <Text color={theme.text.secondary}>↑ more</Text>
-            </Box>
-          )}
-
+        {/* Session list with auto-scrolling */}
+        <Box flexDirection="column" flexGrow={1} paddingX={1} overflow="hidden">
           {filteredSessions.length === 0 ? (
             <Box paddingY={1} justifyContent="center">
               <Text color={theme.text.secondary}>
@@ -215,6 +214,7 @@ function SessionPicker({
             visibleSessions.map((session, visibleIndex) => {
               const actualIndex = scrollOffset + visibleIndex;
               const isSelected = actualIndex === selectedIndex;
+              const isFirst = visibleIndex === 0;
               const isLast = visibleIndex === visibleSessions.length - 1;
               const timeAgo = formatRelativeTime(session.mtime);
               const messageText =
@@ -222,23 +222,43 @@ function SessionPicker({
                   ? '1 message'
                   : `${session.messageCount} messages`;
 
+              // Show scroll indicator on first/last visible items
+              const showUpIndicator = isFirst && showScrollUp;
+              const showDownIndicator = isLast && showScrollDown;
+
+              // Determine the prefix: selector takes priority over scroll indicator
+              const prefix = isSelected
+                ? '› '
+                : showUpIndicator
+                  ? '↑ '
+                  : showDownIndicator
+                    ? '↓ '
+                    : '  ';
+
               return (
                 <Box
                   key={session.sessionId}
                   flexDirection="column"
                   marginBottom={isLast ? 0 : 1}
                 >
-                  {/* First line: selector + prompt text */}
+                  {/* First line: prefix (selector or scroll indicator) + prompt text */}
                   <Box>
-                    <Text color={isSelected ? theme.text.accent : undefined}>
-                      {isSelected ? '› ' : '  '}
+                    <Text
+                      color={
+                        isSelected
+                          ? theme.text.accent
+                          : showUpIndicator || showDownIndicator
+                            ? theme.text.secondary
+                            : undefined
+                      }
+                    >
+                      {prefix}
                     </Text>
                     <Text
                       bold={isSelected}
                       color={
                         isSelected ? theme.text.accent : theme.text.primary
                       }
-                      wrap="truncate"
                     >
                       {truncateText(
                         session.prompt || '(empty prompt)',
@@ -258,12 +278,6 @@ function SessionPicker({
                 </Box>
               );
             })
-          )}
-
-          {showScrollDown && (
-            <Box justifyContent="center" width="100%">
-              <Text color={theme.text.secondary}>↓ more</Text>
-            </Box>
           )}
         </Box>
 

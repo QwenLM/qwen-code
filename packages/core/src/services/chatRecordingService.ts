@@ -101,19 +101,6 @@ export interface ChatCompressionRecordPayload {
 }
 
 /**
- * Complete conversation reconstructed from ChatRecords.
- * Used for resuming sessions and API compatibility.
- */
-export interface ConversationRecord {
-  sessionId: string;
-  projectHash: string;
-  startTime: string;
-  lastUpdated: string;
-  /** Messages in chronological order (reconstructed from tree) */
-  messages: ChatRecord[];
-}
-
-/**
  * Service for recording the current chat session to disk.
  *
  * This service provides comprehensive conversation recording that captures:
