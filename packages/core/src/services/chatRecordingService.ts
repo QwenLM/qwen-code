@@ -24,17 +24,6 @@ import type {
 import type { Status } from '../core/coreToolScheduler.js';
 
 /**
- * Token usage summary for a message or conversation.
- */
-export interface UsageMetadata {
-  input: number; // promptTokenCount
-  output: number; // candidatesTokenCount
-  cached: number; // cachedContentTokenCount
-  thoughts?: number; // thoughtsTokenCount
-  tool?: number; // toolUsePromptTokenCount
-  total: number; // totalTokenCount
-}
-/**
  * A single record stored in the JSONL file.
  * Forms a tree structure via uuid/parentUuid for future checkpointing support.
  *
@@ -80,7 +69,7 @@ export interface ChatRecord {
   // Metadata fields (not part of API Content)
 
   /** Token usage statistics */
-  usageMetadata?: UsageMetadata;
+  usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
   /**
@@ -122,22 +111,6 @@ export interface ConversationRecord {
   lastUpdated: string;
   /** Messages in chronological order (reconstructed from tree) */
   messages: ChatRecord[];
-}
-
-/**
- * Converts GenerateContentResponseUsageMetadata to TokensSummary.
- */
-export function toTokensSummary(
-  metadata: GenerateContentResponseUsageMetadata,
-): UsageMetadata {
-  return {
-    input: metadata.promptTokenCount ?? 0,
-    output: metadata.candidatesTokenCount ?? 0,
-    cached: metadata.cachedContentTokenCount ?? 0,
-    thoughts: metadata.thoughtsTokenCount ?? 0,
-    tool: metadata.toolUsePromptTokenCount ?? 0,
-    total: metadata.totalTokenCount ?? 0,
-  };
 }
 
 /**
@@ -299,7 +272,7 @@ export class ChatRecordingService {
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
-    tokens?: UsageMetadata;
+    tokens?: GenerateContentResponseUsageMetadata;
   }): void {
     try {
       const record: ChatRecord = {

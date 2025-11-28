@@ -571,7 +571,7 @@ export function getResumePromptTokenCount(
     if (fallback === undefined && record.type === 'assistant') {
       const usage = record.usageMetadata;
       if (usage) {
-        fallback = usage.total ?? usage.input;
+        fallback = usage.totalTokenCount ?? usage.promptTokenCount;
       }
     }
   }

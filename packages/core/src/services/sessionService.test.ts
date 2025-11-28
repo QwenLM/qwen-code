@@ -459,7 +459,12 @@ describe('SessionService', () => {
           sessionId: 'test',
           timestamp: '2024-01-01T00:01:01Z',
           type: 'assistant',
-          usageMetadata: { input: 10, output: 20, cached: 0, total: 30 },
+          usageMetadata: {
+            promptTokenCount: 10,
+            candidatesTokenCount: 20,
+            cachedContentTokenCount: 0,
+            totalTokenCount: 30,
+          },
           cwd: '/test/project/root',
           version: '1.0.0',
         },
@@ -489,7 +494,7 @@ describe('SessionService', () => {
       const assistantMsg = loaded?.conversation.messages[1];
       expect(assistantMsg?.uuid).toBe('a1');
       expect(assistantMsg?.message?.parts).toHaveLength(2);
-      expect(assistantMsg?.usageMetadata?.total).toBe(30);
+      expect(assistantMsg?.usageMetadata?.totalTokenCount).toBe(30);
       expect(assistantMsg?.model).toBe('gemini-pro');
     });
   });

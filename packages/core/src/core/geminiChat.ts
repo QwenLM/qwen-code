@@ -14,6 +14,7 @@ import type {
   SendMessageParameters,
   Part,
   Tool,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { ApiError, createUserContent } from '@google/genai';
 import { retryWithBackoff } from '../utils/retry.js';
@@ -28,11 +29,7 @@ import {
   logContentRetry,
   logContentRetryFailure,
 } from '../telemetry/loggers.js';
-import {
-  type ChatRecordingService,
-  toTokensSummary,
-  type UsageMetadata,
-} from '../services/chatRecordingService.js';
+import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -502,7 +499,7 @@ export class GeminiChat {
     const allModelParts: Part[] = [];
     // Non-thought parts for history (what we send back to the API)
     const historyParts: Part[] = [];
-    let collectedTokens: UsageMetadata | undefined;
+    let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 
     let hasToolCall = false;
     let hasFinishReason = false;
@@ -526,7 +523,7 @@ export class GeminiChat {
 
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
-        collectedTokens = toTokensSummary(chunk.usageMetadata);
+        usageMetadata = chunk.usageMetadata;
         if (chunk.usageMetadata.promptTokenCount !== undefined) {
           uiTelemetryService.setLastPromptTokenCount(
             chunk.usageMetadata.promptTokenCount,
@@ -560,7 +557,7 @@ export class GeminiChat {
       .trim();
 
     // Record assistant turn with raw Content and metadata
-    if (responseText || hasToolCall || collectedTokens) {
+    if (responseText || hasToolCall || usageMetadata) {
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
@@ -571,7 +568,7 @@ export class GeminiChat {
                 .map((part) => ({ functionCall: part.functionCall }))
             : []),
         ],
-        tokens: collectedTokens,
+        tokens: usageMetadata,
       });
     }
 

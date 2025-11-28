@@ -13,7 +13,6 @@ import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
   type ChatRecord,
-  toTokensSummary,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
@@ -86,41 +85,6 @@ describe('ChatRecordingService', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  describe('toTokensSummary', () => {
-    it('should convert GenerateContentResponseUsageMetadata to TokensSummary', () => {
-      const result = toTokensSummary({
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        cachedContentTokenCount: 5,
-        thoughtsTokenCount: 3,
-        toolUsePromptTokenCount: 2,
-        totalTokenCount: 40,
-      });
-
-      expect(result).toEqual({
-        input: 10,
-        output: 20,
-        cached: 5,
-        thoughts: 3,
-        tool: 2,
-        total: 40,
-      });
-    });
-
-    it('should handle missing fields with defaults', () => {
-      const result = toTokensSummary({});
-
-      expect(result).toEqual({
-        input: 0,
-        output: 0,
-        cached: 0,
-        thoughts: 0,
-        tool: 0,
-        total: 0,
-      });
-    });
   });
 
   describe('recordUserMessage', () => {
@@ -197,10 +161,10 @@ describe('ChatRecordingService', () => {
         model: 'gemini-pro',
         message: parts,
         tokens: {
-          input: 100,
-          output: 50,
-          cached: 10,
-          total: 160,
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          cachedContentTokenCount: 10,
+          totalTokenCount: 160,
         },
       });
 
@@ -210,20 +174,25 @@ describe('ChatRecordingService', () => {
       // The service wraps parts in a Content object using createModelContent
       expect(record.message).toEqual({ role: 'model', parts });
       expect(record.model).toBe('gemini-pro');
-      expect(record.usageMetadata?.total).toBe(160);
+      expect(record.usageMetadata?.totalTokenCount).toBe(160);
     });
 
     it('should record assistant turn with only tokens', () => {
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
-        tokens: { input: 10, output: 20, cached: 0, total: 30 },
+        tokens: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 0,
+          totalTokenCount: 30,
+        },
       });
 
       const record = vi.mocked(jsonl.writeLineSync).mock
         .calls[0][1] as ChatRecord;
 
       expect(record.message).toBeUndefined();
-      expect(record.usageMetadata?.total).toBe(30);
+      expect(record.usageMetadata?.totalTokenCount).toBe(30);
     });
   });
 
