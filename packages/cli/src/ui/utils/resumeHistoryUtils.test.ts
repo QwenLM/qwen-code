@@ -214,4 +214,66 @@ describe('resumeHistoryUtils', () => {
       text: 'next user message',
     });
   });
+
+  it('replays slash command history items (e.g., /about) on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/about',
+          },
+        },
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/about',
+            outputHistoryItems: [
+              {
+                type: 'about',
+                systemInfo: {
+                  cliVersion: '1.2.3',
+                  osPlatform: 'darwin',
+                  osArch: 'arm64',
+                  osRelease: 'test',
+                  nodeVersion: '20.x',
+                  npmVersion: '10.x',
+                  sandboxEnv: 'none',
+                  modelVersion: 'qwen',
+                  selectedAuthType: 'none',
+                  ideClient: 'none',
+                  sessionId: 'abc',
+                  memoryUsage: '0 MB',
+                },
+              },
+            ],
+          },
+        },
+        {
+          type: 'assistant',
+          message: { parts: [{ text: 'Follow-up' } as Part] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 5);
+
+    expect(items).toEqual([
+      { id: 6, type: 'user', text: '/about' },
+      {
+        id: 7,
+        type: 'about',
+        systemInfo: expect.objectContaining({ cliVersion: '1.2.3' }),
+      },
+      { id: 8, type: 'gemini', text: 'Follow-up' },
+    ]);
+  });
 });

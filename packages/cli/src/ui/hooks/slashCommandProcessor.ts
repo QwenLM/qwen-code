@@ -39,6 +39,20 @@ import {
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
 
+type SerializableHistoryItem = Record<string, unknown>;
+
+function serializeHistoryItemForRecording(
+  item: Omit<HistoryItem, 'id'>,
+): SerializableHistoryItem {
+  const clone: SerializableHistoryItem = { ...item };
+  if ('timestamp' in clone && clone['timestamp'] instanceof Date) {
+    clone['timestamp'] = clone['timestamp'].toISOString();
+  }
+  return clone;
+}
+
+const SLASH_COMMANDS_SKIP_RECORDING = new Set(['quit', 'quit-confirm', 'exit']);
+
 interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openThemeDialog: () => void;
@@ -293,10 +307,25 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
+      const recordedItems: Array<Omit<HistoryItem, 'id'>> = [];
+      const recordItem = (item: Omit<HistoryItem, 'id'>) => {
+        recordedItems.push(item);
+      };
+      const addItemWithRecording: UseHistoryManagerReturn['addItem'] = (
+        item,
+        timestamp,
+      ) => {
+        recordItem(item);
+        return addItem(item, timestamp);
+      };
+
       setIsProcessing(true);
 
       const userMessageTimestamp = Date.now();
-      addItem({ type: MessageType.USER, text: trimmed }, userMessageTimestamp);
+      addItemWithRecording(
+        { type: MessageType.USER, text: trimmed },
+        userMessageTimestamp,
+      );
 
       let hasError = false;
       const {
@@ -315,6 +344,10 @@ export const useSlashCommandProcessor = (
           if (commandToExecute.action) {
             const fullCommandContext: CommandContext = {
               ...commandContext,
+              ui: {
+                ...commandContext.ui,
+                addItem: addItemWithRecording,
+              },
               invocation: {
                 raw: trimmed,
                 name: commandToExecute.name,
@@ -430,7 +463,7 @@ export const useSlashCommandProcessor = (
                             })
                             .catch((error) => {
                               // If summary fails, still quit but show error
-                              addItem(
+                              addItemWithRecording(
                                 {
                                   type: 'error',
                                   text: `Failed to generate summary before quit: ${
@@ -533,7 +566,7 @@ export const useSlashCommandProcessor = (
                   });
 
                   if (!confirmed) {
-                    addItem(
+                    addItemWithRecording(
                       {
                         type: MessageType.INFO,
                         text: 'Operation cancelled.',
@@ -589,7 +622,7 @@ export const useSlashCommandProcessor = (
           });
           logSlashCommand(config, event);
         }
-        addItem(
+        addItemWithRecording(
           {
             type: MessageType.ERROR,
             text: e instanceof Error ? e.message : String(e),
@@ -598,6 +631,38 @@ export const useSlashCommandProcessor = (
         );
         return { type: 'handled' };
       } finally {
+        if (config?.getChatRecordingService) {
+          const chatRecorder = config.getChatRecordingService();
+          const primaryCommand =
+            resolvedCommandPath[0] ||
+            trimmed.replace(/^[/?]/, '').split(/\s+/)[0] ||
+            trimmed;
+          const shouldRecord =
+            !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
+          try {
+            if (shouldRecord) {
+              chatRecorder?.recordSlashCommand({
+                phase: 'invocation',
+                rawCommand: trimmed,
+              });
+              const outputItems = recordedItems
+                .filter((item) => item.type !== 'user')
+                .map(serializeHistoryItemForRecording);
+              chatRecorder?.recordSlashCommand({
+                phase: 'result',
+                rawCommand: trimmed,
+                outputHistoryItems: outputItems,
+              });
+            }
+          } catch (recordError) {
+            if (config.getDebugMode()) {
+              console.error(
+                '[slashCommand] Failed to record slash command:',
+                recordError,
+              );
+            }
+          }
+        }
         if (config && resolvedCommandPath[0] && !hasError) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],

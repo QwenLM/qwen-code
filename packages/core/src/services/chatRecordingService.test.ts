@@ -286,6 +286,42 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordSlashCommand', () => {
+    it('should record slash command with payload and subtype', () => {
+      chatRecordingService.recordSlashCommand({
+        phase: 'invocation',
+        rawCommand: '/about',
+      });
+
+      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLineSync).mock
+        .calls[0][1] as ChatRecord;
+
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('slash_command');
+      expect(record.systemPayload).toMatchObject({
+        phase: 'invocation',
+        rawCommand: '/about',
+      });
+    });
+
+    it('should chain slash command after prior records', () => {
+      chatRecordingService.recordUserMessage([{ text: 'Hello' }]);
+      chatRecordingService.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/about',
+      });
+
+      const userRecord = vi.mocked(jsonl.writeLineSync).mock
+        .calls[0][1] as ChatRecord;
+      const slashRecord = vi.mocked(jsonl.writeLineSync).mock
+        .calls[1][1] as ChatRecord;
+
+      expect(userRecord.parentUuid).toBeNull();
+      expect(slashRecord.parentUuid).toBe(userRecord.uuid);
+    });
+  });
+
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock

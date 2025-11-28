@@ -48,7 +48,7 @@ export interface ChatRecord {
    */
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   /** Optional system subtype for distinguishing system behaviors */
-  subtype?: 'chat_compression';
+  subtype?: 'chat_compression' | 'slash_command';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -82,7 +82,7 @@ export interface ChatRecord {
    * Payload for system records. For chat compression, this stores all data needed
    * to reconstruct the compressed history without mutating the original UI list.
    */
-  systemPayload?: ChatCompressionRecordPayload;
+  systemPayload?: ChatCompressionRecordPayload | SlashCommandRecordPayload;
 }
 
 /**
@@ -98,6 +98,18 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+}
+
+export interface SlashCommandRecordPayload {
+  /** Whether this record represents the invocation or the resulting output. */
+  phase: 'invocation' | 'result';
+  /** Raw user-entered slash command (e.g., "/about"). */
+  rawCommand: string;
+  /**
+   * History items the UI displayed for this command, in the same shape used by
+   * the CLI (without IDs). Stored as plain objects for replay on resume.
+   */
+  outputHistoryItems?: Array<Record<string, unknown>>;
 }
 
 /**
@@ -306,6 +318,27 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving tool result:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Records a slash command invocation as a system record. This keeps the model
+   * history clean while allowing resume to replay UI output for commands like
+   * /about.
+   */
+  recordSlashCommand(payload: SlashCommandRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: payload,
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      console.error('Error saving slash command record:', error);
       throw error;
     }
   }

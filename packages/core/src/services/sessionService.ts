@@ -10,7 +10,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
-import type { ChatRecord } from './chatRecordingService.js';
+import type {
+  ChatCompressionRecordPayload,
+  ChatRecord,
+} from './chatRecordingService.js';
 
 /**
  * Session item for list display.
@@ -534,8 +537,13 @@ export function buildApiHistoryFromConversation(
 
   messages.forEach((record, index) => {
     if (record.type === 'system' && record.subtype === 'chat_compression') {
-      lastCompressionIndex = index;
-      compressedHistory = record.systemPayload?.compressedHistory;
+      const payload = record.systemPayload as
+        | ChatCompressionRecordPayload
+        | undefined;
+      if (payload?.compressedHistory) {
+        lastCompressionIndex = index;
+        compressedHistory = payload.compressedHistory;
+      }
     }
   });
 
@@ -573,12 +581,13 @@ export function getResumePromptTokenCount(
 
   for (let i = conversation.messages.length - 1; i >= 0; i--) {
     const record = conversation.messages[i];
-    if (
-      record.type === 'system' &&
-      record.subtype === 'chat_compression' &&
-      record.systemPayload?.info
-    ) {
-      return record.systemPayload.info.newTokenCount;
+    if (record.type === 'system' && record.subtype === 'chat_compression') {
+      const payload = record.systemPayload as
+        | ChatCompressionRecordPayload
+        | undefined;
+      if (payload?.info) {
+        return payload.info.newTokenCount;
+      }
     }
 
     if (fallback === undefined && record.type === 'assistant') {

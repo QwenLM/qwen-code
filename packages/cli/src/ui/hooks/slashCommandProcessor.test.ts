@@ -305,11 +305,15 @@ describe('useSlashCommandProcessor', () => {
 
       expect(childAction).toHaveBeenCalledWith(
         expect.objectContaining({
+          invocation: expect.objectContaining({
+            name: 'child',
+            args: 'with args',
+          }),
           services: expect.objectContaining({
             config: mockConfig,
           }),
           ui: expect.objectContaining({
-            addItem: mockAddItem,
+            addItem: expect.any(Function),
           }),
         }),
         'with args',

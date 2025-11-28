@@ -11,6 +11,7 @@ import type {
   Config,
   AnyDeclarativeTool,
   ToolResultDisplay,
+  SlashCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { ToolCallStatus } from '../types.js';
@@ -82,6 +83,30 @@ function formatToolDescription(
 }
 
 /**
+ * Restores a HistoryItemWithoutId from the serialized shape stored in
+ * SlashCommandRecordPayload.outputHistoryItems.
+ */
+function restoreHistoryItem(raw: unknown): HistoryItemWithoutId | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return;
+  }
+
+  const clone = { ...(raw as Record<string, unknown>) };
+  if ('timestamp' in clone) {
+    const ts = clone['timestamp'];
+    if (typeof ts === 'string' || typeof ts === 'number') {
+      clone['timestamp'] = new Date(ts);
+    }
+  }
+
+  if (typeof clone['type'] !== 'string') {
+    return;
+  }
+
+  return clone as unknown as HistoryItemWithoutId;
+}
+
+/**
  * Converts ChatRecord messages to UI history items for display.
  *
  * This function transforms the raw ChatRecords into a format suitable
@@ -113,6 +138,32 @@ function convertToHistoryItems(
 
   for (const record of conversation.messages) {
     if (record.type === 'system') {
+      if (record.subtype === 'slash_command') {
+        // Flush any pending tool group to avoid mixing contexts.
+        if (currentToolGroup.length > 0) {
+          items.push({
+            type: 'tool_group',
+            tools: [...currentToolGroup],
+          });
+          currentToolGroup = [];
+        }
+        const payload = record.systemPayload as
+          | SlashCommandRecordPayload
+          | undefined;
+        if (!payload) continue;
+        if (payload.phase === 'invocation' && payload.rawCommand) {
+          items.push({ type: 'user', text: payload.rawCommand });
+        }
+        if (payload.phase === 'result') {
+          const outputs = payload.outputHistoryItems ?? [];
+          for (const raw of outputs) {
+            const restored = restoreHistoryItem(raw);
+            if (restored) {
+              items.push(restored);
+            }
+          }
+        }
+      }
       continue;
     }
     switch (record.type) {
