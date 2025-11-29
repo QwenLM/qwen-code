@@ -23,6 +23,7 @@ import type {
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
 import type { TaskResultDisplay } from '../tools/tools.js';
+import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 /**
  * A single record stored in the JSONL file.
@@ -49,7 +50,7 @@ export interface ChatRecord {
    */
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   /** Optional system subtype for distinguishing system behaviors */
-  subtype?: 'chat_compression' | 'slash_command';
+  subtype?: 'chat_compression' | 'slash_command' | 'ui_telemetry';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -83,7 +84,10 @@ export interface ChatRecord {
    * Payload for system records. For chat compression, this stores all data needed
    * to reconstruct the compressed history without mutating the original UI list.
    */
-  systemPayload?: ChatCompressionRecordPayload | SlashCommandRecordPayload;
+  systemPayload?:
+    | ChatCompressionRecordPayload
+    | SlashCommandRecordPayload
+    | UiTelemetryRecordPayload;
 }
 
 /**
@@ -111,6 +115,13 @@ export interface SlashCommandRecordPayload {
    * the CLI (without IDs). Stored as plain objects for replay on resume.
    */
   outputHistoryItems?: Array<Record<string, unknown>>;
+}
+
+/**
+ * Stored payload for UI telemetry replay.
+ */
+export interface UiTelemetryRecordPayload {
+  uiEvent: UiEvent;
 }
 
 /**
@@ -378,6 +389,25 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving chat compression record:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Records a UI telemetry event for replaying metrics on resume.
+   */
+  recordUiTelemetryEvent(uiEvent: UiEvent): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: { uiEvent },
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      console.error('Error saving ui telemetry record:', error);
       throw error;
     }
   }

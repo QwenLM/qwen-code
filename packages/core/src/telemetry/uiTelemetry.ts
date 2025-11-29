@@ -152,6 +152,18 @@ export class UiTelemetryService extends EventEmitter {
     });
   }
 
+  /**
+   * Resets metrics to the initial state (used when resuming a session).
+   */
+  reset(): void {
+    this.#metrics = createInitialMetrics();
+    this.#lastPromptTokenCount = 0;
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
+  }
+
   private getOrCreateModelMetrics(modelName: string): ModelMetrics {
     if (!this.#metrics.models[modelName]) {
       this.#metrics.models[modelName] = createInitialModelMetrics();

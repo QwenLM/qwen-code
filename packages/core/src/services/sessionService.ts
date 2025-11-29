@@ -8,12 +8,15 @@ import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 /**
  * Session item for list display.
@@ -105,6 +108,8 @@ const MAX_FILES_TO_PROCESS = 10000;
  * (32-36 hex characters, optionally with hyphens).
  */
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
+/** Maximum number of lines to scan when looking for the first prompt text. */
+const MAX_PROMPT_SCAN_LINES = 10;
 
 /**
  * Service for managing chat sessions.
@@ -148,19 +153,45 @@ export class SessionService {
   }
 
   /**
+   * Finds the first available prompt text by scanning the first N records,
+   * preferring user messages. Returns an empty string if none found.
+   */
+  private extractFirstPromptFromRecords(records: ChatRecord[]): string {
+    for (const record of records) {
+      if (record.type !== 'user') continue;
+      const prompt = this.extractPromptText(record.message);
+      if (prompt) return prompt;
+    }
+    return '';
+  }
+
+  /**
    * Counts unique message UUIDs in a session file.
    * This gives the number of logical messages in the session.
    */
   private async countSessionMessages(filePath: string): Promise<number> {
+    const uniqueUuids = new Set<string>();
     try {
-      const records = await jsonl.read<ChatRecord>(filePath);
-      const uniqueUuids = new Set<string>();
-      for (const record of records) {
-        // Only count user and assistant messages, not tool or system results
-        if (record.type === 'user' || record.type === 'assistant') {
-          uniqueUuids.add(record.uuid);
+      const fileStream = fs.createReadStream(filePath);
+      const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity,
+      });
+
+      for await (const line of rl) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const record = JSON.parse(trimmed) as ChatRecord;
+          if (record.type === 'user' || record.type === 'assistant') {
+            uniqueUuids.add(record.uuid);
+          }
+        } catch {
+          // Ignore malformed lines
+          continue;
         }
       }
+
       return uniqueUuids.size;
     } catch {
       return 0;
@@ -241,7 +272,10 @@ export class SessionService {
       lastProcessedMtime = file.mtime;
 
       const filePath = path.join(chatsDir, file.name);
-      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      const records = await jsonl.readLines<ChatRecord>(
+        filePath,
+        MAX_PROMPT_SCAN_LINES,
+      );
 
       if (records.length === 0) continue;
       const firstRecord = records[0];
@@ -254,12 +288,14 @@ export class SessionService {
       // Count messages for this session
       const messageCount = await this.countSessionMessages(filePath);
 
+      const prompt = this.extractFirstPromptFromRecords(records);
+
       items.push({
         sessionId: firstRecord.sessionId,
         cwd: firstRecord.cwd,
         startTime: firstRecord.timestamp,
         mtime: file.mtime,
-        prompt: this.extractPromptText(firstRecord.message),
+        prompt,
         gitBranch: firstRecord.gitBranch,
         filePath,
         messageCount,
@@ -557,6 +593,34 @@ export function buildApiHistoryFromConversation(
     .map((record) => record.message)
     .filter((message): message is Content => message !== undefined)
     .map((message) => structuredClone(message));
+}
+
+/**
+ * Replays stored UI telemetry events to rebuild metrics when resuming a session.
+ * Also restores the last prompt token count from the best available source.
+ */
+export function replayUiTelemetryFromConversation(
+  conversation: ConversationRecord,
+): void {
+  uiTelemetryService.reset();
+
+  for (const record of conversation.messages) {
+    if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
+      continue;
+    }
+    const payload = record.systemPayload as
+      | UiTelemetryRecordPayload
+      | undefined;
+    const uiEvent = payload?.uiEvent;
+    if (uiEvent) {
+      uiTelemetryService.addEvent(uiEvent);
+    }
+  }
+
+  const resumePromptTokens = getResumePromptTokenCount(conversation);
+  if (resumePromptTokens !== undefined) {
+    uiTelemetryService.setLastPromptTokenCount(resumePromptTokens);
+  }
 }
 
 /**

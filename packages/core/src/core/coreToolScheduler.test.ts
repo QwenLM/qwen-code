@@ -256,6 +256,7 @@ describe('CoreToolScheduler', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -333,6 +334,7 @@ describe('CoreToolScheduler', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -511,6 +513,7 @@ describe('CoreToolScheduler', () => {
         getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
+        getChatRecordingService: () => undefined,
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -597,6 +600,7 @@ describe('CoreToolScheduler', () => {
         getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
+        getChatRecordingService: () => undefined,
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -689,6 +693,7 @@ describe('CoreToolScheduler with payload', () => {
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1012,6 +1017,7 @@ describe('CoreToolScheduler edit cancellation', () => {
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1118,6 +1124,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1258,6 +1265,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalWidth: 90,
         terminalHeight: 30,
       }),
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1358,6 +1366,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1490,6 +1499,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1592,6 +1602,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1667,6 +1678,7 @@ describe('CoreToolScheduler request queueing', () => {
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const testTool = new TestApprovalTool(mockConfig);
@@ -1858,6 +1870,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1978,6 +1991,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({

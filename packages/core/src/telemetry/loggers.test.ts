@@ -178,6 +178,7 @@ describe('loggers', () => {
         getProxy: () => 'http://test.proxy.com:8080',
         getOutputFormat: () => OutputFormat.JSON,
         getToolRegistry: () => undefined,
+        getChatRecordingService: () => undefined,
       } as unknown as Config;
 
       const startSessionEvent = new StartSessionEvent(mockConfig);
@@ -282,7 +283,8 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
-    } as Config;
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
 
     const mockMetrics = {
       recordApiResponseMetrics: vi.fn(),
@@ -369,7 +371,7 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
-    } as Config;
+    } as unknown as Config;
 
     it('should log an API request with request_text', () => {
       const event = new ApiRequestEvent(
@@ -532,7 +534,8 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
-    } as Config;
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
 
     const mockMetrics = {
       recordToolCallMetrics: vi.fn(),

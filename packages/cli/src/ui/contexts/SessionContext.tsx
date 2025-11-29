@@ -233,10 +233,9 @@ export const SessionStatsProvider: React.FC<{
   }, []);
 
   const startNewSession = useCallback((sessionId: string) => {
-    setStats((stats) => ({
-      ...stats,
-      sessionId,
-      promptCount: 0,
+    setStats(() => ({
+      ...createDefaultStats(sessionId),
+      lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
     }));
   }, []);
 

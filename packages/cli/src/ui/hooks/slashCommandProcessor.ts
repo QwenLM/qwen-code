@@ -51,7 +51,14 @@ function serializeHistoryItemForRecording(
   return clone;
 }
 
-const SLASH_COMMANDS_SKIP_RECORDING = new Set(['quit', 'quit-confirm', 'exit']);
+const SLASH_COMMANDS_SKIP_RECORDING = new Set([
+  'quit',
+  'quit-confirm',
+  'exit',
+  'clear',
+  'reset',
+  'new',
+]);
 
 interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
