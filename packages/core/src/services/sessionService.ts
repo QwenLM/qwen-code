@@ -470,16 +470,6 @@ export class SessionService {
   }
 
   /**
-   * Gets the most recent session for the current project.
-   *
-   * @returns Session data for resumption, or undefined if no sessions exist
-   * @deprecated Use {@link loadLastSession} instead
-   */
-  async getLatestSession(): Promise<ResumedSessionData | undefined> {
-    return this.loadLastSession();
-  }
-
-  /**
    * Loads the most recent session for the current project.
    * Combines listSessions and loadSession for convenience.
    *

@@ -552,48 +552,6 @@ describe('SessionService', () => {
     });
   });
 
-  describe('getLatestSession', () => {
-    it('should return the most recent session', async () => {
-      const now = Date.now();
-
-      readdirSyncSpy.mockReturnValue([
-        `${sessionIdA}.jsonl`,
-        `${sessionIdB}.jsonl`,
-      ] as unknown as Array<fs.Dirent<Buffer>>);
-
-      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
-        const path = filePath.toString();
-        return {
-          mtimeMs: path.includes(sessionIdB) ? now : now - 10000,
-          isFile: () => true,
-        } as fs.Stats;
-      });
-
-      vi.mocked(jsonl.readLines).mockImplementation(
-        async (filePath: string) => {
-          if (filePath.includes(sessionIdB)) {
-            return [recordB1];
-          }
-          return [recordA1];
-        },
-      );
-
-      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
-
-      const latest = await sessionService.getLatestSession();
-
-      expect(latest?.conversation.sessionId).toBe(sessionIdB);
-    });
-
-    it('should return undefined when no sessions exist', async () => {
-      readdirSyncSpy.mockReturnValue([]);
-
-      const latest = await sessionService.getLatestSession();
-
-      expect(latest).toBeUndefined();
-    });
-  });
-
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();

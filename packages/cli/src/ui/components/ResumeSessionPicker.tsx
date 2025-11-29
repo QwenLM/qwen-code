@@ -4,18 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { render, Box, Text, useInput, useApp } from 'ink';
 import {
   SessionService,
   type SessionListItem,
+  type ListSessionsResult,
   getGitBranch,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { formatRelativeTime } from '../utils/formatters.js';
 
+const PAGE_SIZE = 20;
+
 interface SessionPickerProps {
-  sessions: SessionListItem[];
+  sessionService: SessionService;
   currentBranch?: string;
   onSelect: (sessionId: string) => void;
   onCancel: () => void;
@@ -31,13 +34,23 @@ function truncateText(text: string, maxWidth: number): string {
 }
 
 function SessionPicker({
-  sessions,
+  sessionService,
   currentBranch,
   onSelect,
   onCancel,
 }: SessionPickerProps): React.JSX.Element {
   const { exit } = useApp();
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [sessionState, setSessionState] = useState<{
+    sessions: SessionListItem[];
+    hasMore: boolean;
+    nextCursor?: number;
+  }>({
+    sessions: [],
+    hasMore: true,
+    nextCursor: undefined,
+  });
+  const isLoadingMoreRef = useRef(false);
   const [filterByBranch, setFilterByBranch] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [terminalSize, setTerminalSize] = useState({
@@ -62,13 +75,36 @@ function SessionPicker({
   // Filter sessions by current branch if filter is enabled
   const filteredSessions =
     filterByBranch && currentBranch
-      ? sessions.filter((session) => session.gitBranch === currentBranch)
-      : sessions;
+      ? sessionState.sessions.filter(
+          (session) => session.gitBranch === currentBranch,
+        )
+      : sessionState.sessions;
+
+  const hasSentinel = sessionState.hasMore;
 
   // Reset selection when filter changes
   useEffect(() => {
     setSelectedIndex(0);
   }, [filterByBranch]);
+
+  const loadMoreSessions = useCallback(async () => {
+    if (!sessionState.hasMore || isLoadingMoreRef.current) return;
+    isLoadingMoreRef.current = true;
+    try {
+      const result: ListSessionsResult = await sessionService.listSessions({
+        size: PAGE_SIZE,
+        cursor: sessionState.nextCursor,
+      });
+
+      setSessionState((prev) => ({
+        sessions: [...prev.sessions, ...result.items],
+        hasMore: result.hasMore && result.nextCursor !== undefined,
+        nextCursor: result.nextCursor,
+      }));
+    } finally {
+      isLoadingMoreRef.current = false;
+    }
+  }, [sessionService, sessionState.hasMore, sessionState.nextCursor]);
 
   // Calculate visible items
   // Reserved space: header (1), footer (1), separators (2), borders (2)
@@ -98,6 +134,30 @@ function SessionPicker({
   const showScrollUp = scrollOffset > 0;
   const showScrollDown =
     scrollOffset + maxVisibleItems < filteredSessions.length;
+
+  // Sentinel (invisible) sits after the last session item; consider it visible
+  // once the viewport reaches the final real item.
+  const sentinelVisible =
+    hasSentinel && scrollOffset + maxVisibleItems >= filteredSessions.length;
+
+  // Load more when sentinel enters view or when filtered list is empty.
+  useEffect(() => {
+    if (!sessionState.hasMore || isLoadingMoreRef.current) return;
+
+    const shouldLoadMore =
+      filteredSessions.length === 0 ||
+      sentinelVisible ||
+      isLoadingMoreRef.current;
+
+    if (shouldLoadMore) {
+      void loadMoreSessions();
+    }
+  }, [
+    filteredSessions.length,
+    loadMoreSessions,
+    sessionState.hasMore,
+    sentinelVisible,
+  ]);
 
   // Handle keyboard input
   useInput((input, key) => {
@@ -130,6 +190,9 @@ function SessionPicker({
     }
 
     if (key.downArrow || input === 'j') {
+      if (filteredSessions.length === 0) {
+        return;
+      }
       setSelectedIndex((prev) =>
         Math.min(filteredSessions.length - 1, prev + 1),
       );
@@ -180,16 +243,9 @@ function SessionPicker({
         overflow="hidden"
       >
         {/* Header row */}
-        <Box justifyContent="space-between" paddingX={1}>
+        <Box paddingX={1}>
           <Text bold color={theme.text.primary}>
             Resume Session
-          </Text>
-          <Text color={theme.text.secondary}>
-            {filteredSessions.length}{' '}
-            {filteredSessions.length === 1 ? 'session' : 'sessions'}
-            {filterByBranch && currentBranch && (
-              <Text color={theme.text.accent}> ({currentBranch})</Text>
-            )}
           </Text>
         </Box>
 
@@ -326,9 +382,8 @@ export async function showResumeSessionPicker(
   cwd: string = process.cwd(),
 ): Promise<string | undefined> {
   const sessionService = new SessionService(cwd);
-  const result = await sessionService.listSessions({ size: 100 });
-
-  if (result.items.length === 0) {
+  const hasSession = await sessionService.loadLastSession();
+  if (!hasSession) {
     console.log('No sessions found. Start a new session with `qwen`.');
     return undefined;
   }
@@ -349,7 +404,7 @@ export async function showResumeSessionPicker(
 
     const { unmount, waitUntilExit } = render(
       <SessionPicker
-        sessions={result.items}
+        sessionService={sessionService}
         currentBranch={currentBranch}
         onSelect={(id) => {
           selectedId = id;
