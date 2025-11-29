@@ -775,7 +775,7 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryEnabled()).toBe(false);
   });
 
-  it('should set telemetry to true when --telemetry flag is present', async () => {
+  it('should not set telemetry to true when --telemetry flag is present', async () => {
     process.argv = ['node', 'script.js', '--telemetry'];
     const argv = await parseArguments({} as Settings);
     const settings: Settings = {};
@@ -789,7 +789,7 @@ describe('loadCliConfig telemetry', () => {
       'test-session',
       argv,
     );
-    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('should set telemetry to false when --no-telemetry flag is present', async () => {
@@ -809,23 +809,6 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryEnabled()).toBe(false);
   });
 
-  it('should use telemetry value from settings if CLI flag is not present (settings true)', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(true);
-  });
-
   it('should use telemetry value from settings if CLI flag is not present (settings false)', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments({} as Settings);
@@ -843,7 +826,7 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryEnabled()).toBe(false);
   });
 
-  it('should prioritize --telemetry CLI flag (true) over settings (false)', async () => {
+  it('should not prioritize --telemetry CLI flag (true) over settings (false) and default to false', async () => {
     process.argv = ['node', 'script.js', '--telemetry'];
     const argv = await parseArguments({} as Settings);
     const settings: Settings = { telemetry: { enabled: false } };
@@ -857,7 +840,7 @@ describe('loadCliConfig telemetry', () => {
       'test-session',
       argv,
     );
-    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('should prioritize --no-telemetry CLI flag (false) over settings (true)', async () => {
@@ -3392,7 +3375,7 @@ describe('parseArguments with positional prompt', () => {
 });
 
 describe('Telemetry configuration via environment variables', () => {
-  it('should prioritize GEMINI_TELEMETRY_ENABLED over settings', async () => {
+  it('should not prioritize GEMINI_TELEMETRY_ENABLED over settings and default to false', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', 'true');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments({} as Settings);
@@ -3407,7 +3390,7 @@ describe('Telemetry configuration via environment variables', () => {
       'test-session',
       argv,
     );
-    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('should prioritize GEMINI_TELEMETRY_TARGET over settings', async () => {
@@ -3527,8 +3510,8 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryOutfile()).toBe('/gemini/env/telemetry.log');
   });
 
-  it('should prioritize GEMINI_TELEMETRY_USE_COLLECTOR over settings', async () => {
-    vi.stubEnv('GEMINI_TELEMETRY_USE_COLLECTOR', 'true');
+  it('should not prioritize GEMINI_TELEMETRY_USE_COLLECTOR over settings and default to false', async () => {
+    vi.stubEnv('GEMINI_TELEMETRY_USE_COLLECTOR', 'false');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments({} as Settings);
     const settings: Settings = { telemetry: { useCollector: false } };
@@ -3542,14 +3525,14 @@ describe('Telemetry configuration via environment variables', () => {
       'test-session',
       argv,
     );
-    expect(config.getTelemetryUseCollector()).toBe(true);
+    expect(config.getTelemetryUseCollector()).toBe(false);
   });
 
-  it('should use settings value when GEMINI_TELEMETRY_ENABLED is not set', async () => {
+  it('should use settings value false when GEMINI_TELEMETRY_ENABLED is not set', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', undefined);
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
+    const settings: Settings = { telemetry: { enabled: false } };
     const config = await loadCliConfig(
       settings,
       [],
@@ -3560,7 +3543,7 @@ describe('Telemetry configuration via environment variables', () => {
       'test-session',
       argv,
     );
-    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('should use settings value when GEMINI_TELEMETRY_TARGET is not set', async () => {
@@ -3581,7 +3564,7 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryTarget()).toBe('local');
   });
 
-  it("should treat GEMINI_TELEMETRY_ENABLED='1' as true", async () => {
+  it("should treat GEMINI_TELEMETRY_ENABLED='1' as false", async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', '1');
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments({} as Settings);
@@ -3595,7 +3578,7 @@ describe('Telemetry configuration via environment variables', () => {
       'test-session',
       argv,
     );
-    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it("should treat GEMINI_TELEMETRY_ENABLED='0' as false", async () => {

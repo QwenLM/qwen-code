@@ -1,19 +1,32 @@
-# Qwen Code
+# Qwen Code - Ollama Fork
 
 <div align="center">
 
 ![Qwen Code Screenshot](./docs/assets/qwen-screenshot.png)
 
-[![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
-[![License](https://img.shields.io/github/license/QwenLM/qwen-code.svg)](./LICENSE)
+[![License](https://img.shields.io/github/license/chrisburlacu1/qwen-code.svg)](./LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
-[![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
-**AI-powered command-line workflow tool for developers**
+**AI-powered command-line workflow tool for developers - Optimized for Ollama & Offline Use**
 
-[Installation](#installation) • [Quick Start](#quick-start) • [Features](#key-features) • [Documentation](./docs/) • [Contributing](./CONTRIBUTING.md)
+[Installation](#installation) • [Quick Start](#quick-start) • [Ollama Setup](#ollama-setup) • [Features](#key-features) • [Documentation](./docs/) • [Contributing](./CONTRIBUTING.md)
 
 </div>
+
+> **🔄 This is a fork optimized for [Ollama](https://ollama.ai) and offline/air-gapped environments.**  
+> For the original Qwen Code with cloud API support, see [QwenLM/qwen-code](https://github.com/QwenLM/qwen-code)
+
+## 🎯 What's Different?
+
+This fork is specifically configured for:
+
+- ✅ **Local LLM inference** via Ollama (no internet required)
+- ✅ **Offline/air-gapped environments** (no external API calls)
+- ✅ **qwen3-coder** and other models running locally
+- ✅ **Telemetry disabled by default** (privacy-focused)
+- ✅ **Web search disabled by default** (offline-first)
+
+All core features remain the same - code understanding, editing, automation, and more!
 
 <div align="center">
   
@@ -60,33 +73,70 @@ For detailed setup instructions, see [Authorization](#authorization).
 
 ### Prerequisites
 
-Ensure you have [Node.js version 20](https://nodejs.org/en/download) or higher installed.
-
-```bash
-curl -qL https://www.npmjs.com/install.sh | sh
-```
-
-### Install from npm
-
-```bash
-npm install -g @qwen-code/qwen-code@latest
-qwen --version
-```
+1. **Install Ollama**: [https://ollama.ai](https://ollama.ai)
+2. **Pull qwen3-coder model**:
+   ```bash
+   ollama pull qwen3-coder
+   ```
+3. **Install Node.js 20+**: [https://nodejs.org](https://nodejs.org)
 
 ### Install from source
 
 ```bash
-git clone https://github.com/QwenLM/qwen-code.git
+git clone https://github.com/chrisburlacu1/qwen-code.git
 cd qwen-code
 npm install
+npm run build
 npm install -g .
 ```
 
-### Install globally with Homebrew (macOS/Linux)
+## Ollama Setup
+
+### Quick Configuration
+
+Set environment variables:
 
 ```bash
-brew install qwen-code
+export OPENAI_API_KEY="ollama"  # Ollama doesn't require a real key
+export OPENAI_BASE_URL="http://localhost:11434/v1"
+export OPENAI_MODEL="qwen3-coder"  # Must match your Ollama model name
 ```
+
+### Verify Ollama is Running
+
+```bash
+# Check if Ollama is running
+curl http://localhost:11434/api/tags
+
+# Test the model
+ollama run qwen3-coder "Hello!"
+```
+
+### Configuration File (Alternative)
+
+Create `~/.qwen/settings.json`:
+
+```json
+{
+  "security": {
+    "auth": {
+      "selectedType": "openai",
+      "apiKey": "ollama",
+      "baseUrl": "http://localhost:11434/v1"
+    }
+  },
+  "model": {
+    "generationConfig": {
+      "model": "qwen3-coder"
+    }
+  },
+  "telemetry": {
+    "enabled": false
+  }
+}
+```
+
+See [OLLAMA_README.md](./OLLAMA_README.md) for detailed setup instructions.
 
 ## Quick Start
 

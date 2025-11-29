@@ -4,13 +4,13 @@
   "description": "Qwen Code",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/QwenLM/qwen-code.git"
+    "url": "git+https://github.com/chrisburlacu1/qwen-code.git"
   },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "qwen": "dist/index.js"
+    "qwen-ollama": "dist/index.js"
   },
   "exports": {
     ".": {
@@ -32,9 +32,6 @@
   "files": [
     "dist"
   ],
-  "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.3.0"
-  },
   "dependencies": {
     "@google/genai": "1.16.0",
     "@iarna/toml": "^2.2.5",

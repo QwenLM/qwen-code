@@ -68,7 +68,6 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
-  initializeTelemetry,
   logCliConfiguration,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -347,7 +346,6 @@ export class Config {
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
-  private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private readonly fileFiltering: {
@@ -445,8 +443,10 @@ export class Config {
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.showMemoryUsage = params.showMemoryUsage ?? false;
     this.accessibility = params.accessibility ?? {};
+    // TELEMETRY DISABLED FOR OFFLINE/AIR-GAPPED USE
+    // All telemetry settings are forced to disabled state
     this.telemetrySettings = {
-      enabled: params.telemetry?.enabled ?? false,
+      enabled: false, // Always disabled regardless of params
       target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
       otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
       otlpProtocol: params.telemetry?.otlpProtocol,
@@ -459,7 +459,6 @@ export class Config {
       name: params.gitCoAuthor?.name ?? 'Qwen-Coder',
       email: params.gitCoAuthor?.email ?? 'qwen-coder@alibabacloud.com',
     };
-    this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
 
     this.fileFiltering = {
       respectGitIgnore: params.fileFiltering?.respectGitIgnore ?? true,
@@ -532,9 +531,9 @@ export class Config {
       setGeminiMdFilename(params.contextFileName);
     }
 
-    if (this.telemetrySettings.enabled) {
-      initializeTelemetry(this);
-    }
+    // TELEMETRY INITIALIZATION DISABLED FOR OFFLINE/AIR-GAPPED USE
+    // Telemetry is completely disabled - never initialize even if settings suggest otherwise
+    // initializeTelemetry(this); // DISABLED
 
     if (this.getProxy()) {
       setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
@@ -826,7 +825,9 @@ export class Config {
   }
 
   getTelemetryEnabled(): boolean {
-    return this.telemetrySettings.enabled ?? false;
+    // TELEMETRY DISABLED FOR OFFLINE/AIR-GAPPED USE
+    // Always return false to prevent any telemetry data collection
+    return false;
   }
 
   getTelemetryLogPromptsEnabled(): boolean {
@@ -922,7 +923,9 @@ export class Config {
   }
 
   getUsageStatisticsEnabled(): boolean {
-    return this.usageStatisticsEnabled;
+    // USAGE STATISTICS DISABLED FOR OFFLINE/AIR-GAPPED USE
+    // Always return false to prevent any usage data collection
+    return false;
   }
 
   getExtensionContextFilePaths(): string[] {

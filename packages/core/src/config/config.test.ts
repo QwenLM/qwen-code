@@ -398,7 +398,8 @@ describe('Server Config (config.ts)', () => {
       telemetry: { enabled: true },
     };
     const config = new Config(paramsWithTelemetry);
-    expect(config.getTelemetryEnabled()).toBe(true);
+    // Telemetry is forced disabled in this fork
+    expect(config.getTelemetryEnabled()).toBe(false);
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {
@@ -451,13 +452,14 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('Usage Statistics', () => {
-    it('defaults usage statistics to enabled if not specified', () => {
+    it('defaults usage statistics to disabled if not specified', () => {
       const config = new Config({
         ...baseParams,
         usageStatisticsEnabled: undefined,
       });
 
-      expect(config.getUsageStatisticsEnabled()).toBe(true);
+      // Usage statistics forced disabled
+      expect(config.getUsageStatisticsEnabled()).toBe(false);
     });
 
     it.each([{ enabled: true }, { enabled: false }])(
@@ -467,7 +469,8 @@ describe('Server Config (config.ts)', () => {
           ...baseParams,
           usageStatisticsEnabled: enabled,
         });
-        expect(config.getUsageStatisticsEnabled()).toBe(enabled);
+        // Usage statistics forced disabled
+        expect(config.getUsageStatisticsEnabled()).toBe(false);
       },
     );
 
@@ -478,7 +481,8 @@ describe('Server Config (config.ts)', () => {
       });
       await config.refreshAuth(AuthType.USE_GEMINI);
 
-      expect(QwenLogger.prototype.logStartSessionEvent).toHaveBeenCalledOnce();
+      // Since usage stats are disabled, this should NOT be called
+      expect(QwenLogger.prototype.logStartSessionEvent).not.toHaveBeenCalled();
     });
   });
 

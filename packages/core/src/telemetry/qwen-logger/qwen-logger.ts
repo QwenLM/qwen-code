@@ -83,10 +83,15 @@ export interface LogResponse {
   nextRequestWaitMs?: number;
 }
 
-// Singleton class for batch posting log events to RUM. When a new event comes in, the elapsed time
-// is checked and events are flushed to RUM if at least a minute has passed since the last flush.
+/**
+ * TELEMETRY REMOVED FOR OFFLINE/AIR-GAPPED USE
+ *
+ * This class is a stub. All telemetry functionality has been removed.
+ * getInstance() always returns undefined.
+ */
 export class QwenLogger {
-  private static instance: QwenLogger;
+  // Instance removed - telemetry disabled
+  // private static instance: QwenLogger;
   private config?: Config;
   private readonly installationManager: InstallationManager;
 
@@ -134,18 +139,14 @@ export class QwenLogger {
     return `user-${installationId ?? 'unknown'}`;
   }
 
-  static getInstance(config?: Config): QwenLogger | undefined {
-    if (config === undefined || !config?.getUsageStatisticsEnabled())
-      return undefined;
-    if (!QwenLogger.instance) {
-      QwenLogger.instance = new QwenLogger(config);
-      process.on(
-        'exit',
-        QwenLogger.instance.shutdown.bind(QwenLogger.instance),
-      );
-    }
-
-    return QwenLogger.instance;
+  /**
+   * TELEMETRY REMOVED FOR OFFLINE/AIR-GAPPED USE
+   *
+   * This method always returns undefined. All telemetry code has been removed.
+   */
+  static getInstance(_config?: Config): QwenLogger | undefined {
+    // No-op: Telemetry completely removed for air-gapped environments
+    return undefined;
   }
 
   enqueueLogEvent(event: RumEvent): void {

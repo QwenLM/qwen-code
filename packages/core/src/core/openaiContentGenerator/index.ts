@@ -15,6 +15,7 @@ import {
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
+  OllamaOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -27,6 +28,7 @@ export {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
+  OllamaOpenAICompatibleProvider,
 } from './provider/index.js';
 
 export { OpenAIContentConverter } from './converter.js';
@@ -82,6 +84,14 @@ export function determineProvider(
   // Check for ModelScope provider
   if (ModelScopeOpenAICompatibleProvider.isModelScopeProvider(config)) {
     return new ModelScopeOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Check for Ollama provider (local LLM)
+  if (OllamaOpenAICompatibleProvider.isOllamaProvider(config)) {
+    return new OllamaOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );

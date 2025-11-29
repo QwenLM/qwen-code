@@ -49,25 +49,16 @@ describe('Telemetry SDK', () => {
     await shutdownTelemetry(mockConfig);
   });
 
-  it('should use gRPC exporters when protocol is grpc', () => {
+  it('should NOT use gRPC exporters when protocol is grpc (telemetry disabled)', () => {
     initializeTelemetry(mockConfig);
 
-    expect(OTLPTraceExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPLogExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPMetricExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(OTLPTraceExporter).not.toHaveBeenCalled();
+    expect(OTLPLogExporter).not.toHaveBeenCalled();
+    expect(OTLPMetricExporter).not.toHaveBeenCalled();
+    expect(NodeSDK.prototype.start).not.toHaveBeenCalled();
   });
 
-  it('should use HTTP exporters when protocol is http', () => {
+  it('should NOT use HTTP exporters when protocol is http (telemetry disabled)', () => {
     vi.spyOn(mockConfig, 'getTelemetryEnabled').mockReturnValue(true);
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
@@ -76,40 +67,30 @@ describe('Telemetry SDK', () => {
 
     initializeTelemetry(mockConfig);
 
-    expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
-      url: 'http://localhost:4318/',
-    });
-    expect(OTLPLogExporterHttp).toHaveBeenCalledWith({
-      url: 'http://localhost:4318/',
-    });
-    expect(OTLPMetricExporterHttp).toHaveBeenCalledWith({
-      url: 'http://localhost:4318/',
-    });
-    expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(OTLPTraceExporterHttp).not.toHaveBeenCalled();
+    expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
+    expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
+    expect(NodeSDK.prototype.start).not.toHaveBeenCalled();
   });
 
-  it('should parse gRPC endpoint correctly', () => {
+  it('should NOT parse gRPC endpoint (telemetry disabled)', () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'https://my-collector.com',
     );
     initializeTelemetry(mockConfig);
-    expect(OTLPTraceExporter).toHaveBeenCalledWith(
-      expect.objectContaining({ url: 'https://my-collector.com' }),
-    );
+    expect(OTLPTraceExporter).not.toHaveBeenCalled();
   });
 
-  it('should parse HTTP endpoint correctly', () => {
+  it('should NOT parse HTTP endpoint (telemetry disabled)', () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'https://my-collector.com',
     );
     initializeTelemetry(mockConfig);
-    expect(OTLPTraceExporterHttp).toHaveBeenCalledWith(
-      expect.objectContaining({ url: 'https://my-collector.com/' }),
-    );
+    expect(OTLPTraceExporterHttp).not.toHaveBeenCalled();
   });
 
-  it('should use OTLP exporters when target is gcp but useCollector is true', () => {
+  it('should NOT use OTLP exporters when target is gcp but useCollector is true (telemetry disabled)', () => {
     vi.spyOn(mockConfig, 'getTelemetryTarget').mockReturnValue(
       TelemetryTarget.GCP,
     );
@@ -117,18 +98,9 @@ describe('Telemetry SDK', () => {
 
     initializeTelemetry(mockConfig);
 
-    expect(OTLPTraceExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPLogExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPMetricExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
+    expect(OTLPTraceExporter).not.toHaveBeenCalled();
+    expect(OTLPLogExporter).not.toHaveBeenCalled();
+    expect(OTLPMetricExporter).not.toHaveBeenCalled();
   });
 
   it('should not use OTLP exporters when telemetryOutfile is set', () => {
@@ -143,6 +115,6 @@ describe('Telemetry SDK', () => {
     expect(OTLPTraceExporterHttp).not.toHaveBeenCalled();
     expect(OTLPLogExporterHttp).not.toHaveBeenCalled();
     expect(OTLPMetricExporterHttp).not.toHaveBeenCalled();
-    expect(NodeSDK.prototype.start).toHaveBeenCalled();
+    expect(NodeSDK.prototype.start).not.toHaveBeenCalled();
   });
 });

@@ -5,11 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import {
-  initializeTelemetry,
-  shutdownTelemetry,
-  isTelemetrySdkInitialized,
-} from './sdk.js';
+import { initializeTelemetry, shutdownTelemetry } from './sdk.js';
 import { Config } from '../config/config.js';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 
@@ -30,6 +26,7 @@ describe('telemetry', () => {
       debugMode: false,
       cwd: '/test/dir',
     });
+    // Forced disabled in implementation
     vi.spyOn(mockConfig, 'getTelemetryEnabled').mockReturnValue(true);
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'http://localhost:4317',
@@ -43,22 +40,17 @@ describe('telemetry', () => {
   });
 
   afterEach(async () => {
-    // Ensure we shut down telemetry even if a test fails.
-    if (isTelemetrySdkInitialized()) {
-      await shutdownTelemetry(mockConfig);
-    }
-  });
-
-  it('should initialize the telemetry service', () => {
-    initializeTelemetry(mockConfig);
-    expect(NodeSDK).toHaveBeenCalled();
-    expect(mockNodeSdk.start).toHaveBeenCalled();
-  });
-
-  it('should shutdown the telemetry service', async () => {
-    initializeTelemetry(mockConfig);
     await shutdownTelemetry(mockConfig);
+  });
 
-    expect(mockNodeSdk.shutdown).toHaveBeenCalled();
+  it('should NOT initialize the telemetry service (disabled)', () => {
+    initializeTelemetry(mockConfig);
+    expect(NodeSDK).not.toHaveBeenCalled();
+    expect(mockNodeSdk.start).not.toHaveBeenCalled();
+  });
+
+  it('shutdown should be safe to call when not initialized', async () => {
+    await shutdownTelemetry(mockConfig);
+    expect(mockNodeSdk.shutdown).not.toHaveBeenCalled();
   });
 });
