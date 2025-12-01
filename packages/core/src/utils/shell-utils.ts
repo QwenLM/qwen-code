@@ -517,24 +517,35 @@ export function resolveCommandPath(command: string): {
   try {
     const isWin = process.platform === 'win32';
 
-    const checkCommand = isWin ? 'where' : 'command';
-    const checkArgs = isWin ? [command] : ['-v', command];
+    const shellConfig = getShellConfiguration();
+    const args = [
+      ...shellConfig.argsPrefix,
+      isWin
+        ? `where ${escapeShellArg(command, shellConfig.shell)}`
+        : `command -v ${escapeShellArg(command, shellConfig.shell)}`,
+    ];
 
-    let result: string | null = null;
     try {
-      result = execFileSync(checkCommand, checkArgs, {
+      const result = execFileSync(shellConfig.executable, args, {
         encoding: 'utf8',
-        shell: isWin,
+        shell: false,
       }).trim();
-    } catch {
-      console.warn(`Command ${checkCommand} not found`);
-    }
 
-    if (!result) return { path: null, error: undefined };
-    if (!isWin) {
-      accessSync(result, fsConstants.X_OK);
+      if (!result) return { path: null, error: undefined };
+
+      if (
+        !isWin &&
+        (result.startsWith('/') ||
+          result.startsWith('./') ||
+          result.startsWith('../'))
+      ) {
+        accessSync(result, fsConstants.X_OK);
+      }
+
+      return { path: result, error: undefined };
+    } catch {
+      return { path: null, error: undefined };
     }
-    return { path: result, error: undefined };
   } catch (error) {
     return {
       path: null,
