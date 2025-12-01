@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { Part } from '@google/genai';
 import type * as acp from '../acp.js';
 
 /**
@@ -34,8 +35,6 @@ export interface ToolCallStartParams {
   callId: string;
   /** Arguments passed to the tool */
   args?: Record<string, unknown>;
-  /** Optional description override (e.g., from subagent events) */
-  description?: string;
 }
 
 /**
@@ -48,27 +47,14 @@ export interface ToolCallResultParams {
   callId: string;
   /** Whether the tool execution succeeded */
   success: boolean;
-  /** Display result from tool execution */
+  /** The response parts from tool execution (maps to content in update event) */
+  message: Part[];
+  /** Display result from tool execution (maps to rawOutput in update event) */
   resultDisplay?: unknown;
   /** Error if tool execution failed */
   error?: Error;
   /** Original args (fallback for TodoWriteTool todos extraction) */
   args?: Record<string, unknown>;
-  /**
-   * Fallback content from message when resultDisplay is not available.
-   * Used in history replay when tool result has content in message but not resultDisplay.
-   */
-  fallbackContent?: string;
-  /**
-   * Optional extra fields for tool_call_update (used by SubAgentTracker).
-   * When provided, these are included in the update event.
-   */
-  extra?: {
-    title?: string;
-    kind?: acp.ToolKind | null;
-    locations?: acp.ToolCallLocation[] | null;
-    rawInput?: Record<string, unknown>;
-  };
 }
 
 /**

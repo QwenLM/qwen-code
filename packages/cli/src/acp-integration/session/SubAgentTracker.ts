@@ -144,7 +144,6 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
-        description: event.description,
       });
     };
   }
@@ -161,41 +160,14 @@ export class SubAgentTracker {
 
       const state = this.toolStates.get(event.callId);
 
-      // Build extra fields for tool_call_update (matching original behavior)
-      const extra: {
-        title?: string;
-        kind?: acp.ToolKind | null;
-        locations?: acp.ToolCallLocation[] | null;
-        rawInput?: Record<string, unknown>;
-      } = {};
-
-      // Add title from invocation or fallback to event name
-      extra.title = state?.invocation?.getDescription() ?? event.name;
-
-      // Add kind from tool if available
-      extra.kind = state?.tool
-        ? this.toolCallEmitter.mapToolKind(state.tool.kind)
-        : null;
-
-      // Add locations from invocation if available (with line null mapping)
-      extra.locations = state?.invocation
-        ? state.invocation.toolLocations().map((loc) => ({
-            path: loc.path,
-            line: loc.line ?? null,
-          }))
-        : null;
-
-      // Add rawInput from stored args
-      extra.rawInput = state?.args;
-
       // Use unified emitter - handles TodoWriteTool plan updates internally
       void this.toolCallEmitter.emitResult({
         toolName: event.name,
         callId: event.callId,
         success: event.success,
+        message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
-        extra,
       });
 
       // Clean up state
@@ -241,11 +213,7 @@ export class SubAgentTracker {
       } as unknown as ToolCallConfirmationDetails;
 
       const { title, locations, kind } =
-        this.toolCallEmitter.resolveToolMetadata(
-          event.name,
-          state?.args,
-          event.description,
-        );
+        this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
       const params: acp.RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,

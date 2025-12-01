@@ -203,12 +203,17 @@ describe('SubAgentTracker', () => {
         expect(sendUpdateSpy).toHaveBeenCalled();
       });
 
+      // ToolCallEmitter resolves metadata from registry - uses toolName when tool not found
       expect(sendUpdateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
           sessionUpdate: 'tool_call',
           toolCallId: 'call-123',
           status: 'in_progress',
-          title: 'Reading file',
+          title: 'read_file',
+          content: [],
+          locations: [],
+          kind: 'other',
+          rawInput: { path: '/test.ts' },
         }),
       );
     });

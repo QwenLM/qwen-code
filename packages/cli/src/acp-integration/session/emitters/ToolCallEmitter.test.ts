@@ -14,6 +14,13 @@ import type {
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import { Kind, TodoWriteTool } from '@qwen-code/qwen-code-core';
+import type { Part } from '@google/genai';
+
+// Helper to create mock message parts for tests
+const createMockMessage = (text?: string): Part[] =>
+  text
+    ? [{ functionResponse: { name: 'test', response: { output: text } } }]
+    : [];
 
 describe('ToolCallEmitter', () => {
   let mockContext: SessionContext;
@@ -88,30 +95,12 @@ describe('ToolCallEmitter', () => {
         sessionUpdate: 'tool_call',
         toolCallId: 'call-456',
         status: 'in_progress',
-        title: 'Test tool description',
+        title: 'edit_file: Test tool description',
         content: [],
         locations: [{ path: '/test/file.ts', line: 10 }],
         kind: 'edit',
         rawInput: { path: '/test.ts' },
       });
-    });
-
-    it('should use description override when provided', async () => {
-      const mockTool = createMockTool();
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-
-      await emitter.emitStart({
-        toolName: 'test_tool',
-        callId: 'call-789',
-        args: {},
-        description: 'Custom description from subagent',
-      });
-
-      expect(sendUpdateSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: 'Custom description from subagent',
-        }),
-      );
     });
 
     it('should skip emit for TodoWriteTool and return false', async () => {
@@ -171,20 +160,18 @@ describe('ToolCallEmitter', () => {
         toolName: 'test_tool',
         callId: 'call-123',
         success: true,
+        message: createMockMessage('Tool completed successfully'),
         resultDisplay: 'Tool completed successfully',
       });
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
-        sessionUpdate: 'tool_call_update',
-        toolCallId: 'call-123',
-        status: 'completed',
-        content: [
-          {
-            type: 'content',
-            content: { type: 'text', text: 'Tool completed successfully' },
-          },
-        ],
-      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-123',
+          status: 'completed',
+          rawOutput: 'Tool completed successfully',
+        }),
+      );
     });
 
     it('should emit tool_call_update with failed status on failure', async () => {
@@ -192,6 +179,7 @@ describe('ToolCallEmitter', () => {
         toolName: 'test_tool',
         callId: 'call-123',
         success: false,
+        message: [],
         error: new Error('Something went wrong'),
       });
 
@@ -213,6 +201,7 @@ describe('ToolCallEmitter', () => {
         toolName: 'edit_file',
         callId: 'call-edit',
         success: true,
+        message: [],
         resultDisplay: {
           fileName: '/test/file.ts',
           originalContent: 'old content',
@@ -220,51 +209,54 @@ describe('ToolCallEmitter', () => {
         },
       });
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
-        sessionUpdate: 'tool_call_update',
-        toolCallId: 'call-edit',
-        status: 'completed',
-        content: [
-          {
-            type: 'diff',
-            path: '/test/file.ts',
-            oldText: 'old content',
-            newText: 'new content',
-          },
-        ],
-      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-edit',
+          status: 'completed',
+          content: [
+            {
+              type: 'diff',
+              path: '/test/file.ts',
+              oldText: 'old content',
+              newText: 'new content',
+            },
+          ],
+        }),
+      );
     });
 
-    it('should handle plan_summary display format', async () => {
+    it('should transform message parts to content', async () => {
       await emitter.emitResult({
-        toolName: 'plan_tool',
-        callId: 'call-plan',
+        toolName: 'test_tool',
+        callId: 'call-123',
         success: true,
-        resultDisplay: {
-          type: 'plan_summary',
-          message: 'Plan created',
-          plan: 'Step 1\nStep 2',
-        },
+        message: [{ text: 'Some text output' }],
+        resultDisplay: 'raw output',
       });
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
-        sessionUpdate: 'tool_call_update',
-        toolCallId: 'call-plan',
-        status: 'completed',
-        content: [
-          {
-            type: 'content',
-            content: { type: 'text', text: 'Plan created\n\nStep 1\nStep 2' },
-          },
-        ],
-      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-123',
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'Some text output' },
+            },
+          ],
+          rawOutput: 'raw output',
+        }),
+      );
     });
 
-    it('should handle empty result display', async () => {
+    it('should handle empty message parts', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',
         callId: 'call-empty',
         success: true,
+        message: [],
       });
 
       expect(sendUpdateSpy).toHaveBeenCalledWith({
@@ -281,6 +273,7 @@ describe('ToolCallEmitter', () => {
           toolName: TodoWriteTool.Name,
           callId: 'call-todo',
           success: true,
+          message: [],
           resultDisplay: {
             type: 'todo_list',
             todos: [
@@ -305,6 +298,7 @@ describe('ToolCallEmitter', () => {
           toolName: TodoWriteTool.Name,
           callId: 'call-todo',
           success: true,
+          message: [],
           resultDisplay: null,
           args: {
             todos: [{ id: '1', content: 'From args', status: 'completed' }],
@@ -324,6 +318,7 @@ describe('ToolCallEmitter', () => {
           toolName: TodoWriteTool.Name,
           callId: 'call-todo',
           success: true,
+          message: [],
           resultDisplay: { type: 'todo_list', todos: [] },
         });
 
@@ -335,6 +330,7 @@ describe('ToolCallEmitter', () => {
           toolName: TodoWriteTool.Name,
           callId: 'call-todo',
           success: true,
+          message: [],
           resultDisplay: 'Some string result',
         });
 
@@ -402,19 +398,6 @@ describe('ToolCallEmitter', () => {
       });
     });
 
-    it('should use description override when provided', () => {
-      const mockTool = createMockTool();
-      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
-
-      const metadata = emitter.resolveToolMetadata(
-        'test_tool',
-        { arg: 'value' },
-        'Override description',
-      );
-
-      expect(metadata.title).toBe('Override description');
-    });
-
     it('should return tool metadata when tool found and built successfully', () => {
       const mockTool = createMockTool({ kind: Kind.Search });
       vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
@@ -424,7 +407,7 @@ describe('ToolCallEmitter', () => {
       });
 
       expect(metadata).toEqual({
-        title: 'Test tool description',
+        title: 'search_tool: Test tool description',
         locations: [{ path: '/test/file.ts', line: 10 }],
         kind: 'search',
       });
@@ -457,77 +440,73 @@ describe('ToolCallEmitter', () => {
   });
 
   describe('fixes verification', () => {
-    describe('Fix 2: JSON.stringify fallback for unknown objects', () => {
-      it('should JSON.stringify unknown object types in resultDisplay', async () => {
+    describe('Fix 2: functionResponse parts are stringified', () => {
+      it('should stringify functionResponse parts in message', async () => {
         await emitter.emitResult({
           toolName: 'test_tool',
-          callId: 'call-unknown',
+          callId: 'call-func',
           success: true,
-          resultDisplay: { unknownField: 'value', nested: { data: 123 } },
-        });
-
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'tool_call_update',
-          toolCallId: 'call-unknown',
-          status: 'completed',
-          content: [
+          message: [
             {
-              type: 'content',
-              content: {
-                type: 'text',
-                text: '{"unknownField":"value","nested":{"data":123}}',
+              functionResponse: {
+                name: 'test',
+                response: { output: 'test output' },
               },
             },
           ],
+          resultDisplay: { unknownField: 'value', nested: { data: 123 } },
         });
+
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-func',
+            status: 'completed',
+            content: [
+              {
+                type: 'content',
+                content: {
+                  type: 'text',
+                  text: '{"output":"test output"}',
+                },
+              },
+            ],
+            rawOutput: { unknownField: 'value', nested: { data: 123 } },
+          }),
+        );
       });
     });
 
-    describe('Fix 3: Extra fields in emitResult for SubAgentTracker', () => {
-      it('should include extra fields when provided', async () => {
+    describe('Fix 3: rawOutput is included in emitResult', () => {
+      it('should include rawOutput when resultDisplay is provided', async () => {
         await emitter.emitResult({
           toolName: 'test_tool',
           callId: 'call-extra',
           success: true,
+          message: [{ text: 'Result text' }],
           resultDisplay: 'Result text',
-          extra: {
-            title: 'Custom title',
-            kind: 'edit',
-            locations: [{ path: '/file.ts', line: 5 }],
-            rawInput: { arg: 'value' },
-          },
         });
 
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'tool_call_update',
-          toolCallId: 'call-extra',
-          status: 'completed',
-          content: [
-            { type: 'content', content: { type: 'text', text: 'Result text' } },
-          ],
-          title: 'Custom title',
-          kind: 'edit',
-          locations: [{ path: '/file.ts', line: 5 }],
-          rawInput: { arg: 'value' },
-        });
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-extra',
+            status: 'completed',
+            rawOutput: 'Result text',
+          }),
+        );
       });
 
-      it('should handle null values in extra fields', async () => {
+      it('should not include rawOutput when resultDisplay is undefined', async () => {
         await emitter.emitResult({
           toolName: 'test_tool',
           callId: 'call-null',
           success: true,
-          extra: {
-            title: 'Title',
-            kind: null,
-            locations: null,
-          },
+          message: [],
         });
 
         const call = sendUpdateSpy.mock.calls[0][0];
-        expect(call.title).toBe('Title');
-        expect(call.kind).toBeNull();
-        expect(call.locations).toBeNull();
+        expect(call.rawOutput).toBeUndefined();
       });
     });
 
@@ -563,6 +542,7 @@ describe('ToolCallEmitter', () => {
           toolName: TodoWriteTool.Name,
           callId: 'call-todo-empty',
           success: true,
+          message: [],
           resultDisplay: null, // No result display
           args: {
             todos: [], // Empty array in args
@@ -580,6 +560,7 @@ describe('ToolCallEmitter', () => {
           toolName: TodoWriteTool.Name,
           callId: 'call-todo-cleared',
           success: true,
+          message: [],
           resultDisplay: {
             type: 'todo_list',
             todos: [], // Empty result
@@ -597,49 +578,58 @@ describe('ToolCallEmitter', () => {
       });
     });
 
-    describe('Fallback content', () => {
-      it('should use fallbackContent when resultDisplay is not available', async () => {
+    describe('Message transformation', () => {
+      it('should transform text parts from message', async () => {
         await emitter.emitResult({
           toolName: 'test_tool',
-          callId: 'call-fallback',
+          callId: 'call-text',
           success: true,
-          resultDisplay: undefined,
-          fallbackContent: 'Fallback text from message',
+          message: [{ text: 'Text content from message' }],
         });
 
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'tool_call_update',
-          toolCallId: 'call-fallback',
+          toolCallId: 'call-text',
           status: 'completed',
           content: [
             {
               type: 'content',
-              content: { type: 'text', text: 'Fallback text from message' },
+              content: { type: 'text', text: 'Text content from message' },
             },
           ],
         });
       });
 
-      it('should prefer resultDisplay over fallbackContent', async () => {
+      it('should transform functionResponse parts from message', async () => {
         await emitter.emitResult({
           toolName: 'test_tool',
-          callId: 'call-prefer',
+          callId: 'call-func-resp',
           success: true,
-          resultDisplay: 'Primary content',
-          fallbackContent: 'Fallback content',
-        });
-
-        expect(sendUpdateSpy).toHaveBeenCalledWith({
-          sessionUpdate: 'tool_call_update',
-          toolCallId: 'call-prefer',
-          status: 'completed',
-          content: [
+          message: [
             {
-              type: 'content',
-              content: { type: 'text', text: 'Primary content' },
+              functionResponse: {
+                name: 'test_tool',
+                response: { output: 'Function output' },
+              },
             },
           ],
+          resultDisplay: 'raw result',
         });
+
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'call-func-resp',
+            status: 'completed',
+            content: [
+              {
+                type: 'content',
+                content: { type: 'text', text: '{"output":"Function output"}' },
+              },
+            ],
+            rawOutput: 'raw result',
+          }),
+        );
       });
     });
   });

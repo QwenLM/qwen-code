@@ -25,9 +25,6 @@ import {
   isNodeError,
   TaskTool,
   UserPromptEvent,
-  DEFAULT_GEMINI_MODEL,
-  DEFAULT_GEMINI_MODEL_AUTO,
-  DEFAULT_GEMINI_FLASH_MODEL,
 } from '@qwen-code/qwen-code-core';
 import * as acp from '../acp.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -48,18 +45,6 @@ import { HistoryReplayer } from './HistoryReplayer.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-
-/**
- * Resolves the model to use based on the current configuration.
- * If the model is set to "auto", it will use the flash model if in fallback
- * mode, otherwise it will use the default model.
- */
-export function resolveModel(model: string, isInFallbackMode: boolean): string {
-  if (model === DEFAULT_GEMINI_MODEL_AUTO) {
-    return isInFallbackMode ? DEFAULT_GEMINI_FLASH_MODEL : DEFAULT_GEMINI_MODEL;
-  }
-  return model;
-}
 
 /**
  * Built-in commands that are allowed in ACP integration mode.
@@ -208,7 +193,7 @@ export class Session implements SessionContext {
 
       try {
         const responseStream = await chat.sendMessageStream(
-          resolveModel(this.config.getModel(), this.config.isInFallbackMode()),
+          this.config.getModel(),
           {
             message: nextMessage?.parts ?? [],
             config: {
@@ -471,8 +456,6 @@ export class Session implements SessionContext {
           callId,
           toolName: fc.name,
           args,
-          // Use invocation's description for title
-          description: invocation.getDescription(),
         };
         await this.toolCallEmitter.emitStart(startParams);
       }
@@ -481,6 +464,13 @@ export class Session implements SessionContext {
 
       // Clean up event listeners
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
+
+      // Create response parts first (needed for emitResult and recordToolResult)
+      const responseParts = convertToFunctionResponse(
+        fc.name,
+        callId,
+        toolResult.llmContent,
+      );
 
       // Handle TodoWriteTool: extract todos and send plan update
       if (isTodoWriteTool) {
@@ -507,6 +497,7 @@ export class Session implements SessionContext {
           callId,
           toolName: fc.name,
           args,
+          message: responseParts,
           resultDisplay: toolResult.returnDisplay,
           error,
           success: !toolResult.error,
@@ -529,7 +520,16 @@ export class Session implements SessionContext {
             : 'native',
       });
 
-      return convertToFunctionResponse(fc.name, callId, toolResult.llmContent);
+      // Record tool result for session management
+      this.config.getChatRecordingService()?.recordToolResult(responseParts, {
+        callId,
+        status: 'success',
+        resultDisplay: toolResult.returnDisplay,
+        error: undefined,
+        errorType: undefined,
+      });
+
+      return responseParts;
     } catch (e) {
       // Ensure cleanup on error
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
@@ -538,6 +538,24 @@ export class Session implements SessionContext {
 
       // Use ToolCallEmitter for error handling
       await this.toolCallEmitter.emitError(callId, error);
+
+      // Record tool error for session management
+      const errorParts = [
+        {
+          functionResponse: {
+            id: callId,
+            name: fc.name ?? '',
+            response: { error: error.message },
+          },
+        },
+      ];
+      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+        callId,
+        status: 'error',
+        resultDisplay: undefined,
+        error,
+        errorType: undefined,
+      });
 
       return errorResponse(error);
     }

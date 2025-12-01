@@ -97,24 +97,23 @@ export class HistoryReplayer {
    * Replays a tool result record.
    */
   private async replayToolResult(record: ChatRecord): Promise<void> {
+    // message is required - skip if not present
+    if (!record.message?.parts) {
+      return;
+    }
+
     const result = record.toolCallResult;
     const callId = result?.callId ?? record.uuid;
 
     // Extract tool name from the function response in message if available
     const toolName = this.extractToolNameFromRecord(record);
 
-    // Extract fallback content from message if resultDisplay is not available
-    // This matches original extractToolResultDisplay ?? extractTextContent(message) behavior
-    const fallbackContent = record.message
-      ? this.extractTextFromContent(record.message)
-      : undefined;
-
     await this.toolCallEmitter.emitResult({
       toolName,
       callId,
       success: !result?.error,
+      message: record.message.parts,
       resultDisplay: result?.resultDisplay,
-      fallbackContent,
       // For TodoWriteTool fallback, try to extract args from the record
       // Note: args aren't stored in tool_result records by default
       args: undefined,
@@ -134,36 +133,5 @@ export class HistoryReplayer {
       }
     }
     return '';
-  }
-
-  /**
-   * Extracts text content from a message Content object.
-   * Matches original extractTextFromContent behavior:
-   * - Extracts text from text parts
-   * - Stringifies functionResponse and functionCall parts
-   */
-  private extractTextFromContent(content: Content): string | undefined {
-    const parts = content.parts ?? [];
-    const texts: string[] = [];
-
-    for (const part of parts) {
-      if ('text' in part && part.text) {
-        texts.push(part.text);
-      } else if ('functionResponse' in part && part.functionResponse) {
-        try {
-          texts.push(JSON.stringify(part.functionResponse));
-        } catch {
-          // ignore serialization errors
-        }
-      } else if ('functionCall' in part && part.functionCall) {
-        try {
-          texts.push(JSON.stringify(part.functionCall));
-        } catch {
-          // ignore serialization errors
-        }
-      }
-    }
-
-    return texts.length > 0 ? texts.join(' ') : undefined;
   }
 }

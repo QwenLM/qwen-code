@@ -437,6 +437,7 @@ export const sessionUpdateSchema = z.union([
     kind: toolKindSchema.optional().nullable(),
     locations: z.array(toolCallLocationSchema).optional().nullable(),
     rawInput: z.unknown().optional(),
+    rawOutput: z.unknown().optional(),
     sessionUpdate: z.literal('tool_call_update'),
     status: toolCallStatusSchema.optional().nullable(),
     title: z.string().optional().nullable(),

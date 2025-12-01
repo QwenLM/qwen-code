@@ -274,9 +274,12 @@ describe('HistoryReplayer', () => {
         content: [
           {
             type: 'content',
-            content: { type: 'text', text: 'File contents here' },
+            // Content comes from functionResponse.response (stringified)
+            content: { type: 'text', text: '{"result":"ok"}' },
           },
         ],
+        // resultDisplay is included as rawOutput
+        rawOutput: 'File contents here',
       });
     });
 

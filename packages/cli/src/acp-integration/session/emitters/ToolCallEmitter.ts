@@ -13,6 +13,7 @@ import type {
   ResolvedToolMetadata,
 } from '../types.js';
 import type * as acp from '../../acp.js';
+import type { Part } from '@google/genai';
 import { TodoWriteTool, Kind } from '@qwen-code/qwen-code-core';
 
 /**
@@ -49,7 +50,6 @@ export class ToolCallEmitter extends BaseEmitter {
     const { title, locations, kind } = this.resolveToolMetadata(
       params.toolName,
       params.args,
-      params.description,
     );
 
     await this.sendUpdate({
@@ -90,40 +90,37 @@ export class ToolCallEmitter extends BaseEmitter {
       return; // Skip tool_call_update for TodoWriteTool
     }
 
-    // Normal tool result - try resultDisplay first, then fallbackContent
-    let content = this.extractResultContent(params.resultDisplay, params.error);
+    // Determine content for the update
+    let contentArray: acp.ToolCallContent[] = [];
 
-    // Use fallbackContent if no content extracted from resultDisplay
-    if (!content && params.fallbackContent) {
-      content = {
-        type: 'content',
-        content: { type: 'text', text: params.fallbackContent },
-      };
+    // Special case: diff result from edit tools (format from resultDisplay)
+    const diffContent = this.extractDiffContent(params.resultDisplay);
+    if (diffContent) {
+      contentArray = [diffContent];
+    } else if (params.error) {
+      // Error case: show error message
+      contentArray = [
+        {
+          type: 'content',
+          content: { type: 'text', text: params.error.message },
+        },
+      ];
+    } else {
+      // Normal case: transform message parts to ToolCallContent[]
+      contentArray = this.transformPartsToToolCallContent(params.message);
     }
 
-    // Build the update with optional extra fields (for SubAgentTracker)
+    // Build the update
     const update: Parameters<typeof this.sendUpdate>[0] = {
       sessionUpdate: 'tool_call_update',
       toolCallId: params.callId,
       status: params.success ? 'completed' : 'failed',
-      content: content ? [content] : [],
+      content: contentArray,
     };
 
-    // Add extra fields if provided (used by SubAgentTracker)
-    if (params.extra) {
-      if (params.extra.title !== undefined) {
-        (update as Record<string, unknown>)['title'] = params.extra.title;
-      }
-      if (params.extra.kind !== undefined) {
-        (update as Record<string, unknown>)['kind'] = params.extra.kind;
-      }
-      if (params.extra.locations !== undefined) {
-        (update as Record<string, unknown>)['locations'] =
-          params.extra.locations;
-      }
-      if (params.extra.rawInput !== undefined) {
-        (update as Record<string, unknown>)['rawInput'] = params.extra.rawInput;
-      }
+    // Add rawOutput from resultDisplay
+    if (params.resultDisplay !== undefined) {
+      (update as Record<string, unknown>)['rawOutput'] = params.resultDisplay;
     }
 
     await this.sendUpdate(update);
@@ -163,24 +160,22 @@ export class ToolCallEmitter extends BaseEmitter {
    *
    * @param toolName - Name of the tool
    * @param args - Tool call arguments (used to build invocation)
-   * @param descriptionOverride - Optional description to use instead of invocation description
    */
   resolveToolMetadata(
     toolName: string,
     args?: Record<string, unknown>,
-    descriptionOverride?: string,
   ): ResolvedToolMetadata {
     const toolRegistry = this.config.getToolRegistry();
     const tool = toolRegistry.getTool(toolName);
 
-    let title = descriptionOverride ?? toolName;
+    let title = tool?.displayName ?? toolName;
     let locations: acp.ToolCallLocation[] = [];
     let kind: acp.ToolKind = 'other';
 
     if (tool && args) {
       try {
         const invocation = tool.build(args);
-        title = descriptionOverride ?? invocation.getDescription();
+        title = `${title}: ${invocation.getDescription()}`;
         // Map locations to ensure line is null instead of undefined (for ACP consistency)
         locations = invocation.toolLocations().map((loc) => ({
           path: loc.path,
@@ -216,67 +211,61 @@ export class ToolCallEmitter extends BaseEmitter {
   // ==================== Private Helpers ====================
 
   /**
-   * Extracts content from tool result display or error.
-   * Matches original extractToolResultDisplay behavior with JSON.stringify fallback.
+   * Extracts diff content from resultDisplay if it's a diff type (edit tool result).
+   * Returns null if not a diff.
    */
-  private extractResultContent(
+  private extractDiffContent(
     resultDisplay: unknown,
-    error?: Error,
   ): acp.ToolCallContent | null {
-    if (error) {
+    if (!resultDisplay || typeof resultDisplay !== 'object') return null;
+
+    const obj = resultDisplay as Record<string, unknown>;
+
+    // Check if this is a diff display (edit tool result)
+    if ('fileName' in obj && 'newContent' in obj) {
       return {
-        type: 'content',
-        content: { type: 'text', text: error.message },
+        type: 'diff',
+        path: obj['fileName'] as string,
+        oldText: (obj['originalContent'] as string) ?? '',
+        newText: obj['newContent'] as string,
       };
-    }
-
-    if (!resultDisplay) return null;
-
-    // Handle string result
-    if (typeof resultDisplay === 'string') {
-      return {
-        type: 'content',
-        content: { type: 'text', text: resultDisplay },
-      };
-    }
-
-    // Handle object results
-    if (typeof resultDisplay === 'object') {
-      const obj = resultDisplay as Record<string, unknown>;
-
-      // Handle diff display (edit tool result)
-      if ('fileName' in obj && 'newContent' in obj) {
-        return {
-          type: 'diff',
-          path: obj['fileName'] as string,
-          oldText: (obj['originalContent'] as string) ?? '',
-          newText: obj['newContent'] as string,
-        };
-      }
-
-      // Handle plan_summary display
-      if (obj['type'] === 'plan_summary') {
-        return {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: `${obj['message']}\n\n${obj['plan']}`,
-          },
-        };
-      }
-
-      // Fallback: JSON.stringify for any other object type
-      // This matches original extractToolResultDisplay behavior
-      try {
-        return {
-          type: 'content',
-          content: { type: 'text', text: JSON.stringify(resultDisplay) },
-        };
-      } catch {
-        return null;
-      }
     }
 
     return null;
+  }
+
+  /**
+   * Transforms Part[] to ToolCallContent[].
+   * Extracts text from functionResponse parts and text parts.
+   */
+  private transformPartsToToolCallContent(
+    parts: Part[],
+  ): acp.ToolCallContent[] {
+    const result: acp.ToolCallContent[] = [];
+
+    for (const part of parts) {
+      // Handle text parts
+      if ('text' in part && part.text) {
+        result.push({
+          type: 'content',
+          content: { type: 'text', text: part.text },
+        });
+      }
+
+      // Handle functionResponse parts - stringify the response
+      if ('functionResponse' in part && part.functionResponse) {
+        try {
+          const responseText = JSON.stringify(part.functionResponse.response);
+          result.push({
+            type: 'content',
+            content: { type: 'text', text: responseText },
+          });
+        } catch {
+          // Ignore serialization errors
+        }
+      }
+    }
+
+    return result;
   }
 }

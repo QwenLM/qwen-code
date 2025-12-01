@@ -10,9 +10,6 @@ import type { Config, ConversationRecord } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   clearCachedCredentialFile,
-  DEFAULT_GEMINI_MODEL,
-  DEFAULT_GEMINI_MODEL_AUTO,
-  DEFAULT_GEMINI_FLASH_MODEL,
   MCPServerConfig,
   SessionService,
   buildApiHistoryFromConversation,
@@ -30,19 +27,6 @@ import { ExtensionEnablementManager } from '../config/extensions/extensionEnable
 
 // Import the modular Session class
 import { Session } from './session/Session.js';
-
-/**
- * Resolves the model to use based on the current configuration.
- *
- * If the model is set to "auto", it will use the flash model if in fallback
- * mode, otherwise it will use the default model.
- */
-export function resolveModel(model: string, isInFallbackMode: boolean): string {
-  if (model === DEFAULT_GEMINI_MODEL_AUTO) {
-    return isInFallbackMode ? DEFAULT_GEMINI_FLASH_MODEL : DEFAULT_GEMINI_MODEL;
-  }
-  return model;
-}
 
 export async function runAcpAgent(
   config: Config,
