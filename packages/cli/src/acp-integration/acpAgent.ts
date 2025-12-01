@@ -208,6 +208,31 @@ class GeminiAgent {
     return null;
   }
 
+  async listSessions(
+    params: acp.ListSessionsRequest,
+  ): Promise<acp.ListSessionsResponse> {
+    const sessionService = new SessionService(params.cwd);
+    const result = await sessionService.listSessions({
+      cursor: params.cursor,
+      size: params.size,
+    });
+
+    return {
+      items: result.items.map((item) => ({
+        sessionId: item.sessionId,
+        cwd: item.cwd,
+        startTime: item.startTime,
+        mtime: item.mtime,
+        prompt: item.prompt,
+        gitBranch: item.gitBranch,
+        filePath: item.filePath,
+        messageCount: item.messageCount,
+      })),
+      nextCursor: result.nextCursor,
+      hasMore: result.hasMore,
+    };
+  }
+
   private async ensureAuthenticated(config: Config): Promise<void> {
     const selectedType = this.settings.merged.security?.auth?.selectedType;
     if (!selectedType) {

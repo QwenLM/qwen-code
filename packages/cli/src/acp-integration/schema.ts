@@ -13,6 +13,7 @@ export const AGENT_METHODS = {
   session_load: 'session/load',
   session_new: 'session/new',
   session_prompt: 'session/prompt',
+  session_list: 'session/list',
 };
 
 export const CLIENT_METHODS = {
@@ -47,6 +48,9 @@ export type ReadTextFileResponse = z.infer<typeof readTextFileResponseSchema>;
 export type RequestPermissionOutcome = z.infer<
   typeof requestPermissionOutcomeSchema
 >;
+export type SessionListItem = z.infer<typeof sessionListItemSchema>;
+export type ListSessionsRequest = z.infer<typeof listSessionsRequestSchema>;
+export type ListSessionsResponse = z.infer<typeof listSessionsResponseSchema>;
 
 export type CancelNotification = z.infer<typeof cancelNotificationSchema>;
 
@@ -220,6 +224,29 @@ export const newSessionResponseSchema = z.object({
 });
 
 export const loadSessionResponseSchema = z.null();
+
+export const sessionListItemSchema = z.object({
+  cwd: z.string(),
+  filePath: z.string(),
+  gitBranch: z.string().optional(),
+  messageCount: z.number(),
+  mtime: z.number(),
+  prompt: z.string(),
+  sessionId: z.string(),
+  startTime: z.string(),
+});
+
+export const listSessionsResponseSchema = z.object({
+  hasMore: z.boolean(),
+  items: z.array(sessionListItemSchema),
+  nextCursor: z.number().optional(),
+});
+
+export const listSessionsRequestSchema = z.object({
+  cursor: z.number().optional(),
+  cwd: z.string(),
+  size: z.number().optional(),
+});
 
 export const stopReasonSchema = z.union([
   z.literal('end_turn'),
@@ -456,6 +483,7 @@ export const agentResponseSchema = z.union([
   newSessionResponseSchema,
   loadSessionResponseSchema,
   promptResponseSchema,
+  listSessionsResponseSchema,
 ]);
 
 export const requestPermissionRequestSchema = z.object({
@@ -486,6 +514,7 @@ export const agentRequestSchema = z.union([
   newSessionRequestSchema,
   loadSessionRequestSchema,
   promptRequestSchema,
+  listSessionsRequestSchema,
 ]);
 
 export const agentNotificationSchema = sessionNotificationSchema;
