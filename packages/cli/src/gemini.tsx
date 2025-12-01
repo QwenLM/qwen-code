@@ -110,7 +110,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 
 import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
 import { loadSandboxConfig } from './config/sandboxConfig.js';
-import { runZedIntegration } from './zed-integration/zedIntegration.js';
+import { runAcpAgent } from './acp-integration/acpAgent.js';
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -395,7 +395,7 @@ export async function main() {
     }
 
     if (config.getExperimentalZedIntegration()) {
-      return runZedIntegration(config, settings, extensions, argv);
+      return runAcpAgent(config, settings, extensions, argv);
     }
 
     let input = config.getQuestion();

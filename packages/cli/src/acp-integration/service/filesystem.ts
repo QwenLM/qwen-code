@@ -5,7 +5,7 @@
  */
 
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
-import type * as acp from './acp.js';
+import type * as acp from '../acp.js';
 
 /**
  * ACP client-based implementation of FileSystemService
