@@ -517,34 +517,38 @@ export function resolveCommandPath(command: string): {
   try {
     const isWin = process.platform === 'win32';
 
-    const shellConfig = getShellConfiguration();
-    const args = [
-      ...shellConfig.argsPrefix,
-      isWin
-        ? `where ${escapeShellArg(command, shellConfig.shell)}`
-        : `command -v ${escapeShellArg(command, shellConfig.shell)}`,
-    ];
+    if (isWin) {
+      const checkCommand = 'where.exe';
+      const checkArgs = [command];
 
-    try {
-      const result = execFileSync(shellConfig.executable, args, {
-        encoding: 'utf8',
-        shell: false,
-      }).trim();
-
-      if (!result) return { path: null, error: undefined };
-
-      if (
-        !isWin &&
-        (result.startsWith('/') ||
-          result.startsWith('./') ||
-          result.startsWith('../'))
-      ) {
-        accessSync(result, fsConstants.X_OK);
+      let result: string | null = null;
+      try {
+        result = execFileSync(checkCommand, checkArgs, {
+          encoding: 'utf8',
+          shell: false,
+        }).trim();
+      } catch {
+        return { path: null, error: undefined };
       }
 
+      return result ? { path: result } : { path: null };
+    } else {
+      const shell = '/bin/sh';
+      const checkArgs = ['-c', `command -v ${escapeShellArg(command, 'bash')}`];
+
+      let result: string | null = null;
+      try {
+        result = execFileSync(shell, checkArgs, {
+          encoding: 'utf8',
+          shell: false,
+        }).trim();
+      } catch {
+        return { path: null, error: undefined };
+      }
+
+      if (!result) return { path: null, error: undefined };
+      accessSync(result, fsConstants.X_OK);
       return { path: result, error: undefined };
-    } catch {
-      return { path: null, error: undefined };
     }
   } catch (error) {
     return {
