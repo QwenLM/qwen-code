@@ -19,6 +19,9 @@ describe('validateNonInterActiveAuth', () => {
   let originalEnvVertexAi: string | undefined;
   let originalEnvGcp: string | undefined;
   let originalEnvOpenAiApiKey: string | undefined;
+  let originalEnvAwsProfile: string | undefined;
+  let originalEnvAwsAccessKeyId: string | undefined;
+  let originalEnvAwsSecretAccessKey: string | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
   let processExitSpy: ReturnType<typeof vi.spyOn<[code?: number], never>>;
   let refreshAuthMock: ReturnType<typeof vi.fn>;
@@ -29,10 +32,16 @@ describe('validateNonInterActiveAuth', () => {
     originalEnvVertexAi = process.env['GOOGLE_GENAI_USE_VERTEXAI'];
     originalEnvGcp = process.env['GOOGLE_GENAI_USE_GCA'];
     originalEnvOpenAiApiKey = process.env['OPENAI_API_KEY'];
+    originalEnvAwsProfile = process.env['AWS_PROFILE'];
+    originalEnvAwsAccessKeyId = process.env['AWS_ACCESS_KEY_ID'];
+    originalEnvAwsSecretAccessKey = process.env['AWS_SECRET_ACCESS_KEY'];
     delete process.env['GEMINI_API_KEY'];
     delete process.env['GOOGLE_GENAI_USE_VERTEXAI'];
     delete process.env['GOOGLE_GENAI_USE_GCA'];
     delete process.env['OPENAI_API_KEY'];
+    delete process.env['AWS_PROFILE'];
+    delete process.env['AWS_ACCESS_KEY_ID'];
+    delete process.env['AWS_SECRET_ACCESS_KEY'];
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     processExitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit(${code}) called`);
@@ -79,6 +88,21 @@ describe('validateNonInterActiveAuth', () => {
       process.env['OPENAI_API_KEY'] = originalEnvOpenAiApiKey;
     } else {
       delete process.env['OPENAI_API_KEY'];
+    }
+    if (originalEnvAwsProfile !== undefined) {
+      process.env['AWS_PROFILE'] = originalEnvAwsProfile;
+    } else {
+      delete process.env['AWS_PROFILE'];
+    }
+    if (originalEnvAwsAccessKeyId !== undefined) {
+      process.env['AWS_ACCESS_KEY_ID'] = originalEnvAwsAccessKeyId;
+    } else {
+      delete process.env['AWS_ACCESS_KEY_ID'];
+    }
+    if (originalEnvAwsSecretAccessKey !== undefined) {
+      process.env['AWS_SECRET_ACCESS_KEY'] = originalEnvAwsSecretAccessKey;
+    } else {
+      delete process.env['AWS_SECRET_ACCESS_KEY'];
     }
     vi.restoreAllMocks();
   });
