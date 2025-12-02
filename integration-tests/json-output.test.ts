@@ -53,82 +53,6 @@ describe('JSON output', () => {
     }
   });
 
-  it('should return a JSON error for enforced auth mismatch before running', async () => {
-    const originalOpenaiApiKey = process.env['OPENAI_API_KEY'];
-    process.env['OPENAI_API_KEY'] = 'test-key';
-    await rig.setup('json-output-auth-mismatch', {
-      settings: {
-        security: { auth: { enforcedType: 'qwen-oauth' } },
-      },
-    });
-
-    let thrown: Error | undefined;
-    try {
-      await rig.run('Hello', '--output-format', 'json');
-      expect.fail('Expected process to exit with error');
-    } catch (e) {
-      thrown = e as Error;
-    } finally {
-      process.env['OPENAI_API_KEY'] = originalOpenaiApiKey;
-    }
-
-    expect(thrown).toBeDefined();
-    const message = (thrown as Error).message;
-
-    // The error JSON is written to stdout as a CLIResultMessageError
-    // Extract stdout from the error message
-    const stdoutMatch = message.match(/Stdout:\n([\s\S]*?)(?:\n\nStderr:|$)/);
-    expect(
-      stdoutMatch,
-      'Expected to find stdout in the error message',
-    ).toBeTruthy();
-
-    const stdout = stdoutMatch![1];
-    let parsed: unknown[];
-    try {
-      // Parse the JSON array from stdout
-      parsed = JSON.parse(stdout);
-    } catch (parseError) {
-      console.error('Failed to parse the following JSON:', stdout);
-      throw new Error(
-        `Test failed: Could not parse JSON from stdout. Details: ${parseError}`,
-      );
-    }
-
-    // The output should be an array of messages
-    expect(Array.isArray(parsed)).toBe(true);
-    expect(parsed.length).toBeGreaterThan(0);
-
-    // Find the result message with error
-    const resultMessage = parsed.find(
-      (msg: unknown) =>
-        typeof msg === 'object' &&
-        msg !== null &&
-        'type' in msg &&
-        msg.type === 'result' &&
-        'is_error' in msg &&
-        msg.is_error === true,
-    ) as {
-      type: string;
-      is_error: boolean;
-      subtype: string;
-      error?: { message: string; type?: string };
-    };
-
-    expect(resultMessage).toBeDefined();
-    expect(resultMessage.is_error).toBe(true);
-    expect(resultMessage).toHaveProperty('subtype');
-    expect(resultMessage.subtype).toBe('error_during_execution');
-    expect(resultMessage).toHaveProperty('error');
-    expect(resultMessage.error).toBeDefined();
-    expect(resultMessage.error?.message).toContain(
-      'configured auth type is qwen-oauth',
-    );
-    expect(resultMessage.error?.message).toContain(
-      'current auth type is openai',
-    );
-  });
-
   it('should return line-delimited JSON messages for stream-json output format', async () => {
     const result = await rig.run(
       'What is the capital of France?',
@@ -306,5 +230,81 @@ describe('JSON output', () => {
     expect(resultMessage.is_error).toBe(false);
     expect(resultMessage).toHaveProperty('result');
     expect(resultMessage.result.toLowerCase()).toContain('paris');
+  });
+
+  it('should return a JSON error for enforced auth mismatch before running', async () => {
+    const originalOpenaiApiKey = process.env['OPENAI_API_KEY'];
+    process.env['OPENAI_API_KEY'] = 'test-key';
+    await rig.setup('json-output-auth-mismatch', {
+      settings: {
+        security: { auth: { enforcedType: 'qwen-oauth' } },
+      },
+    });
+
+    let thrown: Error | undefined;
+    try {
+      await rig.run('Hello', '--output-format', 'json');
+      expect.fail('Expected process to exit with error');
+    } catch (e) {
+      thrown = e as Error;
+    } finally {
+      process.env['OPENAI_API_KEY'] = originalOpenaiApiKey;
+    }
+
+    expect(thrown).toBeDefined();
+    const message = (thrown as Error).message;
+
+    // The error JSON is written to stdout as a CLIResultMessageError
+    // Extract stdout from the error message
+    const stdoutMatch = message.match(/Stdout:\n([\s\S]*?)(?:\n\nStderr:|$)/);
+    expect(
+      stdoutMatch,
+      'Expected to find stdout in the error message',
+    ).toBeTruthy();
+
+    const stdout = stdoutMatch![1];
+    let parsed: unknown[];
+    try {
+      // Parse the JSON array from stdout
+      parsed = JSON.parse(stdout);
+    } catch (parseError) {
+      console.error('Failed to parse the following JSON:', stdout);
+      throw new Error(
+        `Test failed: Could not parse JSON from stdout. Details: ${parseError}`,
+      );
+    }
+
+    // The output should be an array of messages
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
+
+    // Find the result message with error
+    const resultMessage = parsed.find(
+      (msg: unknown) =>
+        typeof msg === 'object' &&
+        msg !== null &&
+        'type' in msg &&
+        msg.type === 'result' &&
+        'is_error' in msg &&
+        msg.is_error === true,
+    ) as {
+      type: string;
+      is_error: boolean;
+      subtype: string;
+      error?: { message: string; type?: string };
+    };
+
+    expect(resultMessage).toBeDefined();
+    expect(resultMessage.is_error).toBe(true);
+    expect(resultMessage).toHaveProperty('subtype');
+    expect(resultMessage.subtype).toBe('error_during_execution');
+    expect(resultMessage).toHaveProperty('error');
+    expect(resultMessage.error).toBeDefined();
+    expect(resultMessage.error?.message).toContain(
+      'configured auth type is qwen-oauth',
+    );
+    expect(resultMessage.error?.message).toContain(
+      'current auth type is openai',
+    );
   });
 });
