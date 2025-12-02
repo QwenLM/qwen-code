@@ -8,12 +8,15 @@ import type { ReadableStream, WritableStream } from 'node:stream/web';
 
 import type { Config, ConversationRecord } from '@qwen-code/qwen-code-core';
 import {
+  APPROVAL_MODE_INFO,
+  APPROVAL_MODES,
   AuthType,
   clearCachedCredentialFile,
   MCPServerConfig,
   SessionService,
   buildApiHistoryFromConversation,
 } from '@qwen-code/qwen-code-core';
+import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
@@ -82,9 +85,30 @@ class GeminiAgent {
       },
     ];
 
+    // Get current approval mode from config
+    const currentApprovalMode = this.config.getApprovalMode();
+
+    // Build available modes from shared APPROVAL_MODE_INFO
+    const availableModes = APPROVAL_MODES.map((mode) => ({
+      id: mode as ApprovalModeValue,
+      name: APPROVAL_MODE_INFO[mode].name,
+      description: APPROVAL_MODE_INFO[mode].description,
+    }));
+
+    const version = process.env['CLI_VERSION'] || process.version;
+
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
+      agentInfo: {
+        name: 'qwen-code',
+        title: 'Qwen Code',
+        version,
+      },
       authMethods,
+      modes: {
+        currentModeId: currentApprovalMode as ApprovalModeValue,
+        availableModes,
+      },
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: {
@@ -231,6 +255,14 @@ class GeminiAgent {
       nextCursor: result.nextCursor,
       hasMore: result.hasMore,
     };
+  }
+
+  async setMode(params: acp.SetModeRequest): Promise<acp.SetModeResponse> {
+    const session = this.sessions.get(params.sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${params.sessionId}`);
+    }
+    return session.setMode(params);
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {

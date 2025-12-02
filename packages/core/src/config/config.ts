@@ -116,6 +116,42 @@ export enum ApprovalMode {
 
 export const APPROVAL_MODES = Object.values(ApprovalMode);
 
+/**
+ * Information about an approval mode including display name and description.
+ */
+export interface ApprovalModeInfo {
+  id: ApprovalMode;
+  name: string;
+  description: string;
+}
+
+/**
+ * Detailed information about each approval mode.
+ * Used for UI display and protocol responses.
+ */
+export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
+  [ApprovalMode.PLAN]: {
+    id: ApprovalMode.PLAN,
+    name: 'Plan',
+    description: 'Analyze only, do not modify files or execute commands',
+  },
+  [ApprovalMode.DEFAULT]: {
+    id: ApprovalMode.DEFAULT,
+    name: 'Default',
+    description: 'Require approval for file edits or shell commands',
+  },
+  [ApprovalMode.AUTO_EDIT]: {
+    id: ApprovalMode.AUTO_EDIT,
+    name: 'Auto Edit',
+    description: 'Automatically approve file edits',
+  },
+  [ApprovalMode.YOLO]: {
+    id: ApprovalMode.YOLO,
+    name: 'YOLO',
+    description: 'Automatically approve all tools',
+  },
+};
+
 export interface AccessibilitySettings {
   disableLoadingPhrases?: boolean;
   screenReader?: boolean;

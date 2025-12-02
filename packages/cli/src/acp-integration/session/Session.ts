@@ -14,6 +14,7 @@ import type {
   SubAgentEventEmitter,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
   convertToFunctionResponse,
   DiscoveredMCPTool,
   StreamEventType,
@@ -36,7 +37,13 @@ import {
   handleSlashCommand,
   getAvailableCommands,
 } from '../../nonInteractiveCliCommands.js';
-import type { AvailableCommand, AvailableCommandsUpdate } from '../schema.js';
+import type {
+  AvailableCommand,
+  AvailableCommandsUpdate,
+  SetModeRequest,
+  SetModeResponse,
+  ApprovalModeValue,
+} from '../schema.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 
 // Import modular session components
@@ -312,6 +319,24 @@ export class Session implements SessionContext {
     params: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
     return this.client.requestPermission(params);
+  }
+
+  /**
+   * Sets the approval mode for the current session.
+   * Maps ACP approval mode values to core ApprovalMode enum.
+   */
+  async setMode(params: SetModeRequest): Promise<SetModeResponse> {
+    const modeMap: Record<ApprovalModeValue, ApprovalMode> = {
+      plan: ApprovalMode.PLAN,
+      default: ApprovalMode.DEFAULT,
+      'auto-edit': ApprovalMode.AUTO_EDIT,
+      yolo: ApprovalMode.YOLO,
+    };
+
+    const approvalMode = modeMap[params.mode];
+    this.config.setApprovalMode(approvalMode);
+
+    return { mode: params.mode };
   }
 
   private async runTool(
