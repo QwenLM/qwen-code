@@ -1,0 +1,31 @@
+# Python Requirements for Quebec Electrical Plan Analyzer
+# Installation: pip install -r requirements.txt
+
+# OCR
+pytesseract==0.3.10
+Pillow==10.1.0
+
+# Computer Vision
+opencv-python==4.8.1.78
+numpy==1.24.3
+
+# PDF Processing
+PyMuPDF==1.23.8
+pdf2image==1.16.3
+
+# Machine Learning (optional - pour améliorer détection)
+# torch==2.1.0
+# torchvision==0.16.0
+# ultralytics==8.0.206  # YOLO
+
+# FAISS Vector Database
+faiss-cpu==1.7.4
+sentence-transformers==2.2.2
+
+# Utilities
+scikit-image==0.22.0
+
+# Note: Tesseract OCR doit être installé au niveau système:
+# Ubuntu/Debian: sudo apt-get install tesseract-ocr tesseract-ocr-fra
+# macOS: brew install tesseract tesseract-lang
+# Windows: https://github.com/UB-Mannheim/tesseract/wiki
