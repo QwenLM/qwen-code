@@ -105,6 +105,7 @@ export * from './tools/mcp-client.js';
 export * from './tools/mcp-tool.js';
 export * from './tools/task.js';
 export * from './tools/todoWrite.js';
+export * from './tools/exitPlanMode.js';
 
 // MCP OAuth
 export { MCPOAuthProvider } from './mcp/oauth-provider.js';

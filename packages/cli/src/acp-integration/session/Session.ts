@@ -26,7 +26,10 @@ import {
   isNodeError,
   TaskTool,
   UserPromptEvent,
+  TodoWriteTool,
+  ExitPlanModeTool,
 } from '@qwen-code/qwen-code-core';
+
 import * as acp from '../acp.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as fs from 'node:fs/promises';
@@ -43,6 +46,7 @@ import type {
   SetModeRequest,
   SetModeResponse,
   ApprovalModeValue,
+  CurrentModeUpdate,
 } from '../schema.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 
@@ -324,10 +328,38 @@ export class Session implements SessionContext {
       yolo: ApprovalMode.YOLO,
     };
 
-    const approvalMode = modeMap[params.mode];
+    const approvalMode = modeMap[params.modeId];
     this.config.setApprovalMode(approvalMode);
 
-    return { mode: params.mode };
+    return { modeId: params.modeId };
+  }
+
+  /**
+   * Sends a current_mode_update notification to the client.
+   * Called after the agent switches modes (e.g., from exit_plan_mode tool).
+   */
+  private async sendCurrentModeUpdateNotification(
+    outcome: ToolConfirmationOutcome,
+  ): Promise<void> {
+    // Determine the new mode based on the approval outcome
+    // This mirrors the logic in ExitPlanModeTool.onConfirm
+    let newModeId: ApprovalModeValue;
+    switch (outcome) {
+      case ToolConfirmationOutcome.ProceedAlways:
+        newModeId = 'auto-edit';
+        break;
+      case ToolConfirmationOutcome.ProceedOnce:
+      default:
+        newModeId = 'default';
+        break;
+    }
+
+    const update: CurrentModeUpdate = {
+      sessionUpdate: 'current_mode_update',
+      modeId: newModeId,
+    };
+
+    await this.sendUpdate(update);
   }
 
   private async runTool(
@@ -383,16 +415,15 @@ export class Session implements SessionContext {
     }
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = this.toolCallEmitter.isTodoWriteTool(fc.name);
+    const isTodoWriteTool = tool.name === TodoWriteTool.Name;
+    const isTaskTool = tool.name === TaskTool.Name;
+    const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
 
     // Track cleanup functions for sub-agent event listeners
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     try {
       const invocation = tool.build(args);
-
-      // Detect TaskTool and set up sub-agent tool tracking using SubAgentTracker
-      const isTaskTool = tool.name === TaskTool.Name;
 
       if (isTaskTool && 'eventEmitter' in invocation) {
         // Access eventEmitter from TaskTool invocation
@@ -427,6 +458,20 @@ export class Session implements SessionContext {
           });
         }
 
+        // Add plan content for exit_plan_mode
+        if (confirmationDetails.type === 'plan') {
+          content.push({
+            type: 'content',
+            content: {
+              type: 'text',
+              text: confirmationDetails.plan,
+            },
+          });
+        }
+
+        // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
+        const mappedKind = this.toolCallEmitter.mapToolKind(tool.kind, fc.name);
+
         const params: acp.RequestPermissionRequest = {
           sessionId: this.sessionId,
           options: toPermissionOptions(confirmationDetails),
@@ -436,7 +481,7 @@ export class Session implements SessionContext {
             title: invocation.getDescription(),
             content,
             locations: invocation.toolLocations(),
-            kind: tool.kind,
+            kind: mappedKind,
           },
         };
 
@@ -449,6 +494,11 @@ export class Session implements SessionContext {
                 .parse(output.outcome.optionId);
 
         await confirmationDetails.onConfirm(outcome);
+
+        // After exit_plan_mode confirmation, send current_mode_update notification
+        if (isExitPlanModeTool && outcome !== ToolConfirmationOutcome.Cancel) {
+          await this.sendCurrentModeUpdateNotification(outcome);
+        }
 
         switch (outcome) {
           case ToolConfirmationOutcome.Cancel:
@@ -909,10 +959,19 @@ function toPermissionOptions(
       return [
         {
           optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow Plans`,
+          name: `Yes, and auto-accept edits`,
           kind: 'allow_always',
         },
-        ...basicPermissionOptions,
+        {
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          name: `Yes, and manually approve edits`,
+          kind: 'allow_once',
+        },
+        {
+          optionId: ToolConfirmationOutcome.Cancel,
+          name: `No, keep planning (esc)`,
+          kind: 'reject_once',
+        },
       ];
     default: {
       const unreachable: never = confirmation;

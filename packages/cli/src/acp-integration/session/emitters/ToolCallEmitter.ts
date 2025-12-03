@@ -14,7 +14,11 @@ import type {
 } from '../types.js';
 import type * as acp from '../../acp.js';
 import type { Part } from '@google/genai';
-import { TodoWriteTool, Kind } from '@qwen-code/qwen-code-core';
+import {
+  TodoWriteTool,
+  Kind,
+  ExitPlanModeTool,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Unified tool call event emitter.
@@ -155,6 +159,13 @@ export class ToolCallEmitter extends BaseEmitter {
   }
 
   /**
+   * Checks if a tool name is the ExitPlanModeTool.
+   */
+  isExitPlanModeTool(toolName: string): boolean {
+    return toolName === ExitPlanModeTool.Name;
+  }
+
+  /**
    * Resolves tool metadata from the registry.
    * Falls back to defaults if tool not found or build fails.
    *
@@ -181,7 +192,8 @@ export class ToolCallEmitter extends BaseEmitter {
           path: loc.path,
           line: loc.line ?? null,
         }));
-        kind = this.mapToolKind(tool.kind);
+        // Pass tool name to handle special cases like exit_plan_mode -> switch_mode
+        kind = this.mapToolKind(tool.kind, toolName);
       } catch {
         // Use defaults on build failure
       }
@@ -192,8 +204,16 @@ export class ToolCallEmitter extends BaseEmitter {
 
   /**
    * Maps core Tool Kind enum to ACP ToolKind string literals.
+   *
+   * @param kind - The core Kind enum value
+   * @param toolName - Optional tool name to handle special cases like exit_plan_mode
    */
-  mapToolKind(kind: Kind): acp.ToolKind {
+  mapToolKind(kind: Kind, toolName?: string): acp.ToolKind {
+    // Special case: exit_plan_mode uses 'switch_mode' kind per ACP spec
+    if (toolName && this.isExitPlanModeTool(toolName)) {
+      return 'switch_mode';
+    }
+
     const kindMap: Record<Kind, acp.ToolKind> = {
       [Kind.Read]: 'read',
       [Kind.Edit]: 'edit',

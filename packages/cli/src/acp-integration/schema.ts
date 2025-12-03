@@ -196,6 +196,7 @@ export const toolKindSchema = z.union([
   z.literal('execute'),
   z.literal('think'),
   z.literal('fetch'),
+  z.literal('switch_mode'),
   z.literal('other'),
 ]);
 
@@ -235,11 +236,11 @@ export const approvalModeValueSchema = z.union([
 
 export const setModeRequestSchema = z.object({
   sessionId: z.string(),
-  mode: approvalModeValueSchema,
+  modeId: approvalModeValueSchema,
 });
 
 export const setModeResponseSchema = z.object({
-  mode: approvalModeValueSchema,
+  modeId: approvalModeValueSchema,
 });
 
 export const authenticateRequestSchema = z.object({
@@ -484,6 +485,13 @@ export const availableCommandsUpdateSchema = z.object({
   sessionUpdate: z.literal('available_commands_update'),
 });
 
+export const currentModeUpdateSchema = z.object({
+  sessionUpdate: z.literal('current_mode_update'),
+  modeId: approvalModeValueSchema,
+});
+
+export type CurrentModeUpdate = z.infer<typeof currentModeUpdateSchema>;
+
 export const sessionUpdateSchema = z.union([
   z.object({
     content: contentBlockSchema,
@@ -522,6 +530,7 @@ export const sessionUpdateSchema = z.union([
     entries: z.array(planEntrySchema),
     sessionUpdate: z.literal('plan'),
   }),
+  currentModeUpdateSchema,
   availableCommandsUpdateSchema,
 ]);
 

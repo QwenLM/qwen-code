@@ -383,6 +383,32 @@ describe('ToolCallEmitter', () => {
       expect(emitter.mapToolKind(Kind.Fetch)).toBe('fetch');
       expect(emitter.mapToolKind(Kind.Other)).toBe('other');
     });
+
+    it('should map exit_plan_mode tool to switch_mode kind', () => {
+      // exit_plan_mode uses Kind.Think internally, but should map to switch_mode per ACP spec
+      expect(emitter.mapToolKind(Kind.Think, 'exit_plan_mode')).toBe(
+        'switch_mode',
+      );
+    });
+
+    it('should not affect other tools with Kind.Think', () => {
+      // Other tools with Kind.Think should still map to think
+      expect(emitter.mapToolKind(Kind.Think, 'todo_write')).toBe('think');
+      expect(emitter.mapToolKind(Kind.Think, 'some_other_tool')).toBe('think');
+    });
+  });
+
+  describe('isExitPlanModeTool', () => {
+    it('should return true for exit_plan_mode tool name', () => {
+      expect(emitter.isExitPlanModeTool('exit_plan_mode')).toBe(true);
+    });
+
+    it('should return false for other tool names', () => {
+      expect(emitter.isExitPlanModeTool('read_file')).toBe(false);
+      expect(emitter.isExitPlanModeTool('edit_file')).toBe(false);
+      expect(emitter.isExitPlanModeTool('todo_write')).toBe(false);
+      expect(emitter.isExitPlanModeTool('')).toBe(false);
+    });
   });
 
   describe('resolveToolMetadata', () => {

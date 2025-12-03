@@ -60,7 +60,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   getDescription(): string {
-    return 'Present implementation plan for user approval';
+    return 'Plan:';
   }
 
   override async shouldConfirmExecute(
