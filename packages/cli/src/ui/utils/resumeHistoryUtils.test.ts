@@ -102,7 +102,7 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
-  it('marks tool results as error, skips thought text, and falls back when tool is missing', () => {
+  it('marks tool results as error, captures thought text, and falls back when tool is missing', () => {
     const conversation = {
       messages: [
         {
@@ -142,6 +142,11 @@ describe('resumeHistoryUtils', () => {
     const items = buildResumedHistoryItems(session, makeConfig({}));
 
     expect(items).toEqual([
+      {
+        id: expect.any(Number),
+        type: 'gemini_thought',
+        text: 'should be skipped',
+      },
       { id: expect.any(Number), type: 'gemini', text: 'visible text' },
       {
         id: expect.any(Number),

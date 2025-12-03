@@ -17,7 +17,7 @@ import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
 /**
- * Extracts text content from a Content object's parts.
+ * Extracts text content from a Content object's parts (excluding thought parts).
  */
 function extractTextFromParts(parts: Part[] | undefined): string {
   if (!parts) return '';
@@ -32,6 +32,22 @@ function extractTextFromParts(parts: Part[] | undefined): string {
     }
   }
   return textParts.join('\n');
+}
+
+/**
+ * Extracts thought text content from a Content object's parts.
+ * Thought parts are identified by having `thought: true`.
+ */
+function extractThoughtTextFromParts(parts: Part[] | undefined): string {
+  if (!parts) return '';
+
+  const thoughtParts: string[] = [];
+  for (const part of parts) {
+    if ('text' in part && part.text && 'thought' in part && part.thought) {
+      thoughtParts.push(part.text);
+    }
+  }
+  return thoughtParts.join('\n');
 }
 
 /**
@@ -187,11 +203,27 @@ function convertToHistoryItems(
       case 'assistant': {
         const parts = record.message?.parts as Part[] | undefined;
 
+        // Extract thought content
+        const thoughtText = extractThoughtTextFromParts(parts);
+
         // Extract text content (non-function-call, non-thought)
         const text = extractTextFromParts(parts);
 
         // Extract function calls
         const functionCalls = extractFunctionCalls(parts);
+
+        // If there's thought content, add it as a gemini_thought message
+        if (thoughtText) {
+          // Flush any pending tool group before thought
+          if (currentToolGroup.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: [...currentToolGroup],
+            });
+            currentToolGroup = [];
+          }
+          items.push({ type: 'gemini_thought', text: thoughtText });
+        }
 
         // If there's text content, add it as a gemini message
         if (text) {

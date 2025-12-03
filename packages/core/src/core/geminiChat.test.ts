@@ -1541,10 +1541,10 @@ describe('GeminiChat', () => {
         {
           role: 'model',
           parts: [
-            { text: 'thinking...', thoughtSignature: 'thought-123' },
+            { text: 'thinking...', thought: true },
+            { text: 'hi' },
             {
               functionCall: { name: 'test', args: {} },
-              thoughtSignature: 'thought-456',
             },
           ],
         },
@@ -1559,10 +1559,7 @@ describe('GeminiChat', () => {
         },
         {
           role: 'model',
-          parts: [
-            { text: 'thinking...' },
-            { functionCall: { name: 'test', args: {} } },
-          ],
+          parts: [{ text: 'hi' }, { functionCall: { name: 'test', args: {} } }],
         },
       ]);
     });

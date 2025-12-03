@@ -419,6 +419,9 @@ export class GeminiClient {
 
       // record user message for session management
       this.config.getChatRecordingService()?.recordUserMessage(request);
+
+      // strip thoughts from history before sending the message
+      this.stripThoughtsFromHistory();
     }
     this.sessionTurnCount++;
     if (

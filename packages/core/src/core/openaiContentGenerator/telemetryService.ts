@@ -10,6 +10,7 @@ import { ApiErrorEvent, ApiResponseEvent } from '../../telemetry/types.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type { GenerateContentResponse } from '@google/genai';
 import type OpenAI from 'openai';
+import type { ExtendedCompletionChunkDelta } from './converter.js';
 
 export interface RequestContext {
   userPromptId: string;
@@ -172,6 +173,7 @@ export class DefaultTelemetryService implements TelemetryService {
       | 'content_filter'
       | 'function_call'
       | null = null;
+    let combinedReasoning = '';
     let usage:
       | {
           prompt_tokens: number;
@@ -183,6 +185,12 @@ export class DefaultTelemetryService implements TelemetryService {
     for (const chunk of chunks) {
       const choice = chunk.choices?.[0];
       if (choice) {
+        // Combine reasoning content
+        const reasoningContent = (choice.delta as ExtendedCompletionChunkDelta)
+          ?.reasoning_content;
+        if (reasoningContent) {
+          combinedReasoning += reasoningContent;
+        }
         // Combine text content
         if (choice.delta?.content) {
           combinedContent += choice.delta.content;
@@ -230,6 +238,11 @@ export class DefaultTelemetryService implements TelemetryService {
       content: combinedContent || null,
       refusal: null,
     };
+    if (combinedReasoning) {
+      // Attach reasoning content if any thought tokens were streamed
+      (message as { reasoning_content?: string }).reasoning_content =
+        combinedReasoning;
+    }
 
     // Add tool calls if any
     if (toolCalls.length > 0) {

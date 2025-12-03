@@ -103,6 +103,16 @@ export type HistoryItemGeminiContent = HistoryItemBase & {
   text: string;
 };
 
+export type HistoryItemGeminiThought = HistoryItemBase & {
+  type: 'gemini_thought';
+  text: string;
+};
+
+export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
+  type: 'gemini_thought_content';
+  text: string;
+};
+
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
@@ -246,6 +256,8 @@ export type HistoryItemWithoutId =
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent
+  | HistoryItemGeminiThought
+  | HistoryItemGeminiThoughtContent
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning

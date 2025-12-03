@@ -443,20 +443,28 @@ export class GeminiChat {
   }
 
   stripThoughtsFromHistory(): void {
-    this.history = this.history.map((content) => {
-      const newContent = { ...content };
-      if (newContent.parts) {
-        newContent.parts = newContent.parts.map((part) => {
-          if (part && typeof part === 'object' && 'thoughtSignature' in part) {
-            const newPart = { ...part };
-            delete (newPart as { thoughtSignature?: string }).thoughtSignature;
-            return newPart;
-          }
-          return part;
-        });
-      }
-      return newContent;
-    });
+    this.history = this.history
+      .map((content) => {
+        if (!content.parts) return content;
+
+        // Filter out thought parts entirely
+        const filteredParts = content.parts.filter(
+          (part) =>
+            !(
+              part &&
+              typeof part === 'object' &&
+              'thought' in part &&
+              part.thought
+            ),
+        );
+
+        return {
+          ...content,
+          parts: filteredParts,
+        };
+      })
+      // Remove Content objects that have no parts left after filtering
+      .filter((content) => content.parts && content.parts.length > 0);
   }
 
   setTools(tools: Tool[]): void {
@@ -497,8 +505,6 @@ export class GeminiChat {
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
-    // Non-thought parts for history (what we send back to the API)
-    const historyParts: Part[] = [];
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 
     let hasToolCall = false;
@@ -516,8 +522,6 @@ export class GeminiChat {
 
           // Collect all parts for recording
           allModelParts.push(...content.parts);
-          // Collect non-thought parts for history
-          historyParts.push(...content.parts.filter((part) => !part.thought));
         }
       }
 
@@ -534,9 +538,15 @@ export class GeminiChat {
       yield chunk; // Yield every chunk to the UI immediately.
     }
 
-    // Consolidate text parts for history (merges adjacent text parts).
+    const thoughtParts = allModelParts.filter((part) => part.thought);
+    const thoughtText = thoughtParts
+      .map((part) => part.text)
+      .join('')
+      .trim();
+
+    const contentParts = allModelParts.filter((part) => !part.thought);
     const consolidatedHistoryParts: Part[] = [];
-    for (const part of historyParts) {
+    for (const part of contentParts) {
       const lastPart =
         consolidatedHistoryParts[consolidatedHistoryParts.length - 1];
       if (
@@ -550,20 +560,21 @@ export class GeminiChat {
       }
     }
 
-    const responseText = consolidatedHistoryParts
+    const contentText = consolidatedHistoryParts
       .filter((part) => part.text)
       .map((part) => part.text)
       .join('')
       .trim();
 
     // Record assistant turn with raw Content and metadata
-    if (responseText || hasToolCall || usageMetadata) {
+    if (thoughtText || contentText || hasToolCall || usageMetadata) {
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
-          ...(responseText ? [{ text: responseText }] : []),
+          ...(thoughtText ? [{ text: thoughtText, thought: true }] : []),
+          ...(contentText ? [{ text: contentText }] : []),
           ...(hasToolCall
-            ? historyParts
+            ? contentParts
                 .filter((part) => part.functionCall)
                 .map((part) => ({ functionCall: part.functionCall }))
             : []),
@@ -579,7 +590,7 @@ export class GeminiChat {
     // We throw an error only when there's no tool call AND:
     // - No finish reason, OR
     // - Empty response text (e.g., only thoughts with no actual content)
-    if (!hasToolCall && (!hasFinishReason || !responseText)) {
+    if (!hasToolCall && (!hasFinishReason || !contentText)) {
       if (!hasFinishReason) {
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
@@ -593,8 +604,13 @@ export class GeminiChat {
       }
     }
 
-    // Add to history (without thoughts, for API calls)
-    this.history.push({ role: 'model', parts: consolidatedHistoryParts });
+    this.history.push({
+      role: 'model',
+      parts: [
+        ...(thoughtText ? [{ text: thoughtText, thought: true }] : []),
+        ...consolidatedHistoryParts,
+      ],
+    });
   }
 }
 

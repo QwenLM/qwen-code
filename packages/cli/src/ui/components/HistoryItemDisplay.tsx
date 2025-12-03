@@ -15,6 +15,8 @@ import { InfoMessage } from './messages/InfoMessage.js';
 import { ErrorMessage } from './messages/ErrorMessage.js';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { GeminiMessageContent } from './messages/GeminiMessageContent.js';
+import { GeminiThoughtMessage } from './messages/GeminiThoughtMessage.js';
+import { GeminiThoughtMessageContent } from './messages/GeminiThoughtMessageContent.js';
 import { CompressionMessage } from './messages/CompressionMessage.js';
 import { SummaryMessage } from './messages/SummaryMessage.js';
 import { WarningMessage } from './messages/WarningMessage.js';
@@ -77,6 +79,26 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'gemini_content' && (
         <GeminiMessageContent
+          text={itemForDisplay.text}
+          isPending={isPending}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          terminalWidth={terminalWidth}
+        />
+      )}
+      {itemForDisplay.type === 'gemini_thought' && (
+        <GeminiThoughtMessage
+          text={itemForDisplay.text}
+          isPending={isPending}
+          availableTerminalHeight={
+            availableTerminalHeightGemini ?? availableTerminalHeight
+          }
+          terminalWidth={terminalWidth}
+        />
+      )}
+      {itemForDisplay.type === 'gemini_thought_content' && (
+        <GeminiThoughtMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
           availableTerminalHeight={

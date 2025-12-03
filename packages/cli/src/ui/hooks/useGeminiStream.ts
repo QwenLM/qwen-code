@@ -497,6 +497,87 @@ export const useGeminiStream = (
     [addItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
+  const mergeThought = useCallback(
+    (incoming: ThoughtSummary) => {
+      setThought((prev) => {
+        if (!prev) {
+          return incoming;
+        }
+        const subject = incoming.subject || prev.subject;
+        const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        return { subject, description };
+      });
+    },
+    [setThought],
+  );
+
+  const handleThoughtEvent = useCallback(
+    (
+      eventValue: ThoughtSummary,
+      currentThoughtBuffer: string,
+      userMessageTimestamp: number,
+    ): string => {
+      if (turnCancelledRef.current) {
+        return '';
+      }
+
+      // Extract the description text from the thought summary
+      const thoughtText = eventValue.description ?? '';
+      if (!thoughtText) {
+        return currentThoughtBuffer;
+      }
+
+      let newThoughtBuffer = currentThoughtBuffer + thoughtText;
+
+      // If we're not already showing a thought, start a new one
+      if (
+        pendingHistoryItemRef.current?.type !== 'gemini_thought' &&
+        pendingHistoryItemRef.current?.type !== 'gemini_thought_content'
+      ) {
+        // If there's a pending non-thought item, finalize it first
+        if (pendingHistoryItemRef.current) {
+          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        }
+        setPendingHistoryItem({ type: 'gemini_thought', text: '' });
+        newThoughtBuffer = thoughtText;
+      }
+
+      // Split large thought messages for better rendering performance
+      const splitPoint = findLastSafeSplitPoint(newThoughtBuffer);
+      if (splitPoint === newThoughtBuffer.length) {
+        // Update the existing thought message with accumulated content
+        setPendingHistoryItem((item) => ({
+          type: item?.type as 'gemini_thought' | 'gemini_thought_content',
+          text: newThoughtBuffer,
+        }));
+      } else {
+        // Split the thought message for performance
+        const beforeText = newThoughtBuffer.substring(0, splitPoint);
+        const afterText = newThoughtBuffer.substring(splitPoint);
+        addItem(
+          {
+            type: pendingHistoryItemRef.current?.type as
+              | 'gemini_thought'
+              | 'gemini_thought_content',
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        setPendingHistoryItem({
+          type: 'gemini_thought_content',
+          text: afterText,
+        });
+        newThoughtBuffer = afterText;
+      }
+
+      // Also update the thought state for the loading indicator
+      mergeThought(eventValue);
+
+      return newThoughtBuffer;
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+  );
+
   const handleUserCancelledEvent = useCallback(
     (userMessageTimestamp: number) => {
       if (turnCancelledRef.current) {
@@ -710,11 +791,16 @@ export const useGeminiStream = (
       signal: AbortSignal,
     ): Promise<StreamProcessingStatus> => {
       let geminiMessageBuffer = '';
+      let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
       for await (const event of stream) {
         switch (event.type) {
           case ServerGeminiEventType.Thought:
-            setThought(event.value);
+            thoughtBuffer = handleThoughtEvent(
+              event.value,
+              thoughtBuffer,
+              userMessageTimestamp,
+            );
             break;
           case ServerGeminiEventType.Content:
             geminiMessageBuffer = handleContentEvent(
@@ -776,6 +862,7 @@ export const useGeminiStream = (
     },
     [
       handleContentEvent,
+      handleThoughtEvent,
       handleUserCancelledEvent,
       handleErrorEvent,
       scheduleToolCalls,
