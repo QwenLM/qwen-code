@@ -22,13 +22,29 @@ type PendingRequest = {
   timeout: NodeJS.Timeout;
 };
 
+type SessionUpdateNotification = {
+  sessionId?: string;
+  update?: {
+    sessionUpdate?: string;
+    availableCommands?: Array<{
+      name: string;
+      description: string;
+      input?: { hint: string } | null;
+    }>;
+    content?: {
+      type: string;
+      text?: string;
+    };
+  };
+};
+
 /**
  * Sets up an ACP test environment with all necessary utilities.
  */
 function setupAcpTest(rig: TestRig) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
-  const sessionUpdates: Array<{ sessionId?: string }> = [];
+  const sessionUpdates: SessionUpdateNotification[] = [];
   const stderr: string[] = [];
 
   const agent = spawn('node', [rig.bundlePath, '--experimental-acp'], {
@@ -83,7 +99,7 @@ function setupAcpTest(rig: TestRig) {
   const handleMessage = (msg: {
     id?: number;
     method?: string;
-    params?: { sessionId?: string; path?: string; content?: string };
+    params?: SessionUpdateNotification & { path?: string; content?: string };
     result?: unknown;
     error?: { message?: string };
   }) => {
@@ -99,7 +115,10 @@ function setupAcpTest(rig: TestRig) {
     }
 
     if (msg.method === 'session/update') {
-      sessionUpdates.push({ sessionId: msg.params?.sessionId });
+      sessionUpdates.push({
+        sessionId: msg.params?.sessionId,
+        update: msg.params?.update,
+      });
       return;
     }
 
@@ -321,6 +340,66 @@ describe('acp integration', () => {
       })) as { mode: string };
       expect(setModeResult3).toBeDefined();
       expect(setModeResult3.mode).toBe('default');
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('receives available_commands_update with slash commands after session creation', async () => {
+    const rig = new TestRig();
+    rig.setup('acp slash commands');
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
+
+    try {
+      // Initialize
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      // Create a new session
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      // Wait for available_commands_update to be received
+      await delay(1000);
+
+      // Verify available_commands_update is received
+      const commandsUpdate = sessionUpdates.find(
+        (update) =>
+          update.update?.sessionUpdate === 'available_commands_update',
+      );
+
+      expect(commandsUpdate).toBeDefined();
+      expect(commandsUpdate?.update?.availableCommands).toBeDefined();
+      expect(Array.isArray(commandsUpdate?.update?.availableCommands)).toBe(
+        true,
+      );
+
+      // Verify that the 'init' command is present (the only allowed built-in command for ACP)
+      const initCommand = commandsUpdate?.update?.availableCommands?.find(
+        (cmd) => cmd.name === 'init',
+      );
+      expect(initCommand).toBeDefined();
+      expect(initCommand?.description).toBeTruthy();
+
+      // Note: We don't test /init execution here because it triggers a complex
+      // multi-step process (listing files, reading up to 10 files, generating QWEN.md)
+      // that can take 30-60+ seconds, exceeding the request timeout.
+      // The slash command execution path is tested via simpler prompts in other tests.
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));

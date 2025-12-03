@@ -267,7 +267,6 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving user message:', error);
-      throw error;
     }
   }
 
@@ -302,7 +301,6 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving assistant turn:', error);
-      throw error;
     }
   }
 
@@ -347,7 +345,6 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving tool result:', error);
-      throw error;
     }
   }
 
@@ -368,7 +365,6 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving slash command record:', error);
-      throw error;
     }
   }
 
@@ -389,7 +385,6 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving chat compression record:', error);
-      throw error;
     }
   }
 
@@ -408,7 +403,6 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       console.error('Error saving ui telemetry record:', error);
-      throw error;
     }
   }
 }

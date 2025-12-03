@@ -37,4 +37,4 @@ export { HistoryReplayer } from './HistoryReplayer.js';
 export { SubAgentTracker } from './SubAgentTracker.js';
 
 // Main Session class
-export { Session, ALLOWED_BUILTIN_COMMANDS_FOR_ACP } from './Session.js';
+export { Session } from './Session.js';
