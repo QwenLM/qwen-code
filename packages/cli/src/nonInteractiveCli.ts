@@ -185,6 +185,7 @@ export async function runNonInteractive(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
+          { isContinuation: true },
         );
 
         // Start assistant message for this turn
@@ -205,7 +206,9 @@ export async function runNonInteractive(
             }
           } else {
             // Text output mode - direct stdout
-            if (event.type === GeminiEventType.Content) {
+            if (event.type === GeminiEventType.Thought) {
+              process.stdout.write(event.value.description);
+            } else if (event.type === GeminiEventType.Content) {
               process.stdout.write(event.value);
             } else if (event.type === GeminiEventType.ToolCallRequest) {
               toolCallRequests.push(event.value);
