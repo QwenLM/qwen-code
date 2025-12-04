@@ -437,7 +437,18 @@ const createMcpServer = (diffManager: DiffManager) => {
       inputSchema: OpenDiffRequestSchema.shape,
     },
     async ({ filePath, newContent }: z.infer<typeof OpenDiffRequestSchema>) => {
-      await diffManager.showDiff(filePath, newContent);
+      // Read old content if file exists, otherwise use empty string
+      let oldContent = '';
+      try {
+        const fileUri = vscode.Uri.file(filePath);
+        const document = await vscode.workspace.openTextDocument(fileUri);
+        oldContent = document.getText();
+      } catch (_error) {
+        // File doesn't exist, use empty string (creating new file)
+        oldContent = '';
+      }
+
+      await diffManager.showDiff(filePath, oldContent, newContent);
       return { content: [] };
     },
   );

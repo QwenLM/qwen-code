@@ -14,6 +14,8 @@ import {
   IDE_DEFINITIONS,
   type IdeInfo,
 } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
+import { WebViewProvider } from './webview/WebViewProvider.js';
+import { registerNewCommands } from './commands/index.js';
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
@@ -31,6 +33,7 @@ const HIDE_INSTALLATION_GREETING_IDES: ReadonlySet<IdeInfo['name']> = new Set([
 
 let ideServer: IDEServer;
 let logger: vscode.OutputChannel;
+let webViewProviders: WebViewProvider[] = []; // Track multiple chat tabs
 
 let log: (message: string) => void = () => {};
 
@@ -109,6 +112,59 @@ export async function activate(context: vscode.ExtensionContext) {
 
   const diffContentProvider = new DiffContentProvider();
   const diffManager = new DiffManager(log, diffContentProvider);
+
+  // Helper function to create a new WebView provider instance
+  const createWebViewProvider = (): WebViewProvider => {
+    const provider = new WebViewProvider(context, context.extensionUri);
+    webViewProviders.push(provider);
+    return provider;
+  };
+
+  // Register WebView panel serializer for persistence across reloads
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer('qwenCode.chat', {
+      async deserializeWebviewPanel(
+        webviewPanel: vscode.WebviewPanel,
+        state: unknown,
+      ) {
+        console.log(
+          '[Extension] Deserializing WebView panel with state:',
+          state,
+        );
+
+        // Create a new provider for the restored panel
+        const provider = createWebViewProvider();
+        console.log('[Extension] Provider created for deserialization');
+
+        // Restore state if available BEFORE restoring the panel
+        if (state && typeof state === 'object') {
+          console.log('[Extension] Restoring state:', state);
+          provider.restoreState(
+            state as {
+              conversationId: string | null;
+              agentInitialized: boolean;
+            },
+          );
+        } else {
+          console.log('[Extension] No state to restore or invalid state');
+        }
+
+        await provider.restorePanel(webviewPanel);
+        console.log('[Extension] Panel restore completed');
+
+        log('WebView panel restored from serialization');
+      },
+    }),
+  );
+
+  // Register newly added commands via commands module
+  registerNewCommands(
+    context,
+    log,
+    diffManager,
+    () => webViewProviders,
+    createWebViewProvider,
+  );
 
   context.subscriptions.push(
     vscode.workspace.onDidCloseTextDocument((doc) => {
@@ -204,6 +260,11 @@ export async function deactivate(): Promise<void> {
     if (ideServer) {
       await ideServer.stop();
     }
+    // Dispose all WebView providers
+    webViewProviders.forEach((provider) => {
+      provider.dispose();
+    });
+    webViewProviders = [];
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`Failed to stop IDE server during deactivation: ${message}`);

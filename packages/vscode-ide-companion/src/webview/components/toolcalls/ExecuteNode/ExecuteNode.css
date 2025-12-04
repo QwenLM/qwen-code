@@ -1,0 +1,38 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * ExecuteNode tool call styles
+ */
+
+/* Error content styling */
+.execute-node-error-content {
+  color: #c74e39;
+  margin-top: 4px;
+}
+
+/* Preformatted content */
+.execute-node-pre {
+  margin: 0;
+  font-family: var(--app-monospace-font-family);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Error preformatted content */
+.execute-node-error-pre {
+  color: #c74e39;
+}
+
+/* Output content styling */
+.execute-node-output-content {
+  background-color: var(--app-code-background);
+  border: 0.5px solid var(--app-input-border);
+  border-radius: 5px;
+  margin: 8px 0;
+  padding: 8px;
+  max-width: 100%;
+  box-sizing: border-box;
+}

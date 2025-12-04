@@ -1,0 +1,61 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Custom timeline styles for qwen-message message-item elements
+ *
+ * 实现原理：
+ * 1. 为所有AI消息项(qwen-message.message-item:not(.user-message-container))创建垂直连接线
+ * 2. 当用户消息(user-message-container)隔断AI消息序列时，会自动重新开始一组新的时间线规则
+ * 3. 每组AI消息序列的开始元素(top设为15px)，结束元素(底部预留15px)
+ */
+
+/* 默认的连接线样式 - 为所有AI消息项创建完整高度的连接线 */
+.qwen-message.message-item:not(.user-message-container)::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+  z-index: 0;
+}
+
+/* 处理每组AI消息序列的开始 - 包括整个消息列表的第一个AI消息和被用户消息隔断后的新AI消息 */
+.qwen-message.message-item:not(.user-message-container):first-child::after,
+.user-message-container + .qwen-message.message-item:not(.user-message-container)::after,
+/* 如果前一个兄弟不是 .qwen-message.message-item（例如等待提示、哨兵元素或卡片样式工具调用），也作为一组新开始 */
+.chat-messages > :not(.qwen-message.message-item)
+  + .qwen-message.message-item:not(.user-message-container)::after {
+  top: 15px;
+}
+
+/* 处理每组AI消息序列的结尾 */
+/* 后一个兄弟是用户消息时 */
+.qwen-message.message-item:not(.user-message-container):has(+ .user-message-container)::after,
+/* 或者后一个兄弟不是 .qwen-message.message-item（如等待提示、哨兵元素、卡片样式工具调用等）时 */
+.qwen-message.message-item:not(.user-message-container):has(+ :not(.qwen-message.message-item))::after,
+/* 真正是父容器最后一个子元素时 */
+.qwen-message.message-item:not(.user-message-container):last-child::after {
+  /* 注意：同时设置 top 和 bottom 时高度为 (容器高度 - top - bottom)。
+   * 这里期望“底部留 15px 间距”，因此 bottom 应为 15px（而不是 calc(100% - 15px)）。 */
+  top: 0;
+  bottom: calc(100% - 15px);
+}
+
+.user-message-container:first-child {
+  margin-top: 0;
+}
+
+.message-item {
+  padding: 8px 0;
+  width: 100%;
+  align-items: flex-start;
+  padding-left: 30px;
+  user-select: text;
+  position: relative;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}

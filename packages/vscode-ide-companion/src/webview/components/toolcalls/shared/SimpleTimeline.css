@@ -1,0 +1,70 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Simplified timeline styles for tool calls and messages
+ * Only keeping actually used styles
+ */
+
+/* ToolCallContainer timeline styles (from LayoutComponents.css) */
+.toolcall-container {
+  position: relative;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* ToolCallContainer timeline connector */
+.toolcall-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+}
+
+/* First item: connector starts from status point position */
+.toolcall-container:first-child::after {
+  top: 24px;
+}
+
+/* Last item: connector shows only upper part */
+.toolcall-container:last-child::after {
+  height: calc(100% - 24px);
+  top: 0;
+  bottom: auto;
+}
+
+/* AssistantMessage timeline styles */
+.assistant-message-container {
+  position: relative;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* AssistantMessage timeline connector */
+.assistant-message-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+}
+
+/* First item: connector starts from status point position */
+.assistant-message-container:first-child::after {
+  top: 24px;
+}
+
+/* Last item: connector shows only upper part */
+.assistant-message-container:last-child::after {
+  height: calc(100% - 24px);
+  top: 0;
+  bottom: auto;
+}

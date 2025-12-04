@@ -1,0 +1,33 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Subtle shimmering highlight across the loading text */
+@keyframes waitingMessageShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.loading-text-shimmer {
+  /* Use the theme foreground as the base color, with a moving light band */
+  background-image: linear-gradient(
+    90deg,
+    var(--app-secondary-foreground) 0%,
+    var(--app-secondary-foreground) 40%,
+    rgba(255, 255, 255, 0.95) 50%,
+    var(--app-secondary-foreground) 60%,
+    var(--app-secondary-foreground) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent; /* text color comes from the gradient */
+  animation: waitingMessageShimmer 1.6s linear infinite;
+}
+

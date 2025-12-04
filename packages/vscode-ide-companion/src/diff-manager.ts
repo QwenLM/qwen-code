@@ -76,15 +76,24 @@ export class DiffManager {
 
   /**
    * Creates and shows a new diff view.
+   * @param filePath Path to the file being diffed
+   * @param oldContent The original content (left side)
+   * @param newContent The modified content (right side)
    */
-  async showDiff(filePath: string, newContent: string) {
-    const fileUri = vscode.Uri.file(filePath);
+  async showDiff(filePath: string, oldContent: string, newContent: string) {
+    // Left side: old content using qwen-diff scheme
+    const leftDocUri = vscode.Uri.from({
+      scheme: DIFF_SCHEME,
+      path: filePath,
+      query: `old&rand=${Math.random()}`,
+    });
+    this.diffContentProvider.setContent(leftDocUri, oldContent);
 
+    // Right side: new content using qwen-diff scheme
     const rightDocUri = vscode.Uri.from({
       scheme: DIFF_SCHEME,
       path: filePath,
-      // cache busting
-      query: `rand=${Math.random()}`,
+      query: `new&rand=${Math.random()}`,
     });
     this.diffContentProvider.setContent(rightDocUri, newContent);
 
@@ -94,25 +103,12 @@ export class DiffManager {
       rightDocUri,
     });
 
-    const diffTitle = `${path.basename(filePath)} ↔ Modified`;
+    const diffTitle = `${path.basename(filePath)} (Before ↔ After)`;
     await vscode.commands.executeCommand(
       'setContext',
       'qwen.diff.isVisible',
       true,
     );
-
-    let leftDocUri;
-    try {
-      await vscode.workspace.fs.stat(fileUri);
-      leftDocUri = fileUri;
-    } catch {
-      // We need to provide an empty document to diff against.
-      // Using the 'untitled' scheme is one way to do this.
-      leftDocUri = vscode.Uri.from({
-        scheme: 'untitled',
-        path: filePath,
-      });
-    }
 
     await vscode.commands.executeCommand(
       'vscode.diff',
@@ -120,6 +116,7 @@ export class DiffManager {
       rightDocUri,
       diffTitle,
       {
+        viewColumn: vscode.ViewColumn.Beside,
         preview: false,
         preserveFocus: true,
       },

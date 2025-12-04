@@ -1,0 +1,322 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * DiffDisplay 组件样式
+ */
+
+/* ========================================
+   容器样式
+   ======================================== */
+
+.diff-display-container {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  width: 100%;
+}
+
+/* ========================================
+   紧凑视图样式 - 超简洁版本
+   ======================================== */
+
+.diff-display-container {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.diff-compact-clickable {
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: all 0.15s ease-in-out;
+}
+
+.diff-compact-clickable:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.diff-compact-clickable:active {
+  opacity: 0.9;
+}
+
+.diff-compact-clickable:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.diff-compact-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.diff-file-info {
+  flex: 1;
+  min-width: 0; /* 允许文字截断 */
+  font-weight: 500;
+  font-size: 0.95em;
+}
+
+.diff-file-info .file-link {
+  color: var(--vscode-foreground);
+}
+
+.diff-stats {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: 0.85em;
+  flex-shrink: 0;
+}
+
+.diff-stats > span {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.stat-added {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #4ec9b0);
+}
+
+.stat-removed {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #f48771);
+}
+
+.stat-changed {
+  color: var(--vscode-gitDecoration-modifiedResourceForeground, #e5c07b);
+}
+
+.stat-no-change {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.7;
+}
+
+.diff-compact-actions {
+  padding: 6px 10px 8px;
+  border-top: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editorGroupHeader-tabsBackground);
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ========================================
+   完整视图样式
+   ======================================== */
+
+/* 已移除完整视图，统一为简洁模式 + 预览 */
+
+/* 预览区域（仅变更行） */
+.diff-preview {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--vscode-textCodeBlock-background, rgba(0, 0, 0, 0.06));
+  border-top: 1px solid var(--vscode-panel-border);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.diff-file-path {
+  font-weight: 500;
+  flex: 1;
+}
+
+.diff-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.diff-line {
+  white-space: pre;
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: 0.88em;
+  line-height: 1.45;
+}
+
+.diff-line.added {
+  background: var(--vscode-diffEditor-insertedLineBackground, rgba(76, 175, 80, 0.18));
+  color: var(--vscode-diffEditor-insertedTextForeground, #b5f1cc);
+}
+
+.diff-line.removed {
+  background: var(--vscode-diffEditor-removedLineBackground, rgba(244, 67, 54, 0.18));
+  color: var(--vscode-diffEditor-removedTextForeground, #f6b1a7);
+}
+
+.diff-line.no-change {
+  color: var(--vscode-descriptionForeground);
+  opacity: 0.8;
+}
+
+.diff-omitted {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+  padding-top: 6px;
+}
+
+.diff-section {
+  padding: 12px;
+  background: var(--vscode-editor-background);
+}
+
+.diff-section + .diff-section {
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.diff-label {
+  font-size: 0.85em;
+  color: var(--vscode-descriptionForeground);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+/* ========================================
+   按钮样式
+   ======================================== */
+
+.diff-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: var(--vscode-font-family);
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  white-space: nowrap;
+}
+
+.diff-action-button svg {
+  flex-shrink: 0;
+}
+
+.diff-action-button.primary {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.diff-action-button.primary:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.diff-action-button.primary:active {
+  opacity: 0.9;
+}
+
+.diff-action-button.secondary {
+  background: transparent;
+  color: var(--vscode-textLink-foreground);
+  padding: 4px 8px;
+  font-size: 0.85em;
+}
+
+.diff-action-button.secondary:hover {
+  background: var(--vscode-button-secondaryHoverBackground);
+  text-decoration: underline;
+}
+
+.diff-action-button:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+.diff-action-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ========================================
+   代码块样式
+   ======================================== */
+
+.diff-section .code-block {
+  margin: 0;
+  padding: 12px;
+  background: var(--vscode-textCodeBlock-background, rgba(0, 0, 0, 0.1));
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  overflow-x: auto;
+  font-family: var(--vscode-editor-font-family, 'Menlo', 'Monaco', 'Courier New', monospace);
+  font-size: 0.9em;
+  line-height: 1.5;
+}
+
+.diff-section .code-content {
+  white-space: pre;
+  color: var(--vscode-editor-foreground);
+}
+
+/* ========================================
+   响应式调整
+   ======================================== */
+
+@media (max-width: 600px) {
+  .diff-compact-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .diff-stats {
+    align-self: flex-start;
+  }
+}
+
+/* ========================================
+   高对比度模式支持
+   ======================================== */
+
+@media (prefers-contrast: high) {
+  .diff-compact-view,
+  .diff-full-view {
+    border-width: 2px;
+  }
+
+  .diff-stats > span {
+    font-weight: 700;
+    border: 1px solid currentColor;
+  }
+
+  .diff-action-button {
+    border: 1px solid currentColor;
+  }
+}
+
+/* ========================================
+   深色主题优化
+   ======================================== */
+
+@media (prefers-color-scheme: dark) {
+  .diff-compact-view:hover {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+  }
+
+  .stat-added {
+    background: rgba(78, 201, 176, 0.2);
+  }
+
+  .stat-removed {
+    background: rgba(244, 135, 113, 0.2);
+  }
+
+  .stat-changed {
+    background: rgba(229, 192, 123, 0.2);
+  }
+}
+
+/* ========================================
+   LocationsList 样式（用于 FileLink 列表）
+   ======================================== */
+
+.locations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

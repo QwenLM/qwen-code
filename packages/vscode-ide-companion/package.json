@@ -54,8 +54,56 @@
       {
         "command": "qwen-code.showNotices",
         "title": "Qwen Code: View Third-Party Notices"
+      },
+      {
+        "command": "qwenCode.openChat",
+        "title": "Qwen Code: Open Chat",
+        "icon": "./assets/icon.png"
+      },
+      {
+        "command": "qwenCode.clearAuthCache",
+        "title": "Qwen Code: Clear Authentication Cache"
+      },
+      {
+        "command": "qwenCode.login",
+        "title": "Qwen Code: Login"
       }
     ],
+    "configuration": {
+      "title": "Qwen Code",
+      "properties": {
+        "qwenCode.qwen.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable Qwen agent integration"
+        },
+        "qwenCode.qwen.cliPath": {
+          "type": "string",
+          "default": "qwen",
+          "description": "Path to Qwen CLI executable"
+        },
+        "qwenCode.qwen.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for Qwen (optional, if not using Code Assist)"
+        },
+        "qwenCode.qwen.openaiBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI base URL for custom endpoints (optional)"
+        },
+        "qwenCode.qwen.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model to use (optional)"
+        },
+        "qwenCode.qwen.proxy": {
+          "type": "string",
+          "default": "",
+          "description": "Proxy for Qwen client (format: schema://user:password@host:port, e.g., http://127.0.0.1:7890)"
+        }
+      }
+    },
     "menus": {
       "commandPalette": [
         {
@@ -65,6 +113,10 @@
         {
           "command": "qwen.diff.cancel",
           "when": "qwen.diff.isVisible"
+        },
+        {
+          "command": "qwenCode.login",
+          "when": "false"
         }
       ],
       "editor/title": [
@@ -76,6 +128,10 @@
         {
           "command": "qwen.diff.cancel",
           "when": "qwen.diff.isVisible",
+          "group": "navigation"
+        },
+        {
+          "command": "qwenCode.openChat",
           "group": "navigation"
         }
       ]
@@ -90,6 +146,11 @@
         "command": "qwen.diff.accept",
         "key": "cmd+s",
         "when": "qwen.diff.isVisible"
+      },
+      {
+        "command": "qwenCode.openChat",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
       }
     ]
   },
@@ -98,7 +159,7 @@
   "scripts": {
     "prepackage": "npm run generate:notices && npm run check-types && npm run lint && npm run build:prod",
     "build": "npm run build:dev",
-    "build:dev": "npm run check-types && npm run lint && node esbuild.js",
+    "build:dev": "node esbuild.js",
     "build:prod": "node esbuild.js --production",
     "generate:notices": "node ./scripts/generate-notices.js",
     "prepare": "npm run generate:notices",
@@ -115,14 +176,22 @@
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "20.x",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@types/semver": "^7.7.1",
     "@types/vscode": "^1.99.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
     "@vscode/vsce": "^3.6.0",
+    "autoprefixer": "^10.4.22",
     "esbuild": "^0.25.3",
     "eslint": "^9.25.1",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "npm-run-all2": "^8.0.2",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.18",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },
@@ -130,6 +199,9 @@
     "@modelcontextprotocol/sdk": "^1.15.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "markdown-it": "^14.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
     "zod": "^3.25.76"
   }
 }
