@@ -33,7 +33,7 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
 
 interface ExtendedChatCompletionAssistantMessageParam
   extends OpenAI.Chat.ChatCompletionAssistantMessageParam {
-  reasoning_content?: string | { type: 'text'; text: string } | null;
+  reasoning_content?: string | null;
 }
 
 type ExtendedChatCompletionMessageParam =
@@ -474,7 +474,7 @@ export class OpenAIContentConverter {
       if (reasoningContent) {
         (
           message as ExtendedChatCompletionAssistantMessageParam
-        ).reasoning_content = { type: 'text', text: reasoningContent };
+        ).reasoning_content = reasoningContent;
       }
       return message;
     }
