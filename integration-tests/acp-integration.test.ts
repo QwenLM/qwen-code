@@ -15,6 +15,9 @@ const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const RESUME_PROMPT = 'Continue the note after reload.';
 const LIST_SIZE = 5;
+const IS_SANDBOX =
+  process.env['GEMINI_SANDBOX'] &&
+  process.env['GEMINI_SANDBOX']!.toLowerCase() !== 'false';
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -86,7 +89,6 @@ function setupAcpTest(
   const agent = spawn('node', [rig.bundlePath, '--experimental-acp'], {
     cwd: rig.testDir!,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
   });
 
   agent.stderr?.on('data', (chunk) => {
@@ -250,7 +252,7 @@ function setupAcpTest(
   };
 }
 
-describe('acp integration', () => {
+(IS_SANDBOX ? describe.skip : describe)('acp integration', () => {
   it('creates, lists, loads, and resumes a session', async () => {
     const rig = new TestRig();
     rig.setup('acp load session');
