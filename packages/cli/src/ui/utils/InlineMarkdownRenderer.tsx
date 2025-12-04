@@ -19,12 +19,16 @@ const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 
 interface RenderInlineProps {
   text: string;
+  textColor?: string;
 }
 
-const RenderInlineInternal: React.FC<RenderInlineProps> = ({ text }) => {
+const RenderInlineInternal: React.FC<RenderInlineProps> = ({
+  text,
+  textColor = theme.text.primary,
+}) => {
   // Early return for plain text without markdown or URLs
   if (!/[*_~`<[https?:]/.test(text)) {
-    return <Text color={theme.text.primary}>{text}</Text>;
+    return <Text color={textColor}>{text}</Text>;
   }
 
   const nodes: React.ReactNode[] = [];

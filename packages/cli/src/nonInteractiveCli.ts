@@ -170,6 +170,7 @@ export async function runNonInteractive(
         adapter.emitMessage(systemMessage);
       }
 
+      let isFirstTurn = true;
       while (true) {
         turnCount++;
         if (
@@ -185,8 +186,9 @@ export async function runNonInteractive(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
-          { isContinuation: true },
+          { isContinuation: !isFirstTurn },
         );
+        isFirstTurn = false;
 
         // Start assistant message for this turn
         if (adapter) {

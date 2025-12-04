@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { Text, Box } from 'ink';
+import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { theme } from '../../semantic-colors.js';
 
 interface GeminiThoughtMessageProps {
@@ -21,6 +22,9 @@ interface GeminiThoughtMessageProps {
  */
 export const GeminiThoughtMessage: React.FC<GeminiThoughtMessageProps> = ({
   text,
+  isPending,
+  availableTerminalHeight,
+  terminalWidth,
 }) => {
   const prefix = '✦ ';
   const prefixWidth = prefix.length;
@@ -31,7 +35,13 @@ export const GeminiThoughtMessage: React.FC<GeminiThoughtMessageProps> = ({
         <Text color={theme.text.secondary}>{prefix}</Text>
       </Box>
       <Box flexGrow={1} flexDirection="column">
-        <Text color={theme.text.secondary}>{text}</Text>
+        <MarkdownDisplay
+          text={text}
+          isPending={isPending}
+          availableTerminalHeight={availableTerminalHeight}
+          terminalWidth={terminalWidth}
+          textColor={theme.text.secondary}
+        />
       </Box>
     </Box>
   );
