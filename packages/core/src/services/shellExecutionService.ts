@@ -7,7 +7,7 @@
 import stripAnsi from 'strip-ansi';
 import type { PtyImplementation } from '../utils/getPty.js';
 import { getPty } from '../utils/getPty.js';
-import { spawn as cpSpawn } from 'node:child_process';
+import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
@@ -106,6 +106,51 @@ const getFullBufferText = (terminal: pkg.Terminal): string => {
 
 export class ShellExecutionService {
   private static activePtys = new Map<number, ActivePty>();
+  private static activeChildProcesses = new Set<number>();
+
+  static {
+    const cleanup = () => {
+      // Cleanup PTYs
+      for (const [pid, pty] of this.activePtys) {
+        try {
+          if (os.platform() === 'win32') {
+            pty.ptyProcess.kill();
+          } else {
+            process.kill(-pid, 'SIGKILL');
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      // Cleanup child processes
+      for (const pid of this.activeChildProcesses) {
+        try {
+          if (os.platform() === 'win32') {
+            spawnSync('taskkill', ['/pid', pid.toString(), '/f', '/t']);
+          } else {
+            process.kill(-pid, 'SIGKILL');
+          }
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    process.on('exit', cleanup);
+
+    // Ensure cleanup happens on SIGINT/SIGTERM
+    const signalHandler = () => {
+      process.exit();
+    };
+
+    // We only attach these if we are in a node environment where we can control the process
+    if (typeof process !== 'undefined' && process.on) {
+      process.on('SIGINT', signalHandler);
+      process.on('SIGTERM', signalHandler);
+    }
+  }
+
   /**
    * Executes a shell command using `node-pty`, capturing all output and lifecycle events.
    *
@@ -281,9 +326,13 @@ export class ShellExecutionService {
 
         abortSignal.addEventListener('abort', abortHandler, { once: true });
 
+        if (child.pid) {
+          this.activeChildProcesses.add(child.pid);
+        }
+
         child.on('exit', (code, signal) => {
           if (child.pid) {
-            this.activePtys.delete(child.pid);
+            this.activeChildProcesses.delete(child.pid);
           }
           handleExit(code, signal);
         });
@@ -310,7 +359,7 @@ export class ShellExecutionService {
         }
       });
 
-      return { pid: undefined, result };
+      return { pid: child.pid, result };
     } catch (e) {
       const error = e as Error;
       return {

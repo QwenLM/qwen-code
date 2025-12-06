@@ -210,7 +210,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         '/test/dir',
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -237,7 +237,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -262,7 +262,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -287,7 +287,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -312,7 +312,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         '/test/dir/subdir',
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -340,7 +340,7 @@ describe('ShellTool', () => {
         'dir',
         '/test/dir',
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -433,7 +433,7 @@ describe('ShellTool', () => {
       expect(summarizer.summarizeToolOutput).toHaveBeenCalledWith(
         expect.any(String),
         mockConfig.getGeminiClient(),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         1000,
       );
       expect(result.llmContent).toBe('summarized output');
@@ -542,7 +542,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -572,7 +572,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -602,7 +602,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -631,7 +631,7 @@ describe('ShellTool', () => {
           expect.stringContaining('npm install'),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -660,7 +660,7 @@ describe('ShellTool', () => {
           expect.stringContaining('git commit'),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -690,7 +690,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -726,7 +726,7 @@ describe('ShellTool', () => {
           expect.stringContaining('git commit -m "Initial commit"'),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -763,7 +763,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );

@@ -30,6 +30,7 @@ import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
+  ShellExecutionResult,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
@@ -48,6 +49,7 @@ export interface ShellToolParams {
   is_background: boolean;
   description?: string;
   directory?: string;
+  timeout?: number;
 }
 
 export class ShellToolInvocation extends BaseToolInvocation<
@@ -136,6 +138,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       .toString('hex')}.tmp`;
     const tempFilePath = path.join(os.tmpdir(), tempFileName);
 
+    const timeoutMs = this.params.timeout ?? 3600000;
+    const abortController = new AbortController();
+    const onAbort = () => abortController.abort();
+    signal.addEventListener('abort', onAbort);
+    const timeoutId = setTimeout(() => {
+      abortController.abort();
+    }, timeoutMs);
+
     try {
       // Add co-author to git commit commands
       const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
@@ -143,9 +153,28 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
 
-      // If explicitly marked as background and doesn't already end with &, add it
-      if (shouldRunInBackground && !finalCommand.trim().endsWith('&')) {
+      // On non-Windows, use & to run in background.
+      // On Windows, we don't use start /B because it creates a detached process that
+      // doesn't die when the parent dies. Instead, we rely on the race logic below
+      // to return early while keeping the process attached (detached: false).
+      if (
+        !isWindows &&
+        shouldRunInBackground &&
+        !finalCommand.trim().endsWith('&')
+      ) {
         finalCommand = finalCommand.trim() + ' &';
+      }
+
+      // On Windows, append a keep-alive command to ensure the shell process
+      // stays alive even if the main command exits (e.g. spawns a detached child).
+      // This ensures we always have a valid PID for cleanup.
+      if (isWindows && shouldRunInBackground) {
+        // Remove trailing & if present to avoid syntax errors (e.g. "cmd & & ping")
+        let cmd = finalCommand.trim();
+        while (cmd.endsWith('&')) {
+          cmd = cmd.slice(0, -1).trim();
+        }
+        finalCommand = cmd + ' & ping -n 86400 127.0.0.1 >nul';
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
@@ -210,7 +239,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               lastUpdateTime = Date.now();
             }
           },
-          signal,
+          abortController.signal,
           this.config.getShouldUseNodePtyShell(),
           shellExecutionConfig ?? {},
         );
@@ -219,7 +248,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
         setPidCallback(pid);
       }
 
-      const result = await resultPromise;
+      let result: ShellExecutionResult;
+      if (shouldRunInBackground && isWindows) {
+        // For Windows background tasks, we wait a short time to catch immediate errors.
+        // If it's still running, we return early.
+        const startupDelay = 1000;
+        const raceResult = await Promise.race([
+          resultPromise,
+          new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), startupDelay),
+          ),
+        ]);
+
+        if (raceResult === null) {
+          // Timeout reached, process is still running.
+          const pidMsg = pid ? ` PID: ${pid}` : '';
+          const winHint = isWindows
+            ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
+            : '';
+          return {
+            llmContent: `Background command started.${pidMsg}${winHint}`,
+            returnDisplay: `Background command started.${pidMsg}${winHint}`,
+          };
+        } else {
+          result = raceResult;
+        }
+      } else {
+        result = await resultPromise;
+      }
 
       const backgroundPIDs: number[] = [];
       if (os.platform() !== 'win32') {
@@ -325,6 +381,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ...executionError,
       };
     } finally {
+      clearTimeout(timeoutId);
+      signal.removeEventListener('abort', onAbort);
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);
       }
@@ -458,6 +516,11 @@ export class ShellTool extends BaseDeclarativeTool<
             description:
               '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
           },
+          timeout: {
+            type: 'number',
+            description:
+              '(OPTIONAL) The timeout in milliseconds for the command. If not provided, a default timeout (1 hour) is applied.',
+          },
         },
         required: ['command', 'is_background'],
       },
@@ -481,6 +544,9 @@ export class ShellTool extends BaseDeclarativeTool<
     }
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
+    }
+    if (params.timeout !== undefined && params.timeout <= 0) {
+      return 'Timeout must be a positive number.';
     }
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';
