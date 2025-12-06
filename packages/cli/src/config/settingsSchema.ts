@@ -1174,6 +1174,26 @@ const SETTINGS_SCHEMA = {
           'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
         showInDialog: false,
       },
+      enableParallelSubagents: {
+        type: 'boolean',
+        label: 'Enable Parallel Subagent Execution',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable parallel execution of subagents. When disabled, subagents run sequentially (default behavior).',
+        showInDialog: true,
+      },
+      maxConcurrentSubagents: {
+        type: 'number',
+        label: 'Max Concurrent Subagents',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 3,
+        description:
+          'Maximum number of subagents that can run concurrently. Only applies when parallel subagent execution is enabled. Recommended values: 3-5.',
+        showInDialog: true,
+      },
     },
   },
 
