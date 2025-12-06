@@ -1046,157 +1046,222 @@ export class CoreToolScheduler {
         (call) => call.status === 'scheduled',
       );
 
-      for (const toolCall of callsToExecute) {
+      // Separate TaskTool calls from other tool calls for parallel execution
+      const taskToolCalls = callsToExecute.filter(
+        (call) => call.request.name === 'task',
+      );
+      const otherToolCalls = callsToExecute.filter(
+        (call) => call.request.name !== 'task',
+      );
+
+      // Execute non-TaskTool calls sequentially (preserving existing behavior)
+      for (const toolCall of otherToolCalls) {
+        if (toolCall.status !== 'scheduled') continue;
+        await this.executeSingleToolCall(toolCall, signal);
+      }
+
+      // Execute TaskTool calls in parallel with concurrency limit
+      const maxConcurrent = this.config.getMaxConcurrentSubagents();
+      await this.executeTaskToolCallsInParallel(
+        taskToolCalls,
+        signal,
+        maxConcurrent,
+      );
+    }
+  }
+
+  /**
+   * Execute TaskTool calls in parallel with a concurrency limit
+   */
+  private async executeTaskToolCallsInParallel(
+    taskToolCalls: ScheduledToolCall[],
+    signal: AbortSignal,
+    maxConcurrent: number,
+  ): Promise<void> {
+    if (taskToolCalls.length === 0) return;
+
+    // If maxConcurrent is 1, execute sequentially (backward compatible)
+    if (maxConcurrent === 1) {
+      for (const toolCall of taskToolCalls) {
+        if (toolCall.status !== 'scheduled') continue;
+        await this.executeSingleToolCall(toolCall, signal);
+      }
+      return;
+    }
+
+    // Execute in parallel with concurrency limit
+    const executing: Array<Promise<void>> = [];
+    let index = 0;
+
+    while (index < taskToolCalls.length || executing.length > 0) {
+      // Start new tasks up to the concurrency limit
+      while (index < taskToolCalls.length && executing.length < maxConcurrent) {
+        const toolCall = taskToolCalls[index++];
         if (toolCall.status !== 'scheduled') continue;
 
-        const scheduledCall = toolCall;
-        const { callId, name: toolName } = scheduledCall.request;
-        const invocation = scheduledCall.invocation;
-        this.setStatusInternal(callId, 'executing');
+        const promise = this.executeSingleToolCall(toolCall, signal).then(
+          () => {
+            // Remove from executing array when done
+            const idx = executing.indexOf(promise);
+            if (idx > -1) executing.splice(idx, 1);
+          },
+        );
+        executing.push(promise);
+      }
 
-        const liveOutputCallback = scheduledCall.tool.canUpdateOutput
-          ? (outputChunk: ToolResultDisplay) => {
-              if (this.outputUpdateHandler) {
-                this.outputUpdateHandler(callId, outputChunk);
-              }
-              this.toolCalls = this.toolCalls.map((tc) =>
-                tc.request.callId === callId && tc.status === 'executing'
-                  ? { ...tc, liveOutput: outputChunk }
-                  : tc,
-              );
-              this.notifyToolCallsUpdate();
-            }
-          : undefined;
+      // Wait for at least one to complete before starting more
+      if (executing.length > 0) {
+        await Promise.race(executing);
+      }
+    }
+  }
 
-        const shellExecutionConfig = this.config.getShellExecutionConfig();
+  /**
+   * Execute a single tool call
+   */
+  private async executeSingleToolCall(
+    toolCall: ScheduledToolCall,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const scheduledCall = toolCall;
+    const { callId, name: toolName } = scheduledCall.request;
+    const invocation = scheduledCall.invocation;
+    this.setStatusInternal(callId, 'executing');
 
-        // TODO: Refactor to remove special casing for ShellToolInvocation.
-        // Introduce a generic callbacks object for the execute method to handle
-        // things like `onPid` and `onLiveOutput`. This will make the scheduler
-        // agnostic to the invocation type.
-        let promise: Promise<ToolResult>;
-        if (invocation instanceof ShellToolInvocation) {
-          const setPidCallback = (pid: number) => {
-            this.toolCalls = this.toolCalls.map((tc) =>
-              tc.request.callId === callId && tc.status === 'executing'
-                ? { ...tc, pid }
-                : tc,
-            );
-            this.notifyToolCallsUpdate();
-          };
-          promise = invocation.execute(
-            signal,
-            liveOutputCallback,
-            shellExecutionConfig,
-            setPidCallback,
-          );
-        } else {
-          promise = invocation.execute(
-            signal,
-            liveOutputCallback,
-            shellExecutionConfig,
-          );
-        }
-
-        try {
-          const toolResult: ToolResult = await promise;
-          if (signal.aborted) {
-            this.setStatusInternal(
-              callId,
-              'cancelled',
-              'User cancelled tool execution.',
-            );
-            continue;
+    const liveOutputCallback = scheduledCall.tool.canUpdateOutput
+      ? (outputChunk: ToolResultDisplay) => {
+          if (this.outputUpdateHandler) {
+            this.outputUpdateHandler(callId, outputChunk);
           }
+          this.toolCalls = this.toolCalls.map((tc) =>
+            tc.request.callId === callId && tc.status === 'executing'
+              ? { ...tc, liveOutput: outputChunk }
+              : tc,
+          );
+          this.notifyToolCallsUpdate();
+        }
+      : undefined;
 
-          if (toolResult.error === undefined) {
-            let content = toolResult.llmContent;
-            let outputFile: string | undefined = undefined;
-            const contentLength =
-              typeof content === 'string' ? content.length : undefined;
-            if (
-              typeof content === 'string' &&
-              toolName === ShellTool.Name &&
-              this.config.getEnableToolOutputTruncation() &&
-              this.config.getTruncateToolOutputThreshold() > 0 &&
-              this.config.getTruncateToolOutputLines() > 0
-            ) {
-              const originalContentLength = content.length;
-              const threshold = this.config.getTruncateToolOutputThreshold();
-              const lines = this.config.getTruncateToolOutputLines();
-              const truncatedResult = await truncateAndSaveToFile(
-                content,
-                callId,
-                this.config.storage.getProjectTempDir(),
+    const shellExecutionConfig = this.config.getShellExecutionConfig();
+
+    // TODO: Refactor to remove special casing for ShellToolInvocation.
+    // Introduce a generic callbacks object for the execute method to handle
+    // things like `onPid` and `onLiveOutput`. This will make the scheduler
+    // agnostic to the invocation type.
+    let promise: Promise<ToolResult>;
+    if (invocation instanceof ShellToolInvocation) {
+      const setPidCallback = (pid: number) => {
+        this.toolCalls = this.toolCalls.map((tc) =>
+          tc.request.callId === callId && tc.status === 'executing'
+            ? { ...tc, pid }
+            : tc,
+        );
+        this.notifyToolCallsUpdate();
+      };
+      promise = invocation.execute(
+        signal,
+        liveOutputCallback,
+        shellExecutionConfig,
+        setPidCallback,
+      );
+    } else {
+      promise = invocation.execute(
+        signal,
+        liveOutputCallback,
+        shellExecutionConfig,
+      );
+    }
+
+    try {
+      const toolResult: ToolResult = await promise;
+      if (signal.aborted) {
+        this.setStatusInternal(
+          callId,
+          'cancelled',
+          'User cancelled tool execution.',
+        );
+        return;
+      }
+
+      if (toolResult.error === undefined) {
+        let content = toolResult.llmContent;
+        let outputFile: string | undefined = undefined;
+        const contentLength =
+          typeof content === 'string' ? content.length : undefined;
+        if (
+          typeof content === 'string' &&
+          toolName === ShellTool.Name &&
+          this.config.getEnableToolOutputTruncation() &&
+          this.config.getTruncateToolOutputThreshold() > 0 &&
+          this.config.getTruncateToolOutputLines() > 0
+        ) {
+          const originalContentLength = content.length;
+          const threshold = this.config.getTruncateToolOutputThreshold();
+          const lines = this.config.getTruncateToolOutputLines();
+          const truncatedResult = await truncateAndSaveToFile(
+            content,
+            callId,
+            this.config.storage.getProjectTempDir(),
+            threshold,
+            lines,
+          );
+          content = truncatedResult.content;
+          outputFile = truncatedResult.outputFile;
+
+          if (outputFile) {
+            logToolOutputTruncated(
+              this.config,
+              new ToolOutputTruncatedEvent(scheduledCall.request.prompt_id, {
+                toolName,
+                originalContentLength,
+                truncatedContentLength: content.length,
                 threshold,
                 lines,
-              );
-              content = truncatedResult.content;
-              outputFile = truncatedResult.outputFile;
-
-              if (outputFile) {
-                logToolOutputTruncated(
-                  this.config,
-                  new ToolOutputTruncatedEvent(
-                    scheduledCall.request.prompt_id,
-                    {
-                      toolName,
-                      originalContentLength,
-                      truncatedContentLength: content.length,
-                      threshold,
-                      lines,
-                    },
-                  ),
-                );
-              }
-            }
-
-            const response = convertToFunctionResponse(
-              toolName,
-              callId,
-              content,
-            );
-            const successResponse: ToolCallResponseInfo = {
-              callId,
-              responseParts: response,
-              resultDisplay: toolResult.returnDisplay,
-              error: undefined,
-              errorType: undefined,
-              outputFile,
-              contentLength,
-            };
-            this.setStatusInternal(callId, 'success', successResponse);
-          } else {
-            // It is a failure
-            const error = new Error(toolResult.error.message);
-            const errorResponse = createErrorResponse(
-              scheduledCall.request,
-              error,
-              toolResult.error.type,
-            );
-            this.setStatusInternal(callId, 'error', errorResponse);
-          }
-        } catch (executionError: unknown) {
-          if (signal.aborted) {
-            this.setStatusInternal(
-              callId,
-              'cancelled',
-              'User cancelled tool execution.',
-            );
-          } else {
-            this.setStatusInternal(
-              callId,
-              'error',
-              createErrorResponse(
-                scheduledCall.request,
-                executionError instanceof Error
-                  ? executionError
-                  : new Error(String(executionError)),
-                ToolErrorType.UNHANDLED_EXCEPTION,
-              ),
+              }),
             );
           }
         }
+
+        const response = convertToFunctionResponse(toolName, callId, content);
+        const successResponse: ToolCallResponseInfo = {
+          callId,
+          responseParts: response,
+          resultDisplay: toolResult.returnDisplay,
+          error: undefined,
+          errorType: undefined,
+          outputFile,
+          contentLength,
+        };
+        this.setStatusInternal(callId, 'success', successResponse);
+      } else {
+        // It is a failure
+        const error = new Error(toolResult.error.message);
+        const errorResponse = createErrorResponse(
+          scheduledCall.request,
+          error,
+          toolResult.error.type,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+      }
+    } catch (executionError: unknown) {
+      if (signal.aborted) {
+        this.setStatusInternal(
+          callId,
+          'cancelled',
+          'User cancelled tool execution.',
+        );
+      } else {
+        this.setStatusInternal(
+          callId,
+          'error',
+          createErrorResponse(
+            scheduledCall.request,
+            executionError instanceof Error
+              ? executionError
+              : new Error(String(executionError)),
+            ToolErrorType.UNHANDLED_EXCEPTION,
+          ),
+        );
       }
     }
   }
