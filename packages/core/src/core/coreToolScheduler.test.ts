@@ -2320,6 +2320,7 @@ describe('Parallel Subagent Execution', () => {
       },
       getMaxConcurrentSubagents: () => 3, // Default for parallel tests
       getChatRecordingService: () => undefined,
+      getUsageStatisticsEnabled: () => false,
     } as unknown as Config;
 
     abortController = new AbortController();
@@ -2337,7 +2338,6 @@ describe('Parallel Subagent Execution', () => {
     // Create a mock TaskTool that simulates async work
     const mockTaskTool = new MockTool({
       name: 'task',
-      params: { type: 'object', properties: {} },
       displayName: 'Task',
       params: {
         type: 'object',
