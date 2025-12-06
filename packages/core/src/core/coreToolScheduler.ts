@@ -1083,34 +1083,31 @@ export class CoreToolScheduler {
     // If maxConcurrent is 1, execute sequentially (backward compatible)
     if (maxConcurrent === 1) {
       for (const toolCall of taskToolCalls) {
-        if (toolCall.status !== 'scheduled') continue;
         await this.executeSingleToolCall(toolCall, signal);
       }
       return;
     }
 
-    // Execute in parallel with concurrency limit
-    const executing: Array<Promise<void>> = [];
+    // Execute in parallel with concurrency limit using Set for tracking
+    const executing = new Set<Promise<void>>();
     let index = 0;
 
-    while (index < taskToolCalls.length || executing.length > 0) {
+    while (index < taskToolCalls.length || executing.size > 0) {
       // Start new tasks up to the concurrency limit
-      while (index < taskToolCalls.length && executing.length < maxConcurrent) {
+      while (index < taskToolCalls.length && executing.size < maxConcurrent) {
         const toolCall = taskToolCalls[index++];
-        if (toolCall.status !== 'scheduled') continue;
 
         const promise = this.executeSingleToolCall(toolCall, signal).then(
           () => {
-            // Remove from executing array when done
-            const idx = executing.indexOf(promise);
-            if (idx > -1) executing.splice(idx, 1);
+            // Remove from executing set when done
+            executing.delete(promise);
           },
         );
-        executing.push(promise);
+        executing.add(promise);
       }
 
       // Wait for at least one to complete before starting more
-      if (executing.length > 0) {
+      if (executing.size > 0) {
         await Promise.race(executing);
       }
     }
