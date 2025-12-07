@@ -600,7 +600,10 @@ export class Config {
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
     this.useSmartEdit = params.useSmartEdit ?? false;
     this.extensionManagement = params.extensionManagement ?? true;
-    this.maxConcurrentSubagents = params.maxConcurrentSubagents ?? 1;
+    this.maxConcurrentSubagents = Math.max(
+      1,
+      params.maxConcurrentSubagents ?? 1,
+    );
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;

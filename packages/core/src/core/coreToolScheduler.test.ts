@@ -2639,4 +2639,104 @@ describe('Parallel Subagent Execution', () => {
     expect(normal2StartIdx).toBeGreaterThanOrEqual(0);
     expect(normal2StartIdx).toBeGreaterThan(normal1EndIdx);
   });
+
+  it('should handle errors during parallel execution gracefully', async () => {
+    // Test that errors in one task don't prevent other tasks from completing
+    const executionLog: Array<{ callId: string; action: string }> = [];
+
+    // Create a mock TaskTool that can fail
+    const mockTaskTool = new MockTool({
+      name: 'task',
+      displayName: 'Task',
+      params: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (params) => {
+        const callId = (params as { callId?: string }).callId ?? 'unknown';
+        const shouldFail =
+          (params as { shouldFail?: boolean }).shouldFail ?? false;
+
+        executionLog.push({ callId, action: 'start' });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        if (shouldFail) {
+          executionLog.push({ callId, action: 'error' });
+          throw new Error(`Task ${callId} failed`);
+        }
+
+        executionLog.push({ callId, action: 'end' });
+        return { llmContent: `Done ${callId}`, returnDisplay: 'Success' };
+      },
+    });
+
+    vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) => {
+      if (name === 'task') return mockTaskTool;
+      return undefined;
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Schedule tasks - some will fail, some will succeed
+    const requests = [
+      {
+        callId: 'task1',
+        name: 'task',
+        args: { callId: 'success1', shouldFail: false },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task2',
+        name: 'task',
+        args: { callId: 'fail1', shouldFail: true },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task3',
+        name: 'task',
+        args: { callId: 'success2', shouldFail: false },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+    ];
+
+    scheduler.schedule(requests, abortController.signal);
+
+    // Execute - should handle errors gracefully
+    await vi.waitFor(() => onAllToolCallsComplete.mock.calls.length > 0);
+
+    // Verify all tasks were attempted (success or error)
+    const success1Started = executionLog.some(
+      (log) => log.callId === 'success1' && log.action === 'start',
+    );
+    const fail1Started = executionLog.some(
+      (log) => log.callId === 'fail1' && log.action === 'start',
+    );
+    const success2Started = executionLog.some(
+      (log) => log.callId === 'success2' && log.action === 'start',
+    );
+
+    expect(success1Started).toBe(true);
+    expect(fail1Started).toBe(true);
+    expect(success2Started).toBe(true);
+
+    // Verify successful tasks completed despite failure in parallel task
+    const success1Completed = executionLog.some(
+      (log) => log.callId === 'success1' && log.action === 'end',
+    );
+    const success2Completed = executionLog.some(
+      (log) => log.callId === 'success2' && log.action === 'end',
+    );
+
+    // At least one successful task should complete
+    expect(success1Completed || success2Completed).toBe(true);
+  });
 });

@@ -1097,9 +1097,9 @@ export class CoreToolScheduler {
       while (index < taskToolCalls.length && executing.size < maxConcurrent) {
         const toolCall = taskToolCalls[index++];
 
-        const promise = this.executeSingleToolCall(toolCall, signal).then(
+        const promise = this.executeSingleToolCall(toolCall, signal).finally(
           () => {
-            // Remove from executing set when done
+            // Remove from executing set when done (success or failure)
             executing.delete(promise);
           },
         );
