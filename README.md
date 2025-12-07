@@ -51,10 +51,10 @@ For detailed setup instructions, see [Authorization](#authorization).
 
 ## Key Features
 
-- **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits
-- **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
-- **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
-- **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis
+- **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits.
+- **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases.
+- **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models.
+- **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis.
 
 ## Installation
 
@@ -245,7 +245,7 @@ export OPENAI_MODEL="qwen3-coder-plus"
 **Option 2: ModelScope (Free Tier)** ([Apply for API Key](https://modelscope.cn/docs/model-service/API-Inference/intro))
 
 - ✅ **2,000 free API calls per day**
-- ⚠️ Connect your Aliyun account to avoid authentication errors
+- ⚠️ Connect your Aliyun account to 避免认证错误
 
 ```bash
 export OPENAI_API_KEY="your_api_key_here"
