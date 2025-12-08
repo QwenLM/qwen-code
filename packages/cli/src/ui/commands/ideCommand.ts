@@ -134,7 +134,31 @@ async function setIdeModeAndSyncConnection(
 }
 
 export const ideCommand = async (): Promise<SlashCommand> => {
-  const ideClient = await IdeClient.getInstance();
+  let ideClient: IdeClient;
+  try {
+    ideClient = await Promise.race([
+      IdeClient.getInstance(),
+      new Promise<IdeClient>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout')), 1000),
+      ),
+    ]);
+  } catch {
+    return {
+      name: 'ide',
+      get description() {
+        return t('manage IDE integration (loading...)');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (): Promise<SlashCommandActionReturn> => ({
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'IDE integration is still loading. Please try again in a moment.',
+        ),
+      }),
+    };
+  }
+
   const currentIDE = ideClient.getCurrentIde();
   if (!currentIDE) {
     return {

@@ -234,8 +234,19 @@ export const AppContainer = (props: AppContainerProps) => {
       }
     })();
     registerCleanup(async () => {
-      const ideClient = await IdeClient.getInstance();
-      await ideClient.disconnect();
+      try {
+        await Promise.race([
+          (async () => {
+            const ideClient = await IdeClient.getInstance();
+            await ideClient.disconnect();
+          })(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Cleanup timeout')), 2000),
+          ),
+        ]);
+      } catch {
+        // Ignore timeout or other errors
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);

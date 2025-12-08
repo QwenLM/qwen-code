@@ -36,7 +36,9 @@ async function getProcessInfo(pid: number): Promise<{
         '| ConvertTo-Json',
         '}',
       ].join(' ');
-      const { stdout } = await execAsync(`powershell "${powershellCommand}"`);
+      const { stdout } = await execAsync(`powershell "${powershellCommand}"`, {
+        timeout: 5000,
+      });
       const output = stdout.trim();
       if (!output) return { parentPid: 0, name: '', command: '' };
       const {
