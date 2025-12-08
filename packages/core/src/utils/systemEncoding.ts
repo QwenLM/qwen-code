@@ -34,6 +34,15 @@ export function getCachedEncodingForBuffer(buffer: Buffer): string {
 
   // If we have a cached system encoding, use it
   if (cachedSystemEncoding) {
+    // If the system encoding is not UTF-8 (e.g. Windows CP936), but the buffer
+    // is detected as UTF-8, prefer UTF-8. This handles tools like 'git' which
+    // often output UTF-8 regardless of the system code page.
+    if (cachedSystemEncoding !== 'utf-8') {
+      const detected = detectEncodingFromBuffer(buffer);
+      if (detected === 'utf-8') {
+        return 'utf-8';
+      }
+    }
     return cachedSystemEncoding;
   }
 
