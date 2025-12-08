@@ -8,15 +8,7 @@ import type { Content } from '@google/genai';
 import { createHash } from 'node:crypto';
 import type { ServerGeminiStreamEvent } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
-import {
-  logLoopDetected,
-  logLoopDetectionDisabled,
-} from '../telemetry/loggers.js';
-import {
-  LoopDetectedEvent,
-  LoopDetectionDisabledEvent,
-  LoopType,
-} from '../telemetry/types.js';
+
 import type { Config } from '../config/config.js';
 import {
   isFunctionCall,
@@ -104,10 +96,6 @@ export class LoopDetectionService {
    */
   disableForSession(): void {
     this.disabledForSession = true;
-    logLoopDetectionDisabled(
-      this.config,
-      new LoopDetectionDisabledEvent(this.promptId),
-    );
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -178,13 +166,6 @@ export class LoopDetectionService {
       this.toolCallRepetitionCount = 1;
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
-      logLoopDetected(
-        this.config,
-        new LoopDetectedEvent(
-          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
-          this.promptId,
-        ),
-      );
       return true;
     }
     return false;
@@ -291,13 +272,6 @@ export class LoopDetectionService {
       const chunkHash = createHash('sha256').update(currentChunk).digest('hex');
 
       if (this.isLoopDetectedForChunk(currentChunk, chunkHash)) {
-        logLoopDetected(
-          this.config,
-          new LoopDetectedEvent(
-            LoopType.CHANTING_IDENTICAL_SENTENCES,
-            this.promptId,
-          ),
-        );
         return true;
       }
 
@@ -440,10 +414,7 @@ export class LoopDetectionService {
         if (typeof result['reasoning'] === 'string' && result['reasoning']) {
           console.warn(result['reasoning']);
         }
-        logLoopDetected(
-          this.config,
-          new LoopDetectedEvent(LoopType.LLM_DETECTED_LOOP, this.promptId),
-        );
+
         return true;
       } else {
         this.llmCheckInterval = Math.round(

@@ -305,7 +305,7 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBe('@path ./file.md'); // Should map to one-shot
     expect(argv.promptInteractive).toBeUndefined();
     expect(argv.debug).toBe(true);
-    expect(argv.telemetry).toBe(true);
+    expect(argv.debug).toBe(true);
   });
 
   it('should map any @command to prompt (one-shot)', async () => {
@@ -743,394 +743,210 @@ describe('loadCliConfig', () => {
   });
 });
 
-describe('loadCliConfig telemetry', () => {
-  const originalArgv = process.argv;
+it('should use telemetry OTLP endpoint from settings if CLI flag is not present', async () => {
+  process.argv = ['node', 'script.js'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = {
+    telemetry: { otlpEndpoint: 'http://settings.example.com' },
+  };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryOtlpEndpoint()).toBe('http://settings.example.com');
+});
 
-  beforeEach(() => {
-    vi.resetAllMocks();
-    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
-    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+it('should prioritize --telemetry-otlp-endpoint CLI flag over settings', async () => {
+  process.argv = [
+    'node',
+    'script.js',
+    '--telemetry-otlp-endpoint',
+    'http://cli.example.com',
+  ];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = {
+    telemetry: { otlpEndpoint: 'http://settings.example.com' },
+  };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryOtlpEndpoint()).toBe('http://cli.example.com');
+});
+
+it('should use default endpoint if no OTLP endpoint is provided via CLI or settings', async () => {
+  process.argv = ['node', 'script.js'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = { telemetry: { enabled: true } };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryOtlpEndpoint()).toBe('http://localhost:4317');
+});
+
+it('should use telemetry log prompts from settings if CLI flag is not present', async () => {
+  process.argv = ['node', 'script.js'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = { telemetry: { logPrompts: false } };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+});
+
+it('should prioritize --telemetry-log-prompts CLI flag (true) over settings (false)', async () => {
+  process.argv = ['node', 'script.js', '--telemetry-log-prompts'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = { telemetry: { logPrompts: false } };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+});
+
+it('should prioritize --no-telemetry-log-prompts CLI flag (false) over settings (true)', async () => {
+  process.argv = ['node', 'script.js', '--no-telemetry-log-prompts'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = { telemetry: { logPrompts: true } };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+});
+
+it('should use default log prompts (true) if no value is provided via CLI or settings', async () => {
+  process.argv = ['node', 'script.js'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = { telemetry: { enabled: true } };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+});
+
+it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
+  process.argv = ['node', 'script.js'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = {
+    telemetry: { otlpProtocol: 'http' },
+  };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryOtlpProtocol()).toBe('http');
+});
+
+it('should prioritize --telemetry-otlp-protocol CLI flag over settings', async () => {
+  process.argv = ['node', 'script.js', '--telemetry-otlp-protocol', 'http'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = {
+    telemetry: { otlpProtocol: 'grpc' },
+  };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryOtlpProtocol()).toBe('http');
+});
+
+it('should use default protocol if no OTLP protocol is provided via CLI or settings', async () => {
+  process.argv = ['node', 'script.js'];
+  const argv = await parseArguments({} as Settings);
+  const settings: Settings = { telemetry: { enabled: true } };
+  const config = await loadCliConfig(
+    settings,
+    [],
+    new ExtensionEnablementManager(
+      ExtensionStorage.getUserExtensionsDir(),
+      argv.extensions,
+    ),
+    'test-session',
+    argv,
+  );
+  expect(config.getTelemetryOtlpProtocol()).toBe('grpc');
+});
+
+it('should reject invalid --telemetry-otlp-protocol values', async () => {
+  process.argv = ['node', 'script.js', '--telemetry-otlp-protocol', 'invalid'];
+
+  const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+    throw new Error('process.exit called');
   });
 
-  afterEach(() => {
-    process.argv = originalArgv;
-    vi.unstubAllEnvs();
-    vi.restoreAllMocks();
-  });
+  const mockConsoleError = vi
+    .spyOn(console, 'error')
+    .mockImplementation(() => {});
 
-  it('should set telemetry to false by default when no flag or setting is present', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {};
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(false);
-  });
+  await expect(parseArguments({} as Settings)).rejects.toThrow(
+    'process.exit called',
+  );
 
-  it('should not set telemetry to true when --telemetry flag is present', async () => {
-    process.argv = ['node', 'script.js', '--telemetry'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {};
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(false);
-  });
+  expect(mockConsoleError).toHaveBeenCalledWith(
+    expect.stringContaining('Invalid values:'),
+  );
 
-  it('should set telemetry to false when --no-telemetry flag is present', async () => {
-    process.argv = ['node', 'script.js', '--no-telemetry'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {};
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(false);
-  });
-
-  it('should use telemetry value from settings if CLI flag is not present (settings false)', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: false } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(false);
-  });
-
-  it('should not prioritize --telemetry CLI flag (true) over settings (false) and default to false', async () => {
-    process.argv = ['node', 'script.js', '--telemetry'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: false } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(false);
-  });
-
-  it('should prioritize --no-telemetry CLI flag (false) over settings (true)', async () => {
-    process.argv = ['node', 'script.js', '--no-telemetry'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryEnabled()).toBe(false);
-  });
-
-  it('should use telemetry OTLP endpoint from settings if CLI flag is not present', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {
-      telemetry: { otlpEndpoint: 'http://settings.example.com' },
-    };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryOtlpEndpoint()).toBe(
-      'http://settings.example.com',
-    );
-  });
-
-  it('should prioritize --telemetry-otlp-endpoint CLI flag over settings', async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--telemetry-otlp-endpoint',
-      'http://cli.example.com',
-    ];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {
-      telemetry: { otlpEndpoint: 'http://settings.example.com' },
-    };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryOtlpEndpoint()).toBe('http://cli.example.com');
-  });
-
-  it('should use default endpoint if no OTLP endpoint is provided via CLI or settings', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryOtlpEndpoint()).toBe('http://localhost:4317');
-  });
-
-  it('should use telemetry target from settings if CLI flag is not present', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {
-      telemetry: { target: ServerConfig.DEFAULT_TELEMETRY_TARGET },
-    };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryTarget()).toBe(
-      ServerConfig.DEFAULT_TELEMETRY_TARGET,
-    );
-  });
-
-  it('should prioritize --telemetry-target CLI flag over settings', async () => {
-    process.argv = ['node', 'script.js', '--telemetry-target', 'gcp'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {
-      telemetry: { target: ServerConfig.DEFAULT_TELEMETRY_TARGET },
-    };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryTarget()).toBe('gcp');
-  });
-
-  it('should use default target if no target is provided via CLI or settings', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryTarget()).toBe(
-      ServerConfig.DEFAULT_TELEMETRY_TARGET,
-    );
-  });
-
-  it('should use telemetry log prompts from settings if CLI flag is not present', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { logPrompts: false } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
-  });
-
-  it('should prioritize --telemetry-log-prompts CLI flag (true) over settings (false)', async () => {
-    process.argv = ['node', 'script.js', '--telemetry-log-prompts'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { logPrompts: false } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
-  });
-
-  it('should prioritize --no-telemetry-log-prompts CLI flag (false) over settings (true)', async () => {
-    process.argv = ['node', 'script.js', '--no-telemetry-log-prompts'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { logPrompts: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
-  });
-
-  it('should use default log prompts (true) if no value is provided via CLI or settings', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
-  });
-
-  it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {
-      telemetry: { otlpProtocol: 'http' },
-    };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryOtlpProtocol()).toBe('http');
-  });
-
-  it('should prioritize --telemetry-otlp-protocol CLI flag over settings', async () => {
-    process.argv = ['node', 'script.js', '--telemetry-otlp-protocol', 'http'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {
-      telemetry: { otlpProtocol: 'grpc' },
-    };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryOtlpProtocol()).toBe('http');
-  });
-
-  it('should use default protocol if no OTLP protocol is provided via CLI or settings', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = { telemetry: { enabled: true } };
-    const config = await loadCliConfig(
-      settings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      'test-session',
-      argv,
-    );
-    expect(config.getTelemetryOtlpProtocol()).toBe('grpc');
-  });
-
-  it('should reject invalid --telemetry-otlp-protocol values', async () => {
-    process.argv = [
-      'node',
-      'script.js',
-      '--telemetry-otlp-protocol',
-      'invalid',
-    ];
-
-    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
-      throw new Error('process.exit called');
-    });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
-      expect.stringContaining('Invalid values:'),
-    );
-
-    mockExit.mockRestore();
-    mockConsoleError.mockRestore();
-  });
+  mockExit.mockRestore();
+  mockConsoleError.mockRestore();
 });
 
 describe('Hierarchical Memory Loading (config.ts) - Placeholder Suite', () => {

@@ -23,11 +23,7 @@ import { ApprovalMode } from '../config/config.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { logFileOperation } from '../telemetry/loggers.js';
-import { FileOperationEvent } from '../telemetry/types.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
-import { getLanguageFromFilePath } from '../utils/language-detection.js';
+
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
@@ -37,6 +33,7 @@ import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
   extractEditSnippet,
+  findMatchedSlice,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
@@ -104,6 +101,7 @@ interface CalculatedEdit {
   occurrences: number;
   error?: { display: string; raw: string; type: ToolErrorType };
   isNewFile: boolean;
+  isAlreadyApplied?: boolean;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -127,6 +125,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let currentContent: string | null = null;
     let fileExists = false;
     let isNewFile = false;
+    let isAlreadyApplied = false;
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
     let occurrences = 0;
@@ -188,6 +187,16 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           raw: `Failed to edit, 0 occurrences found for old_string in ${params.file_path}. No edits made. The exact text in old_string was not found. Ensure you're not escaping content incorrectly and check whitespace, indentation, and context. Use ${ReadFileTool.Name} tool to verify.`,
           type: ToolErrorType.EDIT_NO_OCCURRENCE_FOUND,
         };
+        // Check if the edit has already been applied (idempotency check)
+        // identifying if new_string is present in the file.
+        const alreadyAppliedMatch = findMatchedSlice(
+          currentContent,
+          finalNewString,
+        );
+        if (alreadyAppliedMatch) {
+          isAlreadyApplied = true;
+          error = undefined; // Clear the error, we will handle this as a success-like state
+        }
       } else if (!replaceAll && occurrences > 1) {
         error = {
           display: `Failed to edit because the text matches multiple locations. Provide more context or set replace_all to true.`,
@@ -234,6 +243,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       occurrences,
       error,
       isNewFile,
+      isAlreadyApplied,
     };
   }
 
@@ -365,6 +375,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       };
     }
 
+    if (editData.isAlreadyApplied) {
+      return {
+        llmContent: `Edit already applied: The 'new_string' was found in the file, but 'old_string' was not. Assuming the edit was successful.`,
+        returnDisplay: `Edit already applied to ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`,
+      };
+    }
+
     try {
       this.ensureParentDirectoriesExist(this.params.file_path);
       await this.config
@@ -396,28 +413,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         newContent: editData.newContent,
         diffStat,
       };
-
-      // Log file operation for telemetry (without diff_stat to avoid double-counting)
-      const mimetype = getSpecificMimeType(this.params.file_path);
-      const programmingLanguage = getLanguageFromFilePath(
-        this.params.file_path,
-      );
-      const extension = path.extname(this.params.file_path);
-      const operation = editData.isNewFile
-        ? FileOperation.CREATE
-        : FileOperation.UPDATE;
-
-      logFileOperation(
-        this.config,
-        new FileOperationEvent(
-          EditTool.Name,
-          operation,
-          editData.newContent.split('\n').length,
-          mimetype,
-          extension,
-          programmingLanguage,
-        ),
-      );
 
       const llmSuccessMessageParts = [
         editData.isNewFile

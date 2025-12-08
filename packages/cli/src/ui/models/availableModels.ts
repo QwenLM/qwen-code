@@ -60,9 +60,32 @@ export function getOpenAIAvailableModelFromEnv(): AvailableModel | null {
   return id ? { id, label: id } : null;
 }
 
-export function getAvailableModelsForAuthType(
+/**
+ * Fetch available models from local Ollama instance
+ */
+async function fetchOllamaModels(): Promise<AvailableModel[]> {
+  try {
+    const response = await fetch('http://localhost:11434/api/tags');
+    if (!response.ok) {
+      return [];
+    }
+    const data = await response.json();
+    return (data.models || []).map(
+      (model: { name: string; details?: { parameter_size?: string } }) => ({
+        id: model.name,
+        label: model.name,
+        description: `Ollama model (${model.details?.parameter_size || 'Unknown size'})`,
+      }),
+    );
+  } catch (_error) {
+    // Silently fail if Ollama is not running or unreachable
+    return [];
+  }
+}
+
+export async function getAvailableModelsForAuthType(
   authType: AuthType,
-): AvailableModel[] {
+): Promise<AvailableModel[]> {
   switch (authType) {
     case AuthType.QWEN_OAUTH:
       return AVAILABLE_MODELS_QWEN;
@@ -70,6 +93,8 @@ export function getAvailableModelsForAuthType(
       const openAIModel = getOpenAIAvailableModelFromEnv();
       return openAIModel ? [openAIModel] : [];
     }
+    case AuthType.OLLAMA:
+      return await fetchOllamaModels();
     default:
       // For other auth types, return empty array for now
       // This can be expanded later according to the design doc

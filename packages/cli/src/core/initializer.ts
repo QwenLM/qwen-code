@@ -4,13 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  IdeClient,
-  IdeConnectionEvent,
-  IdeConnectionType,
-  logIdeConnection,
-  type Config,
-} from '@qwen-code/qwen-code-core';
+import { IdeClient, type Config } from '@qwen-code/qwen-code-core';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
@@ -60,7 +54,6 @@ export async function initializeApp(
   if (config.getIdeMode()) {
     const ideClient = await IdeClient.getInstance();
     await ideClient.connect();
-    logIdeConnection(config, new IdeConnectionEvent(IdeConnectionType.START));
   }
 
   return {

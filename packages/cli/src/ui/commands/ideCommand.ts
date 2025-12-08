@@ -4,14 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  type Config,
-  IdeClient,
-  type File,
-  logIdeConnection,
-  IdeConnectionEvent,
-  IdeConnectionType,
-} from '@qwen-code/qwen-code-core';
+import { type Config, IdeClient, type File } from '@qwen-code/qwen-code-core';
 import {
   QWEN_CODE_COMPANION_EXTENSION_NAME,
   getIdeInstaller,
@@ -127,7 +120,7 @@ async function setIdeModeAndSyncConnection(
   const ideClient = await IdeClient.getInstance();
   if (value) {
     await ideClient.connect();
-    logIdeConnection(config, new IdeConnectionEvent(IdeConnectionType.SESSION));
+    await ideClient.connect();
   } else {
     await ideClient.disconnect();
   }

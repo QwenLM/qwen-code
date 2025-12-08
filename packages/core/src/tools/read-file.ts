@@ -11,15 +11,8 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 import type { PartUnion } from '@google/genai';
-import {
-  processSingleFileContent,
-  getSpecificMimeType,
-} from '../utils/fileUtils.js';
+import { processSingleFileContent } from '../utils/fileUtils.js';
 import type { Config } from '../config/config.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
-import { logFileOperation } from '../telemetry/loggers.js';
-import { FileOperationEvent } from '../telemetry/types.js';
 
 /**
  * Parameters for the ReadFile tool
@@ -92,25 +85,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       llmContent = result.llmContent || '';
     }
 
-    const lines =
-      typeof result.llmContent === 'string'
-        ? result.llmContent.split('\n').length
-        : undefined;
-    const mimetype = getSpecificMimeType(this.params.absolute_path);
-    const programming_language = getProgrammingLanguage({
-      absolute_path: this.params.absolute_path,
-    });
-    logFileOperation(
-      this.config,
-      new FileOperationEvent(
-        ReadFileTool.Name,
-        FileOperation.READ,
-        lines,
-        mimetype,
-        path.extname(this.params.absolute_path),
-        programming_language,
-      ),
-    );
+    // lines removed
 
     return {
       llmContent,

@@ -155,7 +155,7 @@ describe('gemini.tsx main function', () => {
         getMcpServers: () => ({}),
         initialize: vi.fn(),
         getIdeMode: () => false,
-        getExperimentalZedIntegration: () => false,
+
         getScreenReader: () => false,
         getGeminiMdFileCount: () => 0,
         getProjectRoot: () => '/',

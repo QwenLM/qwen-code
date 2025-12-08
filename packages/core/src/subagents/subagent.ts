@@ -51,8 +51,7 @@ import {
   type SubagentStatsSummary,
 } from './subagent-statistics.js';
 import type { SubagentHooks } from './subagent-hooks.js';
-import { logSubagentExecution } from '../telemetry/loggers.js';
-import { SubagentExecutionEvent } from '../telemetry/types.js';
+
 import { TaskTool } from '../tools/task.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 
@@ -340,8 +339,7 @@ export class SubAgentScope {
       } as SubAgentStartEvent);
 
       // Log telemetry for subagent start
-      const startEvent = new SubagentExecutionEvent(this.name, 'started');
-      logSubagentExecution(this.runtimeContext, startEvent);
+
       while (true) {
         // Check termination conditions.
         if (
@@ -521,21 +519,6 @@ export class SubAgentScope {
         outputTokens: summary.outputTokens,
         totalTokens: summary.totalTokens,
       } as SubAgentFinishEvent);
-
-      const completionEvent = new SubagentExecutionEvent(
-        this.name,
-        this.terminateMode === SubagentTerminateMode.GOAL
-          ? 'completed'
-          : 'failed',
-        {
-          terminate_reason: this.terminateMode,
-          result: this.finalText,
-          execution_summary: this.stats.formatCompact(
-            'Subagent execution completed',
-          ),
-        },
-      );
-      logSubagentExecution(this.runtimeContext, completionEvent);
 
       await this.hooks?.onStop?.({
         subagentId: this.subagentId,

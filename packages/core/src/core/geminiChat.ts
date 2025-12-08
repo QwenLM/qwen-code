@@ -26,19 +26,10 @@ import {
 } from '../config/models.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
-import {
-  logContentRetry,
-  logContentRetryFailure,
-} from '../telemetry/loggers.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
-import {
-  ContentRetryEvent,
-  ContentRetryFailureEvent,
-} from '../telemetry/types.js';
 import { handleFallback } from '../fallback/handler.js';
 import { isFunctionResponse } from '../utils/messageInspectors.js';
 import { partListUnionToString } from './geminiRequest.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 export enum StreamEventType {
   /** A regular content chunk from the API. */
@@ -307,15 +298,6 @@ export class GeminiChat {
             if (isContentError) {
               // Check if we have more attempts left.
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
-                logContentRetry(
-                  self.config,
-                  new ContentRetryEvent(
-                    attempt,
-                    (error as InvalidStreamError).type,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs,
-                    model,
-                  ),
-                );
                 await new Promise((res) =>
                   setTimeout(
                     res,
@@ -331,16 +313,6 @@ export class GeminiChat {
         }
 
         if (lastError) {
-          if (lastError instanceof InvalidStreamError) {
-            logContentRetryFailure(
-              self.config,
-              new ContentRetryFailureEvent(
-                INVALID_CONTENT_RETRY_OPTIONS.maxAttempts,
-                (lastError as InvalidStreamError).type,
-                model,
-              ),
-            );
-          }
           throw lastError;
         }
       } finally {
@@ -533,11 +505,6 @@ export class GeminiChat {
       // Record token usage if this chunk has usageMetadata
       if (chunk.usageMetadata) {
         this.chatRecordingService.recordMessageTokens(chunk.usageMetadata);
-        if (chunk.usageMetadata.promptTokenCount !== undefined) {
-          uiTelemetryService.setLastPromptTokenCount(
-            chunk.usageMetadata.promptTokenCount,
-          );
-        }
       }
 
       yield chunk; // Yield every chunk to the UI immediately.

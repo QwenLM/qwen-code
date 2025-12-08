@@ -114,9 +114,9 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     showToolDescriptions: false,
     filteredConsoleMessages: [],
     sessionStats: {
-      lastPromptTokenCount: 0,
-      sessionTokenCount: 0,
-      totalPrompts: 0,
+      sessionId: 'test-session',
+      sessionStartTime: new Date(),
+      promptCount: 0,
     },
     branchName: 'main',
     debugMessage: '',
@@ -205,9 +205,7 @@ describe('Composer', () => {
         sessionStats: {
           sessionId: 'test-session',
           sessionStartTime: new Date(),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          metrics: {} as any,
-          lastPromptTokenCount: 150,
+           
           promptCount: 5,
         },
       });

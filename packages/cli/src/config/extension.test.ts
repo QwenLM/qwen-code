@@ -24,13 +24,7 @@ import {
   uninstallExtension,
   type Extension,
 } from './extension.js';
-import {
-  QWEN_DIR,
-  type GeminiCLIExtension,
-  ExtensionUninstallEvent,
-  ExtensionDisableEvent,
-  ExtensionEnableEvent,
-} from '@qwen-code/qwen-code-core';
+import { QWEN_DIR, type GeminiCLIExtension } from '@qwen-code/qwen-code-core';
 import { execSync } from 'node:child_process';
 import { SettingScope } from './settings.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
@@ -852,21 +846,6 @@ describe('extension tests', () => {
       fs.rmSync(targetExtDir, { recursive: true, force: true });
     });
 
-    it('should log to clearcut on successful install', async () => {
-      const sourceExtDir = createExtension({
-        extensionsDir: tempHomeDir,
-        name: 'my-local-extension',
-        version: '1.0.0',
-      });
-
-      await installExtension(
-        { source: sourceExtDir, type: 'local' },
-        async (_) => true,
-      );
-
-      expect(mockLogExtensionInstallEvent).toHaveBeenCalled();
-    });
-
     it('should show users information on their mcp server when installing', async () => {
       const consoleInfoSpy = vi.spyOn(console, 'info');
       const sourceExtDir = createExtension({
@@ -1077,22 +1056,6 @@ This extension will run the following MCP servers:
       );
     });
 
-    it('should log uninstall event', async () => {
-      createExtension({
-        extensionsDir: userExtensionsDir,
-        name: 'my-local-extension',
-        version: '1.0.0',
-      });
-
-      await uninstallExtension('my-local-extension');
-
-      expect(mockLogExtensionUninstall).toHaveBeenCalled();
-      expect(ExtensionUninstallEvent).toHaveBeenCalledWith(
-        'my-local-extension',
-        'success',
-      );
-    });
-
     it('should uninstall an extension by its source URL', async () => {
       const gitUrl = 'https://github.com/google/gemini-sql-extension.git';
       const sourceExtDir = createExtension({
@@ -1108,11 +1071,6 @@ This extension will run the following MCP servers:
       await uninstallExtension(gitUrl);
 
       expect(fs.existsSync(sourceExtDir)).toBe(false);
-      expect(mockLogExtensionUninstall).toHaveBeenCalled();
-      expect(ExtensionUninstallEvent).toHaveBeenCalledWith(
-        'gemini-sql-extension',
-        'success',
-      );
     });
 
     it('should fail to uninstall by URL if an extension has no install metadata', async () => {
@@ -1356,22 +1314,6 @@ This extension will run the following MCP servers:
         disableExtension('my-extension', SettingScope.System),
       ).toThrow('System and SystemDefaults scopes are not supported.');
     });
-
-    it('should log a disable event', () => {
-      createExtension({
-        extensionsDir: userExtensionsDir,
-        name: 'ext1',
-        version: '1.0.0',
-      });
-
-      disableExtension('ext1', SettingScope.Workspace);
-
-      expect(mockLogExtensionDisable).toHaveBeenCalled();
-      expect(ExtensionDisableEvent).toHaveBeenCalledWith(
-        'ext1',
-        SettingScope.Workspace,
-      );
-    });
   });
 
   describe('enableExtension', () => {
@@ -1422,22 +1364,6 @@ This extension will run the following MCP servers:
       activeExtensions = getActiveExtensions();
       expect(activeExtensions).toHaveLength(1);
       expect(activeExtensions[0].name).toBe('ext1');
-    });
-
-    it('should log an enable event', () => {
-      createExtension({
-        extensionsDir: userExtensionsDir,
-        name: 'ext1',
-        version: '1.0.0',
-      });
-      disableExtension('ext1', SettingScope.Workspace);
-      enableExtension('ext1', SettingScope.Workspace);
-
-      expect(mockLogExtensionEnable).toHaveBeenCalled();
-      expect(ExtensionEnableEvent).toHaveBeenCalledWith(
-        'ext1',
-        SettingScope.Workspace,
-      );
     });
   });
 });

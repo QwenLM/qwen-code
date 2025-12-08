@@ -21,7 +21,7 @@ describe('SettingsSchema', () => {
         'ui',
         'ide',
         'privacy',
-        'telemetry',
+
         'model',
         'context',
         'tools',
@@ -191,7 +191,6 @@ describe('SettingsSchema', () => {
         false,
       );
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
-      expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
 
       // Check that some settings are appropriately hidden
       expect(getSettingsSchema().ui.properties.theme.showInDialog).toBe(false); // Changed to false

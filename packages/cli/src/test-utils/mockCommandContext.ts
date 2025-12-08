@@ -65,18 +65,6 @@ export const createMockCommandContext = (
       sessionShellAllowlist: new Set<string>(),
       stats: {
         sessionStartTime: new Date(),
-        lastPromptTokenCount: 0,
-        metrics: {
-          models: {},
-          tools: {
-            totalCalls: 0,
-            totalSuccess: 0,
-            totalFail: 0,
-            totalDurationMs: 0,
-            totalDecisions: { accept: 0, reject: 0, modify: 0 },
-            byName: {},
-          },
-        },
         promptCount: 0,
       } as SessionStatsState,
     },

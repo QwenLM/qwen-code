@@ -9,7 +9,6 @@ import { parseSlashCommand } from './utils/commands.js';
 import {
   FatalInputError,
   Logger,
-  uiTelemetryService,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
@@ -109,8 +108,6 @@ export const handleSlashCommand = async (
       const sessionStats: SessionStatsState = {
         sessionId: config?.getSessionId(),
         sessionStartTime: new Date(),
-        metrics: uiTelemetryService.getMetrics(),
-        lastPromptTokenCount: 0,
         promptCount: 1,
       };
 

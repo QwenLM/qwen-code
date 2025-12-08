@@ -547,9 +547,6 @@ describe('runNonInteractive', () => {
     );
     expect(resultMessage).toBeTruthy();
     expect(resultMessage?.result).toBe('Hello World');
-    // Get the actual metrics that were used
-    const actualMetrics = vi.mocked(uiTelemetryService.getMetrics)();
-    expect(resultMessage?.stats).toEqual(actualMetrics);
   });
 
   it('should write JSON output with stats for tool-only commands (no text response)', async () => {
@@ -699,9 +696,6 @@ describe('runNonInteractive', () => {
     );
     expect(resultMessage).toBeTruthy();
     expect(resultMessage?.result).toBe('');
-    // Get the actual metrics that were used
-    const actualMetrics = vi.mocked(uiTelemetryService.getMetrics)();
-    expect(resultMessage?.stats).toEqual(actualMetrics);
   });
 
   it('should handle errors in JSON format', async () => {

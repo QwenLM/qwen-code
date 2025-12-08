@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -27,7 +26,6 @@ export const clearCommand: SlashCommand = {
       context.ui.setDebugMessage(t('Clearing terminal.'));
     }
 
-    uiTelemetryService.setLastPromptTokenCount(0);
     context.ui.clear();
   },
 };

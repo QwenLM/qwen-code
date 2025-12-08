@@ -5,7 +5,7 @@
  */
 
 import type { GenerateContentParameters } from '@google/genai';
-import type { RequestContext } from './telemetryService.js';
+import type { RequestContext } from './pipeline.js';
 
 export interface ErrorHandler {
   handle(

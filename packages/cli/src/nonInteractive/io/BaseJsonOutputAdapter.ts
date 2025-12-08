@@ -9,7 +9,6 @@ import type {
   Config,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
-  SessionMetrics,
   ServerGeminiStreamEvent,
   TaskResultDisplay,
 } from '@qwen-code/qwen-code-core';
@@ -57,7 +56,7 @@ export interface ResultOptions {
   readonly apiDurationMs: number;
   readonly numTurns: number;
   readonly usage?: ExtendedUsage;
-  readonly stats?: SessionMetrics;
+
   readonly summary?: string;
   readonly subtype?: string;
 }
@@ -1044,7 +1043,7 @@ export abstract class BaseJsonOutputAdapter {
         error: { message: errorMessage },
       };
     } else {
-      const success: CLIResultMessageSuccess & { stats?: SessionMetrics } = {
+      const success: CLIResultMessageSuccess = {
         type: 'result',
         subtype:
           (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
@@ -1058,10 +1057,6 @@ export abstract class BaseJsonOutputAdapter {
         usage,
         permission_denials: [...this.permissionDenials],
       };
-
-      if (options.stats) {
-        success.stats = options.stats;
-      }
 
       return success;
     }

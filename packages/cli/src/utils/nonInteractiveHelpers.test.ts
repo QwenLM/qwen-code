@@ -7,7 +7,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   Config,
-  SessionMetrics,
   TaskResultDisplay,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
@@ -27,7 +26,6 @@ import {
   normalizePartList,
   extractPartsFromUserMessage,
   extractUsageFromGeminiClient,
-  computeUsageFromMetrics,
   buildSystemMessage,
   createTaskToolProgressHandler,
   functionResponsePartsToString,
@@ -315,174 +313,6 @@ describe('extractUsageFromGeminiClient', () => {
     expect(result).toEqual({
       input_tokens: 50,
       output_tokens: 75,
-    });
-  });
-});
-
-describe('computeUsageFromMetrics', () => {
-  it('should compute usage from SessionMetrics with single model', () => {
-    const metrics: SessionMetrics = {
-      models: {
-        'model-1': {
-          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
-          tokens: {
-            prompt: 50,
-            candidates: 100,
-            total: 150,
-            cached: 10,
-            thoughts: 0,
-            tool: 0,
-          },
-        },
-      },
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 0,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    const result = computeUsageFromMetrics(metrics);
-    expect(result).toEqual({
-      input_tokens: 100,
-      output_tokens: 100,
-      cache_read_input_tokens: 20,
-      total_tokens: 150,
-    });
-  });
-
-  it('should aggregate usage across multiple models', () => {
-    const metrics: SessionMetrics = {
-      models: {
-        'model-1': {
-          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
-          tokens: {
-            prompt: 50,
-            candidates: 100,
-            total: 150,
-            cached: 10,
-            thoughts: 0,
-            tool: 0,
-          },
-        },
-        'model-2': {
-          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
-          tokens: {
-            prompt: 75,
-            candidates: 125,
-            total: 200,
-            cached: 15,
-            thoughts: 0,
-            tool: 0,
-          },
-        },
-      },
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 0,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    const result = computeUsageFromMetrics(metrics);
-    expect(result).toEqual({
-      input_tokens: 100,
-      output_tokens: 225,
-      cache_read_input_tokens: 20,
-      total_tokens: 350,
-    });
-  });
-
-  it('should not include total_tokens when it is 0', () => {
-    const metrics: SessionMetrics = {
-      models: {
-        'model-1': {
-          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
-          tokens: {
-            prompt: 50,
-            candidates: 100,
-            total: 0,
-            cached: 10,
-            thoughts: 0,
-            tool: 0,
-          },
-        },
-      },
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 0,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    const result = computeUsageFromMetrics(metrics);
-    expect(result).not.toHaveProperty('total_tokens');
-    expect(result).toEqual({
-      input_tokens: 100,
-      output_tokens: 100,
-      cache_read_input_tokens: 20,
-    });
-  });
-
-  it('should handle empty models', () => {
-    const metrics: SessionMetrics = {
-      models: {},
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 0,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    const result = computeUsageFromMetrics(metrics);
-    expect(result).toEqual({
-      input_tokens: 100,
-      output_tokens: 0,
-      cache_read_input_tokens: 20,
     });
   });
 });

@@ -15,7 +15,7 @@ import { OpenAIContentConverter } from './converter.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import type { TelemetryService } from './telemetryService.js';
+
 import type { ErrorHandler } from './errorHandler.js';
 
 // Mock dependencies
@@ -28,7 +28,7 @@ describe('ContentGenerationPipeline', () => {
   let mockProvider: OpenAICompatibleProvider;
   let mockClient: OpenAI;
   let mockConverter: OpenAIContentConverter;
-  let mockTelemetryService: TelemetryService;
+
   let mockErrorHandler: ErrorHandler;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
   let mockCliConfig: Config;
@@ -62,13 +62,6 @@ describe('ContentGenerationPipeline', () => {
       buildHeaders: vi.fn().mockReturnValue({}),
     };
 
-    // Mock telemetry service
-    mockTelemetryService = {
-      logSuccess: vi.fn().mockResolvedValue(undefined),
-      logError: vi.fn().mockResolvedValue(undefined),
-      logStreamingSuccess: vi.fn().mockResolvedValue(undefined),
-    };
-
     // Mock error handler
     mockErrorHandler = {
       handle: vi.fn().mockImplementation((error: unknown) => {
@@ -98,7 +91,7 @@ describe('ContentGenerationPipeline', () => {
       cliConfig: mockCliConfig,
       provider: mockProvider,
       contentGeneratorConfig: mockContentGeneratorConfig,
-      telemetryService: mockTelemetryService,
+
       errorHandler: mockErrorHandler,
     };
 
@@ -166,17 +159,6 @@ describe('ContentGenerationPipeline', () => {
         }),
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
-        mockOpenAIResponse,
-      );
-      expect(mockTelemetryService.logSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: false,
-        }),
-        mockGeminiResponse,
-        expect.any(Object),
         mockOpenAIResponse,
       );
     });
@@ -264,16 +246,6 @@ describe('ContentGenerationPipeline', () => {
         'API Error',
       );
 
-      expect(mockTelemetryService.logError).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: false,
-        }),
-        testError,
-        expect.any(Object),
-      );
       expect(mockErrorHandler.handle).toHaveBeenCalledWith(
         testError,
         expect.any(Object),
@@ -371,17 +343,6 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
-      );
-      expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: true,
-        }),
-        [mockGeminiResponse1, mockGeminiResponse2],
-        expect.any(Object),
-        [mockChunk1, mockChunk2],
       );
     });
 
@@ -486,16 +447,7 @@ describe('ContentGenerationPipeline', () => {
 
       expect(results).toHaveLength(0); // No results due to error
       expect(mockConverter.resetStreamingToolCalls).toHaveBeenCalledTimes(2); // Once at start, once on error
-      expect(mockTelemetryService.logError).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: true,
-        }),
-        testError,
-        expect.any(Object),
-      );
+
       expect(mockErrorHandler.handle).toHaveBeenCalledWith(
         testError,
         expect.any(Object),
@@ -646,18 +598,6 @@ describe('ContentGenerationPipeline', () => {
         candidatesTokenCount: 20,
         totalTokenCount: 30,
       });
-
-      expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: true,
-        }),
-        results,
-        expect.any(Object),
-        [mockChunk1, mockChunk2, mockChunk3],
-      );
     });
 
     it('should handle ideal case where last chunk has both finishReason and usageMetadata', async () => {
@@ -849,18 +789,6 @@ describe('ContentGenerationPipeline', () => {
         candidatesTokenCount: 20,
         totalTokenCount: 30,
       });
-
-      expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: true,
-        }),
-        results,
-        expect.any(Object),
-        [mockChunk1, mockChunk2, mockChunk3],
-      );
     });
 
     it('should handle providers that send finishReason and valid usage in same chunk', async () => {
@@ -1114,19 +1042,6 @@ describe('ContentGenerationPipeline', () => {
       await pipeline.execute(request, userPromptId);
 
       // Assert
-      expect(mockTelemetryService.logSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: false,
-          startTime: expect.any(Number),
-          duration: expect.any(Number),
-        }),
-        expect.any(Object),
-        expect.any(Object),
-        expect.any(Object),
-      );
     });
 
     it('should create context with correct properties for streaming request', async () => {
@@ -1169,19 +1084,6 @@ describe('ContentGenerationPipeline', () => {
       }
 
       // Assert
-      expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          userPromptId,
-          model: 'test-model',
-          authType: 'openai',
-          isStreaming: true,
-          startTime: expect.any(Number),
-          duration: expect.any(Number),
-        }),
-        expect.any(Array),
-        expect.any(Object),
-        expect.any(Array),
-      );
     });
 
     it('should collect all OpenAI chunks for logging even when Gemini responses are filtered', async () => {
@@ -1327,20 +1229,6 @@ describe('ContentGenerationPipeline', () => {
       expect(responses[0]).toBe(finalGeminiResponse);
 
       // Verify telemetry was called with ALL OpenAI chunks, including the filtered ones
-      expect(mockTelemetryService.logStreamingSuccess).toHaveBeenCalledWith(
-        expect.objectContaining({
-          model: 'test-model',
-          duration: expect.any(Number),
-          userPromptId: 'test-prompt-id',
-          authType: 'openai',
-        }),
-        [finalGeminiResponse], // Only the non-empty Gemini response
-        expect.objectContaining({
-          model: 'test-model',
-          messages: [{ role: 'user', content: 'test' }],
-        }),
-        [partialToolCallChunk1, partialToolCallChunk2, finishChunk], // ALL OpenAI chunks
-      );
     });
   });
 });

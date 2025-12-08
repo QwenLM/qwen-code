@@ -13,14 +13,22 @@ import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
-import type { TelemetryService, RequestContext } from './telemetryService.js';
 import type { ErrorHandler } from './errorHandler.js';
+
+export interface RequestContext {
+  userPromptId: string;
+  model: string;
+  authType: string;
+  startTime: number;
+  duration: number;
+  isStreaming: boolean;
+}
 
 export interface PipelineConfig {
   cliConfig: Config;
   provider: OpenAICompatibleProvider;
   contentGeneratorConfig: ContentGeneratorConfig;
-  telemetryService: TelemetryService;
+
   errorHandler: ErrorHandler;
 }
 
@@ -45,7 +53,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       false,
-      async (openaiRequest, context) => {
+      async (openaiRequest, _context) => {
         const openaiResponse = (await this.client.chat.completions.create(
           openaiRequest,
           {
@@ -55,14 +63,6 @@ export class ContentGenerationPipeline {
 
         const geminiResponse =
           this.converter.convertOpenAIResponseToGemini(openaiResponse);
-
-        // Log success
-        await this.config.telemetryService.logSuccess(
-          context,
-          geminiResponse,
-          openaiRequest,
-          openaiResponse,
-        );
 
         return geminiResponse;
       },
@@ -165,13 +165,6 @@ export class ContentGenerationPipeline {
 
       // Stage 2e: Stream completed successfully - perform logging with original OpenAI chunks
       context.duration = Date.now() - context.startTime;
-
-      await this.config.telemetryService.logStreamingSuccess(
-        context,
-        collectedGeminiResponses,
-        openaiRequest,
-        collectedOpenAIChunks,
-      );
     } catch (error) {
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
@@ -376,37 +369,11 @@ export class ContentGenerationPipeline {
     error: unknown,
     context: RequestContext,
     request: GenerateContentParameters,
-    userPromptId?: string,
-    isStreaming?: boolean,
+    _userPromptId?: string,
+    _isStreaming?: boolean,
   ): Promise<never> {
     context.duration = Date.now() - context.startTime;
 
-    // Build request for logging (may fail, but we still want to log the error)
-    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams;
-    try {
-      if (userPromptId !== undefined && isStreaming !== undefined) {
-        openaiRequest = await this.buildRequest(
-          request,
-          userPromptId,
-          isStreaming,
-        );
-      } else {
-        // For processStreamWithLogging, we don't have userPromptId/isStreaming,
-        // so create a minimal request
-        openaiRequest = {
-          model: this.contentGeneratorConfig.model,
-          messages: [],
-        };
-      }
-    } catch (_buildError) {
-      // If we can't build the request, create a minimal one for logging
-      openaiRequest = {
-        model: this.contentGeneratorConfig.model,
-        messages: [],
-      };
-    }
-
-    await this.config.telemetryService.logError(context, error, openaiRequest);
     this.config.errorHandler.handle(error, context, request);
   }
 

@@ -96,7 +96,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toContain('About Qwen Code');
   });
 
-  it('renders ModelStatsDisplay for "model_stats" type', () => {
+  it('renders nothing for "model_stats" type (disabled)', () => {
     const item: HistoryItem = {
       ...baseItem,
       type: 'model_stats',
@@ -106,12 +106,10 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay {...baseItem} item={item} />
       </SessionStatsProvider>,
     );
-    expect(lastFrame()).toContain(
-      'No API calls have been made in this session.',
-    );
+    expect(lastFrame()).toBe('');
   });
 
-  it('renders ToolStatsDisplay for "tool_stats" type', () => {
+  it('renders disabled message for "tool_stats" type', () => {
     const item: HistoryItem = {
       ...baseItem,
       type: 'tool_stats',
@@ -121,9 +119,7 @@ describe('<HistoryItemDisplay />', () => {
         <HistoryItemDisplay {...baseItem} item={item} />
       </SessionStatsProvider>,
     );
-    expect(lastFrame()).toContain(
-      'No tool calls have been made in this session.',
-    );
+    expect(lastFrame()).toContain('Tool stats are disabled in this build.');
   });
 
   it('renders SessionSummaryDisplay for "quit" type', () => {

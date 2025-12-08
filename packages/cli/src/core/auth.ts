@@ -8,8 +8,6 @@ import {
   type AuthType,
   type Config,
   getErrorMessage,
-  logAuth,
-  AuthEvent,
 } from '@qwen-code/qwen-code-core';
 
 /**
@@ -30,17 +28,8 @@ export async function performInitialAuth(
     await config.refreshAuth(authType, true);
     // The console.log is intentionally left out here.
     // We can add a dedicated startup message later if needed.
-
-    // Log authentication success
-    const authEvent = new AuthEvent(authType, 'auto', 'success');
-    logAuth(config, authEvent);
   } catch (e) {
     const errorMessage = `Failed to login. Message: ${getErrorMessage(e)}`;
-
-    // Log authentication failure
-    const authEvent = new AuthEvent(authType, 'auto', 'error', errorMessage);
-    logAuth(config, authEvent);
-
     return errorMessage;
   }
 

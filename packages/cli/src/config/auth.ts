@@ -11,6 +11,10 @@ export function validateAuthMethod(authMethod: string): string | null {
   const settings = loadSettings();
   loadEnvironment(settings.merged);
 
+  if (authMethod === AuthType.OLLAMA) {
+    return null;
+  }
+
   if (authMethod === AuthType.USE_OPENAI) {
     const hasApiKey =
       process.env['OPENAI_API_KEY'] || settings.merged.security?.auth?.apiKey;

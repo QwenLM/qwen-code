@@ -6,13 +6,13 @@
 
 // Export config
 export * from './config/config.js';
+export * from './config/constants.js';
 export * from './output/types.js';
 export * from './output/json-formatter.js';
 
 // Export Core Logic
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
-export * from './core/loggingContentGenerator.js';
 export * from './core/geminiChat.js';
 export * from './core/logger.js';
 export * from './core/prompts.js';
@@ -120,11 +120,11 @@ export type {
 export { OAuthUtils } from './mcp/oauth-utils.js';
 
 // Export telemetry functions
-export * from './telemetry/index.js';
+
 export { sessionId } from './utils/session.js';
 export * from './utils/browser.js';
 // OpenAI Logging Utilities
-export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
+
 export { Storage } from './config/storage.js';
 
 // Export test utils

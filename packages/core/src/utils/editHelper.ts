@@ -262,7 +262,7 @@ function findLineBasedMatch(
 /* Slice discovery                                                           */
 /* -------------------------------------------------------------------------- */
 
-function findMatchedSlice(
+export function findMatchedSlice(
   haystack: string,
   needle: string,
 ): MatchedSliceResult | null {

@@ -488,49 +488,6 @@ describe('JsonOutputAdapter', () => {
 
       expect(resultMessage.usage).toEqual(usage);
     });
-
-    it('should include stats when provided', () => {
-      const stats = {
-        models: {},
-        tools: {
-          totalCalls: 5,
-          totalSuccess: 4,
-          totalFail: 1,
-          totalDurationMs: 1000,
-          totalDecisions: {
-            accept: 3,
-            reject: 1,
-            modify: 0,
-            auto_accept: 1,
-          },
-          byName: {},
-        },
-        files: {
-          totalLinesAdded: 10,
-          totalLinesRemoved: 5,
-        },
-      };
-
-      adapter.emitResult({
-        isError: false,
-        stats,
-        durationMs: 1000,
-        apiDurationMs: 800,
-        numTurns: 1,
-      });
-
-      const output = stdoutWriteSpy.mock.calls[0][0] as string;
-      const parsed = JSON.parse(output);
-      const resultMessage = parsed.find(
-        (msg: unknown) =>
-          typeof msg === 'object' &&
-          msg !== null &&
-          'type' in msg &&
-          msg.type === 'result',
-      );
-
-      expect(resultMessage.stats).toEqual(stats);
-    });
   });
 
   describe('emitUserMessage', () => {

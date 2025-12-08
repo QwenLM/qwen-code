@@ -50,12 +50,6 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 // Tools
 import { TaskTool } from '../tools/task.js';
 
-// Telemetry
-import {
-  NextSpeakerCheckEvent,
-  logNextSpeakerCheck,
-} from '../telemetry/index.js';
-
 // Utilities
 import {
   getDirectoryContextString,
@@ -564,14 +558,7 @@ export class GeminiClient {
         signal,
         prompt_id,
       );
-      logNextSpeakerCheck(
-        this.config,
-        new NextSpeakerCheckEvent(
-          prompt_id,
-          turn.finishReason?.toString() || '',
-          nextSpeakerCheck?.next_speaker || '',
-        ),
-      );
+
       if (nextSpeakerCheck?.next_speaker === 'model') {
         const nextRequest = [{ text: 'Please continue.' }];
         // This recursive call's events will be yielded out, but the final

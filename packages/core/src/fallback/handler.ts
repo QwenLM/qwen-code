@@ -7,7 +7,6 @@
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
-import { logFlashFallback, FlashFallbackEvent } from '../telemetry/index.js';
 
 export async function handleFallback(
   config: Config,
@@ -123,7 +122,7 @@ function activateFallbackMode(config: Config, authType: string | undefined) {
   if (!config.isInFallbackMode()) {
     config.setFallbackMode(true);
     if (authType) {
-      logFlashFallback(config, new FlashFallbackEvent(authType));
+      // logFlashFallback removed
     }
   }
 }

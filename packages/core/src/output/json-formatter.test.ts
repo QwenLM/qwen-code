@@ -5,7 +5,7 @@
  */
 
 import { expect, describe, it } from 'vitest';
-import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
+
 import { JsonFormatter } from './json-formatter.js';
 import type { JsonError } from './types.js';
 
@@ -47,81 +47,6 @@ describe('JsonFormatter', () => {
     expect(parsed.response).toBe('Line 1\nLine 2\r\nLine 3\twith tab');
   });
 
-  it('should format the response as JSON with stats', () => {
-    const formatter = new JsonFormatter();
-    const response = 'This is a test response.';
-    const stats: SessionMetrics = {
-      models: {
-        'gemini-2.5-pro': {
-          api: {
-            totalRequests: 2,
-            totalErrors: 0,
-            totalLatencyMs: 5672,
-          },
-          tokens: {
-            prompt: 24401,
-            candidates: 215,
-            total: 24719,
-            cached: 10656,
-            thoughts: 103,
-            tool: 0,
-          },
-        },
-        'gemini-2.5-flash': {
-          api: {
-            totalRequests: 2,
-            totalErrors: 0,
-            totalLatencyMs: 5914,
-          },
-          tokens: {
-            prompt: 20803,
-            candidates: 716,
-            total: 21657,
-            cached: 0,
-            thoughts: 138,
-            tool: 0,
-          },
-        },
-      },
-      tools: {
-        totalCalls: 1,
-        totalSuccess: 1,
-        totalFail: 0,
-        totalDurationMs: 4582,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 1,
-        },
-        byName: {
-          google_web_search: {
-            count: 1,
-            success: 1,
-            fail: 0,
-            durationMs: 4582,
-            decisions: {
-              accept: 0,
-              reject: 0,
-              modify: 0,
-              auto_accept: 1,
-            },
-          },
-        },
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
-    const formatted = formatter.format(response, stats);
-    const expected = {
-      response,
-      stats,
-    };
-    expect(JSON.parse(formatted)).toEqual(expected);
-  });
-
   it('should format error as JSON', () => {
     const formatter = new JsonFormatter();
     const error: JsonError = {
@@ -129,7 +54,7 @@ describe('JsonFormatter', () => {
       message: 'Invalid input provided',
       code: 400,
     };
-    const formatted = formatter.format(undefined, undefined, error);
+    const formatted = formatter.format(undefined, error);
     const expected = {
       error,
     };
@@ -144,7 +69,7 @@ describe('JsonFormatter', () => {
       message: 'Request timed out',
       code: 'TIMEOUT',
     };
-    const formatted = formatter.format(response, undefined, error);
+    const formatted = formatter.format(response, error);
     const expected = {
       response,
       error,
@@ -191,36 +116,17 @@ describe('JsonFormatter', () => {
   it('should format complete JSON output with response, stats, and error', () => {
     const formatter = new JsonFormatter();
     const response = 'Partial response before error';
-    const stats: SessionMetrics = {
-      models: {},
-      tools: {
-        totalCalls: 0,
-        totalSuccess: 0,
-        totalFail: 1,
-        totalDurationMs: 0,
-        totalDecisions: {
-          accept: 0,
-          reject: 0,
-          modify: 0,
-          auto_accept: 0,
-        },
-        byName: {},
-      },
-      files: {
-        totalLinesAdded: 0,
-        totalLinesRemoved: 0,
-      },
-    };
+
     const error: JsonError = {
       type: 'ApiError',
       message: 'Rate limit exceeded',
       code: 429,
     };
 
-    const formatted = formatter.format(response, stats, error);
+    const formatted = formatter.format(response, error);
     const expected = {
       response,
-      stats,
+
       error,
     };
     expect(JSON.parse(formatted)).toEqual(expected);

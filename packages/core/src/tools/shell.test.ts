@@ -685,82 +685,7 @@ describe('ShellTool', () => {
         await promise;
 
         expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Qwen-Coder <qwen-coder@alibabacloud.com>',
-          ),
-          expect.any(String),
-          expect.any(Function),
-          mockAbortSignal,
-          false,
-          {},
-        );
-      });
-
-      it('should not add co-author when disabled in config', async () => {
-        // Mock config with disabled co-author
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          enabled: false,
-          name: 'Qwen-Coder',
-          email: 'qwen-coder@alibabacloud.com',
-        });
-
-        const command = 'git commit -m "Initial commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        // On Linux, commands are wrapped with pgrep functionality
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining('git commit -m "Initial commit"'),
-          expect.any(String),
-          expect.any(Function),
-          mockAbortSignal,
-          false,
-          {},
-        );
-      });
-
-      it('should use custom name and email from config', async () => {
-        // Mock config with custom co-author details
-        (mockConfig.getGitCoAuthor as Mock).mockReturnValue({
-          enabled: true,
-          name: 'Custom Bot',
-          email: 'custom@example.com',
-        });
-
-        const command = 'git commit -m "Test commit"';
-        const invocation = shellTool.build({ command, is_background: false });
-        const promise = invocation.execute(mockAbortSignal);
-
-        resolveExecutionPromise({
-          rawOutput: Buffer.from(''),
-          output: '',
-          exitCode: 0,
-          signal: null,
-          error: null,
-          aborted: false,
-          pid: 12345,
-          executionMethod: 'child_process',
-        });
-
-        await promise;
-
-        expect(mockShellExecutionService).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Co-authored-by: Custom Bot <custom@example.com>',
-          ),
+          expect.stringContaining('git commit'),
           expect.any(String),
           expect.any(Function),
           mockAbortSignal,
@@ -769,66 +694,66 @@ describe('ShellTool', () => {
         );
       });
     });
-  });
 
-  describe('shouldConfirmExecute', () => {
-    it('should not request confirmation for read-only commands', async () => {
-      const invocation = shellTool.build({
-        command: 'ls -la',
-        is_background: false,
+    describe('shouldConfirmExecute', () => {
+      it('should not request confirmation for read-only commands', async () => {
+        const invocation = shellTool.build({
+          command: 'ls -la',
+          is_background: false,
+        });
+
+        const confirmation = await invocation.shouldConfirmExecute(
+          new AbortController().signal,
+        );
+
+        expect(confirmation).toBe(false);
       });
 
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
+      it('should request confirmation for a new command and whitelist it on "Always"', async () => {
+        const params = { command: 'npm install', is_background: false };
+        const invocation = shellTool.build(params);
+        const confirmation = await invocation.shouldConfirmExecute(
+          new AbortController().signal,
+        );
 
-      expect(confirmation).toBe(false);
-    });
+        expect(confirmation).not.toBe(false);
+        expect(confirmation && confirmation.type).toBe('exec');
 
-    it('should request confirmation for a new command and whitelist it on "Always"', async () => {
-      const params = { command: 'npm install', is_background: false };
-      const invocation = shellTool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (confirmation as any).onConfirm(
+          ToolConfirmationOutcome.ProceedAlways,
+        );
 
-      expect(confirmation).not.toBe(false);
-      expect(confirmation && confirmation.type).toBe('exec');
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (confirmation as any).onConfirm(
-        ToolConfirmationOutcome.ProceedAlways,
-      );
-
-      // Should now be whitelisted
-      const secondInvocation = shellTool.build({
-        command: 'npm test',
-        is_background: false,
+        // Should now be whitelisted
+        const secondInvocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const secondConfirmation = await secondInvocation.shouldConfirmExecute(
+          new AbortController().signal,
+        );
+        expect(secondConfirmation).toBe(false);
       });
-      const secondConfirmation = await secondInvocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(secondConfirmation).toBe(false);
+
+      it('should throw an error if validation fails', () => {
+        expect(() =>
+          shellTool.build({ command: '', is_background: false }),
+        ).toThrow();
+      });
     });
 
-    it('should throw an error if validation fails', () => {
-      expect(() =>
-        shellTool.build({ command: '', is_background: false }),
-      ).toThrow();
-    });
-  });
+    describe('getDescription', () => {
+      it('should return the windows description when on windows', () => {
+        vi.mocked(os.platform).mockReturnValue('win32');
+        const shellTool = new ShellTool(mockConfig);
+        expect(shellTool.description).toMatchSnapshot();
+      });
 
-  describe('getDescription', () => {
-    it('should return the windows description when on windows', () => {
-      vi.mocked(os.platform).mockReturnValue('win32');
-      const shellTool = new ShellTool(mockConfig);
-      expect(shellTool.description).toMatchSnapshot();
-    });
-
-    it('should return the non-windows description when not on windows', () => {
-      vi.mocked(os.platform).mockReturnValue('linux');
-      const shellTool = new ShellTool(mockConfig);
-      expect(shellTool.description).toMatchSnapshot();
+      it('should return the non-windows description when not on windows', () => {
+        vi.mocked(os.platform).mockReturnValue('linux');
+        const shellTool = new ShellTool(mockConfig);
+        expect(shellTool.description).toMatchSnapshot();
+      });
     });
   });
 });

@@ -22,19 +22,13 @@ import {
   getErrorMessage,
   isNodeError,
   MessageSenderType,
-  logUserPrompt,
   GitService,
   UnauthorizedError,
-  UserPromptEvent,
   DEFAULT_GEMINI_FLASH_MODEL,
-  logConversationFinishedEvent,
-  ConversationFinishedEvent,
   ApprovalMode,
   parseAndFormatApiError,
   promptIdContext,
   ToolConfirmationOutcome,
-  logApiCancel,
-  ApiCancelEvent,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -237,27 +231,6 @@ export const useGeminiStream = (
     return StreamingState.Idle;
   }, [isResponding, toolCalls]);
 
-  useEffect(() => {
-    if (
-      config.getApprovalMode() === ApprovalMode.YOLO &&
-      streamingState === StreamingState.Idle
-    ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
-      );
-
-      const turnCount =
-        lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;
-
-      if (turnCount > 0) {
-        logConversationFinishedEvent(
-          config,
-          new ConversationFinishedEvent(config.getApprovalMode(), turnCount),
-        );
-      }
-    }
-  }, [streamingState, config, history]);
-
   const cancelOngoingRequest = useCallback(() => {
     if (streamingState !== StreamingState.Responding) {
       return;
@@ -268,15 +241,6 @@ export const useGeminiStream = (
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
-
-    // Log API cancellation
-    const prompt_id = config.getSessionId() + '########' + getPromptCount();
-    const cancellationEvent = new ApiCancelEvent(
-      config.getModel(),
-      prompt_id,
-      config.getContentGeneratorConfig()?.authType,
-    );
-    logApiCancel(config, cancellationEvent);
 
     if (pendingHistoryItemRef.current) {
       addItem(pendingHistoryItemRef.current, Date.now());
@@ -299,8 +263,6 @@ export const useGeminiStream = (
     onCancelSubmit,
     pendingHistoryItemRef,
     setShellInputFocused,
-    config,
-    getPromptCount,
   ]);
 
   useKeypress(
@@ -849,19 +811,6 @@ export const useGeminiStream = (
         const finalQueryToSend = queryToSend;
 
         if (!options?.isContinuation) {
-          if (typeof queryToSend === 'string') {
-            // logging the text prompts only for now
-            const promptText = queryToSend;
-            logUserPrompt(
-              config,
-              new UserPromptEvent(
-                promptText.length,
-                prompt_id,
-                config.getContentGeneratorConfig()?.authType,
-                promptText,
-              ),
-            );
-          }
           startNewPrompt();
           setThought(null); // Reset thought when starting a new prompt
         }

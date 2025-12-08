@@ -9,19 +9,7 @@ import type {
   GeminiCLIExtension,
   ExtensionInstallMetadata,
 } from '@qwen-code/qwen-code-core';
-import {
-  QWEN_DIR,
-  Storage,
-  Config,
-  ExtensionInstallEvent,
-  ExtensionUninstallEvent,
-  ExtensionDisableEvent,
-  ExtensionEnableEvent,
-  logExtensionEnable,
-  logExtensionInstallEvent,
-  logExtensionUninstall,
-  logExtensionDisable,
-} from '@qwen-code/qwen-code-core';
+import { QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -30,7 +18,6 @@ import { getErrorMessage } from '../utils/errors.js';
 import { recursivelyHydrateStrings } from './extensions/variables.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { randomUUID } from 'node:crypto';
 import {
   cloneFromGit,
   downloadFromGitHubRelease,
@@ -127,20 +114,6 @@ export async function performWorkspaceExtensionMigration(
     }
   }
   return failedInstallNames;
-}
-
-function getTelemetryConfig(cwd: string) {
-  const settings = loadSettings(cwd);
-  const config = new Config({
-    telemetry: settings.merged.telemetry,
-    interactive: false,
-    sessionId: randomUUID(),
-    targetDir: cwd,
-    cwd,
-    model: '',
-    debugMode: false,
-  });
-  return config;
 }
 
 export function loadExtensions(
@@ -424,7 +397,6 @@ export async function installExtension(
   cwd: string = process.cwd(),
   previousExtensionConfig?: ExtensionConfig,
 ): Promise<string> {
-  const telemetryConfig = getTelemetryConfig(cwd);
   let newExtensionConfig: ExtensionConfig | null = null;
   let localSourcePath: string | undefined;
 
@@ -521,16 +493,6 @@ export async function installExtension(
       }
     }
 
-    logExtensionInstallEvent(
-      telemetryConfig,
-      new ExtensionInstallEvent(
-        newExtensionConfig!.name,
-        newExtensionConfig!.version,
-        installMetadata.source,
-        'success',
-      ),
-    );
-
     enableExtension(newExtensionConfig!.name, SettingScope.User);
     return newExtensionConfig!.name;
   } catch (error) {
@@ -546,15 +508,7 @@ export async function installExtension(
         // Ignore error, this is just for logging.
       }
     }
-    logExtensionInstallEvent(
-      telemetryConfig,
-      new ExtensionInstallEvent(
-        newExtensionConfig?.name ?? '',
-        newExtensionConfig?.version ?? '',
-        installMetadata.source,
-        'error',
-      ),
-    );
+
     throw error;
   }
 }
@@ -664,9 +618,8 @@ export function loadExtensionConfig(
 
 export async function uninstallExtension(
   extensionIdentifier: string,
-  cwd: string = process.cwd(),
+  _cwd: string = process.cwd(),
 ): Promise<void> {
-  const telemetryConfig = getTelemetryConfig(cwd);
   const installedExtensions = loadUserExtensions();
   const extensionName = installedExtensions.find(
     (installed) =>
@@ -689,10 +642,6 @@ export async function uninstallExtension(
     recursive: true,
     force: true,
   });
-  logExtensionUninstall(
-    telemetryConfig,
-    new ExtensionUninstallEvent(extensionName, 'success'),
-  );
 }
 
 export function toOutputString(
@@ -748,7 +697,6 @@ export function disableExtension(
   scope: SettingScope,
   cwd: string = process.cwd(),
 ) {
-  const config = getTelemetryConfig(cwd);
   if (scope === SettingScope.System || scope === SettingScope.SystemDefaults) {
     throw new Error('System and SystemDefaults scopes are not supported.');
   }
@@ -763,7 +711,6 @@ export function disableExtension(
   );
   const scopePath = scope === SettingScope.Workspace ? cwd : os.homedir();
   manager.disable(name, true, scopePath);
-  logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
 }
 
 export function enableExtension(
@@ -783,6 +730,4 @@ export function enableExtension(
   );
   const scopePath = scope === SettingScope.Workspace ? cwd : os.homedir();
   manager.enable(name, true, scopePath);
-  const config = getTelemetryConfig(cwd);
-  logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
 }

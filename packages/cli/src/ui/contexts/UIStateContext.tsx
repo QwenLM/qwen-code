@@ -16,7 +16,6 @@ import type {
   HistoryItemWithoutId,
   StreamingState,
 } from '../types.js';
-import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
@@ -37,7 +36,6 @@ export interface ProQuotaDialogRequest {
   fallbackModel: string;
   resolve: (intent: FallbackIntent) => void;
 }
-
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 
@@ -52,7 +50,8 @@ export interface UIState {
   isAuthDialogOpen: boolean;
   pendingAuthType: AuthType | undefined;
   // Qwen OAuth state
-  qwenAuthState: QwenAuthState;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  qwenAuthState: any;
   editorError: string | null;
   isEditorDialogOpen: boolean;
   corgiMode: boolean;

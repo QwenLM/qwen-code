@@ -26,26 +26,7 @@ export {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from './src/config/config.js';
 export { detectIdeFromEnv } from './src/ide/detect-ide.js';
-export {
-  logExtensionEnable,
-  logIdeConnection,
-  logExtensionDisable,
-  logAuth,
-} from './src/telemetry/loggers.js';
 
-export {
-  IdeConnectionEvent,
-  IdeConnectionType,
-  ExtensionInstallEvent,
-  ExtensionDisableEvent,
-  ExtensionEnableEvent,
-  ExtensionUninstallEvent,
-  ModelSlashCommandEvent,
-  AuthEvent,
-} from './src/telemetry/types.js';
 export { makeFakeConfig } from './src/test-utils/config.js';
 export * from './src/utils/pathReader.js';
 export * from './src/utils/request-tokenizer/supportedImageFormats.js';
-export { ClearcutLogger } from './src/telemetry/clearcut-logger/clearcut-logger.js';
-export { QwenLogger } from './src/telemetry/qwen-logger/qwen-logger.js';
-export { logModelSlashCommand } from './src/telemetry/loggers.js';

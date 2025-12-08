@@ -1,8 +1,8 @@
 {
-  "name": "qwen-code-vscode-ide-companion",
-  "displayName": "Qwen Code Companion",
-  "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.3.0",
+  "name": "qwen-ollama-vscode-ide-companion",
+  "displayName": "Qwen Ollama Companion",
+  "description": "Enable Qwen Ollama with direct access to your VS Code workspace.",
+  "version": "0.4.0",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -39,21 +39,21 @@
     "commands": [
       {
         "command": "qwen.diff.accept",
-        "title": "Qwen Code: Accept Current Diff",
+        "title": "Qwen Ollama: Accept Current Diff",
         "icon": "$(check)"
       },
       {
         "command": "qwen.diff.cancel",
-        "title": "Qwen Code: Close Diff Editor",
+        "title": "Qwen Ollama: Close Diff Editor",
         "icon": "$(close)"
       },
       {
         "command": "qwen-code.runQwenCode",
-        "title": "Qwen Code: Run"
+        "title": "Qwen Ollama: Run"
       },
       {
         "command": "qwen-code.showNotices",
-        "title": "Qwen Code: View Third-Party Notices"
+        "title": "Qwen Ollama: View Third-Party Notices"
       }
     ],
     "menus": {

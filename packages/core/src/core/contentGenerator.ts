@@ -18,8 +18,6 @@ import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { Config } from '../config/config.js';
 
 import type { UserTierId } from '../code_assist/types.js';
-import { InstallationManager } from '../utils/installationManager.js';
-import { LoggingContentGenerator } from './loggingContentGenerator.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -49,6 +47,7 @@ export enum AuthType {
   CLOUD_SHELL = 'cloud-shell',
   USE_OPENAI = 'openai',
   QWEN_OAUTH = 'qwen-oauth',
+  OLLAMA = 'ollama',
 }
 
 export type ContentGeneratorConfig = {
@@ -110,6 +109,17 @@ export function createContentGeneratorConfig(
     } as ContentGeneratorConfig;
   }
 
+  // Enforce defaults for Ollama if explicitly selected or as fallback
+  if (authType === AuthType.OLLAMA) {
+    return {
+      ...newContentGeneratorConfig,
+      model: newContentGeneratorConfig?.model || 'qwen2.5-coder:7b',
+      baseUrl:
+        newContentGeneratorConfig?.baseUrl || 'http://localhost:11434/v1',
+      apiKey: 'ollama', // Placeholder key
+    } as ContentGeneratorConfig;
+  }
+
   return {
     ...newContentGeneratorConfig,
     model: newContentGeneratorConfig?.model || DEFAULT_QWEN_MODEL,
@@ -133,14 +143,11 @@ export async function createContentGenerator(
     config.authType === AuthType.CLOUD_SHELL
   ) {
     const httpOptions = { headers: baseHeaders };
-    return new LoggingContentGenerator(
-      await createCodeAssistContentGenerator(
-        httpOptions,
-        config.authType,
-        gcConfig,
-        sessionId,
-      ),
+    return await createCodeAssistContentGenerator(
+      httpOptions,
+      config.authType,
       gcConfig,
+      sessionId,
     );
   }
 
@@ -148,15 +155,8 @@ export async function createContentGenerator(
     config.authType === AuthType.USE_GEMINI ||
     config.authType === AuthType.USE_VERTEX_AI
   ) {
-    let headers: Record<string, string> = { ...baseHeaders };
-    if (gcConfig?.getUsageStatisticsEnabled()) {
-      const installationManager = new InstallationManager();
-      const installationId = installationManager.getInstallationId();
-      headers = {
-        ...headers,
-        'x-gemini-api-privileged-user-id': `${installationId}`,
-      };
-    }
+    const headers: Record<string, string> = { ...baseHeaders };
+    // Usage statistics check removed
     const httpOptions = { headers };
 
     const googleGenAI = new GoogleGenAI({
@@ -164,11 +164,14 @@ export async function createContentGenerator(
       vertexai: config.vertexai,
       httpOptions,
     });
-    return new LoggingContentGenerator(googleGenAI.models, gcConfig);
+    return googleGenAI.models;
   }
 
-  if (config.authType === AuthType.USE_OPENAI) {
-    if (!config.apiKey) {
+  if (
+    config.authType === AuthType.USE_OPENAI ||
+    config.authType === AuthType.OLLAMA
+  ) {
+    if (config.authType === AuthType.USE_OPENAI && !config.apiKey) {
       throw new Error('OpenAI API key is required');
     }
 
@@ -178,6 +181,7 @@ export async function createContentGenerator(
     );
 
     // Always use OpenAIContentGenerator, logging is controlled by enableOpenAILogging flag
+    // It handles Ollama internally via provider detection or explicit configuration
     return createOpenAIContentGenerator(config, gcConfig);
   }
 

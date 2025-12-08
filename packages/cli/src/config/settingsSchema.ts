@@ -7,7 +7,6 @@
 import type {
   MCPServerConfig,
   BugCommandSettings,
-  TelemetrySettings,
   AuthType,
   ChatCompressionSettings,
 } from '@qwen-code/qwen-code-core';
@@ -470,16 +469,6 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
     },
-  },
-
-  telemetry: {
-    type: 'object',
-    label: 'Telemetry',
-    category: 'Advanced',
-    requiresRestart: true,
-    default: undefined as TelemetrySettings | undefined,
-    description: 'Telemetry configuration.',
-    showInDialog: false,
   },
 
   model: {

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-ollama",
-  "version": "0.3.0-ollama",
+  "version": "0.4.0-ollama",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -52,7 +52,6 @@
     "prepare": "husky && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
     "release:version": "node scripts/version.js",
-    "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"

@@ -9,7 +9,6 @@ import {
   AuthType,
   getOauthClient,
   InputFormat,
-  logUserPrompt,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import { randomUUID } from 'node:crypto';
@@ -110,7 +109,6 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 
 import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
 import { loadSandboxConfig } from './config/sandboxConfig.js';
-import { runZedIntegration } from './zed-integration/zedIntegration.js';
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -385,10 +383,6 @@ export async function main() {
       await getOauthClient(settings.merged.security.auth.selectedType, config);
     }
 
-    if (config.getExperimentalZedIntegration()) {
-      return runZedIntegration(config, settings, extensions, argv);
-    }
-
     let input = config.getQuestion();
     const startupWarnings = [
       ...(await getStartupWarnings()),
@@ -458,15 +452,6 @@ export async function main() {
       );
       process.exit(1);
     }
-
-    logUserPrompt(config, {
-      'event.name': 'user_prompt',
-      'event.timestamp': new Date().toISOString(),
-      prompt: input,
-      prompt_id,
-      auth_type: config.getContentGeneratorConfig()?.authType,
-      prompt_length: input.length,
-    });
 
     if (config.getDebugMode()) {
       console.log('Session ID: %s', sessionId);

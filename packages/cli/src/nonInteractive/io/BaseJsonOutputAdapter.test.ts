@@ -1112,42 +1112,6 @@ describe('BaseJsonOutputAdapter', () => {
       expect(result.usage).toEqual(usage);
     });
 
-    it('should include stats when provided', () => {
-      const stats = {
-        models: {},
-        tools: {
-          totalCalls: 5,
-          totalSuccess: 4,
-          totalFail: 1,
-          totalDurationMs: 1000,
-          totalDecisions: {
-            accept: 3,
-            reject: 1,
-            modify: 0,
-            auto_accept: 1,
-          },
-          byName: {},
-        },
-        files: {
-          totalLinesAdded: 10,
-          totalLinesRemoved: 5,
-        },
-      };
-      const options: ResultOptions = {
-        isError: false,
-        stats,
-        durationMs: 1000,
-        apiDurationMs: 800,
-        numTurns: 1,
-      };
-
-      const result = adapter.exposeBuildResultMessage(options);
-
-      if (!result.is_error && 'stats' in result) {
-        expect(result['stats']).toEqual(stats);
-      }
-    });
-
     it('should handle result without assistant message', () => {
       adapter = new TestJsonOutputAdapter(mockConfig);
       const options: ResultOptions = {

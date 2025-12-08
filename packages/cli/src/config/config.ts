@@ -4,14 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  FileFilteringOptions,
-  MCPServerConfig,
-} from '@qwen-code/qwen-code-core';
-import { extensionsCommand } from '../commands/extensions.js';
-import {
+import type { MCPServerConfig ,
   ApprovalMode,
   Config,
+  type FileFilteringOptions,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
   EditTool,
@@ -21,12 +17,11 @@ import {
   setGeminiMdFilename as setServerGeminiMdFilename,
   ShellTool,
   WriteFileTool,
-  resolveTelemetrySettings,
-  FatalConfigError,
   Storage,
   InputFormat,
   OutputFormat,
 } from '@qwen-code/qwen-code-core';
+import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
 import yargs, { type Argv } from 'yargs';
 import { hideBin } from 'yargs/helpers';
@@ -686,22 +681,6 @@ export async function loadCliConfig(
     approvalMode = ApprovalMode.DEFAULT;
   }
 
-  let telemetrySettings;
-  try {
-    telemetrySettings = await resolveTelemetrySettings({
-      argv,
-      env: process.env as unknown as Record<string, string | undefined>,
-      settings: settings.telemetry,
-    });
-  } catch (err) {
-    if (err instanceof FatalConfigError) {
-      throw new FatalConfigError(
-        `Invalid telemetry configuration: ${err.message}.`,
-      );
-    }
-    throw err;
-  }
-
   // Interactive mode determination with priority:
   // 1. If promptInteractive (-i flag) is provided, it is explicitly interactive
   // 2. If outputFormat is stream-json or json (no matter input-format) along with query or prompt, it is non-interactive
@@ -824,7 +803,6 @@ export async function loadCliConfig(
       ...settings.ui?.accessibility,
       screenReader,
     },
-    telemetry: telemetrySettings,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     fileFiltering: settings.context?.fileFiltering,
     checkpointing:
@@ -842,7 +820,7 @@ export async function loadCliConfig(
     extensionContextFilePaths,
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns: settings.model?.maxSessionTurns ?? -1,
-    experimentalZedIntegration: argv.experimentalAcp || false,
+
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
     blockedMcpServers,

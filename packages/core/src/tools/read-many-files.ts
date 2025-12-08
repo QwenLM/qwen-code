@@ -16,17 +16,13 @@ import {
   detectFileType,
   processSingleFileContent,
   DEFAULT_ENCODING,
-  getSpecificMimeType,
 } from '../utils/fileUtils.js';
 import type { PartListUnion } from '@google/genai';
 import {
   type Config,
   DEFAULT_FILE_FILTERING_OPTIONS,
 } from '../config/config.js';
-import { FileOperation } from '../telemetry/metrics.js';
-import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
-import { logFileOperation } from '../telemetry/loggers.js';
-import { FileOperationEvent } from '../telemetry/types.js';
+
 import { ToolErrorType } from './tool-error.js';
 
 /**
@@ -389,26 +385,6 @@ ${finalExclusionPatternsForDescription
           }
 
           processedFilesRelativePaths.push(relativePathForDisplay);
-
-          const lines =
-            typeof fileReadResult.llmContent === 'string'
-              ? fileReadResult.llmContent.split('\n').length
-              : undefined;
-          const mimetype = getSpecificMimeType(filePath);
-          const programming_language = getProgrammingLanguage({
-            absolute_path: filePath,
-          });
-          logFileOperation(
-            this.config,
-            new FileOperationEvent(
-              ReadManyFilesTool.Name,
-              FileOperation.READ,
-              lines,
-              mimetype,
-              path.extname(filePath),
-              programming_language,
-            ),
-          );
         }
       } else {
         // Handle Promise rejection (unexpected errors)

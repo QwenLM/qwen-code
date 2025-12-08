@@ -7,12 +7,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
-import type { RequestContext } from './telemetryService.js';
 
 describe('EnhancedErrorHandler', () => {
   let errorHandler: EnhancedErrorHandler;
   let mockConsoleError: ReturnType<typeof vi.spyOn>;
-  let mockContext: RequestContext;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let mockContext: any;
   let mockRequest: GenerateContentParameters;
 
   beforeEach(() => {

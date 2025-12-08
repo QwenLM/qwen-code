@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
-
 export enum InputFormat {
   TEXT = 'text',
   STREAM_JSON = 'stream-json',
@@ -25,6 +23,5 @@ export interface JsonError {
 
 export interface JsonOutput {
   response?: string;
-  stats?: SessionMetrics;
   error?: JsonError;
 }

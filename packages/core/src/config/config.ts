@@ -20,7 +20,6 @@ import type {
 import type { FallbackModelHandler } from '../fallback/types.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
-import type { AnyToolInvocation } from '../tools/tools.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -30,7 +29,6 @@ import {
   createContentGenerator,
   createContentGeneratorConfig,
 } from '../core/contentGenerator.js';
-import { tokenLimit } from '../core/tokenLimits.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
@@ -56,8 +54,7 @@ import { SmartEditTool } from '../tools/smart-edit.js';
 import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
-import { WebFetchTool } from '../tools/web-fetch.js';
-import { WebSearchTool } from '../tools/web-search/index.js';
+
 import { WriteFileTool } from '../tools/write-file.js';
 
 // Other modules
@@ -65,23 +62,12 @@ import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
-import {
-  DEFAULT_OTLP_ENDPOINT,
-  DEFAULT_TELEMETRY_TARGET,
-  logCliConfiguration,
-  logRipgrepFallback,
-  RipgrepFallbackEvent,
-  StartSessionEvent,
-  type TelemetryTarget,
-  uiTelemetryService,
-} from '../telemetry/index.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
-import { getErrorMessage } from '../utils/errors.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -94,7 +80,7 @@ import { Storage } from './storage.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 
 // Re-export types
-export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
+
 export {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
@@ -126,24 +112,8 @@ export interface SummarizeToolOutputSettings {
   tokenBudget?: number;
 }
 
-export interface TelemetrySettings {
-  enabled?: boolean;
-  target?: TelemetryTarget;
-  otlpEndpoint?: string;
-  otlpProtocol?: 'grpc' | 'http';
-  logPrompts?: boolean;
-  outfile?: string;
-  useCollector?: boolean;
-}
-
 export interface OutputSettings {
   format?: OutputFormat;
-}
-
-export interface GitCoAuthorSettings {
-  enabled?: boolean;
-  name?: string;
-  email?: string;
 }
 
 export interface GeminiCLIExtension {
@@ -231,8 +201,7 @@ export interface ConfigParameters {
   showMemoryUsage?: boolean;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
-  telemetry?: TelemetrySettings;
-  gitCoAuthor?: GitCoAuthorSettings;
+
   usageStatisticsEnabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
@@ -344,8 +313,7 @@ export class Config {
   private approvalMode: ApprovalMode;
   private readonly showMemoryUsage: boolean;
   private readonly accessibility: AccessibilitySettings;
-  private readonly telemetrySettings: TelemetrySettings;
-  private readonly gitCoAuthor: GitCoAuthorSettings;
+
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
   private readonly fileFiltering: {
@@ -443,22 +411,6 @@ export class Config {
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.showMemoryUsage = params.showMemoryUsage ?? false;
     this.accessibility = params.accessibility ?? {};
-    // TELEMETRY DISABLED FOR OFFLINE/AIR-GAPPED USE
-    // All telemetry settings are forced to disabled state
-    this.telemetrySettings = {
-      enabled: false, // Always disabled regardless of params
-      target: params.telemetry?.target ?? DEFAULT_TELEMETRY_TARGET,
-      otlpEndpoint: params.telemetry?.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT,
-      otlpProtocol: params.telemetry?.otlpProtocol,
-      logPrompts: params.telemetry?.logPrompts ?? true,
-      outfile: params.telemetry?.outfile,
-      useCollector: params.telemetry?.useCollector,
-    };
-    this.gitCoAuthor = {
-      enabled: params.gitCoAuthor?.enabled ?? true,
-      name: params.gitCoAuthor?.name ?? 'Qwen-Coder',
-      email: params.gitCoAuthor?.email ?? 'qwen-coder@alibabacloud.com',
-    };
 
     this.fileFiltering = {
       respectGitIgnore: params.fileFiltering?.respectGitIgnore ?? true,
@@ -489,6 +441,7 @@ export class Config {
       model: params.model,
       ...(params.generationConfig || {}),
       baseUrl: params.generationConfig?.baseUrl || DEFAULT_DASHSCOPE_BASE_URL,
+      authType: AuthType.OLLAMA,
     };
     this.contentGeneratorConfig = this
       ._generationConfig as ContentGeneratorConfig;
@@ -618,7 +571,7 @@ export class Config {
     this.inFallbackMode = false;
 
     // Logging the cli configuration here as the auth related configuration params would have been loaded by this point
-    logCliConfiguration(this, new StartSessionEvent(this, this.toolRegistry));
+    // Telemetry logging removed
   }
 
   /**
@@ -664,8 +617,6 @@ export class Config {
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
     }
-    // TODO: Log _metadata for telemetry if needed
-    // This _metadata can be used for tracking model switches (reason, context)
   }
 
   isInFallbackMode(): boolean {
@@ -824,40 +775,6 @@ export class Config {
     return this.accessibility;
   }
 
-  getTelemetryEnabled(): boolean {
-    // TELEMETRY DISABLED FOR OFFLINE/AIR-GAPPED USE
-    // Always return false to prevent any telemetry data collection
-    return false;
-  }
-
-  getTelemetryLogPromptsEnabled(): boolean {
-    return this.telemetrySettings.logPrompts ?? true;
-  }
-
-  getTelemetryOtlpEndpoint(): string {
-    return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
-  }
-
-  getTelemetryOtlpProtocol(): 'grpc' | 'http' {
-    return this.telemetrySettings.otlpProtocol ?? 'grpc';
-  }
-
-  getTelemetryTarget(): TelemetryTarget {
-    return this.telemetrySettings.target ?? DEFAULT_TELEMETRY_TARGET;
-  }
-
-  getTelemetryOutfile(): string | undefined {
-    return this.telemetrySettings.outfile;
-  }
-
-  getGitCoAuthor(): GitCoAuthorSettings {
-    return this.gitCoAuthor;
-  }
-
-  getTelemetryUseCollector(): boolean {
-    return this.telemetrySettings.useCollector ?? false;
-  }
-
   getGeminiClient(): GeminiClient {
     return this.geminiClient;
   }
@@ -920,12 +837,6 @@ export class Config {
       this.fileDiscoveryService = new FileDiscoveryService(this.targetDir);
     }
     return this.fileDiscoveryService;
-  }
-
-  getUsageStatisticsEnabled(): boolean {
-    // USAGE STATISTICS DISABLED FOR OFFLINE/AIR-GAPPED USE
-    // Always return false to prevent any usage data collection
-    return false;
   }
 
   getExtensionContextFilePaths(): string[] {
@@ -1098,13 +1009,7 @@ export class Config {
       return Number.POSITIVE_INFINITY;
     }
 
-    return Math.min(
-      // Estimate remaining context window in characters (1 token ~= 4 chars).
-      4 *
-        (tokenLimit(this.getModel()) -
-          uiTelemetryService.getLastPromptTokenCount()),
-      this.truncateToolOutputThreshold,
-    );
+    return this.truncateToolOutputThreshold;
   }
 
   getTruncateToolOutputLines(): number {
@@ -1180,24 +1085,15 @@ export class Config {
 
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
-      let errorString: undefined | string = undefined;
+
       try {
         useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
-      } catch (error: unknown) {
-        errorString = getErrorMessage(error);
+      } catch (_error: unknown) {
+        // Ignore error
       }
       if (useRipgrep) {
         registerCoreTool(RipGrepTool, this);
       } else {
-        // Log for telemetry
-        logRipgrepFallback(
-          this,
-          new RipgrepFallbackEvent(
-            this.getUseRipgrep(),
-            this.getUseBuiltinRipgrep(),
-            errorString || 'ripgrep is not available',
-          ),
-        );
         registerCoreTool(GrepTool, this);
       }
     } else {
@@ -1216,13 +1112,16 @@ export class Config {
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
     registerCoreTool(ExitPlanModeTool, this);
-    registerCoreTool(WebFetchTool, this);
+    // EXTERNAL TOOLS DISABLED FOR OFFLINE/AIR-GAPPED USE
+    // registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist
+    /*
     if (this.getWebSearchConfig()) {
       registerCoreTool(WebSearchTool, this);
     }
+    */
 
     await registry.discoverAllTools();
     return registry;

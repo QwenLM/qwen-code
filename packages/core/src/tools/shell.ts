@@ -134,11 +134,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     try {
       // Add co-author to git commit commands
-      const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
 
       const shouldRunInBackground = this.params.is_background;
-      let finalCommand = processedCommand;
-
+      let finalCommand = strippedCommand;
       // If explicitly marked as background and doesn't already end with &, add it
       if (shouldRunInBackground && !finalCommand.trim().endsWith('&')) {
         finalCommand = finalCommand.trim() + ' &';
@@ -325,42 +323,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
         fs.unlinkSync(tempFilePath);
       }
     }
-  }
-
-  private addCoAuthorToGitCommit(command: string): string {
-    // Check if co-author feature is enabled
-    const gitCoAuthorSettings = this.config.getGitCoAuthor();
-    if (!gitCoAuthorSettings.enabled) {
-      return command;
-    }
-
-    // Check if this is a git commit command
-    const gitCommitPattern = /^git\s+commit/;
-    if (!gitCommitPattern.test(command.trim())) {
-      return command;
-    }
-
-    // Define the co-author line using configuration
-    const coAuthor = `
-
-Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
-
-    // Handle different git commit patterns
-    // Match -m "message" or -m 'message'
-    const messagePattern = /(-m\s+)(['"])((?:\\.|[^\\])*?)(\2)/;
-    const match = command.match(messagePattern);
-
-    if (match) {
-      const [fullMatch, prefix, quote, existingMessage, closingQuote] = match;
-      const newMessage = existingMessage + coAuthor;
-      const replacement = prefix + quote + newMessage + closingQuote;
-
-      return command.replace(fullMatch, replacement);
-    }
-
-    // If no -m flag found, the command might open an editor
-    // In this case, we can't easily modify it, so return as-is
-    return command;
   }
 }
 

@@ -10,7 +10,6 @@ import { createContentGenerator, AuthType } from './contentGenerator.js';
 import { createCodeAssistContentGenerator } from '../code_assist/codeAssist.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { LoggingContentGenerator } from './loggingContentGenerator.js';
 
 vi.mock('../code_assist/codeAssist.js');
 vi.mock('@google/genai');
@@ -33,9 +32,7 @@ describe('createContentGenerator', () => {
       mockConfig,
     );
     expect(createCodeAssistContentGenerator).toHaveBeenCalled();
-    expect(generator).toEqual(
-      new LoggingContentGenerator(mockGenerator, mockConfig),
-    );
+    expect(generator).toEqual(mockGenerator);
   });
 
   it('should create a GoogleGenAI content generator', async () => {
@@ -65,12 +62,7 @@ describe('createContentGenerator', () => {
         },
       },
     });
-    expect(generator).toEqual(
-      new LoggingContentGenerator(
-        (mockGenerator as GoogleGenAI).models,
-        mockConfig,
-      ),
-    );
+    expect(generator).toEqual((mockGenerator as GoogleGenAI).models);
   });
 
   it('should create a GoogleGenAI content generator with client install id logging disabled', async () => {
@@ -98,11 +90,6 @@ describe('createContentGenerator', () => {
         },
       },
     });
-    expect(generator).toEqual(
-      new LoggingContentGenerator(
-        (mockGenerator as GoogleGenAI).models,
-        mockConfig,
-      ),
-    );
+    expect(generator).toEqual(mockGenerator);
   });
 });

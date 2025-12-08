@@ -5,18 +5,15 @@
  */
 
 import type React from 'react';
-import { useCallback, useContext, useMemo } from 'react';
+import { useCallback, useContext, useMemo, useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
-import {
-  AuthType,
-  ModelSlashCommandEvent,
-  logModelSlashCommand,
-} from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import {
+  type AvailableModel,
   getAvailableModelsForAuthType,
   MAINLINE_CODER,
 } from '../models/availableModels.js';
@@ -33,10 +30,30 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const authType = config?.getAuthType() ?? AuthType.QWEN_OAUTH;
 
   // Get available models based on auth type
-  const availableModels = useMemo(
-    () => getAvailableModelsForAuthType(authType),
-    [authType],
-  );
+  const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let mounted = true;
+    setIsLoading(true);
+    getAvailableModelsForAuthType(authType)
+      .then((models) => {
+        if (mounted) {
+          setAvailableModels(models);
+          setIsLoading(false);
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch models:', err);
+        if (mounted) {
+          setAvailableModels([]);
+          setIsLoading(false);
+        }
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [authType]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -72,8 +89,6 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     (model: string) => {
       if (config) {
         config.setModel(model);
-        const event = new ModelSlashCommandEvent(model);
-        logModelSlashCommand(config, event);
       }
       onClose();
     },
@@ -90,12 +105,24 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     >
       <Text bold>{t('Select Model')}</Text>
       <Box marginTop={1}>
-        <DescriptiveRadioButtonSelect
-          items={MODEL_OPTIONS}
-          onSelect={handleSelect}
-          initialIndex={initialIndex}
-          showNumbers={true}
-        />
+        {isLoading && (
+          <Box marginBottom={1}>
+            <Text> {t('Loading available models...')}</Text>
+          </Box>
+        )}
+        {!isLoading && MODEL_OPTIONS.length === 0 && (
+          <Text color="yellow">
+            {t('No models found. Ensure Ollama is running.')}
+          </Text>
+        )}
+        {!isLoading && MODEL_OPTIONS.length > 0 && (
+          <DescriptiveRadioButtonSelect
+            items={MODEL_OPTIONS}
+            onSelect={handleSelect}
+            initialIndex={initialIndex}
+            showNumbers={true}
+          />
+        )}
       </Box>
       <Box marginTop={1} flexDirection="column">
         <Text color={theme.text.secondary}>{t('(Press Esc to close)')}</Text>

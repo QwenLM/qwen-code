@@ -20,13 +20,9 @@ import type {
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
-  logToolCall,
   ReadFileTool,
   ToolErrorType,
-  ToolCallEvent,
   ShellTool,
-  logToolOutputTruncated,
-  ToolOutputTruncatedEvent,
 } from '../index.js';
 import type { Part, PartListUnion } from '@google/genai';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
@@ -1112,7 +1108,7 @@ export class CoreToolScheduler {
               this.config.getTruncateToolOutputThreshold() > 0 &&
               this.config.getTruncateToolOutputLines() > 0
             ) {
-              const originalContentLength = content.length;
+              // originalContentLength removed
               const threshold = this.config.getTruncateToolOutputThreshold();
               const lines = this.config.getTruncateToolOutputLines();
               const truncatedResult = await truncateAndSaveToFile(
@@ -1126,19 +1122,7 @@ export class CoreToolScheduler {
               outputFile = truncatedResult.outputFile;
 
               if (outputFile) {
-                logToolOutputTruncated(
-                  this.config,
-                  new ToolOutputTruncatedEvent(
-                    scheduledCall.request.prompt_id,
-                    {
-                      toolName,
-                      originalContentLength,
-                      truncatedContentLength: content.length,
-                      threshold,
-                      lines,
-                    },
-                  ),
-                );
+                // logToolOutputTruncated removed
               }
             }
 
@@ -1203,10 +1187,6 @@ export class CoreToolScheduler {
     if (this.toolCalls.length > 0 && allCallsAreTerminal) {
       const completedCalls = [...this.toolCalls] as CompletedToolCall[];
       this.toolCalls = [];
-
-      for (const call of completedCalls) {
-        logToolCall(this.config, new ToolCallEvent(call));
-      }
 
       if (this.onAllToolCallsComplete) {
         this.isFinalizingToolCalls = true;

@@ -10,14 +10,11 @@ import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
-  GitService,
-  Logger,
-  logSlashCommand,
-  makeSlashCommandEvent,
-  SlashCommandStatus,
-  ToolConfirmationOutcome,
   Storage,
   IdeClient,
+  GitService,
+  Logger,
+  ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { formatDuration } from '../utils/formatters.js';
@@ -314,11 +311,6 @@ export const useSlashCommandProcessor = (
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
 
-      const subcommand =
-        resolvedCommandPath.length > 1
-          ? resolvedCommandPath.slice(1).join(' ')
-          : undefined;
-
       try {
         if (commandToExecute) {
           if (commandToExecute.action) {
@@ -599,12 +591,7 @@ export const useSlashCommandProcessor = (
       } catch (e: unknown) {
         hasError = true;
         if (config) {
-          const event = makeSlashCommandEvent({
-            command: resolvedCommandPath[0],
-            subcommand,
-            status: SlashCommandStatus.ERROR,
-          });
-          logSlashCommand(config, event);
+          // Telemetry removed
         }
         addItem(
           {
@@ -616,12 +603,7 @@ export const useSlashCommandProcessor = (
         return { type: 'handled' };
       } finally {
         if (config && resolvedCommandPath[0] && !hasError) {
-          const event = makeSlashCommandEvent({
-            command: resolvedCommandPath[0],
-            subcommand,
-            status: SlashCommandStatus.SUCCESS,
-          });
-          logSlashCommand(config, event);
+          // Telemetry removed
         }
         setIsProcessing(false);
       }

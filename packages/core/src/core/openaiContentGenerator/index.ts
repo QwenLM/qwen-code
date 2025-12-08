@@ -21,7 +21,11 @@ import {
 } from './provider/index.js';
 
 export { OpenAIContentGenerator } from './openaiContentGenerator.js';
-export { ContentGenerationPipeline, type PipelineConfig } from './pipeline.js';
+export {
+  ContentGenerationPipeline,
+  type PipelineConfig,
+  type RequestContext,
+} from './pipeline.js';
 
 export {
   type OpenAICompatibleProvider,
@@ -100,12 +104,5 @@ export function determineProvider(
   // Default provider for standard OpenAI-compatible APIs
   return new DefaultOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
 }
-
-// Services
-export {
-  type TelemetryService,
-  type RequestContext,
-  DefaultTelemetryService,
-} from './telemetryService.js';
 
 export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';

@@ -23,7 +23,6 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { AuthType } from './contentGenerator.js';
 import { type RetryOptions } from '../utils/retry.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -68,22 +67,6 @@ vi.mock('../fallback/handler.js', () => ({
   handleFallback: mockHandleFallback,
 }));
 
-const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
-  mockLogContentRetry: vi.fn(),
-  mockLogContentRetryFailure: vi.fn(),
-}));
-
-vi.mock('../telemetry/loggers.js', () => ({
-  logContentRetry: mockLogContentRetry,
-  logContentRetryFailure: mockLogContentRetryFailure,
-}));
-
-vi.mock('../telemetry/uiTelemetry.js', () => ({
-  uiTelemetryService: {
-    setLastPromptTokenCount: vi.fn(),
-  },
-}));
-
 describe('GeminiChat', () => {
   let mockContentGenerator: ContentGenerator;
   let chat: GeminiChat;
@@ -92,7 +75,7 @@ describe('GeminiChat', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
+    vi.clearAllMocks();
     mockContentGenerator = {
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
@@ -106,8 +89,7 @@ describe('GeminiChat', () => {
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
       getSessionId: () => 'test-session-id',
-      getTelemetryLogPromptsEnabled: () => true,
-      getUsageStatisticsEnabled: () => true,
+
       getDebugMode: () => false,
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         authType: 'oauth-personal', // Ensure this is set for fallback tests
@@ -709,12 +691,6 @@ describe('GeminiChat', () => {
       );
 
       // Verify that token counting is called when usageMetadata is present
-      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
-        42,
-      );
-      expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
-        1,
-      );
     });
   });
 
@@ -827,8 +803,7 @@ describe('GeminiChat', () => {
       }
 
       // Assertions
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-      expect(mockLogContentRetryFailure).not.toHaveBeenCalled();
+
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         2,
       );
@@ -859,7 +834,6 @@ describe('GeminiChat', () => {
       });
 
       // Verify that token counting is not called when usageMetadata is missing
-      expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
     });
 
     it('should fail after all retries on persistent invalid content and report metrics', async () => {
@@ -894,8 +868,6 @@ describe('GeminiChat', () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         2,
       );
-      expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
-      expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
 
       // History should still contain the user message.
       const history = chat.getHistory();
@@ -1117,7 +1089,6 @@ describe('GeminiChat', () => {
     expect(history.length).toBe(4);
 
     // Assert that the correct metrics were reported for one empty-stream retry
-    expect(mockLogContentRetry).toHaveBeenCalledTimes(1);
 
     // Explicitly verify the structure of each part to satisfy TypeScript
     const turn1 = history[0];

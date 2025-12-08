@@ -21,14 +21,8 @@ import {
   DEFAULT_GEMINI_FLASH_MODEL,
   DEFAULT_GEMINI_MODEL,
 } from '../config/models.js';
-import { logFlashFallback } from '../telemetry/index.js';
-import type { FallbackModelHandler } from './types.js';
 
-// Mock the telemetry logger and event class
-vi.mock('../telemetry/index.js', () => ({
-  logFlashFallback: vi.fn(),
-  FlashFallbackEvent: class {},
-}));
+import type { FallbackModelHandler } from './types.js';
 
 const MOCK_PRO_MODEL = DEFAULT_GEMINI_MODEL;
 const FALLBACK_MODEL = DEFAULT_GEMINI_FLASH_MODEL;
@@ -107,7 +101,6 @@ describe('handleFallback', () => {
 
       expect(result).toBe(true);
       expect(mockConfig.setFallbackMode).toHaveBeenCalledWith(true);
-      expect(logFlashFallback).toHaveBeenCalled();
     });
   });
 
@@ -123,7 +116,6 @@ describe('handleFallback', () => {
 
       expect(result).toBe(false);
       expect(mockConfig.setFallbackMode).toHaveBeenCalledWith(true);
-      expect(logFlashFallback).toHaveBeenCalled();
     });
   });
 
@@ -139,7 +131,6 @@ describe('handleFallback', () => {
 
       expect(result).toBe(false);
       expect(mockConfig.setFallbackMode).not.toHaveBeenCalled();
-      expect(logFlashFallback).not.toHaveBeenCalled();
     });
   });
 
@@ -199,7 +190,6 @@ describe('handleFallback', () => {
     expect(mockHandler).toHaveBeenCalled();
     // But should not mutate state or log telemetry again
     expect(activeFallbackConfig.setFallbackMode).not.toHaveBeenCalled();
-    expect(logFlashFallback).not.toHaveBeenCalled();
   });
 
   it('should catch errors from the handler, log an error, and return null', async () => {
