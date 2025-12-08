@@ -581,7 +581,6 @@ describe('ShellExecutionService child_process fallback', () => {
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'ls -l',
-        [],
         expect.objectContaining({ shell: 'bash' }),
       );
       expect(result.exitCode).toBe(0);
@@ -826,7 +825,6 @@ describe('ShellExecutionService child_process fallback', () => {
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'dir "foo bar"',
-        [],
         expect.objectContaining({
           shell: true,
           detached: false,
@@ -840,7 +838,6 @@ describe('ShellExecutionService child_process fallback', () => {
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'ls "foo bar"',
-        [],
         expect.objectContaining({
           shell: 'bash',
           detached: true,
