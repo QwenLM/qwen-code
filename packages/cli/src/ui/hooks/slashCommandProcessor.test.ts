@@ -36,6 +36,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...original,
     logSlashCommand,
     getIdeInstaller: vi.fn().mockReturnValue(null),
+    IdeClient: {
+      getInstance: vi.fn().mockResolvedValue({
+        addStatusChangeListener: vi.fn(),
+        removeStatusChangeListener: vi.fn(),
+      }),
+    },
   };
 });
 
@@ -175,12 +181,12 @@ describe('useSlashCommandProcessor', () => {
 
       await waitFor(() => {
         expect(result.current.slashCommands).toHaveLength(1);
+        expect(mockBuiltinLoadCommands).toHaveBeenCalledTimes(2);
+        expect(mockFileLoadCommands).toHaveBeenCalledTimes(2);
+        expect(mockMcpLoadCommands).toHaveBeenCalledTimes(2);
       });
 
       expect(result.current.slashCommands[0]?.name).toBe('test');
-      expect(mockBuiltinLoadCommands).toHaveBeenCalledTimes(1);
-      expect(mockFileLoadCommands).toHaveBeenCalledTimes(1);
-      expect(mockMcpLoadCommands).toHaveBeenCalledTimes(1);
     });
 
     it('should provide an immutable array of commands to consumers', async () => {
