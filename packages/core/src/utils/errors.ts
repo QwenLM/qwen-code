@@ -18,6 +18,23 @@ export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
+  if (error && typeof error === 'object') {
+    // Handle Node.js errno errors (EACCES, ENOENT, etc.)
+    if ('code' in error && 'syscall' in error && 'path' in error) {
+      const err = error as { code: string; syscall: string; path: string; errno?: number };
+      return `${err.code}: ${err.syscall} failed for ${err.path}`;
+    }
+    // Handle objects with message property
+    if ('message' in error && typeof error.message === 'string') {
+      return error.message;
+    }
+    // Fall back to JSON serialization for other objects
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return '[Error object could not be serialized]';
+    }
+  }
   try {
     return String(error);
   } catch {
