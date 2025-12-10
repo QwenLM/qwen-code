@@ -34,6 +34,10 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
 interface ExtendedChatCompletionAssistantMessageParam
   extends OpenAI.Chat.ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
+  /**
+   * Extended tool calls to support 'signature' field for Gemini 3 Pro
+   */
+  tool_calls?: ExtendedChatCompletionMessageToolCall[];
 }
 
 type ExtendedChatCompletionMessageParam =
@@ -48,6 +52,15 @@ export interface ExtendedCompletionMessage
 export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
+}
+
+export interface ExtendedChatCompletionMessageToolCall
+  extends OpenAI.Chat.ChatCompletionMessageToolCall {
+  /**
+   * Gemini 3 Pro thought signature required for verification.
+   * Vertex AI OpenAI-compatible endpoint maps this to/from 'thoughtSignature' in Gemini API.
+   */
+  signature?: string;
 }
 
 /**
@@ -65,7 +78,7 @@ export interface ToolCallAccumulator {
 interface ParsedParts {
   thoughtParts: string[];
   contentParts: string[];
-  functionCalls: FunctionCall[];
+  functionCalls: Array<{ call: FunctionCall; signature?: string }>;
   functionResponses: FunctionResponse[];
   mediaParts: Array<{
     type: 'image' | 'audio' | 'file';
@@ -82,6 +95,12 @@ export class OpenAIContentConverter {
   private model: string;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
+  /**
+   * Cache for thought signatures during streaming.
+   * Maps tool call index to its signature string.
+   * Needed because signatures might arrive split from other data in chunks.
+   */
+  private thoughtSignatureCache = new Map<number, string>();
 
   constructor(model: string) {
     this.model = model;
@@ -94,6 +113,7 @@ export class OpenAIContentConverter {
    */
   resetStreamingToolCalls(): void {
     this.streamingToolCallParser.reset();
+    this.thoughtSignatureCache.clear();
   }
 
   /**
@@ -312,14 +332,18 @@ export class OpenAIContentConverter {
 
     // Handle model messages with function calls
     if (content.role === 'model' && parsedParts.functionCalls.length > 0) {
-      const toolCalls = parsedParts.functionCalls.map((fc, index) => ({
-        id: fc.id || `call_${index}`,
-        type: 'function' as const,
-        function: {
-          name: fc.name || '',
-          arguments: JSON.stringify(fc.args || {}),
-        },
-      }));
+      const toolCalls: ExtendedChatCompletionMessageToolCall[] =
+        parsedParts.functionCalls.map(({ call: fc, signature }, index) => ({
+          id: fc.id || `call_${index}`,
+          type: 'function' as const,
+          function: {
+            name: fc.name || '',
+            arguments: JSON.stringify(fc.args || {}),
+          },
+          // Pass the signature back to OpenAI/Vertex AI
+          // This allows Vertex AI to verify the thought process for this tool call
+          signature,
+        }));
 
       const assistantMessage: ExtendedChatCompletionAssistantMessageParam = {
         role: 'assistant' as const,
@@ -352,7 +376,7 @@ export class OpenAIContentConverter {
   private parseParts(parts: Part[]): ParsedParts {
     const thoughtParts: string[] = [];
     const contentParts: string[] = [];
-    const functionCalls: FunctionCall[] = [];
+    const functionCalls: Array<{ call: FunctionCall; signature?: string }> = [];
     const functionResponses: FunctionResponse[] = [];
     const mediaParts: Array<{
       type: 'image' | 'audio' | 'file';
@@ -378,7 +402,10 @@ export class OpenAIContentConverter {
       ) {
         thoughtParts.push(part.text);
       } else if ('functionCall' in part && part.functionCall) {
-        functionCalls.push(part.functionCall);
+        functionCalls.push({
+          call: part.functionCall,
+          signature: part.thoughtSignature,
+        });
       } else if ('functionResponse' in part && part.functionResponse) {
         functionResponses.push(part.functionResponse);
       } else if ('inlineData' in part && part.inlineData) {
@@ -718,6 +745,14 @@ export class OpenAIContentConverter {
         for (const toolCall of choice.delta.tool_calls) {
           const index = toolCall.index ?? 0;
 
+          // Extract and cache thought signature if present in the chunk
+          // Vertex AI sends this in the 'signature' field of the tool call
+          const signature = (toolCall as ExtendedChatCompletionMessageToolCall)
+            .signature;
+          if (signature) {
+            this.thoughtSignatureCache.set(index, signature);
+          }
+
           // Process the tool call chunk through the streaming parser
           if (toolCall.function?.arguments) {
             this.streamingToolCallParser.addChunk(
@@ -743,9 +778,9 @@ export class OpenAIContentConverter {
         const completedToolCalls =
           this.streamingToolCallParser.getCompletedToolCalls();
 
-        for (const toolCall of completedToolCalls) {
+        completedToolCalls.forEach((toolCall, index) => {
           if (toolCall.name) {
-            parts.push({
+            const part: Part = {
               functionCall: {
                 id:
                   toolCall.id ||
@@ -753,12 +788,21 @@ export class OpenAIContentConverter {
                 name: toolCall.name,
                 args: toolCall.args,
               },
-            });
+            };
+
+            const signature = this.thoughtSignatureCache.get(index);
+            // Attach the cached signature to the final part
+            // This ensures the Gemini 'Part' object contains the verification token
+            if (signature) {
+              part.thoughtSignature = signature;
+            }
+
+            parts.push(part);
           }
-        }
+        });
 
         // Clear the parser for the next stream
-        this.streamingToolCallParser.reset();
+        this.resetStreamingToolCalls();
       }
 
       // Only include finishReason key if finish_reason is present
@@ -838,7 +882,7 @@ export class OpenAIContentConverter {
     const content = candidate?.content;
 
     let messageContent: string | null = null;
-    const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
+    const toolCalls: ExtendedChatCompletionMessageToolCall[] = [];
 
     if (content?.parts) {
       const textParts: string[] = [];
@@ -847,14 +891,22 @@ export class OpenAIContentConverter {
         if ('text' in part && part.text) {
           textParts.push(part.text);
         } else if ('functionCall' in part && part.functionCall) {
-          toolCalls.push({
+          const toolCall: ExtendedChatCompletionMessageToolCall = {
             id: part.functionCall.id || `call_${toolCalls.length}`,
             type: 'function' as const,
             function: {
               name: part.functionCall.name || '',
               arguments: JSON.stringify(part.functionCall.args || {}),
             },
-          });
+          };
+
+          // Capture thoughtSignature from Gemini response for future requests
+          // This is critical for Gemini 3 Pro verification
+          if (part.thoughtSignature) {
+            toolCall.signature = part.thoughtSignature;
+          }
+
+          toolCalls.push(toolCall);
         }
       }
 
