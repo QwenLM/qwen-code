@@ -313,10 +313,17 @@ export class ContentGenerationPipeline {
       return value !== undefined ? { [key]: value } : {};
     };
 
+    // Get values for temperature and top_p
+    const temperature = getParameterValue('temperature', 'temperature');
+    const top_p = getParameterValue('top_p', 'topP');
+
     const params = {
-      // Parameters with request fallback but no defaults
-      ...addParameterIfDefined('temperature', 'temperature', 'temperature'),
-      ...addParameterIfDefined('top_p', 'top_p', 'topP'),
+      // Note: temperature and top_p cannot both be specified for some APIs (e.g., Claude via OpenAI proxy)
+      // If both are defined, prefer top_p as it's more standard in OpenAI-compatible APIs
+      ...(top_p !== undefined ? { top_p } : {}),
+      ...(top_p === undefined && temperature !== undefined
+        ? { temperature }
+        : {}),
 
       // Max tokens (special case: different property names)
       ...addParameterIfDefined('max_tokens', 'max_tokens', 'maxOutputTokens'),
