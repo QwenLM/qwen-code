@@ -16,7 +16,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { useSettings } from '../hooks/useSettings.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import {
   getAvailableModelsForAuthType,
   MAINLINE_CODER,
