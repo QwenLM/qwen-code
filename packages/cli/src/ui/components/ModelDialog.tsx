@@ -16,6 +16,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { useSettings } from '../hooks/useSettings.js';
 import {
   getAvailableModelsForAuthType,
   MAINLINE_CODER,
@@ -23,6 +24,7 @@ import {
 } from '../models/availableModels.js';
 import { ModelsService } from '../../services/ModelsService.js';
 import { t } from '../../i18n/index.js';
+import { SettingScope } from '../../config/settings.js';
 
 interface ModelDialogProps {
   onClose: () => void;
@@ -30,6 +32,7 @@ interface ModelDialogProps {
 
 export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
+  const settings = useSettings();
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -117,15 +120,26 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
   // Handle selection internally (Autonomous Dialog).
   const handleSelect = useCallback(
-    (model: string) => {
+    async (model: string) => {
       if (config) {
         config.setModel(model);
         const event = new ModelSlashCommandEvent(model);
         logModelSlashCommand(config, event);
+
+        // Persist the selected model to settings so it's remembered across sessions
+        if (settings) {
+          try {
+            // Save to user settings scope (not workspace, so it's global)
+            await settings.setValue(SettingScope.User, 'model.name', model);
+          } catch (err) {
+            // Log error but don't block the dialog close
+            console.error('Failed to save model selection to settings:', err);
+          }
+        }
       }
       onClose();
     },
-    [config, onClose],
+    [config, settings, onClose],
   );
 
   // Show loading state
