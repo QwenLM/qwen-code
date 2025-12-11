@@ -106,9 +106,6 @@ export const useAuthCommand = (
               credentials.baseUrl,
             );
           }
-          if (credentials?.model != null) {
-            settings.setValue(scope, 'model.name', credentials.model);
-          }
           await clearCachedCredentialFile();
         }
       } catch (error) {
@@ -178,7 +175,6 @@ export const useAuthCommand = (
           config.updateCredentials({
             apiKey: credentials.apiKey,
             baseUrl: credentials.baseUrl,
-            model: credentials.model,
           });
           await performAuth(authType, scope, credentials);
         }

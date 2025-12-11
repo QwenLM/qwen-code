@@ -13,11 +13,10 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 
 interface OpenAIKeyPromptProps {
-  onSubmit: (apiKey: string, baseUrl: string, model: string) => void;
+  onSubmit: (apiKey: string, baseUrl: string) => void;
   onCancel: () => void;
   defaultApiKey?: string;
   defaultBaseUrl?: string;
-  defaultModel?: string;
 }
 
 export const credentialSchema = z.object({
@@ -25,7 +24,6 @@ export const credentialSchema = z.object({
   baseUrl: z
     .union([z.string().url('Base URL must be a valid URL'), z.literal('')])
     .optional(),
-  model: z.string().min(1, 'Model must be a non-empty string').optional(),
 });
 
 export type OpenAICredentials = z.infer<typeof credentialSchema>;
@@ -35,14 +33,12 @@ export function OpenAIKeyPrompt({
   onCancel,
   defaultApiKey,
   defaultBaseUrl,
-  defaultModel,
 }: OpenAIKeyPromptProps): React.JSX.Element {
   const [apiKey, setApiKey] = useState(defaultApiKey || '');
   const [baseUrl, setBaseUrl] = useState(defaultBaseUrl || '');
-  const [model, setModel] = useState(defaultModel || '');
-  const [currentField, setCurrentField] = useState<
-    'apiKey' | 'baseUrl' | 'model'
-  >('apiKey');
+  const [currentField, setCurrentField] = useState<'apiKey' | 'baseUrl'>(
+    'apiKey',
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const validateAndSubmit = () => {
@@ -52,13 +48,11 @@ export function OpenAIKeyPrompt({
       const validated = credentialSchema.parse({
         apiKey: apiKey.trim(),
         baseUrl: baseUrl.trim() || undefined,
-        model: model.trim() || undefined,
       });
 
       onSubmit(
         validated.apiKey,
         validated.baseUrl === '' ? '' : validated.baseUrl || '',
-        validated.model || '',
       );
     } catch (error) {
       if (error instanceof z.ZodError) {
@@ -85,18 +79,13 @@ export function OpenAIKeyPrompt({
       // Handle Enter key
       if (key.name === 'return') {
         if (currentField === 'apiKey') {
-          // 允许空 API key 跳转到下一个字段，让用户稍后可以返回修改
           setCurrentField('baseUrl');
           return;
         } else if (currentField === 'baseUrl') {
-          setCurrentField('model');
-          return;
-        } else if (currentField === 'model') {
-          // 只有在提交时才检查 API key 是否为空
+          // Only submit if API key is not empty
           if (apiKey.trim()) {
             validateAndSubmit();
           } else {
-            // 如果 API key 为空，回到 API key 字段
             setCurrentField('apiKey');
           }
         }
@@ -105,13 +94,7 @@ export function OpenAIKeyPrompt({
 
       // Handle Tab key for field navigation
       if (key.name === 'tab') {
-        if (currentField === 'apiKey') {
-          setCurrentField('baseUrl');
-        } else if (currentField === 'baseUrl') {
-          setCurrentField('model');
-        } else if (currentField === 'model') {
-          setCurrentField('apiKey');
-        }
+        setCurrentField(currentField === 'apiKey' ? 'baseUrl' : 'apiKey');
         return;
       }
 
@@ -119,8 +102,6 @@ export function OpenAIKeyPrompt({
       if (key.name === 'up') {
         if (currentField === 'baseUrl') {
           setCurrentField('apiKey');
-        } else if (currentField === 'model') {
-          setCurrentField('baseUrl');
         }
         return;
       }
@@ -128,8 +109,6 @@ export function OpenAIKeyPrompt({
       if (key.name === 'down') {
         if (currentField === 'apiKey') {
           setCurrentField('baseUrl');
-        } else if (currentField === 'baseUrl') {
-          setCurrentField('model');
         }
         return;
       }
@@ -140,8 +119,6 @@ export function OpenAIKeyPrompt({
           setApiKey((prev) => prev.slice(0, -1));
         } else if (currentField === 'baseUrl') {
           setBaseUrl((prev) => prev.slice(0, -1));
-        } else if (currentField === 'model') {
-          setModel((prev) => prev.slice(0, -1));
         }
         return;
       }
@@ -170,8 +147,6 @@ export function OpenAIKeyPrompt({
             setApiKey((prev) => prev + cleanInput);
           } else if (currentField === 'baseUrl') {
             setBaseUrl((prev) => prev + cleanInput);
-          } else if (currentField === 'model') {
-            setModel((prev) => prev + cleanInput);
           }
         }
         return;
@@ -190,8 +165,6 @@ export function OpenAIKeyPrompt({
             setApiKey((prev) => prev + cleanInput);
           } else if (currentField === 'baseUrl') {
             setBaseUrl((prev) => prev + cleanInput);
-          } else if (currentField === 'model') {
-            setModel((prev) => prev + cleanInput);
           }
         }
       }
@@ -252,21 +225,6 @@ export function OpenAIKeyPrompt({
           <Text>
             {currentField === 'baseUrl' ? '> ' : '  '}
             {baseUrl}
-          </Text>
-        </Box>
-      </Box>
-      <Box marginTop={1} flexDirection="row">
-        <Box width={12}>
-          <Text
-            color={currentField === 'model' ? Colors.AccentBlue : Colors.Gray}
-          >
-            {t('Model:')}
-          </Text>
-        </Box>
-        <Box flexGrow={1}>
-          <Text>
-            {currentField === 'model' ? '> ' : '  '}
-            {model}
           </Text>
         </Box>
       </Box>
