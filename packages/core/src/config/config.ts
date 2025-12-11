@@ -349,6 +349,7 @@ export interface ConfigParameters {
   skipStartupContext?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
+  maxConcurrentSubagents?: number;
 }
 
 function normalizeConfigOutputFormat(
@@ -485,6 +486,7 @@ export class Config {
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
+  private readonly maxConcurrentSubagents: number;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -598,6 +600,10 @@ export class Config {
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
     this.useSmartEdit = params.useSmartEdit ?? false;
     this.extensionManagement = params.extensionManagement ?? true;
+    this.maxConcurrentSubagents = Math.max(
+      1,
+      params.maxConcurrentSubagents ?? 1,
+    );
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -1239,6 +1245,10 @@ export class Config {
     }
 
     return this.truncateToolOutputLines;
+  }
+
+  getMaxConcurrentSubagents(): number {
+    return this.maxConcurrentSubagents;
   }
 
   getUseSmartEdit(): boolean {

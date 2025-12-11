@@ -129,6 +129,13 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
         .join('\n');
     }
 
+    const maxConcurrent = this.config.getMaxConcurrentSubagents();
+    const parallelEnabled = maxConcurrent > 1;
+
+    const parallelUsageNote = parallelEnabled
+      ? `1. **IMPORTANT: Launch multiple agents concurrently whenever possible** to maximize performance. Parallel execution is enabled (up to ${maxConcurrent} agents at once). To use parallel execution, include multiple task tool calls in a single message with multiple tool uses.`
+      : `1. Agents run sequentially (one at a time). If you need to use multiple agents, they will execute one after another.`;
+
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. 
 
 Available agent types and the tools they have access to:
@@ -143,7 +150,7 @@ When NOT to use the Agent tool:
 - Other tasks that are not related to the agent descriptions above
 
 Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+${parallelUsageNote}
 2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
 4. The agent's outputs should generally be trusted

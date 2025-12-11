@@ -2285,3 +2285,458 @@ describe('truncateAndSaveToFile', () => {
     );
   });
 });
+
+describe('Parallel Subagent Execution', () => {
+  let mockConfig: Config;
+  let mockToolRegistry: ToolRegistry;
+  let abortController: AbortController;
+
+  beforeEach(() => {
+    mockToolRegistry = {
+      getTool: vi.fn(),
+      getAllToolNames: vi.fn(() => []),
+    } as unknown as ToolRegistry;
+
+    mockConfig = {
+      getToolRegistry: () => mockToolRegistry,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getExcludeTools: () => undefined,
+      getAllowedTools: () => [],
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getInputFormat: () => 'text',
+      getShellExecutionConfig: () => ({
+        terminalWidth: 80,
+        terminalHeight: 24,
+        showColor: false,
+        pager: 'cat',
+      }),
+      getEnableToolOutputTruncation: () => false,
+      getTruncateToolOutputThreshold: () => 0,
+      getTruncateToolOutputLines: () => 0,
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getMaxConcurrentSubagents: () => 3, // Default for parallel tests
+      getChatRecordingService: () => undefined,
+      getUsageStatisticsEnabled: () => false,
+    } as unknown as Config;
+
+    abortController = new AbortController();
+  });
+
+  it('should execute TaskTool invocations in parallel when maxConcurrentSubagents > 1', async () => {
+    // Track execution order and timing
+    const executionLog: Array<{
+      callId: string;
+      action: string;
+      time: number;
+    }> = [];
+    const startTime = Date.now();
+
+    // Create a mock TaskTool that simulates async work
+    const mockTaskTool = new MockTool({
+      name: 'task',
+      displayName: 'Task',
+      params: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (params) => {
+        const callId = (params as { callId?: string }).callId ?? 'unknown';
+        executionLog.push({
+          callId,
+          action: 'start',
+          time: Date.now() - startTime,
+        });
+
+        // Simulate async work (50ms)
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        executionLog.push({
+          callId,
+          action: 'end',
+          time: Date.now() - startTime,
+        });
+        return { llmContent: 'Success', returnDisplay: 'Test result' };
+      },
+    });
+
+    vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) => {
+      if (name === 'task') return mockTaskTool;
+      return undefined;
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Schedule 3 TaskTool calls
+    const requests = [
+      {
+        callId: 'task1',
+        name: 'task',
+        args: { callId: 'task1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task2',
+        name: 'task',
+        args: { callId: 'task2' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task3',
+        name: 'task',
+        args: { callId: 'task3' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+    ];
+
+    await scheduler.schedule(requests, abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // Verify all tasks executed - check the execute function was called
+    expect(executionLog.length).toBe(6); // 3 starts + 3 ends
+
+    // Verify parallel execution: all tasks should start before any completes
+    const task1Start = executionLog.find(
+      (log) => log.callId === 'task1' && log.action === 'start',
+    );
+    const task2Start = executionLog.find(
+      (log) => log.callId === 'task2' && log.action === 'start',
+    );
+    const task3Start = executionLog.find(
+      (log) => log.callId === 'task3' && log.action === 'start',
+    );
+    const task1End = executionLog.find(
+      (log) => log.callId === 'task1' && log.action === 'end',
+    );
+
+    expect(task1Start).toBeDefined();
+    expect(task2Start).toBeDefined();
+    expect(task3Start).toBeDefined();
+    expect(task1End).toBeDefined();
+
+    // All tasks should start before the first one ends (indicating parallel execution)
+    if (task1End && task2Start && task3Start) {
+      expect(task2Start.time).toBeLessThan(task1End.time);
+      expect(task3Start.time).toBeLessThan(task1End.time);
+    }
+  });
+
+  it('should execute TaskTool invocations sequentially when maxConcurrentSubagents = 1', async () => {
+    // Update config to use sequential execution
+    mockConfig.getMaxConcurrentSubagents = () => 1;
+
+    const executionLog: Array<{
+      callId: string;
+      action: string;
+      time: number;
+    }> = [];
+    const startTime = Date.now();
+
+    const mockTaskTool = new MockTool({
+      name: 'task',
+      params: { type: 'object', properties: {} },
+      displayName: 'Task',
+      execute: async (params) => {
+        const callId = (params as { callId?: string }).callId ?? 'unknown';
+        executionLog.push({
+          callId,
+          action: 'start',
+          time: Date.now() - startTime,
+        });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        executionLog.push({
+          callId,
+          action: 'end',
+          time: Date.now() - startTime,
+        });
+        return { llmContent: 'Success', returnDisplay: 'Test result' };
+      },
+    });
+
+    vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) => {
+      if (name === 'task') return mockTaskTool;
+      return undefined;
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const requests = [
+      {
+        callId: 'task1',
+        name: 'task',
+        args: { callId: 'task1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task2',
+        name: 'task',
+        args: { callId: 'task2' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+    ];
+
+    await scheduler.schedule(requests, abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // Verify sequential execution: task2 should start after task1 ends
+    const task1End = executionLog.find(
+      (log) => log.callId === 'task1' && log.action === 'end',
+    );
+    const task2Start = executionLog.find(
+      (log) => log.callId === 'task2' && log.action === 'start',
+    );
+
+    expect(task1End).toBeDefined();
+    expect(task2Start).toBeDefined();
+
+    if (task1End && task2Start) {
+      expect(task2Start.time).toBeGreaterThanOrEqual(task1End.time);
+    }
+  });
+
+  it('should respect concurrency limit when executing multiple TaskTool calls', async () => {
+    // Set max concurrent to 2
+    mockConfig.getMaxConcurrentSubagents = () => 2;
+
+    const concurrentExecutions: number[] = [];
+    let currentExecuting = 0;
+
+    const mockTaskTool = new MockTool({
+      name: 'task',
+      params: { type: 'object', properties: {} },
+      displayName: 'Task',
+      execute: async () => {
+        currentExecuting++;
+        concurrentExecutions.push(currentExecuting);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        currentExecuting--;
+        return { llmContent: 'Success', returnDisplay: 'Test result' };
+      },
+    });
+
+    vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) => {
+      if (name === 'task') return mockTaskTool;
+      return undefined;
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Schedule 5 TaskTool calls
+    const requests = Array.from({ length: 5 }, (_, i) => ({
+      callId: `task${i + 1}`,
+      name: 'task',
+      args: { callId: `task${i + 1}` },
+      isClientInitiated: false,
+      prompt_id: 'prompt-1',
+    }));
+
+    await scheduler.schedule(requests, abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // Verify that we never exceeded the concurrency limit of 2
+    const maxConcurrent = Math.max(...concurrentExecutions);
+    expect(maxConcurrent).toBeLessThanOrEqual(2);
+  });
+
+  it('should not run non-TaskTool invocations in parallel', async () => {
+    mockConfig.getMaxConcurrentSubagents = () => 3;
+
+    const executionLog: Array<{ callId: string; action: string }> = [];
+
+    const mockNormalTool = new MockTool({
+      name: 'normal_tool',
+      params: { type: 'object', properties: {} },
+      displayName: 'NormalTool',
+      execute: async (params) => {
+        const callId = (params as { callId?: string }).callId ?? 'unknown';
+        executionLog.push({ callId, action: 'start' });
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        executionLog.push({ callId, action: 'end' });
+        return { llmContent: 'Success', returnDisplay: 'Test result' };
+      },
+    });
+
+    vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) => {
+      if (name === 'normal_tool') return mockNormalTool;
+      return undefined;
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const requests = [
+      {
+        callId: 'normal1',
+        name: 'normal_tool',
+        args: { callId: 'normal1' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'normal2',
+        name: 'normal_tool',
+        args: { callId: 'normal2' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+    ];
+
+    await scheduler.schedule(requests, abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // Verify sequential execution for non-TaskTool
+    const normal1EndIdx = executionLog.findIndex(
+      (log) => log.callId === 'normal1' && log.action === 'end',
+    );
+    const normal2StartIdx = executionLog.findIndex(
+      (log) => log.callId === 'normal2' && log.action === 'start',
+    );
+
+    expect(normal1EndIdx).toBeGreaterThanOrEqual(0);
+    expect(normal2StartIdx).toBeGreaterThanOrEqual(0);
+    expect(normal2StartIdx).toBeGreaterThan(normal1EndIdx);
+  });
+
+  it('should handle errors during parallel execution gracefully', async () => {
+    // Test that errors in one task don't prevent other tasks from completing
+    const executionLog: Array<{ callId: string; action: string }> = [];
+
+    // Create a mock TaskTool that can fail
+    const mockTaskTool = new MockTool({
+      name: 'task',
+      displayName: 'Task',
+      params: {
+        type: 'object',
+        properties: {},
+      },
+      execute: async (params) => {
+        const callId = (params as { callId?: string }).callId ?? 'unknown';
+        const shouldFail =
+          (params as { shouldFail?: boolean }).shouldFail ?? false;
+
+        executionLog.push({ callId, action: 'start' });
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        if (shouldFail) {
+          executionLog.push({ callId, action: 'error' });
+          throw new Error(`Task ${callId} failed`);
+        }
+
+        executionLog.push({ callId, action: 'end' });
+        return { llmContent: `Done ${callId}`, returnDisplay: 'Success' };
+      },
+    });
+
+    vi.mocked(mockToolRegistry.getTool).mockImplementation((name: string) => {
+      if (name === 'task') return mockTaskTool;
+      return undefined;
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Schedule tasks - some will fail, some will succeed
+    const requests = [
+      {
+        callId: 'task1',
+        name: 'task',
+        args: { callId: 'success1', shouldFail: false },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task2',
+        name: 'task',
+        args: { callId: 'fail1', shouldFail: true },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+      {
+        callId: 'task3',
+        name: 'task',
+        args: { callId: 'success2', shouldFail: false },
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      },
+    ];
+
+    scheduler.schedule(requests, abortController.signal);
+
+    // Execute - should handle errors gracefully
+    await vi.waitFor(() => onAllToolCallsComplete.mock.calls.length > 0);
+
+    // Verify all tasks were attempted (success or error)
+    const success1Started = executionLog.some(
+      (log) => log.callId === 'success1' && log.action === 'start',
+    );
+    const fail1Started = executionLog.some(
+      (log) => log.callId === 'fail1' && log.action === 'start',
+    );
+    const success2Started = executionLog.some(
+      (log) => log.callId === 'success2' && log.action === 'start',
+    );
+
+    expect(success1Started).toBe(true);
+    expect(fail1Started).toBe(true);
+    expect(success2Started).toBe(true);
+
+    // Verify successful tasks completed despite failure in parallel task
+    const success1Completed = executionLog.some(
+      (log) => log.callId === 'success1' && log.action === 'end',
+    );
+    const success2Completed = executionLog.some(
+      (log) => log.callId === 'success2' && log.action === 'end',
+    );
+
+    // At least one successful task should complete
+    expect(success1Completed || success2Completed).toBe(true);
+  });
+});

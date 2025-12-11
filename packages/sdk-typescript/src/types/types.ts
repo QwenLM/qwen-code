@@ -392,6 +392,26 @@ export interface QueryOptions {
   authType?: 'openai' | 'qwen-oauth';
 
   /**
+   * Maximum number of subagents (TaskTool invocations) that can run concurrently.
+   *
+   * When multiple subagents are scheduled for execution, this setting controls
+   * how many can run in parallel, which can significantly reduce total execution time.
+   *
+   * - Set to `1` for sequential execution (default, backward compatible)
+   * - Set to higher values (e.g., `3`, `5`) for parallel execution
+   * - Be mindful of system resources when setting high concurrency
+   *
+   * **Use cases:**
+   * - Sequential workflows: Keep at `1` when subagents have dependencies
+   * - Independent tasks: Set to `3-5` when subagents work on separate files/tasks
+   * - Resource-intensive: Lower values prevent system overload
+   *
+   * @default 1
+   * @example 3 // Allow up to 3 subagents to run in parallel
+   */
+  maxConcurrentSubagents?: number;
+
+  /**
    * Configuration for subagents that can be invoked during the session.
    * Subagents are specialized AI agents that can handle specific tasks or domains.
    * The invocation is marked as a `task` tool use with the name of agent and a tool_use_id.

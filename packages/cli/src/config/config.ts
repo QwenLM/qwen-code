@@ -980,6 +980,9 @@ export async function loadCliConfig(
     enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,
     eventEmitter: appEvents,
     useSmartEdit: argv.useSmartEdit ?? settings.useSmartEdit,
+    maxConcurrentSubagents: settings.experimental?.enableParallelSubagents
+      ? (settings.experimental?.maxConcurrentSubagents ?? 3)
+      : 1,
     output: {
       format: outputSettingsFormat,
     },
