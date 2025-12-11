@@ -1,0 +1,195 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===========================
+   Reusable Component Classes
+   =========================== */
+@layer components {
+  .btn-ghost {
+    @apply bg-transparent border border-transparent rounded cursor-pointer outline-none transition-colors duration-200;
+    color: var(--app-primary-foreground);
+    font-size: var(--vscode-chat-font-size, 13px);
+    border-radius: 4px;
+  }
+
+  .btn-ghost:hover,
+  .btn-ghost:focus {
+    background: var(--app-ghost-button-hover-background);
+  }
+
+  .btn-sm {
+    @apply p-small;
+  }
+
+  .btn-md {
+    @apply py-small px-medium;
+  }
+
+  .icon-sm {
+    @apply w-4 h-4;
+  }
+
+  /* Composer: root container anchored to bottom*/
+  .composer-root {
+    @apply absolute bottom-4 left-4 right-4 flex flex-col z-20;
+  }
+
+  /* Composer: form wrapper */
+  .composer-form {
+    @apply relative flex flex-col max-w-[680px] mx-auto rounded-large border shadow-sm transition-colors duration-200;
+    background: var(--app-input-secondary-background);
+    border-color: var(--app-input-border);
+    color: var(--app-input-foreground);
+  }
+  .composer-form:focus-within {
+    /* match existing highlight behavior */
+    border-color: var(--app-input-highlight);
+    box-shadow: 0 1px 2px
+      color-mix(in srgb, var(--app-input-highlight), transparent 80%);
+  }
+
+  /* Composer: input editable area */
+  .composer-input {
+    /* Use plain CSS for font-family inheritance; Tailwind has no `font-inherit` utility */
+    @apply flex-1 self-stretch py-2.5 px-3.5 outline-none overflow-y-auto relative select-text min-h-[1.5em] max-h-[200px] bg-transparent border-0 rounded-none overflow-x-hidden break-words whitespace-pre-wrap;
+    font-family: inherit;
+    font-size: var(--vscode-chat-font-size, 13px);
+    color: var(--app-input-foreground);
+  }
+  /* Show placeholder when truly empty OR when flagged as empty via data attribute.
+     The data attribute is needed because some browsers insert a <br> in
+     contentEditable, which breaks :empty matching. */
+  .composer-input:empty:before,
+  .composer-input[data-empty='true']::before {
+    content: attr(data-placeholder);
+    color: var(--app-input-placeholder-foreground);
+    pointer-events: none;
+    position: absolute;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100% - 28px);
+  }
+  .composer-input:focus {
+    outline: none;
+  }
+  .composer-input:disabled,
+  .composer-input[contenteditable='false'] {
+    color: #999;
+    cursor: not-allowed;
+  }
+
+  /* Composer: actions row (more compact) */
+  .composer-actions {
+    @apply flex items-center gap-1 min-w-0 z-[1];
+    padding: 5px;
+    color: var(--app-secondary-foreground);
+    border-top: 0.5px solid var(--app-input-border);
+  }
+
+  /* Text button (icon + label) */
+  .btn-text-compact {
+    @apply inline-flex items-center gap-1 px-1 py-0.5 rounded-[2px] cursor-pointer appearance-none bg-transparent border-0 min-w-0 shrink text-[0.85em] transition-colors duration-150;
+    color: var(--app-secondary-foreground);
+  }
+  .btn-text-compact--primary {
+    color: var(--app-secondary-foreground);
+    /* color: var(--app-primary-foreground); */
+  }
+  .btn-text-compact:hover {
+    background-color: var(--app-ghost-button-hover-background);
+  }
+  .btn-text-compact:active:not(:disabled) {
+    filter: brightness(1.1);
+  }
+  .btn-text-compact > svg {
+    height: 1em;
+    width: 1em; 
+    flex-shrink: 0;
+  }
+  .btn-text-compact > span {
+    display: inline-block;
+    min-width: 0;
+    max-width: 200px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+  }
+
+  @media screen and (max-width: 300px) {
+    .btn-text-compact > svg {
+      display: none;
+    }
+  }
+
+  /* Icon-only button, compact square (26x26) */
+  .btn-icon-compact {
+    @apply inline-flex items-center justify-center w-[26px] h-[26px] p-0 rounded-small bg-transparent border border-transparent cursor-pointer shrink-0 transition-all duration-150;
+    color: var(--app-secondary-foreground);
+  }
+  .btn-icon-compact:hover {
+    background-color: var(--app-ghost-button-hover-background);
+  }
+  .btn-icon-compact > svg {
+    @apply w-4 h-4;
+  }
+  /* Active/primary state for icon button (e.g., Thinking on) */
+  .btn-icon-compact--active {
+    background-color: var(--app-qwen-clay-button-orange);
+    color: var(--app-qwen-ivory);
+  }
+  .btn-icon-compact--active > svg {
+    stroke: var(--app-qwen-ivory);
+    fill: var(--app-qwen-ivory);
+  }
+
+  .composer-overlay {
+    @apply absolute inset-0 rounded-large z-0;
+    background: var(--app-input-background);
+  }
+
+  /* Optional: send button variant */
+  .btn-send-compact {
+    @apply btn-icon-compact ml-auto hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed;
+    background-color: var(--app-qwen-clay-button-orange);
+    color: var(--app-qwen-ivory);
+  }
+
+  /*
+   * File path styling inside tool call content
+   * Applies to: .toolcall-content-wrapper .file-link-path
+   * - Use monospace editor font
+   * - Slightly smaller size
+   * - Link color
+   * - Tighten top alignment and allow aggressive breaking for long paths
+   */
+  .toolcall-content-wrapper .file-link-path {
+    /* Tailwind utilities where possible */
+    @apply text-[0.85em] pt-px break-all min-w-0;
+    /* Not covered by Tailwind defaults: use CSS vars / properties */
+    font-family: var(--app-monospace-font-family);
+    color: var(--app-link-color);
+    overflow-wrap: anywhere;
+  }
+}
+
+/* ===========================
+   Utilities
+   =========================== */
+@layer utilities {
+  /* Multi-line clamp with ellipsis (Chromium-based webview supported) */
+  .q-line-clamp-3 {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+  }
+}

@@ -437,6 +437,7 @@ const createMcpServer = (diffManager: DiffManager) => {
       inputSchema: OpenDiffRequestSchema.shape,
     },
     async ({ filePath, newContent }: z.infer<typeof OpenDiffRequestSchema>) => {
+      // Minimal call site: only pass newContent; DiffManager reads old content itself
       await diffManager.showDiff(filePath, newContent);
       return { content: [] };
     },

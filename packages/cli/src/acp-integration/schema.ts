@@ -316,6 +316,23 @@ export const annotationsSchema = z.object({
   priority: z.number().optional().nullable(),
 });
 
+export const usageSchema = z.object({
+  promptTokens: z.number().optional().nullable(),
+  completionTokens: z.number().optional().nullable(),
+  thoughtsTokens: z.number().optional().nullable(),
+  totalTokens: z.number().optional().nullable(),
+  cachedTokens: z.number().optional().nullable(),
+});
+
+export type Usage = z.infer<typeof usageSchema>;
+
+export const sessionUpdateMetaSchema = z.object({
+  usage: usageSchema.optional().nullable(),
+  durationMs: z.number().optional().nullable(),
+});
+
+export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
+
 export const requestPermissionResponseSchema = z.object({
   outcome: requestPermissionOutcomeSchema,
 });
@@ -500,10 +517,12 @@ export const sessionUpdateSchema = z.union([
   z.object({
     content: contentBlockSchema,
     sessionUpdate: z.literal('agent_message_chunk'),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
   }),
   z.object({
     content: contentBlockSchema,
     sessionUpdate: z.literal('agent_thought_chunk'),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
   }),
   z.object({
     content: z.array(toolCallContentSchema).optional(),

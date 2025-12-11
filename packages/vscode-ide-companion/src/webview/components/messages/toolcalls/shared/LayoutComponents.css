@@ -1,0 +1,204 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * LayoutComponents.css - Tool call layout styles with timeline support
+ */
+
+/* ToolCallContainer with timeline support */
+.toolcall-container {
+  position: relative;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  user-select: text;
+  align-items: flex-start;
+}
+
+/* Default timeline connector line */
+.toolcall-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+}
+
+/* First item: connector starts from status point position */
+.toolcall-container:first-child::after {
+  top: 24px;
+}
+
+/* Last item: connector shows only upper part */
+.toolcall-container:last-child::after {
+  height: calc(100% - 24px);
+  top: 0;
+  bottom: auto;
+}
+
+/* Status-specific styles using ::before pseudo-element for bullet points */
+.toolcall-container.toolcall-status-default::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  padding-top: 2px;
+  font-size: 10px;
+  color: var(--app-secondary-foreground);
+  z-index: 1;
+}
+
+.toolcall-container.toolcall-status-success::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  font-size: 10px;
+  color: #74c991;
+  z-index: 1;
+}
+
+.toolcall-container.toolcall-status-error::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  font-size: 10px;
+  color: #c74e39;
+  z-index: 1;
+}
+
+.toolcall-container.toolcall-status-warning::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  padding-top: 2px;
+  font-size: 10px;
+  color: #e1c08d;
+  z-index: 1;
+}
+
+.toolcall-container.toolcall-status-loading::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  padding-top: 2px;
+  font-size: 10px;
+  color: var(--app-secondary-foreground);
+  background-color: var(--app-secondary-background);
+  animation: toolcallPulse 1s linear infinite;
+  z-index: 1;
+}
+
+/* Loading animation */
+@keyframes toolcallPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* Content wrapper */
+.toolcall-content-wrapper {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Legacy card styles */
+.toolcall-card {
+  grid-template-columns: auto 1fr;
+  gap: var(--spacing-medium);
+  background: var(--app-input-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--border-radius-medium);
+  padding: var(--spacing-large);
+  margin: var(--spacing-medium) 0;
+  align-items: start;
+  animation: fadeIn 0.2s ease-in;
+}
+
+/* Legacy row styles */
+.toolcall-row {
+  grid-template-columns: 80px 1fr;
+  gap: var(--spacing-medium);
+  min-width: 0;
+}
+
+.toolcall-row-label {
+  font-size: var(--font-size-xs);
+  color: var(--app-secondary-foreground);
+  font-weight: 500;
+  padding-top: 2px;
+}
+
+.toolcall-row-content {
+  color: var(--app-primary-foreground);
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* Locations list */
+.toolcall-locations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;
+}
+
+/* ToolCall header with loading indicator */
+.toolcall-header {
+  position: relative;
+}
+
+.toolcall-header::before {
+  content: '\25cf';
+  position: absolute;
+  left: -22px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 10px;
+  line-height: 1;
+  z-index: 1;
+  color: #e1c08d;
+  animation: toolcallHeaderPulse 1.5s ease-in-out infinite;
+}
+
+/* Loading animation for toolcall header */
+@keyframes toolcallHeaderPulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* In-progress toolcall specific styles */
+.in-progress-toolcall .toolcall-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 1;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.in-progress-toolcall .toolcall-header {
+  display: flex;
+  align-items: center;
+  gap: 2;
+  position: relative;
+  min-width: 0;
+}
+
+.in-progress-toolcall .toolcall-content-text {
+  word-break: break-word;
+  white-space: pre-wrap;
+  width: 100%;
+}

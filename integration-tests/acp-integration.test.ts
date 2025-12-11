@@ -25,6 +25,14 @@ type PendingRequest = {
   timeout: NodeJS.Timeout;
 };
 
+type UsageMetadata = {
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  thoughtsTokens?: number | null;
+  totalTokens?: number | null;
+  cachedTokens?: number | null;
+};
+
 type SessionUpdateNotification = {
   sessionId?: string;
   update?: {
@@ -39,6 +47,9 @@ type SessionUpdateNotification = {
       text?: string;
     };
     modeId?: string;
+    _meta?: {
+      usage?: UsageMetadata;
+    };
   };
 };
 
@@ -582,6 +593,54 @@ function setupAcpTest(
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
       }
+      throw e;
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('receives usage metadata in agent_message_chunk updates', async () => {
+    const rig = new TestRig();
+    rig.setup('acp usage metadata');
+
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+      });
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+
+      await sendRequest('session/prompt', {
+        sessionId: newSession.sessionId,
+        prompt: [{ type: 'text', text: 'Say "hello".' }],
+      });
+
+      await delay(500);
+
+      // Find updates with usage metadata
+      const updatesWithUsage = sessionUpdates.filter(
+        (u) =>
+          u.update?.sessionUpdate === 'agent_message_chunk' &&
+          u.update?._meta?.usage,
+      );
+
+      expect(updatesWithUsage.length).toBeGreaterThan(0);
+
+      const usage = updatesWithUsage[0].update?._meta?.usage;
+      expect(usage).toBeDefined();
+      expect(
+        typeof usage?.promptTokens === 'number' ||
+          typeof usage?.totalTokens === 'number',
+      ).toBe(true);
+    } catch (e) {
+      if (stderr.length) console.error('Agent stderr:', stderr.join(''));
       throw e;
     } finally {
       await cleanup();

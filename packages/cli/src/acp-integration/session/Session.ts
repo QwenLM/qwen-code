@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, FunctionCall, Part } from '@google/genai';
+import type {
+  Content,
+  FunctionCall,
+  GenerateContentResponseUsageMetadata,
+  Part,
+} from '@google/genai';
 import type {
   Config,
   GeminiChat,
@@ -55,6 +60,7 @@ import type { SessionContext, ToolCallStartParams } from './types.js';
 import { HistoryReplayer } from './HistoryReplayer.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
+import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 
 /**
@@ -79,6 +85,7 @@ export class Session implements SessionContext {
   private readonly historyReplayer: HistoryReplayer;
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
+  private readonly messageEmitter: MessageEmitter;
 
   // Implement SessionContext interface
   readonly sessionId: string;
@@ -96,6 +103,7 @@ export class Session implements SessionContext {
     this.toolCallEmitter = new ToolCallEmitter(this);
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
+    this.messageEmitter = new MessageEmitter(this);
   }
 
   getId(): string {
@@ -192,6 +200,8 @@ export class Session implements SessionContext {
       }
 
       const functionCalls: FunctionCall[] = [];
+      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+      const streamStartTime = Date.now();
 
       try {
         const responseStream = await chat.sendMessageStream(
@@ -222,18 +232,16 @@ export class Session implements SessionContext {
                 continue;
               }
 
-              const content: acp.ContentBlock = {
-                type: 'text',
-                text: part.text,
-              };
-
-              this.sendUpdate({
-                sessionUpdate: part.thought
-                  ? 'agent_thought_chunk'
-                  : 'agent_message_chunk',
-                content,
-              });
+              this.messageEmitter.emitMessage(
+                part.text,
+                'assistant',
+                part.thought,
+              );
             }
+          }
+
+          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
+            usageMetadata = resp.value.usageMetadata;
           }
 
           if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
@@ -249,6 +257,15 @@ export class Session implements SessionContext {
         }
 
         throw error;
+      }
+
+      if (usageMetadata) {
+        const durationMs = Date.now() - streamStartTime;
+        await this.messageEmitter.emitUsageMetadata(
+          usageMetadata,
+          '',
+          durationMs,
+        );
       }
 
       if (functionCalls.length > 0) {
@@ -444,7 +461,9 @@ export class Session implements SessionContext {
       }
 
       const confirmationDetails =
-        await invocation.shouldConfirmExecute(abortSignal);
+        this.config.getApprovalMode() !== ApprovalMode.YOLO
+          ? await invocation.shouldConfirmExecute(abortSignal)
+          : false;
 
       if (confirmationDetails) {
         const content: acp.ToolCallContent[] = [];
@@ -522,6 +541,7 @@ export class Session implements SessionContext {
           callId,
           toolName: fc.name,
           args,
+          status: 'in_progress',
         };
         await this.toolCallEmitter.emitStart(startParams);
       }
