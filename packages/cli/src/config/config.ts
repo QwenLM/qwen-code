@@ -5,6 +5,7 @@
  */
 
 import type {
+  ContentGeneratorConfig,
   FileFilteringOptions,
   MCPServerConfig,
   OutputFormat,
@@ -121,6 +122,24 @@ export interface CliArgs {
   vlmSwitchMode: string | undefined;
   useSmartEdit: boolean | undefined;
   outputFormat: string | undefined;
+}
+
+type LegacySamplingSettings = {
+  sampling_params?: ContentGeneratorConfig['samplingParams'];
+};
+
+function getLegacySamplingParams(
+  settings: Settings,
+): ContentGeneratorConfig['samplingParams'] | undefined {
+  if (
+    typeof settings !== 'object' ||
+    settings === null ||
+    !('sampling_params' in (settings as Record<string, unknown>))
+  ) {
+    return undefined;
+  }
+
+  return (settings as Settings & LegacySamplingSettings).sampling_params;
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
@@ -685,6 +704,7 @@ export async function loadCliConfig(
 
   const vlmSwitchMode =
     argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
+  const legacySamplingParams = getLegacySamplingParams(settings);
   return new Config({
     sessionId,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -745,6 +765,8 @@ export async function loadCliConfig(
         (typeof argv.openaiLogging === 'undefined'
           ? settings.model?.enableOpenAILogging
           : argv.openaiLogging) ?? false,
+      // Include sampling_params from root level settings
+      ...(legacySamplingParams ? { samplingParams: legacySamplingParams } : {}),
     },
     cliVersion: await getCliVersion(),
     tavilyApiKey:
