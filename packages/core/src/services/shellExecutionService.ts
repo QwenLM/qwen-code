@@ -158,12 +158,15 @@ export class ShellExecutionService {
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
+      const shell = isWindows ? 'cmd.exe' : 'bash';
+      const shellArgs = isWindows
+        ? ['/c', commandToExecute]
+        : ['-c', commandToExecute];
 
-      const child = cpSpawn(commandToExecute, [], {
+      const child = cpSpawn(shell, shellArgs, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        windowsVerbatimArguments: true,
-        shell: isWindows ? true : 'bash',
+        windowsVerbatimArguments: isWindows,
         detached: !isWindows,
         env: {
           ...process.env,
