@@ -391,6 +391,19 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(result).toBe('windows-1252');
     });
 
+    it('should prioritize UTF-8 detection over Windows system encoding', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 936'); // GBK
+
+      const buffer = Buffer.from('test');
+      // Mock chardet to return UTF-8
+      mockedChardetDetect.mockReturnValue('UTF-8');
+
+      const result = getCachedEncodingForBuffer(buffer);
+
+      expect(result).toBe('utf-8');
+    });
+
     it('should cache null system encoding result', () => {
       // Reset the cache specifically for this test
       resetEncodingCache();

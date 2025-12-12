@@ -41,7 +41,7 @@ import {
 import {
   logApiRequest,
   logApiResponse,
-  logCliConfiguration,
+  logStartSession,
   logUserPrompt,
   logToolCall,
   logFlashFallback,
@@ -116,7 +116,7 @@ describe('loggers', () => {
     });
 
     it('logs the chat compression event to QwenLogger', () => {
-      const mockConfig = makeFakeConfig();
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
 
       const event = makeChatCompressionEvent({
         tokens_before: 9001,
@@ -131,7 +131,7 @@ describe('loggers', () => {
     });
 
     it('records the chat compression event to OTEL', () => {
-      const mockConfig = makeFakeConfig();
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
 
       logChatCompression(
         mockConfig,
@@ -177,10 +177,12 @@ describe('loggers', () => {
         getTargetDir: () => 'target-dir',
         getProxy: () => 'http://test.proxy.com:8080',
         getOutputFormat: () => OutputFormat.JSON,
+        getToolRegistry: () => undefined,
+        getChatRecordingService: () => undefined,
       } as unknown as Config;
 
       const startSessionEvent = new StartSessionEvent(mockConfig);
-      logCliConfiguration(mockConfig, startSessionEvent);
+      logStartSession(mockConfig, startSessionEvent);
 
       expect(mockLogger.emit).toHaveBeenCalledWith({
         body: 'CLI configuration loaded.',
@@ -281,7 +283,8 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
-    } as Config;
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
 
     const mockMetrics = {
       recordApiResponseMetrics: vi.fn(),
@@ -368,7 +371,7 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
-    } as Config;
+    } as unknown as Config;
 
     it('should log an API request with request_text', () => {
       const event = new ApiRequestEvent(
@@ -498,6 +501,7 @@ describe('loggers', () => {
     const cfg2 = {
       getSessionId: () => 'test-session-id',
       getTargetDir: () => 'target-dir',
+      getProjectRoot: () => '/test/project/root',
       getProxy: () => 'http://test.proxy.com:8080',
       getContentGeneratorConfig: () =>
         ({ model: 'test-model' }) as ContentGeneratorConfig,
@@ -530,7 +534,8 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
-    } as Config;
+      getChatRecordingService: () => undefined,
+    } as unknown as Config;
 
     const mockMetrics = {
       recordToolCallMetrics: vi.fn(),
@@ -1029,7 +1034,7 @@ describe('loggers', () => {
     });
 
     it('logs the event to Clearcut and OTEL', () => {
-      const mockConfig = makeFakeConfig();
+      const mockConfig = makeFakeConfig({ sessionId: 'test-session-id' });
       const event = new MalformedJsonResponseEvent('test-model');
 
       logMalformedJsonResponse(mockConfig, event);

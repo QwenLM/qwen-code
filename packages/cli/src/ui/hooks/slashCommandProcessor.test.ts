@@ -110,6 +110,9 @@ describe('useSlashCommandProcessor', () => {
   const mockSetQuittingMessages = vi.fn();
 
   const mockConfig = makeFakeConfig({});
+  mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+    recordSlashCommand: vi.fn(),
+  });
   const mockSettings = {} as LoadedSettings;
 
   beforeEach(() => {
@@ -305,11 +308,15 @@ describe('useSlashCommandProcessor', () => {
 
       expect(childAction).toHaveBeenCalledWith(
         expect.objectContaining({
+          invocation: expect.objectContaining({
+            name: 'child',
+            args: 'with args',
+          }),
           services: expect.objectContaining({
             config: mockConfig,
           }),
           ui: expect.objectContaining({
-            addItem: mockAddItem,
+            addItem: expect.any(Function),
           }),
         }),
         'with args',
@@ -911,7 +918,6 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // toggleVimEnabled
           vi.fn(), // setIsProcessing
           vi.fn(), // setGeminiMdFileCount
-          vi.fn(), // _showQuitConfirmation
         ),
       );
 

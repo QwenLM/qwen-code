@@ -11,31 +11,8 @@ Slash commands provide meta-level control over the CLI itself.
 - **`/bug`**
   - **Description:** File an issue about Qwen Code. By default, the issue is filed within the GitHub repository for Qwen Code. The string you enter after `/bug` will become the headline for the bug being filed. The default `/bug` behavior can be modified using the `advanced.bugCommand` setting in your `.qwen/settings.json` files.
 
-- **`/chat`**
-  - **Description:** Save and resume conversation history for branching conversation state interactively, or resuming a previous state from a later session.
-  - **Sub-commands:**
-    - **`save`**
-      - **Description:** Saves the current conversation history. You must add a `<tag>` for identifying the conversation state.
-      - **Usage:** `/chat save <tag>`
-      - **Details on Checkpoint Location:** The default locations for saved chat checkpoints are:
-        - Linux/macOS: `~/.qwen/tmp/<project_hash>/`
-        - Windows: `C:\Users\<YourUsername>\.qwen\tmp\<project_hash>\`
-        - When you run `/chat list`, the CLI only scans these specific directories to find available checkpoints.
-        - **Note:** These checkpoints are for manually saving and resuming conversation states. For automatic checkpoints created before file modifications, see the [Checkpointing documentation](../checkpointing.md).
-    - **`resume`**
-      - **Description:** Resumes a conversation from a previous save.
-      - **Usage:** `/chat resume <tag>`
-    - **`list`**
-      - **Description:** Lists available tags for chat state resumption.
-    - **`delete`**
-      - **Description:** Deletes a saved conversation checkpoint.
-      - **Usage:** `/chat delete <tag>`
-    - **`share`**
-      - **Description** Writes the current conversation to a provided Markdown or JSON file.
-      - **Usage** `/chat share file.md` or `/chat share file.json`. If no filename is provided, then the CLI will generate one.
-
-- **`/clear`**
-  - **Description:** Clear the terminal screen, including the visible session history and scrollback within the CLI. The underlying session data (for history recall) might be preserved depending on the exact implementation, but the visual display is cleared.
+- **`/clear`** (aliases: `reset`, `new`)
+  - **Description:** Clear conversation history and free up context by starting a fresh session. Also clears the terminal output and scrollback within the CLI.
   - **Keyboard shortcut:** Press **Ctrl+L** at any time to perform a clear action.
 
 - **`/summary`**
@@ -168,16 +145,6 @@ Slash commands provide meta-level control over the CLI itself.
     - **`nodesc`** or **`nodescriptions`**:
       - **Description:** Hide tool descriptions, showing only the tool names.
 
-- **`/quit-confirm`**
-  - **Description:** Show a confirmation dialog before exiting Qwen Code, allowing you to choose how to handle your current session.
-  - **Usage:** `/quit-confirm`
-  - **Features:**
-    - **Quit immediately:** Exit without saving anything (equivalent to `/quit`)
-    - **Generate summary and quit:** Create a project summary using `/summary` before exiting
-    - **Save conversation and quit:** Save the current conversation with an auto-generated tag before exiting
-  - **Keyboard shortcut:** Press **Ctrl+C** twice to trigger the quit confirmation dialog
-  - **Note:** This command is automatically triggered when you press Ctrl+C once, providing a safety mechanism to prevent accidental exits.
-
 - **`/quit`** (or **`/exit`**)
   - **Description:** Exit Qwen Code immediately without any confirmation dialog.
 
@@ -194,6 +161,16 @@ Slash commands provide meta-level control over the CLI itself.
 
 - **`/init`**
   - **Description:** Analyzes the current directory and creates a `QWEN.md` context file by default (or the filename specified by `contextFileName`). If a non-empty file already exists, no changes are made. The command seeds an empty file and prompts the model to populate it with project-specific instructions.
+
+- [**`/language`**](./language.md)
+  - **Description:** View or change the language setting for both UI and LLM output.
+  - **Sub-commands:**
+    - **`ui`**: Set the UI language (zh-CN or en-US)
+    - **`output`**: Set the LLM output language
+  - **Usage:** `/language [ui|output] [language]`
+  - **Examples:**
+    - `/language ui zh-CN` (set UI language to Simplified Chinese)
+    - `/language output English` (set LLM output language to English)
 
 ### Custom Commands
 

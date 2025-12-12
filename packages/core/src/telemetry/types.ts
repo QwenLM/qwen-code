@@ -17,7 +17,6 @@ import {
 } from './tool-call-decision.js';
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
-import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { OutputFormat } from '../output/types.js';
 
 export interface BaseTelemetryEvent {
@@ -31,6 +30,7 @@ type CommonFields = keyof BaseTelemetryEvent;
 export class StartSessionEvent implements BaseTelemetryEvent {
   'event.name': 'cli_config';
   'event.timestamp': string;
+  session_id: string;
   model: string;
   embedding_model: string;
   sandbox_enabled: boolean;
@@ -48,9 +48,10 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   mcp_tools?: string;
   output_format: OutputFormat;
 
-  constructor(config: Config, toolRegistry?: ToolRegistry) {
+  constructor(config: Config) {
     const generatorConfig = config.getContentGeneratorConfig();
     const mcpServers = config.getMcpServers();
+    const toolRegistry = config.getToolRegistry();
 
     let useGemini = false;
     let useVertex = false;
@@ -60,6 +61,7 @@ export class StartSessionEvent implements BaseTelemetryEvent {
     }
 
     this['event.name'] = 'cli_config';
+    this.session_id = config.getSessionId();
     this.model = config.getModel();
     this.embedding_model = config.getEmbeddingModel();
     this.sandbox_enabled =

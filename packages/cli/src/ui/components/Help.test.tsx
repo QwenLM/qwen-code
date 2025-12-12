@@ -17,6 +17,7 @@ const mockCommands: readonly SlashCommand[] = [
     name: 'test',
     description: 'A test command',
     kind: CommandKind.BUILT_IN,
+    altNames: ['alias-one', 'alias-two'],
   },
   {
     name: 'hidden',
@@ -59,5 +60,12 @@ describe('Help Component', () => {
 
     expect(output).toContain('visible-child');
     expect(output).not.toContain('hidden-child');
+  });
+
+  it('should render alt names for commands when available', () => {
+    const { lastFrame } = render(<Help commands={mockCommands} />);
+    const output = lastFrame();
+
+    expect(output).toContain('/test (alias-one, alias-two)');
   });
 });

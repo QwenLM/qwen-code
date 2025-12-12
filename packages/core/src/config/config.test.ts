@@ -23,19 +23,6 @@ import {
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
 import { GitService } from '../services/gitService.js';
-
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  return {
-    ...actual,
-    existsSync: vi.fn().mockReturnValue(true),
-    statSync: vi.fn().mockReturnValue({
-      isDirectory: vi.fn().mockReturnValue(true),
-    }),
-    realpathSync: vi.fn((path) => path),
-  };
-});
-
 import { ShellTool } from '../tools/shell.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { GrepTool } from '../tools/grep.js';
@@ -54,15 +41,19 @@ function createToolMock(toolName: string) {
   return ToolMock;
 }
 
-vi.mock('fs', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('fs')>();
-  return {
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const mocked = {
     ...actual,
     existsSync: vi.fn().mockReturnValue(true),
     statSync: vi.fn().mockReturnValue({
       isDirectory: vi.fn().mockReturnValue(true),
     }),
     realpathSync: vi.fn((path) => path),
+  };
+  return {
+    ...mocked,
+    default: mocked, // Required for ESM default imports (import fs from 'node:fs')
   };
 });
 
@@ -72,6 +63,7 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
+  ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
   return { ToolRegistry: ToolRegistryMock };
@@ -197,7 +189,6 @@ describe('Server Config (config.ts)', () => {
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
-  const SESSION_ID = 'test-session-id';
   const baseParams: ConfigParameters = {
     cwd: '/tmp',
     embeddingModel: EMBEDDING_MODEL,
@@ -208,7 +199,6 @@ describe('Server Config (config.ts)', () => {
     fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
-    sessionId: SESSION_ID,
     model: MODEL,
     usageStatisticsEnabled: false,
   };
@@ -217,7 +207,7 @@ describe('Server Config (config.ts)', () => {
     // Reset mocks if necessary
     vi.clearAllMocks();
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
-      () => undefined,
+      async () => undefined,
     );
   });
 
@@ -476,7 +466,7 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         usageStatisticsEnabled: true,
       });
-      await config.refreshAuth(AuthType.USE_GEMINI);
+      await config.initialize();
 
       expect(QwenLogger.prototype.logStartSessionEvent).toHaveBeenCalledOnce();
     });
@@ -956,7 +946,6 @@ describe('Server Config (config.ts)', () => {
 
 describe('setApprovalMode with folder trust', () => {
   const baseParams: ConfigParameters = {
-    sessionId: 'test',
     targetDir: '.',
     debugMode: false,
     model: 'test-model',
@@ -987,7 +976,6 @@ describe('setApprovalMode with folder trust', () => {
 
   it('should NOT throw an error when setting PLAN mode in an untrusted folder', () => {
     const config = new Config({
-      sessionId: 'test',
       targetDir: '.',
       debugMode: false,
       model: 'test-model',
@@ -1168,7 +1156,6 @@ describe('BaseLlmClient Lifecycle', () => {
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
-  const SESSION_ID = 'test-session-id';
   const baseParams: ConfigParameters = {
     cwd: '/tmp',
     embeddingModel: EMBEDDING_MODEL,
@@ -1179,7 +1166,6 @@ describe('BaseLlmClient Lifecycle', () => {
     fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
-    sessionId: SESSION_ID,
     model: MODEL,
     usageStatisticsEnabled: false,
   };

@@ -78,10 +78,11 @@ export function SuggestionsDisplay({
         const isActive = originalIndex === activeIndex;
         const isExpanded = originalIndex === expandedIndex;
         const textColor = isActive ? theme.text.accent : theme.text.secondary;
-        const isLong = suggestion.value.length >= MAX_WIDTH;
+        const displayLabel = suggestion.label ?? suggestion.value;
+        const isLong = displayLabel.length >= MAX_WIDTH;
         const labelElement = (
           <PrepareLabel
-            label={suggestion.value}
+            label={displayLabel}
             matchedIndex={suggestion.matchedIndex}
             userInput={userInput}
             textColor={textColor}

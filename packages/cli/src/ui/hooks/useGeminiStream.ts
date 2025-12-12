@@ -124,9 +124,13 @@ export const useGeminiStream = (
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
-  const { startNewPrompt, getPromptCount } = useSessionStats();
+  const {
+    startNewPrompt,
+    getPromptCount,
+    stats: sessionStates,
+  } = useSessionStats();
   const storage = config.storage;
-  const logger = useLogger(storage);
+  const logger = useLogger(storage, sessionStates.sessionId);
   const gitService = useMemo(() => {
     if (!config.getProjectRoot()) {
       return;
@@ -493,6 +497,61 @@ export const useGeminiStream = (
     [addItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
+  const mergeThought = useCallback(
+    (incoming: ThoughtSummary) => {
+      setThought((prev) => {
+        if (!prev) {
+          return incoming;
+        }
+        const subject = incoming.subject || prev.subject;
+        const description = `${prev.description ?? ''}${incoming.description ?? ''}`;
+        return { subject, description };
+      });
+    },
+    [setThought],
+  );
+
+  const handleThoughtEvent = useCallback(
+    (
+      eventValue: ThoughtSummary,
+      currentThoughtBuffer: string,
+      userMessageTimestamp: number,
+    ): string => {
+      if (turnCancelledRef.current) {
+        return '';
+      }
+
+      // Extract the description text from the thought summary
+      const thoughtText = eventValue.description ?? '';
+      if (!thoughtText) {
+        return currentThoughtBuffer;
+      }
+
+      const newThoughtBuffer = currentThoughtBuffer + thoughtText;
+
+      // If we're not already showing a thought, start a new one
+      if (pendingHistoryItemRef.current?.type !== 'gemini_thought') {
+        // If there's a pending non-thought item, finalize it first
+        if (pendingHistoryItemRef.current) {
+          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+        }
+        setPendingHistoryItem({ type: 'gemini_thought', text: '' });
+      }
+
+      // Update the existing thought message with accumulated content
+      setPendingHistoryItem({
+        type: 'gemini_thought',
+        text: newThoughtBuffer,
+      });
+
+      // Also update the thought state for the loading indicator
+      mergeThought(eventValue);
+
+      return newThoughtBuffer;
+    },
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+  );
+
   const handleUserCancelledEvent = useCallback(
     (userMessageTimestamp: number) => {
       if (turnCancelledRef.current) {
@@ -706,11 +765,16 @@ export const useGeminiStream = (
       signal: AbortSignal,
     ): Promise<StreamProcessingStatus> => {
       let geminiMessageBuffer = '';
+      let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
       for await (const event of stream) {
         switch (event.type) {
           case ServerGeminiEventType.Thought:
-            setThought(event.value);
+            thoughtBuffer = handleThoughtEvent(
+              event.value,
+              thoughtBuffer,
+              userMessageTimestamp,
+            );
             break;
           case ServerGeminiEventType.Content:
             geminiMessageBuffer = handleContentEvent(
@@ -772,6 +836,7 @@ export const useGeminiStream = (
     },
     [
       handleContentEvent,
+      handleThoughtEvent,
       handleUserCancelledEvent,
       handleErrorEvent,
       scheduleToolCalls,
@@ -849,21 +914,24 @@ export const useGeminiStream = (
         const finalQueryToSend = queryToSend;
 
         if (!options?.isContinuation) {
+          // trigger new prompt event for session stats in CLI
+          startNewPrompt();
+
+          // log user prompt event for telemetry, only text prompts for now
           if (typeof queryToSend === 'string') {
-            // logging the text prompts only for now
-            const promptText = queryToSend;
             logUserPrompt(
               config,
               new UserPromptEvent(
-                promptText.length,
+                queryToSend.length,
                 prompt_id,
                 config.getContentGeneratorConfig()?.authType,
-                promptText,
+                queryToSend,
               ),
             );
           }
-          startNewPrompt();
-          setThought(null); // Reset thought when starting a new prompt
+
+          // Reset thought when starting a new prompt
+          setThought(null);
         }
 
         setIsResponding(true);
@@ -874,6 +942,7 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
+            options,
           );
           const processingStatus = await processGeminiStreamEvents(
             stream,

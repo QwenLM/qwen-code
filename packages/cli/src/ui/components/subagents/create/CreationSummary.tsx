@@ -15,6 +15,7 @@ import { theme } from '../../../semantic-colors.js';
 import { shouldShowColor, getColorForDisplay } from '../utils.js';
 import { useLaunchEditor } from '../../../hooks/useLaunchEditor.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { t } from '../../../../i18n/index.js';
 
 /**
  * Step 6: Final confirmation and actions.
@@ -62,15 +63,24 @@ export function CreationSummary({
 
             if (conflictLevel === targetLevel) {
               allWarnings.push(
-                `Name "${state.generatedName}" already exists at ${conflictLevel} level - will overwrite existing subagent`,
+                t(
+                  'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent',
+                  { name: state.generatedName, level: conflictLevel },
+                ),
               );
             } else if (targetLevel === 'project') {
               allWarnings.push(
-                `Name "${state.generatedName}" exists at user level - project level will take precedence`,
+                t(
+                  'Name "{{name}}" exists at user level - project level will take precedence',
+                  { name: state.generatedName },
+                ),
               );
             } else {
               allWarnings.push(
-                `Name "${state.generatedName}" exists at project level - existing subagent will take precedence`,
+                t(
+                  'Name "{{name}}" exists at project level - existing subagent will take precedence',
+                  { name: state.generatedName },
+                ),
               );
             }
           }
@@ -83,12 +93,16 @@ export function CreationSummary({
       // Check length warnings
       if (state.generatedDescription.length > 300) {
         allWarnings.push(
-          `Description is over ${state.generatedDescription.length} characters`,
+          t('Description is over {{length}} characters', {
+            length: state.generatedDescription.length.toString(),
+          }),
         );
       }
       if (state.generatedSystemPrompt.length > 10000) {
         allWarnings.push(
-          `System prompt is over ${state.generatedSystemPrompt.length} characters`,
+          t('System prompt is over {{length}} characters', {
+            length: state.generatedSystemPrompt.length.toString(),
+          }),
         );
       }
 
@@ -181,7 +195,9 @@ export function CreationSummary({
       showSuccessAndClose();
     } catch (error) {
       setSaveError(
-        `Failed to save and edit subagent: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        t('Failed to save and edit subagent: {{error}}', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+        }),
       );
     }
   }, [
@@ -215,13 +231,15 @@ export function CreationSummary({
       <Box flexDirection="column" gap={1}>
         <Box>
           <Text bold color={theme.status.success}>
-            ✅ Subagent Created Successfully!
+            {t('✅ Subagent Created Successfully!')}
           </Text>
         </Box>
         <Box>
           <Text>
-            Subagent &quot;{state.generatedName}&quot; has been saved to{' '}
-            {state.location} level.
+            {t('Subagent "{{name}}" has been saved to {{level}} level.', {
+              name: state.generatedName,
+              level: state.location,
+            })}
           </Text>
         </Box>
       </Box>
@@ -232,35 +250,35 @@ export function CreationSummary({
     <Box flexDirection="column" gap={1}>
       <Box flexDirection="column">
         <Box>
-          <Text color={theme.text.primary}>Name: </Text>
+          <Text color={theme.text.primary}>{t('Name: ')}</Text>
           <Text color={getColorForDisplay(state.color)}>
             {state.generatedName}
           </Text>
         </Box>
 
         <Box>
-          <Text color={theme.text.primary}>Location: </Text>
+          <Text color={theme.text.primary}>{t('Location: ')}</Text>
           <Text>
             {state.location === 'project'
-              ? 'Project Level (.qwen/agents/)'
-              : 'User Level (~/.qwen/agents/)'}
+              ? t('Project Level (.qwen/agents/)')
+              : t('User Level (~/.qwen/agents/)')}
           </Text>
         </Box>
 
         <Box>
-          <Text color={theme.text.primary}>Tools: </Text>
+          <Text color={theme.text.primary}>{t('Tools: ')}</Text>
           <Text>{toolsDisplay}</Text>
         </Box>
 
         {shouldShowColor(state.color) && (
           <Box>
-            <Text color={theme.text.primary}>Color: </Text>
+            <Text color={theme.text.primary}>{t('Color: ')}</Text>
             <Text color={getColorForDisplay(state.color)}>{state.color}</Text>
           </Box>
         )}
 
         <Box marginTop={1}>
-          <Text color={theme.text.primary}>Description:</Text>
+          <Text color={theme.text.primary}>{t('Description:')}</Text>
         </Box>
         <Box padding={1} paddingBottom={0}>
           <Text wrap="wrap">
@@ -269,7 +287,7 @@ export function CreationSummary({
         </Box>
 
         <Box marginTop={1}>
-          <Text color={theme.text.primary}>System Prompt:</Text>
+          <Text color={theme.text.primary}>{t('System Prompt:')}</Text>
         </Box>
         <Box padding={1} paddingBottom={0}>
           <Text wrap="wrap">
@@ -281,7 +299,7 @@ export function CreationSummary({
       {saveError && (
         <Box flexDirection="column">
           <Text bold color={theme.status.error}>
-            ❌ Error saving subagent:
+            {t('❌ Error saving subagent:')}
           </Text>
           <Box flexDirection="column" padding={1} paddingBottom={0}>
             <Text color={theme.status.error} wrap="wrap">
@@ -294,7 +312,7 @@ export function CreationSummary({
       {warnings.length > 0 && (
         <Box flexDirection="column">
           <Text bold color={theme.status.warning}>
-            Warnings:
+            {t('Warnings:')}
           </Text>
           <Box flexDirection="column" padding={1} paddingBottom={0}>
             {warnings.map((warning, index) => (

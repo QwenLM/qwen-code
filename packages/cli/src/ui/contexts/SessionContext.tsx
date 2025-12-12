@@ -19,7 +19,7 @@ import type {
   ModelMetrics,
   ToolCallStats,
 } from '@qwen-code/qwen-code-core';
-import { uiTelemetryService, sessionId } from '@qwen-code/qwen-code-core';
+import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 export enum ToolCallDecision {
   ACCEPT = 'accept',
@@ -168,6 +168,7 @@ export interface ComputedSessionStats {
 // and the functions to update it.
 interface SessionStatsContextValue {
   stats: SessionStatsState;
+  startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
 }
@@ -178,18 +179,23 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
   undefined,
 );
 
+const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
+  sessionId,
+  sessionStartTime: new Date(),
+  metrics: uiTelemetryService.getMetrics(),
+  lastPromptTokenCount: 0,
+  promptCount: 0,
+});
+
 // --- Provider Component ---
 
-export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
-  children,
-}) => {
-  const [stats, setStats] = useState<SessionStatsState>({
-    sessionId,
-    sessionStartTime: new Date(),
-    metrics: uiTelemetryService.getMetrics(),
-    lastPromptTokenCount: 0,
-    promptCount: 0,
-  });
+export const SessionStatsProvider: React.FC<{
+  sessionId?: string;
+  children: React.ReactNode;
+}> = ({ sessionId, children }) => {
+  const [stats, setStats] = useState<SessionStatsState>(() =>
+    createDefaultStats(sessionId ?? ''),
+  );
 
   useEffect(() => {
     const handleUpdate = ({
@@ -226,6 +232,13 @@ export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
     };
   }, []);
 
+  const startNewSession = useCallback((sessionId: string) => {
+    setStats(() => ({
+      ...createDefaultStats(sessionId),
+      lastPromptTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    }));
+  }, []);
+
   const startNewPrompt = useCallback(() => {
     setStats((prevState) => ({
       ...prevState,
@@ -241,10 +254,11 @@ export const SessionStatsProvider: React.FC<{ children: React.ReactNode }> = ({
   const value = useMemo(
     () => ({
       stats,
+      startNewSession,
       startNewPrompt,
       getPromptCount,
     }),
-    [stats, startNewPrompt, getPromptCount],
+    [stats, startNewSession, startNewPrompt, getPromptCount],
   );
 
   return (

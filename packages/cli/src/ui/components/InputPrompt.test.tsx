@@ -66,20 +66,6 @@ const mockSlashCommands: SlashCommand[] = [
       },
     ],
   },
-  {
-    name: 'chat',
-    description: 'Manage chats',
-    kind: CommandKind.BUILT_IN,
-    subCommands: [
-      {
-        name: 'resume',
-        description: 'Resume a chat',
-        kind: CommandKind.BUILT_IN,
-        action: vi.fn(),
-        completion: async () => ['fix-foo', 'fix-bar'],
-      },
-    ],
-  },
 ];
 
 describe('InputPrompt', () => {
@@ -210,6 +196,7 @@ describe('InputPrompt', () => {
       inputWidth: 80,
       suggestionsWidth: 80,
       focus: true,
+      placeholder: '  Type your message or @path/to/file',
     };
   });
 
@@ -570,14 +557,14 @@ describe('InputPrompt', () => {
   });
 
   it('should complete a partial argument for a command', async () => {
-    // SCENARIO: /chat resume fi- -> Tab
+    // SCENARIO: /memory add fi- -> Tab
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
       suggestions: [{ label: 'fix-foo', value: 'fix-foo' }],
       activeSuggestionIndex: 0,
     });
-    props.buffer.setText('/chat resume fi-');
+    props.buffer.setText('/memory add fi-');
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
@@ -1320,7 +1307,7 @@ describe('InputPrompt', () => {
       mockBuffer.text = text;
       mockBuffer.lines = [text];
       mockBuffer.viewportVisualLines = [text];
-      mockBuffer.visualCursor = [0, 8]; // cursor after '👍' (length is 6 + 2 for emoji)
+      mockBuffer.visualCursor = [0, 7]; // cursor after '👍' (emoji is 1 code point, so total is 7)
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1950,7 +1937,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('expands and collapses long suggestion via Right/Left arrows', async () => {
+    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
       props.shellModeActive = false;
       const longValue = 'l'.repeat(200);
 

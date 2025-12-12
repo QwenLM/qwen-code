@@ -16,6 +16,7 @@ import type { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import { connectAndDiscover } from './mcp-client.js';
+import type { SendSdkMcpMessage } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
@@ -173,7 +174,11 @@ export class ToolRegistry {
   private config: Config;
   private mcpClientManager: McpClientManager;
 
-  constructor(config: Config, eventEmitter?: EventEmitter) {
+  constructor(
+    config: Config,
+    eventEmitter?: EventEmitter,
+    sendSdkMcpMessage?: SendSdkMcpMessage,
+  ) {
     this.config = config;
     this.mcpClientManager = new McpClientManager(
       this.config.getMcpServers() ?? {},
@@ -183,6 +188,7 @@ export class ToolRegistry {
       this.config.getDebugMode(),
       this.config.getWorkspaceContext(),
       eventEmitter,
+      sendSdkMcpMessage,
     );
   }
 

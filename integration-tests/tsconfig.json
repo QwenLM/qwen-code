@@ -2,7 +2,11 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "allowJs": true
+    "allowJs": true,
+    "baseUrl": ".",
+    "paths": {
+      "@qwen-code/sdk": ["../packages/sdk-typescript/dist/index.d.ts"]
+    }
   },
   "include": ["**/*.ts"],
   "references": [{ "path": "../packages/core" }]

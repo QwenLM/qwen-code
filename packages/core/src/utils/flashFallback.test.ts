@@ -32,7 +32,6 @@ describe('Retry Utility Fallback Integration', () => {
       isDirectory: () => true,
     } as fs.Stats);
     config = new Config({
-      sessionId: 'test-session',
       targetDir: '/test',
       debugMode: false,
       cwd: '/test',

@@ -4,59 +4,61 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  getOauthClient,
+  InputFormat,
+  logUserPrompt,
+} from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
-import { AppContainer } from './ui/AppContainer.js';
-import { loadCliConfig, parseArguments } from './config/config.js';
-import * as cliConfig from './config/config.js';
-import { readStdin } from './utils/readStdin.js';
+import dns from 'node:dns';
+import os from 'node:os';
 import { basename } from 'node:path';
 import v8 from 'node:v8';
-import os from 'node:os';
-import dns from 'node:dns';
-import { randomUUID } from 'node:crypto';
-import { start_sandbox } from './utils/sandbox.js';
+import React from 'react';
+import { validateAuthMethod } from './config/auth.js';
+import * as cliConfig from './config/config.js';
+import { loadCliConfig, parseArguments } from './config/config.js';
+import { ExtensionStorage, loadExtensions } from './config/extension.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
 import { loadSettings, migrateDeprecatedSettings } from './config/settings.js';
-import { themeManager } from './ui/themes/theme-manager.js';
-import { getStartupWarnings } from './utils/startupWarnings.js';
-import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
-import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
+import {
+  initializeApp,
+  type InitializationResult,
+} from './core/initializer.js';
 import { runNonInteractive } from './nonInteractiveCli.js';
-import { ExtensionStorage, loadExtensions } from './config/extension.js';
+import { runNonInteractiveStreamJson } from './nonInteractive/session.js';
+import { AppContainer } from './ui/AppContainer.js';
+import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
+import { KeypressProvider } from './ui/contexts/KeypressContext.js';
+import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
+import { SettingsContext } from './ui/contexts/SettingsContext.js';
+import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
+import { themeManager } from './ui/themes/theme-manager.js';
+import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
+import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
+import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
   cleanupCheckpoints,
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
-import { getCliVersion } from './utils/version.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-import {
-  AuthType,
-  getOauthClient,
-  logUserPrompt,
-} from '@qwen-code/qwen-code-core';
-import {
-  initializeApp,
-  type InitializationResult,
-} from './core/initializer.js';
-import { validateAuthMethod } from './config/auth.js';
-import { setMaxSizedBoxDebugging } from './ui/components/shared/MaxSizedBox.js';
-import { SettingsContext } from './ui/contexts/SettingsContext.js';
-import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
-import { checkForUpdates } from './ui/utils/updateCheck.js';
+import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
-import { computeWindowTitle } from './utils/windowTitle.js';
-import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
-import { VimModeProvider } from './ui/contexts/VimModeContext.js';
-import { KeypressProvider } from './ui/contexts/KeypressContext.js';
-import { appEvents, AppEvent } from './utils/events.js';
-import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
+import { readStdin } from './utils/readStdin.js';
 import {
-  relaunchOnExitCode,
   relaunchAppInChildProcess,
+  relaunchOnExitCode,
 } from './utils/relaunch.js';
+import { start_sandbox } from './utils/sandbox.js';
+import { getStartupWarnings } from './utils/startupWarnings.js';
+import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
+import { getCliVersion } from './utils/version.js';
+import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
+import { showResumeSessionPicker } from './ui/components/ResumeSessionPicker.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -106,9 +108,9 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   return [];
 }
 
-import { runZedIntegration } from './zed-integration/zedIntegration.js';
-import { loadSandboxConfig } from './config/sandboxConfig.js';
 import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
+import { loadSandboxConfig } from './config/sandboxConfig.js';
+import { runAcpAgent } from './acp-integration/acpAgent.js';
 
 export function setupUnhandledRejectionHandler() {
   let unhandledRejectionOccurred = false;
@@ -156,7 +158,7 @@ export async function startInteractiveUI(
             process.platform === 'win32' || nodeMajorVersion < 20
           }
         >
-          <SessionStatsProvider>
+          <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
               <AppContainer
                 config={config}
@@ -205,9 +207,8 @@ export async function main() {
   const settings = loadSettings();
   migrateDeprecatedSettings(settings);
   await cleanupCheckpoints();
-  const sessionId = randomUUID();
 
-  const argv = await parseArguments(settings.merged);
+  let argv = await parseArguments(settings.merged);
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -218,12 +219,6 @@ export async function main() {
   }
 
   const isDebugMode = cliConfig.isDebugMode(argv);
-  const consolePatcher = new ConsolePatcher({
-    stderr: true,
-    debugMode: isDebugMode,
-  });
-  consolePatcher.patch();
-  registerCleanup(consolePatcher.cleanup);
 
   dns.setDefaultResultOrder(
     validateDnsResolutionOrder(settings.merged.advanced?.dnsResolutionOrder),
@@ -257,7 +252,6 @@ export async function main() {
         settings.merged,
         [],
         new ExtensionEnablementManager(ExtensionStorage.getUserExtensionsDir()),
-        sessionId,
         argv,
       );
 
@@ -282,8 +276,11 @@ export async function main() {
           process.exit(1);
         }
       }
+      // For stream-json mode, don't read stdin here - it should be forwarded to the sandbox
+      // and consumed by StreamJsonInputReader inside the container
+      const inputFormat = argv.inputFormat as string | undefined;
       let stdinData = '';
-      if (!process.stdin.isTTY) {
+      if (!process.stdin.isTTY && inputFormat !== 'stream-json') {
         stdinData = await readStdin();
       }
 
@@ -323,6 +320,18 @@ export async function main() {
     }
   }
 
+  // Handle --resume without a session ID by showing the session picker
+  if (argv.resume === '') {
+    const selectedSessionId = await showResumeSessionPicker();
+    if (!selectedSessionId) {
+      // User cancelled or no sessions available
+      process.exit(0);
+    }
+
+    // Update argv with the selected session ID
+    argv = { ...argv, resume: selectedSessionId };
+  }
+
   // We are now past the logic handling potentially launching a child process
   // to run Gemini CLI. It is now safe to perform expensive initialization that
   // may have side effects.
@@ -336,7 +345,6 @@ export async function main() {
       settings.merged,
       extensions,
       extensionEnablementManager,
-      sessionId,
       argv,
     );
 
@@ -347,6 +355,15 @@ export async function main() {
       }
       process.exit(0);
     }
+
+    // Setup unified ConsolePatcher based on interactive mode
+    const isInteractive = config.isInteractive();
+    const consolePatcher = new ConsolePatcher({
+      stderr: isInteractive,
+      debugMode: isDebugMode,
+    });
+    consolePatcher.patch();
+    registerCleanup(consolePatcher.cleanup);
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -369,7 +386,18 @@ export async function main() {
 
     setMaxSizedBoxDebugging(isDebugMode);
 
-    const initializationResult = await initializeApp(config, settings);
+    // Check input format early to determine initialization flow
+    const inputFormat =
+      typeof config.getInputFormat === 'function'
+        ? config.getInputFormat()
+        : InputFormat.TEXT;
+
+    // For stream-json mode, defer config.initialize() until after the initialize control request
+    // For other modes, initialize normally
+    let initializationResult: InitializationResult | undefined;
+    if (inputFormat !== InputFormat.STREAM_JSON) {
+      initializationResult = await initializeApp(config, settings);
+    }
 
     if (
       settings.merged.security?.auth?.selectedType ===
@@ -381,7 +409,7 @@ export async function main() {
     }
 
     if (config.getExperimentalZedIntegration()) {
-      return runZedIntegration(config, settings, extensions, argv);
+      return runAcpAgent(config, settings, extensions, argv);
     }
 
     let input = config.getQuestion();
@@ -403,21 +431,47 @@ export async function main() {
         settings,
         startupWarnings,
         process.cwd(),
-        initializationResult,
+        initializationResult!,
       );
       return;
     }
 
-    await config.initialize();
+    // For non-stream-json mode, initialize config here
+    if (inputFormat !== InputFormat.STREAM_JSON) {
+      await config.initialize();
+    }
 
-    // If not a TTY, read from stdin
-    // This is for cases where the user pipes input directly into the command
-    if (!process.stdin.isTTY) {
+    // Only read stdin if NOT in stream-json mode
+    // In stream-json mode, stdin is used for protocol messages (control requests, etc.)
+    // and should be consumed by StreamJsonInputReader instead
+    if (inputFormat !== InputFormat.STREAM_JSON && !process.stdin.isTTY) {
       const stdinData = await readStdin();
       if (stdinData) {
         input = `${stdinData}\n\n${input}`;
       }
     }
+
+    const nonInteractiveConfig = await validateNonInteractiveAuth(
+      (argv.authType as AuthType) ||
+        settings.merged.security?.auth?.selectedType,
+      settings.merged.security?.auth?.useExternal,
+      config,
+      settings,
+    );
+
+    const prompt_id = Math.random().toString(16).slice(2);
+
+    if (inputFormat === InputFormat.STREAM_JSON) {
+      const trimmedInput = (input ?? '').trim();
+
+      await runNonInteractiveStreamJson(
+        nonInteractiveConfig,
+        trimmedInput.length > 0 ? trimmedInput : '',
+      );
+      await runExitCleanup();
+      process.exit(0);
+    }
+
     if (!input) {
       console.error(
         `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
@@ -425,7 +479,6 @@ export async function main() {
       process.exit(1);
     }
 
-    const prompt_id = Math.random().toString(16).slice(2);
     logUserPrompt(config, {
       'event.name': 'user_prompt',
       'event.timestamp': new Date().toISOString(),
@@ -435,15 +488,8 @@ export async function main() {
       prompt_length: input.length,
     });
 
-    const nonInteractiveConfig = await validateNonInteractiveAuth(
-      settings.merged.security?.auth?.selectedType,
-      settings.merged.security?.auth?.useExternal,
-      config,
-      settings,
-    );
-
     if (config.getDebugMode()) {
-      console.log('Session ID: %s', sessionId);
+      console.log('Session ID: %s', config.getSessionId());
     }
 
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);

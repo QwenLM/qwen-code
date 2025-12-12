@@ -15,6 +15,7 @@ import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
+import { t } from '../../i18n/index.js';
 
 interface ApprovalModeDialogProps {
   /** Callback function when an approval mode is selected */
@@ -33,15 +34,15 @@ interface ApprovalModeDialogProps {
 const formatModeDescription = (mode: ApprovalMode): string => {
   switch (mode) {
     case ApprovalMode.PLAN:
-      return 'Analyze only, do not modify files or execute commands';
+      return t('Analyze only, do not modify files or execute commands');
     case ApprovalMode.DEFAULT:
-      return 'Require approval for file edits or shell commands';
+      return t('Require approval for file edits or shell commands');
     case ApprovalMode.AUTO_EDIT:
-      return 'Automatically approve file edits';
+      return t('Automatically approve file edits');
     case ApprovalMode.YOLO:
-      return 'Automatically approve all tools';
+      return t('Automatically approve all tools');
     default:
-      return `${mode} mode`;
+      return t('{{mode}} mode', { mode });
   }
 };
 
@@ -134,7 +135,8 @@ export function ApprovalModeDialog({
       <Box flexDirection="column" flexGrow={1}>
         {/* Approval Mode Selection */}
         <Text bold={focusSection === 'mode'} wrap="truncate">
-          {focusSection === 'mode' ? '> ' : '  '}Approval Mode{' '}
+          {focusSection === 'mode' ? '> ' : '  '}
+          {t('Approval Mode')}{' '}
           <Text color={theme.text.secondary}>{otherScopeModifiedMessage}</Text>
         </Text>
         <Box height={1} />
@@ -167,15 +169,17 @@ export function ApprovalModeDialog({
         {showWorkspacePriorityWarning && (
           <>
             <Text color={theme.status.warning} wrap="wrap">
-              ⚠ Workspace approval mode exists and takes priority. User-level
-              change will have no effect.
+              ⚠{' '}
+              {t(
+                'Workspace approval mode exists and takes priority. User-level change will have no effect.',
+              )}
             </Text>
             <Box height={1} />
           </>
         )}
 
         <Text color={theme.text.secondary}>
-          (Use Enter to select, Tab to change focus)
+          {t('(Use Enter to select, Tab to change focus)')}
         </Text>
       </Box>
     </Box>

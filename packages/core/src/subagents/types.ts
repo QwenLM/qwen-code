@@ -11,8 +11,9 @@ import type { Content, FunctionDeclaration } from '@google/genai';
  * - 'project': Stored in `.qwen/agents/` within the project directory
  * - 'user': Stored in `~/.qwen/agents/` in the user's home directory
  * - 'builtin': Built-in agents embedded in the codebase, always available
+ * - 'session': Session-level agents provided at runtime, read-only
  */
-export type SubagentLevel = 'project' | 'user' | 'builtin';
+export type SubagentLevel = 'project' | 'user' | 'builtin' | 'session';
 
 /**
  * Core configuration for a subagent as stored in Markdown files.
@@ -41,8 +42,8 @@ export interface SubagentConfig {
   /** Storage level - determines where the configuration file is stored */
   level: SubagentLevel;
 
-  /** Absolute path to the configuration file */
-  filePath: string;
+  /** Absolute path to the configuration file. Optional for session subagents. */
+  filePath?: string;
 
   /**
    * Optional model configuration. If not provided, uses defaults.

@@ -103,6 +103,16 @@ export type HistoryItemGeminiContent = HistoryItemBase & {
   text: string;
 };
 
+export type HistoryItemGeminiThought = HistoryItemBase & {
+  type: 'gemini_thought';
+  text: string;
+};
+
+export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
+  type: 'gemini_thought_content';
+  text: string;
+};
+
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
@@ -158,11 +168,6 @@ export type HistoryItemToolStats = HistoryItemBase & {
 
 export type HistoryItemQuit = HistoryItemBase & {
   type: 'quit';
-  duration: string;
-};
-
-export type HistoryItemQuitConfirmation = HistoryItemBase & {
-  type: 'quit_confirmation';
   duration: string;
 };
 
@@ -246,6 +251,8 @@ export type HistoryItemWithoutId =
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent
+  | HistoryItemGeminiThought
+  | HistoryItemGeminiThoughtContent
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
@@ -256,7 +263,6 @@ export type HistoryItemWithoutId =
   | HistoryItemModelStats
   | HistoryItemToolStats
   | HistoryItemQuit
-  | HistoryItemQuitConfirmation
   | HistoryItemCompression
   | HistoryItemSummary
   | HistoryItemCompression
@@ -278,7 +284,6 @@ export enum MessageType {
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
   QUIT = 'quit',
-  QUIT_CONFIRMATION = 'quit_confirmation',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',
   SUMMARY = 'summary',
@@ -343,12 +348,6 @@ export type Message =
       content?: string;
     }
   | {
-      type: MessageType.QUIT_CONFIRMATION;
-      timestamp: Date;
-      duration: string;
-      content?: string;
-    }
-  | {
       type: MessageType.COMPRESSION;
       compression: CompressionProps;
       timestamp: Date;
@@ -403,8 +402,4 @@ export interface ConfirmationRequest {
 
 export interface LoopDetectionConfirmationRequest {
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
-}
-
-export interface QuitConfirmationRequest {
-  onConfirm: (shouldQuit: boolean, action?: string) => void;
 }

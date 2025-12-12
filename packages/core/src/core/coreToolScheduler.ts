@@ -16,6 +16,7 @@ import type {
   ToolConfirmationPayload,
   AnyDeclarativeTool,
   AnyToolInvocation,
+  ChatRecordingService,
 } from '../index.js';
 import {
   ToolConfirmationOutcome,
@@ -27,6 +28,7 @@ import {
   ShellTool,
   logToolOutputTruncated,
   ToolOutputTruncatedEvent,
+  InputFormat,
 } from '../index.js';
 import type { Part, PartListUnion } from '@google/genai';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
@@ -321,6 +323,10 @@ interface CoreToolSchedulerOptions {
   onToolCallsUpdate?: ToolCallsUpdateHandler;
   getPreferredEditor: () => EditorType | undefined;
   onEditorClose: () => void;
+  /**
+   * Optional recording service. If provided, tool results will be recorded.
+   */
+  chatRecordingService?: ChatRecordingService;
 }
 
 export class CoreToolScheduler {
@@ -332,6 +338,7 @@ export class CoreToolScheduler {
   private getPreferredEditor: () => EditorType | undefined;
   private config: Config;
   private onEditorClose: () => void;
+  private chatRecordingService?: ChatRecordingService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private requestQueue: Array<{
@@ -349,6 +356,7 @@ export class CoreToolScheduler {
     this.onToolCallsUpdate = options.onToolCallsUpdate;
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
+    this.chatRecordingService = options.chatRecordingService;
   }
 
   private setStatusInternal(
@@ -587,12 +595,16 @@ export class CoreToolScheduler {
 
   /**
    * Generates a suggestion string for a tool name that was not found in the registry.
-   * It finds the closest matches based on Levenshtein distance.
+   * Uses Levenshtein distance to suggest similar tool names for hallucinated or misspelled tools.
+   * Note: Excluded tools are handled separately before calling this method, so this only
+   * handles the case where a tool is truly not found (hallucinated or typo).
    * @param unknownToolName The tool name that was not found.
    * @param topN The number of suggestions to return. Defaults to 3.
-   * @returns A suggestion string like " Did you mean 'tool'?" or " Did you mean one of: 'tool1', 'tool2'?", or an empty string if no suggestions are found.
+   * @returns A suggestion string like " Did you mean 'tool'?" or " Did you mean one of: 'tool1', 'tool2'?",
+   *          or an empty string if no suggestions are found.
    */
   private getToolSuggestion(unknownToolName: string, topN = 3): string {
+    // Use Levenshtein distance to find similar tool names from the registry.
     const allToolNames = this.toolRegistry.getAllToolNames();
 
     const matches = allToolNames.map((toolName) => ({
@@ -670,8 +682,35 @@ export class CoreToolScheduler {
 
       const newToolCalls: ToolCall[] = requestsToProcess.map(
         (reqInfo): ToolCall => {
+          // Check if the tool is excluded due to permissions/environment restrictions
+          // This check should happen before registry lookup to provide a clear permission error
+          const excludeTools = this.config.getExcludeTools?.() ?? undefined;
+          if (excludeTools && excludeTools.length > 0) {
+            const normalizedToolName = reqInfo.name.toLowerCase().trim();
+            const excludedMatch = excludeTools.find(
+              (excludedTool) =>
+                excludedTool.toLowerCase().trim() === normalizedToolName,
+            );
+
+            if (excludedMatch) {
+              // The tool exists but is excluded - return permission error directly
+              const permissionErrorMessage = `Qwen Code requires permission to use ${excludedMatch}, but that permission was declined.`;
+              return {
+                status: 'error',
+                request: reqInfo,
+                response: createErrorResponse(
+                  reqInfo,
+                  new Error(permissionErrorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+                durationMs: 0,
+              };
+            }
+          }
+
           const toolInstance = this.toolRegistry.getTool(reqInfo.name);
           if (!toolInstance) {
+            // Tool is not in registry and not excluded - likely hallucinated or typo
             const suggestion = this.getToolSuggestion(reqInfo.name);
             const errorMessage = `Tool "${reqInfo.name}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
             return {
@@ -777,6 +816,32 @@ export class CoreToolScheduler {
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
           } else {
+            /**
+             * In non-interactive mode where no user will respond to approval prompts,
+             * and not running as IDE companion or Zed integration, automatically deny approval.
+             * This is intended to create an explicit denial of the tool call,
+             * rather than silently waiting for approval and hanging forever.
+             */
+            const shouldAutoDeny =
+              !this.config.isInteractive() &&
+              !this.config.getIdeMode() &&
+              !this.config.getExperimentalZedIntegration() &&
+              this.config.getInputFormat() !== InputFormat.STREAM_JSON;
+
+            if (shouldAutoDeny) {
+              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              continue;
+            }
+
             // Allow IDE to resolve confirmation
             if (
               confirmationDetails.type === 'edit' &&
@@ -852,7 +917,10 @@ export class CoreToolScheduler {
 
   async handleConfirmationResponse(
     callId: string,
-    originalOnConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>,
+    originalOnConfirm: (
+      outcome: ToolConfirmationOutcome,
+      payload?: ToolConfirmationPayload,
+    ) => Promise<void>,
     outcome: ToolConfirmationOutcome,
     signal: AbortSignal,
     payload?: ToolConfirmationPayload,
@@ -861,9 +929,7 @@ export class CoreToolScheduler {
       (c) => c.request.callId === callId && c.status === 'awaiting_approval',
     );
 
-    if (toolCall && toolCall.status === 'awaiting_approval') {
-      await originalOnConfirm(outcome);
-    }
+    await originalOnConfirm(outcome, payload);
 
     if (outcome === ToolConfirmationOutcome.ProceedAlways) {
       await this.autoApproveCompatiblePendingTools(signal, callId);
@@ -872,11 +938,10 @@ export class CoreToolScheduler {
     this.setToolCallOutcome(callId, outcome);
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
-      this.setStatusInternal(
-        callId,
-        'cancelled',
-        'User did not allow tool call',
-      );
+      // Use custom cancel message from payload if provided, otherwise use default
+      const cancelMessage =
+        payload?.cancelMessage || 'User did not allow tool call';
+      this.setStatusInternal(callId, 'cancelled', cancelMessage);
     } else if (outcome === ToolConfirmationOutcome.ModifyWithEditor) {
       const waitingToolCall = toolCall as WaitingToolCall;
       if (isModifiableDeclarativeTool(waitingToolCall.tool)) {
@@ -934,7 +999,8 @@ export class CoreToolScheduler {
   ): Promise<void> {
     if (
       toolCall.confirmationDetails.type !== 'edit' ||
-      !isModifiableDeclarativeTool(toolCall.tool)
+      !isModifiableDeclarativeTool(toolCall.tool) ||
+      !payload.newContent
     ) {
       return;
     }
@@ -1151,6 +1217,9 @@ export class CoreToolScheduler {
         logToolCall(this.config, new ToolCallEvent(call));
       }
 
+      // Record tool results before notifying completion
+      this.recordToolResults(completedCalls);
+
       if (this.onAllToolCallsComplete) {
         this.isFinalizingToolCalls = true;
         await this.onAllToolCallsComplete(completedCalls);
@@ -1164,6 +1233,33 @@ export class CoreToolScheduler {
           .then(next.resolve)
           .catch(next.reject);
       }
+    }
+  }
+
+  /**
+   * Records tool results to the chat recording service.
+   * This captures both the raw Content (for API reconstruction) and
+   * enriched metadata (for UI recovery).
+   */
+  private recordToolResults(completedCalls: CompletedToolCall[]): void {
+    if (!this.chatRecordingService) return;
+
+    // Collect all response parts from completed calls
+    const responseParts: Part[] = completedCalls.flatMap(
+      (call) => call.response.responseParts,
+    );
+
+    if (responseParts.length === 0) return;
+
+    // Record each tool result individually
+    for (const call of completedCalls) {
+      this.chatRecordingService.recordToolResult(call.response.responseParts, {
+        callId: call.request.callId,
+        status: call.status,
+        resultDisplay: call.response.resultDisplay,
+        error: call.response.error,
+        errorType: call.response.errorType,
+      });
     }
   }
 

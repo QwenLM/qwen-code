@@ -65,7 +65,6 @@ async function createMockConfig(
   toolRegistryMocks = {},
 ): Promise<{ config: Config; toolRegistry: ToolRegistry }> {
   const configParams: ConfigParameters = {
-    sessionId: 'test-session',
     model: DEFAULT_GEMINI_MODEL,
     targetDir: '.',
     debugMode: false,

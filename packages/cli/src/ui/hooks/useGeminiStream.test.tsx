@@ -152,6 +152,9 @@ vi.mock('../contexts/SessionContext.js', () => ({
     startNewPrompt: mockStartNewPrompt,
     addUsage: mockAddUsage,
     getPromptCount: vi.fn(() => 5),
+    stats: {
+      sessionId: 'test-session-id',
+    },
   })),
 }));
 
@@ -514,6 +517,7 @@ describe('useGeminiStream', () => {
       expectedMergedResponse,
       expect.any(AbortSignal),
       'prompt-id-2',
+      { isContinuation: true },
     );
   });
 
@@ -840,6 +844,7 @@ describe('useGeminiStream', () => {
         toolCallResponseParts,
         expect.any(AbortSignal),
         'prompt-id-4',
+        { isContinuation: true },
       );
     });
 
@@ -1165,6 +1170,7 @@ describe('useGeminiStream', () => {
           'This is the actual prompt from the command file.',
           expect.any(AbortSignal),
           expect.any(String),
+          undefined,
         );
 
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
@@ -1191,6 +1197,7 @@ describe('useGeminiStream', () => {
           '',
           expect.any(AbortSignal),
           expect.any(String),
+          undefined,
         );
       });
     });
@@ -1209,6 +1216,7 @@ describe('useGeminiStream', () => {
           '// This is a line comment',
           expect.any(AbortSignal),
           expect.any(String),
+          undefined,
         );
       });
     });
@@ -1227,6 +1235,7 @@ describe('useGeminiStream', () => {
           '/* This is a block comment */',
           expect.any(AbortSignal),
           expect.any(String),
+          undefined,
         );
       });
     });
@@ -2151,6 +2160,7 @@ describe('useGeminiStream', () => {
       processedQueryParts, // Argument 1: The parts array directly
       expect.any(AbortSignal), // Argument 2: An AbortSignal
       expect.any(String), // Argument 3: The prompt_id string
+      undefined, // Argument 4: Options (undefined for normal prompts)
     );
   });
 
@@ -2248,6 +2258,57 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         );
+      });
+    });
+
+    it('should accumulate streamed thought descriptions', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'thinking ' },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'more' },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          false, // visionModelPreviewEnabled
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Streamed thought');
+      });
+
+      await waitFor(() => {
+        expect(result.current.thought?.description).toBe('thinking more');
       });
     });
 
@@ -2509,6 +2570,7 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
+        undefined,
       );
 
       // Verify only the first query was added to history
@@ -2560,12 +2622,14 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
+        undefined,
       );
       expect(mockSendMessageStream).toHaveBeenNthCalledWith(
         2,
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
+        undefined,
       );
     });
 
@@ -2588,6 +2652,7 @@ describe('useGeminiStream', () => {
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
+        undefined,
       );
     });
   });

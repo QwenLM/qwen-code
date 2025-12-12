@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { StatsDisplay } from './StatsDisplay.js';
+import { t } from '../../i18n/index.js';
 
 interface SessionSummaryDisplayProps {
   duration: string;
@@ -14,5 +15,8 @@ interface SessionSummaryDisplayProps {
 export const SessionSummaryDisplay: React.FC<SessionSummaryDisplayProps> = ({
   duration,
 }) => (
-  <StatsDisplay title="Agent powering down. Goodbye!" duration={duration} />
+  <StatsDisplay
+    title={t('Agent powering down. Goodbye!')}
+    duration={duration}
+  />
 );

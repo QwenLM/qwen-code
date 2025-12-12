@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { GenerateContentResponse } from '@google/genai';
+
 export type ThoughtSummary = {
   subject: string;
   description: string;
@@ -51,4 +53,24 @@ export function parseThought(rawText: string): ThoughtSummary {
   ).trim();
 
   return { subject, description };
+}
+
+export function getThoughtText(
+  response: GenerateContentResponse,
+): string | null {
+  if (response.candidates && response.candidates.length > 0) {
+    const candidate = response.candidates[0];
+
+    if (
+      candidate.content &&
+      candidate.content.parts &&
+      candidate.content.parts.length > 0
+    ) {
+      return candidate.content.parts
+        .filter((part) => part.thought)
+        .map((part) => part.text ?? '')
+        .join('');
+    }
+  }
+  return null;
 }

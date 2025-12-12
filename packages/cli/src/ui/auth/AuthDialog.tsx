@@ -15,6 +15,7 @@ import { RadioButtonSelect } from '../components/shared/RadioButtonSelect.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { t } from '../../i18n/index.js';
 
 function parseDefaultAuthType(
   defaultAuthType: string | undefined,
@@ -39,10 +40,14 @@ export function AuthDialog(): React.JSX.Element {
   const items = [
     {
       key: AuthType.QWEN_OAUTH,
-      label: 'Qwen OAuth',
+      label: t('Qwen OAuth'),
       value: AuthType.QWEN_OAUTH,
     },
-    { key: AuthType.USE_OPENAI, label: 'OpenAI', value: AuthType.USE_OPENAI },
+    {
+      key: AuthType.USE_OPENAI,
+      label: t('OpenAI'),
+      value: AuthType.USE_OPENAI,
+    },
   ];
 
   const initialAuthIndex = Math.max(
@@ -98,7 +103,9 @@ export function AuthDialog(): React.JSX.Element {
         if (settings.merged.security?.auth?.selectedType === undefined) {
           // Prevent exiting if no auth method is set
           setErrorMessage(
-            'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+            t(
+              'You must select an auth method to proceed. Press Ctrl+C again to exit.',
+            ),
           );
           return;
         }
@@ -116,9 +123,9 @@ export function AuthDialog(): React.JSX.Element {
       padding={1}
       width="100%"
     >
-      <Text bold>Get started</Text>
+      <Text bold>{t('Get started')}</Text>
       <Box marginTop={1}>
-        <Text>How would you like to authenticate for this project?</Text>
+        <Text>{t('How would you like to authenticate for this project?')}</Text>
       </Box>
       <Box marginTop={1}>
         <RadioButtonSelect
@@ -134,19 +141,19 @@ export function AuthDialog(): React.JSX.Element {
         </Box>
       )}
       <Box marginTop={1}>
-        <Text color={Colors.AccentPurple}>(Use Enter to Set Auth)</Text>
+        <Text color={Colors.AccentPurple}>{t('(Use Enter to Set Auth)')}</Text>
       </Box>
       {hasApiKey && currentSelectedAuthType === AuthType.QWEN_OAUTH && (
         <Box marginTop={1}>
           <Text color={Colors.Gray}>
-            Note: Your existing API key in settings.json will not be cleared
-            when using Qwen OAuth. You can switch back to OpenAI authentication
-            later if needed.
+            {t(
+              'Note: Your existing API key in settings.json will not be cleared when using Qwen OAuth. You can switch back to OpenAI authentication later if needed.',
+            )}
           </Text>
         </Box>
       )}
       <Box marginTop={1}>
-        <Text>Terms of Services and Privacy Notice for Qwen Code</Text>
+        <Text>{t('Terms of Services and Privacy Notice for Qwen Code')}</Text>
       </Box>
       <Box marginTop={1}>
         <Text color={Colors.AccentBlue}>

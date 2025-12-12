@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 
 /**
  * Checks if a directory is within a git repository
@@ -71,3 +72,19 @@ export function findGitRoot(directory: string): string | null {
     return null;
   }
 }
+
+/**
+ * Gets the current git branch, if in a git repository.
+ */
+export const getGitBranch = (cwd: string): string | undefined => {
+  try {
+    const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return branch || undefined;
+  } catch {
+    return undefined;
+  }
+};

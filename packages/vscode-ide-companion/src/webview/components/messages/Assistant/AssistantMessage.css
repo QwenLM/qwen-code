@@ -1,0 +1,52 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * AssistantMessage Component Styles
+ * Pseudo-elements (::before) for bullet points and (::after) for timeline connectors
+ */
+
+/* Bullet point indicator using ::before pseudo-element */
+.assistant-message-container.assistant-message-default::before,
+.assistant-message-container.assistant-message-success::before,
+.assistant-message-container.assistant-message-error::before,
+.assistant-message-container.assistant-message-warning::before,
+.assistant-message-container.assistant-message-loading::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  padding-top: 2px;
+  font-size: 10px;
+  z-index: 1;
+}
+
+/* Default state - secondary foreground color */
+.assistant-message-container.assistant-message-default::before {
+  color: var(--app-secondary-foreground);
+}
+
+/* Success state - green bullet (maps to .ge) */
+.assistant-message-container.assistant-message-success::before {
+  color: #74c991;
+}
+
+/* Error state - red bullet (maps to .be) */
+.assistant-message-container.assistant-message-error::before {
+  color: #c74e39;
+}
+
+/* Warning state - yellow/orange bullet (maps to .ue) */
+.assistant-message-container.assistant-message-warning::before {
+  color: #e1c08d;
+}
+
+/* Loading state - static bullet (maps to .he) */
+.assistant-message-container.assistant-message-loading::before {
+  color: var(--app-secondary-foreground);
+  background-color: var(--app-secondary-background);
+}
+
+.assistant-message-container.assistant-message-loading::after {
+  display: none
+}

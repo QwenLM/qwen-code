@@ -282,7 +282,7 @@ function useCommandSuggestions(
 
         if (!signal.aborted) {
           const finalSuggestions = potentialSuggestions.map((cmd) => ({
-            label: cmd.name,
+            label: formatSlashCommandLabel(cmd),
             value: cmd.name,
             description: cmd.description,
             commandKind: cmd.kind,
@@ -524,4 +524,15 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
     completionStart,
     completionEnd,
   };
+}
+
+function formatSlashCommandLabel(command: SlashCommand): string {
+  const baseLabel = command.name;
+  const altNames = command.altNames?.filter(Boolean);
+
+  if (!altNames || altNames.length === 0) {
+    return baseLabel;
+  }
+
+  return `${baseLabel} (${altNames.join(', ')})`;
 }

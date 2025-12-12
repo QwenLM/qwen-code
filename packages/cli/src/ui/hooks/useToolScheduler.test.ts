@@ -68,6 +68,7 @@ const mockConfig = {
   getUseModelRouter: () => false,
   getGeminiClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
+  getChatRecordingService: () => undefined,
 } as unknown as Config;
 
 const mockTool = new MockTool({

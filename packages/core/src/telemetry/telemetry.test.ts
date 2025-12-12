@@ -24,7 +24,6 @@ describe('telemetry', () => {
     vi.resetAllMocks();
 
     mockConfig = new Config({
-      sessionId: 'test-session-id',
       model: 'test-model',
       targetDir: '/test/dir',
       debugMode: false,

@@ -13,6 +13,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import type {
   GetPromptResult,
+  JSONRPCMessage,
   Prompt,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -22,10 +23,11 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
-import { AuthProviderType } from '../config/config.js';
+import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 
 import type { FunctionDeclaration } from '@google/genai';
 import { mcpToTool } from '@google/genai';
@@ -41,6 +43,14 @@ import type {
   WorkspaceContext,
 } from '../utils/workspaceContext.js';
 import type { ToolRegistry } from './tool-registry.js';
+
+/**
+ * Callback type for sending MCP messages to SDK servers via control plane
+ */
+export type SendSdkMcpMessage = (
+  serverName: string,
+  message: JSONRPCMessage,
+) => Promise<JSONRPCMessage>;
 
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
@@ -92,6 +102,7 @@ export class McpClient {
     private readonly promptRegistry: PromptRegistry,
     private readonly workspaceContext: WorkspaceContext,
     private readonly debugMode: boolean,
+    private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
     this.client = new Client({
       name: `qwen-cli-mcp-client-${this.serverName}`,
@@ -189,7 +200,12 @@ export class McpClient {
   }
 
   private async createTransport(): Promise<Transport> {
-    return createTransport(this.serverName, this.serverConfig, this.debugMode);
+    return createTransport(
+      this.serverName,
+      this.serverConfig,
+      this.debugMode,
+      this.sendSdkMcpMessage,
+    );
   }
 
   private async discoverTools(cliConfig: Config): Promise<DiscoveredMCPTool[]> {
@@ -501,6 +517,7 @@ export function populateMcpServerCommand(
  * @param mcpServerName The name identifier for this MCP server
  * @param mcpServerConfig Configuration object containing connection details
  * @param toolRegistry The registry to register discovered tools with
+ * @param sendSdkMcpMessage Optional callback for SDK MCP servers to route messages via control plane.
  * @returns Promise that resolves when discovery is complete
  */
 export async function connectAndDiscover(
@@ -511,6 +528,7 @@ export async function connectAndDiscover(
   debugMode: boolean,
   workspaceContext: WorkspaceContext,
   cliConfig: Config,
+  sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<void> {
   updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTING);
 
@@ -521,6 +539,7 @@ export async function connectAndDiscover(
       mcpServerConfig,
       debugMode,
       workspaceContext,
+      sendSdkMcpMessage,
     );
 
     mcpClient.onerror = (error) => {
@@ -744,6 +763,7 @@ export function hasNetworkTransport(config: MCPServerConfig): boolean {
  *
  * @param mcpServerName The name of the MCP server, used for logging and identification.
  * @param mcpServerConfig The configuration specifying how to connect to the server.
+ * @param sendSdkMcpMessage Optional callback for SDK MCP servers to route messages via control plane.
  * @returns A promise that resolves to a connected MCP `Client` instance.
  * @throws An error if the connection fails or the configuration is invalid.
  */
@@ -752,6 +772,7 @@ export async function connectToMcpServer(
   mcpServerConfig: MCPServerConfig,
   debugMode: boolean,
   workspaceContext: WorkspaceContext,
+  sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
   const mcpClient = new Client({
     name: 'qwen-code-mcp-client',
@@ -808,6 +829,7 @@ export async function connectToMcpServer(
       mcpServerName,
       mcpServerConfig,
       debugMode,
+      sendSdkMcpMessage,
     );
     try {
       await mcpClient.connect(transport, {
@@ -1172,7 +1194,21 @@ export async function createTransport(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
   debugMode: boolean,
+  sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Transport> {
+  if (isSdkMcpServerConfig(mcpServerConfig)) {
+    if (!sendSdkMcpMessage) {
+      throw new Error(
+        `SDK MCP server '${mcpServerName}' requires sendSdkMcpMessage callback`,
+      );
+    }
+    return new SdkControlClientTransport({
+      serverName: mcpServerName,
+      sendMcpMessage: sendSdkMcpMessage,
+      debugMode,
+    });
+  }
+
   if (
     mcpServerConfig.authProviderType ===
     AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION

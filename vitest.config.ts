@@ -6,6 +6,7 @@ export default defineConfig({
       'packages/cli',
       'packages/core',
       'packages/vscode-ide-companion',
+      'packages/sdk-typescript',
       'integration-tests',
       'scripts',
     ],

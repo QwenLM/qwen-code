@@ -41,6 +41,7 @@ import type {
   SubAgentToolResultEvent,
   SubAgentStreamTextEvent,
   SubAgentErrorEvent,
+  SubAgentUsageEvent,
 } from './subagent-events.js';
 import {
   type SubAgentEventEmitter,
@@ -369,6 +370,7 @@ export class SubAgentScope {
           },
         };
 
+        const roundStreamStart = Date.now();
         const responseStream = await chat.sendMessageStream(
           this.modelConfig.model ||
             this.runtimeContext.getModel() ||
@@ -439,10 +441,19 @@ export class SubAgentScope {
         if (lastUsage) {
           const inTok = Number(lastUsage.promptTokenCount || 0);
           const outTok = Number(lastUsage.candidatesTokenCount || 0);
-          if (isFinite(inTok) || isFinite(outTok)) {
+          const thoughtTok = Number(lastUsage.thoughtsTokenCount || 0);
+          const cachedTok = Number(lastUsage.cachedContentTokenCount || 0);
+          if (
+            isFinite(inTok) ||
+            isFinite(outTok) ||
+            isFinite(thoughtTok) ||
+            isFinite(cachedTok)
+          ) {
             this.stats.recordTokens(
               isFinite(inTok) ? inTok : 0,
               isFinite(outTok) ? outTok : 0,
+              isFinite(thoughtTok) ? thoughtTok : 0,
+              isFinite(cachedTok) ? cachedTok : 0,
             );
             // mirror legacy fields for compatibility
             this.executionStats.inputTokens =
@@ -453,11 +464,20 @@ export class SubAgentScope {
               (isFinite(outTok) ? outTok : 0);
             this.executionStats.totalTokens =
               (this.executionStats.inputTokens || 0) +
-              (this.executionStats.outputTokens || 0);
+              (this.executionStats.outputTokens || 0) +
+              (isFinite(thoughtTok) ? thoughtTok : 0) +
+              (isFinite(cachedTok) ? cachedTok : 0);
             this.executionStats.estimatedCost =
               (this.executionStats.inputTokens || 0) * 3e-5 +
               (this.executionStats.outputTokens || 0) * 6e-5;
           }
+          this.eventEmitter?.emit(SubAgentEventType.USAGE_METADATA, {
+            subagentId: this.subagentId,
+            round: turnCounter,
+            usage: lastUsage,
+            durationMs: Date.now() - roundStreamStart,
+            timestamp: Date.now(),
+          } as SubAgentUsageEvent);
         }
 
         if (functionCalls.length > 0) {
@@ -572,6 +592,7 @@ export class SubAgentScope {
     const responded = new Set<string>();
     let resolveBatch: (() => void) | null = null;
     const scheduler = new CoreToolScheduler({
+      config: this.runtimeContext,
       outputUpdateHandler: undefined,
       onAllToolCallsComplete: async (completedCalls) => {
         for (const call of completedCalls) {
@@ -619,6 +640,13 @@ export class SubAgentScope {
             name: toolName,
             success,
             error: errorMessage,
+            responseParts: call.response.responseParts,
+            /**
+             * Tools like todoWrite will add some extra contents to the result,
+             * making it unable to deserialize the `responseParts` to a JSON object.
+             * While `resultDisplay` is normally a string, if not we stringify it,
+             * so that we can deserialize it to a JSON object when needed.
+             */
             resultDisplay: call.response.resultDisplay
               ? typeof call.response.resultDisplay === 'string'
                 ? call.response.resultDisplay
@@ -703,7 +731,6 @@ export class SubAgentScope {
         }
       },
       getPreferredEditor: () => undefined,
-      config: this.runtimeContext,
       onEditorClose: () => {},
     });
 

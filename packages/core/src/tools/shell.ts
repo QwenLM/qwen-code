@@ -17,6 +17,7 @@ import type {
   ToolResultDisplay,
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
+  ToolConfirmationPayload,
 } from './tools.js';
 import {
   BaseDeclarativeTool,
@@ -102,7 +103,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       title: 'Confirm Shell Command',
       command: this.params.command,
       rootCommand: commandsToConfirm.join(', '),
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
+      onConfirm: async (
+        outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           commandsToConfirm.forEach((command) => this.allowlist.add(command));
         }

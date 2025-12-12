@@ -23,6 +23,12 @@ export type UiEvent =
   | (ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR })
   | (ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
 
+export {
+  EVENT_API_ERROR,
+  EVENT_API_RESPONSE,
+  EVENT_TOOL_CALL,
+} from './constants.js';
+
 export interface ToolCallStats {
   count: number;
   success: number;
@@ -146,6 +152,18 @@ export class UiTelemetryService extends EventEmitter {
 
   setLastPromptTokenCount(lastPromptTokenCount: number): void {
     this.#lastPromptTokenCount = lastPromptTokenCount;
+    this.emit('update', {
+      metrics: this.#metrics,
+      lastPromptTokenCount: this.#lastPromptTokenCount,
+    });
+  }
+
+  /**
+   * Resets metrics to the initial state (used when resuming a session).
+   */
+  reset(): void {
+    this.#metrics = createInitialMetrics();
+    this.#lastPromptTokenCount = 0;
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,

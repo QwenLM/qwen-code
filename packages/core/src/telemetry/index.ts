@@ -25,7 +25,7 @@ export {
   parseTelemetryTargetValue,
 } from './config.js';
 export {
-  logCliConfiguration,
+  logStartSession,
   logUserPrompt,
   logToolCall,
   logApiRequest,

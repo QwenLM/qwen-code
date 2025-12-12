@@ -5,96 +5,127 @@
  */
 
 import { type Config } from '../config/config.js';
-import { type Status } from '../core/coreToolScheduler.js';
-import { type ThoughtSummary } from '../utils/thoughtUtils.js';
-import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import type {
-  PartListUnion,
-  GenerateContentResponseUsageMetadata,
+import {
+  type PartListUnion,
+  type Content,
+  type GenerateContentResponseUsageMetadata,
+  createUserContent,
+  createModelContent,
 } from '@google/genai';
+import * as jsonl from '../utils/jsonl-utils.js';
+import { getGitBranch } from '../utils/gitUtils.js';
+import type {
+  ChatCompressionInfo,
+  ToolCallResponseInfo,
+} from '../core/turn.js';
+import type { Status } from '../core/coreToolScheduler.js';
+import type { TaskResultDisplay } from '../tools/tools.js';
+import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 /**
- * Token usage summary for a message or conversation.
+ * A single record stored in the JSONL file.
+ * Forms a tree structure via uuid/parentUuid for future checkpointing support.
+ *
+ * Each record is self-contained with full metadata, enabling:
+ * - Append-only writes (crash-safe)
+ * - Tree reconstruction by following parentUuid chain
+ * - Future checkpointing by branching from any historical record
  */
-export interface TokensSummary {
-  input: number; // promptTokenCount
-  output: number; // candidatesTokenCount
-  cached: number; // cachedContentTokenCount
-  thoughts?: number; // thoughtsTokenCount
-  tool?: number; // toolUsePromptTokenCount
-  total: number; // totalTokenCount
-}
-
-/**
- * Base fields common to all messages.
- */
-export interface BaseMessageRecord {
-  id: string;
-  timestamp: string;
-  content: PartListUnion;
-}
-
-/**
- * Record of a tool call execution within a conversation.
- */
-export interface ToolCallRecord {
-  id: string;
-  name: string;
-  args: Record<string, unknown>;
-  result?: PartListUnion | null;
-  status: Status;
-  timestamp: string;
-  // UI-specific fields for display purposes
-  displayName?: string;
-  description?: string;
-  resultDisplay?: string;
-  renderOutputAsMarkdown?: boolean;
-}
-
-/**
- * Message type and message type-specific fields.
- */
-export type ConversationRecordExtra =
-  | {
-      type: 'user';
-    }
-  | {
-      type: 'qwen';
-      toolCalls?: ToolCallRecord[];
-      thoughts?: Array<ThoughtSummary & { timestamp: string }>;
-      tokens?: TokensSummary | null;
-      model?: string;
-    };
-
-/**
- * A single message record in a conversation.
- */
-export type MessageRecord = BaseMessageRecord & ConversationRecordExtra;
-
-/**
- * Complete conversation record stored in session files.
- */
-export interface ConversationRecord {
+export interface ChatRecord {
+  /** Unique identifier for this logical message */
+  uuid: string;
+  /** UUID of the parent message; null for root (first message in session) */
+  parentUuid: string | null;
+  /** Session identifier - groups records into a logical conversation */
   sessionId: string;
-  projectHash: string;
-  startTime: string;
-  lastUpdated: string;
-  messages: MessageRecord[];
+  /** ISO 8601 timestamp of when the record was created */
+  timestamp: string;
+  /**
+   * Message type: user input, assistant response, tool result, or system event.
+   * System records are append-only events that can alter how history is reconstructed
+   * (e.g., chat compression checkpoints) while keeping the original UI history intact.
+   */
+  type: 'user' | 'assistant' | 'tool_result' | 'system';
+  /** Optional system subtype for distinguishing system behaviors */
+  subtype?: 'chat_compression' | 'slash_command' | 'ui_telemetry';
+  /** Working directory at time of message */
+  cwd: string;
+  /** CLI version for compatibility tracking */
+  version: string;
+  /** Current git branch, if available */
+  gitBranch?: string;
+
+  // Content field - raw API format for history reconstruction
+
+  /**
+   * The actual Content object (role + parts) sent to/from LLM.
+   * This is stored in the exact format needed for API calls, enabling
+   * direct aggregation into Content[] for session resumption.
+   * Contains: text, functionCall, functionResponse, thought parts, etc.
+   */
+  message?: Content;
+
+  // Metadata fields (not part of API Content)
+
+  /** Token usage statistics */
+  usageMetadata?: GenerateContentResponseUsageMetadata;
+  /** Model used for this response */
+  model?: string;
+  /**
+   * Tool call metadata for UI recovery.
+   * Contains enriched info (displayName, status, result, etc.) not in API format.
+   */
+  toolCallResult?: Partial<ToolCallResponseInfo>;
+
+  /**
+   * Payload for system records. For chat compression, this stores all data needed
+   * to reconstruct the compressed history without mutating the original UI list.
+   */
+  systemPayload?:
+    | ChatCompressionRecordPayload
+    | SlashCommandRecordPayload
+    | UiTelemetryRecordPayload;
 }
 
 /**
- * Data structure for resuming an existing session.
+ * Stored payload for chat compression checkpoints. This allows us to rebuild the
+ * effective chat history on resume while keeping the original UI-visible history.
  */
-export interface ResumedSessionData {
-  conversation: ConversationRecord;
-  filePath: string;
+export interface ChatCompressionRecordPayload {
+  /** Compression metrics/status returned by the compression service */
+  info: ChatCompressionInfo;
+  /**
+   * Snapshot of the new history contents that the model should see after
+   * compression (summary turns + retained tail). Stored as Content[] for
+   * resume reconstruction.
+   */
+  compressedHistory: Content[];
+}
+
+export interface SlashCommandRecordPayload {
+  /** Whether this record represents the invocation or the resulting output. */
+  phase: 'invocation' | 'result';
+  /** Raw user-entered slash command (e.g., "/about"). */
+  rawCommand: string;
+  /**
+   * History items the UI displayed for this command, in the same shape used by
+   * the CLI (without IDs). Stored as plain objects for replay on resume.
+   */
+  outputHistoryItems?: Array<Record<string, unknown>>;
 }
 
 /**
- * Service for automatically recording chat conversations to disk.
+ * Stored payload for UI telemetry replay.
+ */
+export interface UiTelemetryRecordPayload {
+  uiEvent: UiEvent;
+}
+
+/**
+ * Service for recording the current chat session to disk.
  *
  * This service provides comprehensive conversation recording that captures:
  * - All user and assistant messages
@@ -102,346 +133,276 @@ export interface ResumedSessionData {
  * - Token usage statistics
  * - Assistant thoughts and reasoning
  *
- * Sessions are stored as JSON files in ~/.qwen/tmp/<project_hash>/chats/
+ * **API Design:**
+ * - `recordUserMessage()` - Records a user message (immediate write)
+ * - `recordAssistantTurn()` - Records an assistant turn with all data (immediate write)
+ * - `recordToolResult()` - Records tool results (immediate write)
+ *
+ * **Storage Format:** JSONL files with tree-structured records.
+ * Each record has uuid/parentUuid fields enabling:
+ * - Append-only writes (never rewrite the file)
+ * - Linear history reconstruction
+ * - Future checkpointing (branch from any historical point)
+ *
+ * File location: ~/.qwen/tmp/<project_id>/chats/
+ *
+ * For session management (list, load, remove), use SessionService.
  */
 export class ChatRecordingService {
-  private conversationFile: string | null = null;
-  private cachedLastConvData: string | null = null;
-  private sessionId: string;
-  private projectHash: string;
-  private queuedThoughts: Array<ThoughtSummary & { timestamp: string }> = [];
-  private queuedTokens: TokensSummary | null = null;
-  private config: Config;
+  /** UUID of the last written record in the chain */
+  private lastRecordUuid: string | null = null;
+  private readonly config: Config;
 
   constructor(config: Config) {
     this.config = config;
-    this.sessionId = config.getSessionId();
-    this.projectHash = getProjectHash(config.getProjectRoot());
+    this.lastRecordUuid =
+      config.getResumedSessionData()?.lastCompletedUuid ?? null;
   }
 
   /**
-   * Initializes the chat recording service: creates a new conversation file and associates it with
-   * this service instance, or resumes from an existing session if resumedSessionData is provided.
+   * Returns the session ID.
+   * @returns The session ID.
    */
-  initialize(resumedSessionData?: ResumedSessionData): void {
+  private getSessionId(): string {
+    return this.config.getSessionId();
+  }
+
+  /**
+   * Ensures the chats directory exists, creating it if it doesn't exist.
+   * @returns The path to the chats directory.
+   * @throws Error if the directory cannot be created.
+   */
+  private ensureChatsDir(): string {
+    const projectDir = this.config.storage.getProjectDir();
+    const chatsDir = path.join(projectDir, 'chats');
+
     try {
-      if (resumedSessionData) {
-        // Resume from existing session
-        this.conversationFile = resumedSessionData.filePath;
-        this.sessionId = resumedSessionData.conversation.sessionId;
-
-        // Update the session ID in the existing file
-        this.updateConversation((conversation) => {
-          conversation.sessionId = this.sessionId;
-        });
-
-        // Clear any cached data to force fresh reads
-        this.cachedLastConvData = null;
-      } else {
-        // Create new session
-        const chatsDir = path.join(
-          this.config.storage.getProjectTempDir(),
-          'chats',
-        );
-        fs.mkdirSync(chatsDir, { recursive: true });
-
-        const timestamp = new Date()
-          .toISOString()
-          .slice(0, 16)
-          .replace(/:/g, '-');
-        const filename = `session-${timestamp}-${this.sessionId.slice(
-          0,
-          8,
-        )}.json`;
-        this.conversationFile = path.join(chatsDir, filename);
-
-        this.writeConversation({
-          sessionId: this.sessionId,
-          projectHash: this.projectHash,
-          startTime: new Date().toISOString(),
-          lastUpdated: new Date().toISOString(),
-          messages: [],
-        });
-      }
-
-      // Clear any queued data since this is a fresh start
-      this.queuedThoughts = [];
-      this.queuedTokens = null;
-    } catch (error) {
-      console.error('Error initializing chat recording service:', error);
-      throw error;
+      fs.mkdirSync(chatsDir, { recursive: true });
+    } catch {
+      // Ignore errors - directory will be created if it doesn't exist
     }
+
+    return chatsDir;
   }
 
-  private getLastMessage(
-    conversation: ConversationRecord,
-  ): MessageRecord | undefined {
-    return conversation.messages.at(-1);
+  /**
+   * Ensures the conversation file exists, creating it if it doesn't exist.
+   * Uses atomic file creation to avoid race conditions.
+   * @returns The path to the conversation file.
+   * @throws Error if the file cannot be created or accessed.
+   */
+  private ensureConversationFile(): string {
+    const chatsDir = this.ensureChatsDir();
+    const sessionId = this.getSessionId();
+    const safeFilename = `${sessionId}.jsonl`;
+    const conversationFile = path.join(chatsDir, safeFilename);
+
+    if (fs.existsSync(conversationFile)) {
+      return conversationFile;
+    }
+
+    try {
+      // Use 'wx' flag for exclusive creation - atomic operation that fails if file exists
+      // This avoids the TOCTOU race condition of existsSync + writeFileSync
+      fs.writeFileSync(conversationFile, '', { flag: 'wx', encoding: 'utf8' });
+    } catch (error) {
+      const nodeError = error as NodeJS.ErrnoException;
+      // EEXIST means file already exists, which is expected and fine
+      if (nodeError.code !== 'EEXIST') {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Failed to create conversation file at ${conversationFile}: ${message}`,
+        );
+      }
+    }
+
+    return conversationFile;
   }
 
-  private newMessage(
-    type: ConversationRecordExtra['type'],
-    content: PartListUnion,
-  ): MessageRecord {
+  /**
+   * Creates base fields for a ChatRecord.
+   */
+  private createBaseRecord(
+    type: ChatRecord['type'],
+  ): Omit<ChatRecord, 'message' | 'tokens' | 'model' | 'toolCallsMetadata'> {
     return {
-      id: randomUUID(),
+      uuid: randomUUID(),
+      parentUuid: this.lastRecordUuid,
+      sessionId: this.getSessionId(),
       timestamp: new Date().toISOString(),
       type,
-      content,
+      cwd: this.config.getProjectRoot(),
+      version: this.config.getCliVersion() || 'unknown',
+      gitBranch: getGitBranch(this.config.getProjectRoot()),
     };
   }
 
   /**
-   * Records a message in the conversation.
+   * Appends a record to the session file and updates lastRecordUuid.
    */
-  recordMessage(message: {
+  private appendRecord(record: ChatRecord): void {
+    try {
+      const conversationFile = this.ensureConversationFile();
+
+      jsonl.writeLineSync(conversationFile, record);
+      this.lastRecordUuid = record.uuid;
+    } catch (error) {
+      console.error('Error appending record:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Records a user message.
+   * Writes immediately to disk.
+   *
+   * @param message The raw PartListUnion object as used with the API
+   */
+  recordUserMessage(message: PartListUnion): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        message: createUserContent(message),
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      console.error('Error saving user message:', error);
+    }
+  }
+
+  /**
+   * Records an assistant turn with all available data.
+   * Writes immediately to disk.
+   *
+   * @param data.message The raw PartListUnion object from the model response
+   * @param data.model The model name
+   * @param data.tokens Token usage statistics
+   * @param data.toolCallsMetadata Enriched tool call info for UI recovery
+   */
+  recordAssistantTurn(data: {
     model: string;
-    type: ConversationRecordExtra['type'];
-    content: PartListUnion;
+    message?: PartListUnion;
+    tokens?: GenerateContentResponseUsageMetadata;
   }): void {
-    if (!this.conversationFile) return;
-
     try {
-      this.updateConversation((conversation) => {
-        const msg = this.newMessage(message.type, message.content);
-        if (msg.type === 'qwen') {
-          // If it's a new Gemini message then incorporate any queued thoughts.
-          conversation.messages.push({
-            ...msg,
-            thoughts: this.queuedThoughts,
-            tokens: this.queuedTokens,
-            model: message.model,
-          });
-          this.queuedThoughts = [];
-          this.queuedTokens = null;
-        } else {
-          // Or else just add it.
-          conversation.messages.push(msg);
-        }
-      });
+      const record: ChatRecord = {
+        ...this.createBaseRecord('assistant'),
+        model: data.model,
+      };
+
+      if (data.message !== undefined) {
+        record.message = createModelContent(data.message);
+      }
+
+      if (data.tokens) {
+        record.usageMetadata = data.tokens;
+      }
+
+      this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving message:', error);
-      throw error;
+      console.error('Error saving assistant turn:', error);
     }
   }
 
   /**
-   * Records a thought from the assistant's reasoning process.
+   * Records tool results (function responses) sent back to the model.
+   * Writes immediately to disk.
+   *
+   * @param message The raw PartListUnion object with functionResponse parts
+   * @param toolCallResult Optional tool call result info for UI recovery
    */
-  recordThought(thought: ThoughtSummary): void {
-    if (!this.conversationFile) return;
-
-    try {
-      this.queuedThoughts.push({
-        ...thought,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.error('Error saving thought:', error);
-      throw error;
-    }
-  }
-
-  /**
-   * Updates the tokens for the last message in the conversation (which should be by Gemini).
-   */
-  recordMessageTokens(
-    respUsageMetadata: GenerateContentResponseUsageMetadata,
+  recordToolResult(
+    message: PartListUnion,
+    toolCallResult?: Partial<ToolCallResponseInfo> & { status: Status },
   ): void {
-    if (!this.conversationFile) return;
-
     try {
-      const tokens = {
-        input: respUsageMetadata.promptTokenCount ?? 0,
-        output: respUsageMetadata.candidatesTokenCount ?? 0,
-        cached: respUsageMetadata.cachedContentTokenCount ?? 0,
-        thoughts: respUsageMetadata.thoughtsTokenCount ?? 0,
-        tool: respUsageMetadata.toolUsePromptTokenCount ?? 0,
-        total: respUsageMetadata.totalTokenCount ?? 0,
+      const record: ChatRecord = {
+        ...this.createBaseRecord('tool_result'),
+        message: createUserContent(message),
       };
-      this.updateConversation((conversation) => {
-        const lastMsg = this.getLastMessage(conversation);
-        // If the last message already has token info, it's because this new token info is for a
-        // new message that hasn't been recorded yet.
-        if (lastMsg && lastMsg.type === 'qwen' && !lastMsg.tokens) {
-          lastMsg.tokens = tokens;
-          this.queuedTokens = null;
-        } else {
-          this.queuedTokens = tokens;
-        }
-      });
-    } catch (error) {
-      console.error('Error updating message tokens:', error);
-      throw error;
-    }
-  }
 
-  /**
-   * Adds tool calls to the last message in the conversation (which should be by Gemini).
-   * This method enriches tool calls with metadata from the ToolRegistry.
-   */
-  recordToolCalls(model: string, toolCalls: ToolCallRecord[]): void {
-    if (!this.conversationFile) return;
-
-    // Enrich tool calls with metadata from the ToolRegistry
-    const toolRegistry = this.config.getToolRegistry();
-    const enrichedToolCalls = toolCalls.map((toolCall) => {
-      const toolInstance = toolRegistry.getTool(toolCall.name);
-      return {
-        ...toolCall,
-        displayName: toolInstance?.displayName || toolCall.name,
-        description: toolInstance?.description || '',
-        renderOutputAsMarkdown: toolInstance?.isOutputMarkdown || false,
-      };
-    });
-
-    try {
-      this.updateConversation((conversation) => {
-        const lastMsg = this.getLastMessage(conversation);
-        // If a tool call was made, but the last message isn't from Gemini, it's because Gemini is
-        // calling tools without starting the message with text.  So the user submits a prompt, and
-        // Gemini immediately calls a tool (maybe with some thinking first).  In that case, create
-        // a new empty Gemini message.
-        // Also if there are any queued thoughts, it means this tool call(s) is from a new Gemini
-        // message--because it's thought some more since we last, if ever, created a new Gemini
-        // message from tool calls, when we dequeued the thoughts.
+      if (toolCallResult) {
+        // special case for task executions - we don't want to record the tool calls
         if (
-          !lastMsg ||
-          lastMsg.type !== 'qwen' ||
-          this.queuedThoughts.length > 0
+          typeof toolCallResult.resultDisplay === 'object' &&
+          toolCallResult.resultDisplay !== null &&
+          'type' in toolCallResult.resultDisplay &&
+          toolCallResult.resultDisplay.type === 'task_execution'
         ) {
-          const newMsg: MessageRecord = {
-            ...this.newMessage('qwen' as const, ''),
-            // This isn't strictly necessary, but TypeScript apparently can't
-            // tell that the first parameter to newMessage() becomes the
-            // resulting message's type, and so it thinks that toolCalls may
-            // not be present.  Confirming the type here satisfies it.
-            type: 'qwen' as const,
-            toolCalls: enrichedToolCalls,
-            thoughts: this.queuedThoughts,
-            model,
+          const taskResult = toolCallResult.resultDisplay as TaskResultDisplay;
+          record.toolCallResult = {
+            ...toolCallResult,
+            resultDisplay: {
+              ...taskResult,
+              toolCalls: [],
+            },
           };
-          // If there are any queued thoughts join them to this message.
-          if (this.queuedThoughts.length > 0) {
-            newMsg.thoughts = this.queuedThoughts;
-            this.queuedThoughts = [];
-          }
-          // If there's any queued tokens info join it to this message.
-          if (this.queuedTokens) {
-            newMsg.tokens = this.queuedTokens;
-            this.queuedTokens = null;
-          }
-          conversation.messages.push(newMsg);
         } else {
-          // The last message is an existing Gemini message that we need to update.
-
-          // Update any existing tool call entries.
-          if (!lastMsg.toolCalls) {
-            lastMsg.toolCalls = [];
-          }
-          lastMsg.toolCalls = lastMsg.toolCalls.map((toolCall) => {
-            // If there are multiple tool calls with the same ID, this will take the first one.
-            const incomingToolCall = toolCalls.find(
-              (tc) => tc.id === toolCall.id,
-            );
-            if (incomingToolCall) {
-              // Merge in the new data to keep preserve thoughts, etc., that were assigned to older
-              // versions of the tool call.
-              return { ...toolCall, ...incomingToolCall };
-            } else {
-              return toolCall;
-            }
-          });
-
-          // Add any new tools calls that aren't in the message yet.
-          for (const toolCall of enrichedToolCalls) {
-            const existingToolCall = lastMsg.toolCalls.find(
-              (tc) => tc.id === toolCall.id,
-            );
-            if (!existingToolCall) {
-              lastMsg.toolCalls.push(toolCall);
-            }
-          }
+          record.toolCallResult = toolCallResult;
         }
-      });
+      }
+
+      this.appendRecord(record);
     } catch (error) {
-      console.error('Error adding tool call to message:', error);
-      throw error;
+      console.error('Error saving tool result:', error);
     }
   }
 
   /**
-   * Loads up the conversation record from disk.
+   * Records a slash command invocation as a system record. This keeps the model
+   * history clean while allowing resume to replay UI output for commands like
+   * /about.
    */
-  private readConversation(): ConversationRecord {
+  recordSlashCommand(payload: SlashCommandRecordPayload): void {
     try {
-      this.cachedLastConvData = fs.readFileSync(this.conversationFile!, 'utf8');
-      return JSON.parse(this.cachedLastConvData);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error('Error reading conversation file:', error);
-        throw error;
-      }
-
-      // Placeholder empty conversation if file doesn't exist.
-      return {
-        sessionId: this.sessionId,
-        projectHash: this.projectHash,
-        startTime: new Date().toISOString(),
-        lastUpdated: new Date().toISOString(),
-        messages: [],
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: payload,
       };
+
+      this.appendRecord(record);
+    } catch (error) {
+      console.error('Error saving slash command record:', error);
     }
   }
 
   /**
-   * Saves the conversation record; overwrites the file.
+   * Records a chat compression checkpoint as a system record. This keeps the UI
+   * history immutable while allowing resume/continue flows to reconstruct the
+   * compressed model-facing history from the stored snapshot.
    */
-  private writeConversation(conversation: ConversationRecord): void {
+  recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
-      if (!this.conversationFile) return;
-      // Don't write the file yet until there's at least one message.
-      if (conversation.messages.length === 0) return;
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: payload,
+      };
 
-      // Only write the file if this change would change the file.
-      if (this.cachedLastConvData !== JSON.stringify(conversation, null, 2)) {
-        conversation.lastUpdated = new Date().toISOString();
-        const newContent = JSON.stringify(conversation, null, 2);
-        this.cachedLastConvData = newContent;
-        fs.writeFileSync(this.conversationFile, newContent);
-      }
+      this.appendRecord(record);
     } catch (error) {
-      console.error('Error writing conversation file:', error);
-      throw error;
+      console.error('Error saving chat compression record:', error);
     }
   }
 
   /**
-   * Convenient helper for updating the conversation without file reading and writing and time
-   * updating boilerplate.
+   * Records a UI telemetry event for replaying metrics on resume.
    */
-  private updateConversation(
-    updateFn: (conversation: ConversationRecord) => void,
-  ) {
-    const conversation = this.readConversation();
-    updateFn(conversation);
-    this.writeConversation(conversation);
-  }
-
-  /**
-   * Deletes a session file by session ID.
-   */
-  deleteSession(sessionId: string): void {
+  recordUiTelemetryEvent(uiEvent: UiEvent): void {
     try {
-      const chatsDir = path.join(
-        this.config.storage.getProjectTempDir(),
-        'chats',
-      );
-      const sessionPath = path.join(chatsDir, `${sessionId}.json`);
-      fs.unlinkSync(sessionPath);
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: { uiEvent },
+      };
+
+      this.appendRecord(record);
     } catch (error) {
-      console.error('Error deleting session:', error);
-      throw error;
+      console.error('Error saving ui telemetry record:', error);
     }
   }
 }

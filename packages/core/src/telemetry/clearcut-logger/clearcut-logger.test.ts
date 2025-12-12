@@ -142,6 +142,7 @@ describe('ClearcutLogger', () => {
 
     const loggerConfig = makeFakeConfig({
       ...config,
+      sessionId: 'test-session-id',
     });
     ClearcutLogger.clearInstance();
 
@@ -248,7 +249,7 @@ describe('ClearcutLogger', () => {
 
     it('logs default metadata', () => {
       // Define expected values
-      const session_id = 'my-session-id';
+      const session_id = 'test-session-id';
       const auth_type = AuthType.USE_GEMINI;
       const google_accounts = 123;
       const surface = 'ide-1234';
@@ -260,7 +261,7 @@ describe('ClearcutLogger', () => {
       // Setup logger with expected values
       const { logger, loggerConfig } = setup({
         lifetimeGoogleAccounts: google_accounts,
-        config: { sessionId: session_id },
+        config: {},
       });
       vi.spyOn(loggerConfig, 'getContentGeneratorConfig').mockReturnValue({
         authType: auth_type,

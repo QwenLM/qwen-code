@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import type { SettingScope } from '../../../config/settings.js';
 import { getScopeItems } from '../../../utils/dialogScopeUtils.js';
 import { RadioButtonSelect } from './RadioButtonSelect.js';
+import { t } from '../../../i18n/index.js';
 
 interface ScopeSelectorProps {
   /** Callback function when a scope is selected */
@@ -29,6 +30,7 @@ export function ScopeSelector({
 }: ScopeSelectorProps): React.JSX.Element {
   const scopeItems = getScopeItems().map((item) => ({
     ...item,
+    label: t(item.label),
     key: item.value,
   }));
 
@@ -40,7 +42,8 @@ export function ScopeSelector({
   return (
     <Box flexDirection="column">
       <Text bold={isFocused} wrap="truncate">
-        {isFocused ? '> ' : '  '}Apply To
+        {isFocused ? '> ' : '  '}
+        {t('Apply To')}
       </Text>
       <RadioButtonSelect
         items={scopeItems}

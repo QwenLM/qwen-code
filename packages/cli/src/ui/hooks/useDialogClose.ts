@@ -44,11 +44,6 @@ export interface DialogCloseOptions {
   // Welcome back dialog
   showWelcomeBackDialog: boolean;
   handleWelcomeBackClose: () => void;
-
-  // Quit confirmation dialog
-  quitConfirmationRequest: {
-    onConfirm: (shouldQuit: boolean, action?: string) => void;
-  } | null;
 }
 
 /**
@@ -95,9 +90,6 @@ export function useDialogClose(options: DialogCloseOptions) {
       options.handleWelcomeBackClose();
       return true;
     }
-
-    // Note: quitConfirmationRequest is NOT handled here anymore
-    // It's handled specially in handleExit - ctrl+c in quit-confirm should exit immediately
 
     // No dialog was open
     return false;

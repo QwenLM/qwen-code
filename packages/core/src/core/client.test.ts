@@ -61,6 +61,7 @@ vi.mock('node:fs', () => {
       });
     }),
     existsSync: vi.fn((path: string) => mockFileSystem.has(path)),
+    appendFileSync: vi.fn(),
   };
 
   return {
@@ -364,6 +365,9 @@ describe('Gemini Client (client.ts)', () => {
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
+        getProjectDir: vi
+          .fn()
+          .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn().mockReturnValue({
@@ -374,6 +378,8 @@ describe('Gemini Client (client.ts)', () => {
       }),
       getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      getChatRecordingService: vi.fn().mockReturnValue(undefined),
+      getResumedSessionData: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
@@ -442,6 +448,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: mockGetHistory,
         addHistory: vi.fn(),
         setHistory: vi.fn(),
+        stripThoughtsFromHistory: vi.fn(),
       } as unknown as GeminiChat;
     });
 
@@ -456,6 +463,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockOriginalChat: Partial<GeminiChat> = {
         getHistory: vi.fn((_curated?: boolean) => chatHistory),
         setHistory: vi.fn(),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockOriginalChat as GeminiChat;
 
@@ -1074,6 +1082,7 @@ describe('Gemini Client (client.ts)', () => {
       const mockChat = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       } as unknown as GeminiChat;
       client['chat'] = mockChat;
 
@@ -1136,6 +1145,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1191,6 +1201,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1267,6 +1278,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1313,6 +1325,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1357,6 +1370,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1444,6 +1458,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1500,6 +1515,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1513,6 +1529,7 @@ ${JSON.stringify(
         [{ text: 'Start conversation' }],
         signal,
         'prompt-id-3',
+        { isContinuation: false },
         Number.MAX_SAFE_INTEGER, // Bypass the MAX_TURNS protection
       );
 
@@ -1579,6 +1596,7 @@ ${JSON.stringify(
             .mockReturnValue([
               { role: 'user', parts: [{ text: 'previous message' }] },
             ]),
+          stripThoughtsFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
       });
@@ -1833,6 +1851,7 @@ ${JSON.stringify(
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
+          stripThoughtsFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -2173,6 +2192,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2209,6 +2229,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2249,6 +2270,7 @@ ${JSON.stringify(
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 

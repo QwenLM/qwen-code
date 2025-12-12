@@ -26,6 +26,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { StreamingState } from '../types.js';
 import { ConfigInitDisplay } from '../components/ConfigInitDisplay.js';
+import { t } from '../../i18n/index.js';
 
 export const Composer = () => {
   const config = useConfig();
@@ -86,14 +87,16 @@ export const Composer = () => {
           )}
           {uiState.ctrlCPressedOnce ? (
             <Text color={theme.status.warning}>
-              Press Ctrl+C again to exit.
+              {t('Press Ctrl+C again to exit.')}
             </Text>
           ) : uiState.ctrlDPressedOnce ? (
             <Text color={theme.status.warning}>
-              Press Ctrl+D again to exit.
+              {t('Press Ctrl+D again to exit.')}
             </Text>
           ) : uiState.showEscapePrompt ? (
-            <Text color={theme.text.secondary}>Press Esc again to clear.</Text>
+            <Text color={theme.text.secondary}>
+              {t('Press Esc again to clear.')}
+            </Text>
           ) : (
             !settings.merged.ui?.hideContextSummary && (
               <ContextSummaryDisplay
@@ -151,8 +154,8 @@ export const Composer = () => {
           isEmbeddedShellFocused={uiState.embeddedShellFocused}
           placeholder={
             vimEnabled
-              ? "  Press 'i' for INSERT mode and 'Esc' for NORMAL mode."
-              : '  Type your message or @path/to/file'
+              ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
+              : '  ' + t('Type your message or @path/to/file')
           }
         />
       )}

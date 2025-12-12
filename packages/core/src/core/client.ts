@@ -39,7 +39,6 @@ import {
 } from './turn.js';
 
 // Services
-import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   COMPRESSION_PRESERVE_THRESHOLD,
@@ -55,12 +54,17 @@ import {
   NextSpeakerCheckEvent,
   logNextSpeakerCheck,
 } from '../telemetry/index.js';
+import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 // Utilities
 import {
   getDirectoryContextString,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
+import {
+  buildApiHistoryFromConversation,
+  replayUiTelemetryFromConversation,
+} from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
@@ -96,7 +100,7 @@ export class GeminiClient {
   private sessionTurnCount = 0;
 
   private readonly loopDetector: LoopDetectionService;
-  private lastPromptId: string;
+  private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
 
@@ -108,11 +112,24 @@ export class GeminiClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
-    this.lastPromptId = this.config.getSessionId();
   }
 
   async initialize() {
-    this.chat = await this.startChat();
+    this.lastPromptId = this.config.getSessionId();
+
+    // Check if we're resuming from a previous session
+    const resumedSessionData = this.config.getResumedSessionData();
+    if (resumedSessionData) {
+      replayUiTelemetryFromConversation(resumedSessionData.conversation);
+      // Convert resumed session to API history format
+      // Each ChatRecord's message field is already a Content object
+      const resumedHistory = buildApiHistoryFromConversation(
+        resumedSessionData.conversation,
+      );
+      this.chat = await this.startChat(resumedHistory);
+    } else {
+      this.chat = await this.startChat();
+    }
   }
 
   private getContentGeneratorOrFail(): ContentGenerator {
@@ -159,10 +176,6 @@ export class GeminiClient {
 
   async resetChat(): Promise<void> {
     this.chat = await this.startChat();
-  }
-
-  getChatRecordingService(): ChatRecordingService | undefined {
-    return this.chat?.getChatRecordingService();
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -212,6 +225,7 @@ export class GeminiClient {
           tools,
         },
         history,
+        this.config.getChatRecordingService(),
       );
     } catch (error) {
       await reportError(
@@ -396,12 +410,18 @@ export class GeminiClient {
     request: PartListUnion,
     signal: AbortSignal,
     prompt_id: string,
+    options?: { isContinuation: boolean },
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
-    const isNewPrompt = this.lastPromptId !== prompt_id;
-    if (isNewPrompt) {
+    if (!options?.isContinuation) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+
+      // record user message for session management
+      this.config.getChatRecordingService()?.recordUserMessage(request);
+
+      // strip thoughts from history before sending the message
+      this.stripThoughtsFromHistory();
     }
     this.sessionTurnCount++;
     if (
@@ -510,7 +530,7 @@ export class GeminiClient {
 
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
-    if (isNewPrompt) {
+    if (!options?.isContinuation) {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
@@ -525,7 +545,9 @@ export class GeminiClient {
 
       // add plan mode system reminder if approval mode is plan
       if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-        systemReminders.push(getPlanModeSystemReminder());
+        systemReminders.push(
+          getPlanModeSystemReminder(this.config.getSdkMode()),
+        );
       }
 
       requestToSent = [...systemReminders, ...requestToSent];
@@ -580,6 +602,7 @@ export class GeminiClient {
           nextRequest,
           signal,
           prompt_id,
+          options,
           boundedTurns - 1,
         );
       }
@@ -624,7 +647,7 @@ export class GeminiClient {
             config: requestConfig,
             contents,
           },
-          this.lastPromptId,
+          this.lastPromptId!,
         );
       };
       const onPersistent429Callback = async (
@@ -678,7 +701,14 @@ export class GeminiClient {
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       // Success: update chat with new compressed history
       if (newHistory) {
+        const chatRecordingService = this.config.getChatRecordingService();
+        chatRecordingService?.recordChatCompression({
+          info,
+          compressedHistory: newHistory,
+        });
+
         this.chat = await this.startChat(newHistory);
+        uiTelemetryService.setLastPromptTokenCount(info.newTokenCount);
         this.forceFullIdeContext = true;
       }
     } else if (

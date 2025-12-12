@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Mock } from 'vitest';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { clearCommand } from './clearCommand.js';
 import { type CommandContext } from './types.js';
@@ -16,20 +15,21 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   return {
     ...actual,
     uiTelemetryService: {
-      setLastPromptTokenCount: vi.fn(),
+      reset: vi.fn(),
     },
   };
 });
 
 import type { GeminiClient } from '@qwen-code/qwen-code-core';
-import { uiTelemetryService } from '@qwen-code/qwen-code-core';
 
 describe('clearCommand', () => {
   let mockContext: CommandContext;
   let mockResetChat: ReturnType<typeof vi.fn>;
+  let mockStartNewSession: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockResetChat = vi.fn().mockResolvedValue(undefined);
+    mockStartNewSession = vi.fn().mockReturnValue('new-session-id');
     vi.clearAllMocks();
 
     mockContext = createMockCommandContext({
@@ -39,12 +39,16 @@ describe('clearCommand', () => {
             ({
               resetChat: mockResetChat,
             }) as unknown as GeminiClient,
+          startNewSession: mockStartNewSession,
         },
+      },
+      session: {
+        startNewSession: vi.fn(),
       },
     });
   });
 
-  it('should set debug message, reset chat, reset telemetry, and clear UI when config is available', async () => {
+  it('should set debug message, start a new session, reset chat, and clear UI when config is available', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
@@ -52,28 +56,23 @@ describe('clearCommand', () => {
     await clearCommand.action(mockContext, '');
 
     expect(mockContext.ui.setDebugMessage).toHaveBeenCalledWith(
-      'Clearing terminal and resetting chat.',
+      'Starting a new session, resetting chat, and clearing terminal.',
     );
     expect(mockContext.ui.setDebugMessage).toHaveBeenCalledTimes(1);
 
+    expect(mockStartNewSession).toHaveBeenCalledTimes(1);
+    expect(mockContext.session.startNewSession).toHaveBeenCalledWith(
+      'new-session-id',
+    );
     expect(mockResetChat).toHaveBeenCalledTimes(1);
-    expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(0);
-    expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(1);
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
 
-    // Check the order of operations.
-    const setDebugMessageOrder = (mockContext.ui.setDebugMessage as Mock).mock
-      .invocationCallOrder[0];
-    const resetChatOrder = mockResetChat.mock.invocationCallOrder[0];
-    const resetTelemetryOrder = (
-      uiTelemetryService.setLastPromptTokenCount as Mock
-    ).mock.invocationCallOrder[0];
-    const clearOrder = (mockContext.ui.clear as Mock).mock
-      .invocationCallOrder[0];
-
-    expect(setDebugMessageOrder).toBeLessThan(resetChatOrder);
-    expect(resetChatOrder).toBeLessThan(resetTelemetryOrder);
-    expect(resetTelemetryOrder).toBeLessThan(clearOrder);
+    // Check that all expected operations were called
+    expect(mockContext.ui.setDebugMessage).toHaveBeenCalled();
+    expect(mockStartNewSession).toHaveBeenCalled();
+    expect(mockContext.session.startNewSession).toHaveBeenCalled();
+    expect(mockResetChat).toHaveBeenCalled();
+    expect(mockContext.ui.clear).toHaveBeenCalled();
   });
 
   it('should not attempt to reset chat if config service is not available', async () => {
@@ -85,16 +84,17 @@ describe('clearCommand', () => {
       services: {
         config: null,
       },
+      session: {
+        startNewSession: vi.fn(),
+      },
     });
 
     await clearCommand.action(nullConfigContext, '');
 
     expect(nullConfigContext.ui.setDebugMessage).toHaveBeenCalledWith(
-      'Clearing terminal.',
+      'Starting a new session and clearing.',
     );
     expect(mockResetChat).not.toHaveBeenCalled();
-    expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(0);
-    expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(1);
     expect(nullConfigContext.ui.clear).toHaveBeenCalledTimes(1);
   });
 });

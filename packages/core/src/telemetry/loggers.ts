@@ -101,7 +101,7 @@ function getCommonAttributes(config: Config): LogAttributes {
   };
 }
 
-export function logCliConfiguration(
+export function logStartSession(
   config: Config,
   event: StartSessionEvent,
 ): void {
@@ -172,6 +172,7 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   QwenLogger.getInstance(config)?.logToolCallEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -339,6 +340,7 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   QwenLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -405,6 +407,7 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {

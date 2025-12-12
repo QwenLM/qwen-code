@@ -133,14 +133,14 @@ export function useReactToolScheduler(
   const scheduler = useMemo(
     () =>
       new CoreToolScheduler({
+        config,
+        chatRecordingService: config.getChatRecordingService(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
         getPreferredEditor,
-        config,
         onEditorClose,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any),
+      }),
     [
       config,
       outputUpdateHandler,

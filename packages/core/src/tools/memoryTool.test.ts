@@ -29,10 +29,6 @@ vi.mock(import('node:fs/promises'), async (importOriginal) => {
   };
 });
 
-vi.mock('fs', () => ({
-  mkdirSync: vi.fn(),
-}));
-
 vi.mock('os');
 
 const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
