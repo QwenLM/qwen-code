@@ -255,7 +255,6 @@ export const useSlashCommandProcessor = (
     (async () => {
       const ideClient = await IdeClient.getInstance();
       ideClient.addStatusChangeListener(listener);
-      reloadCommands();
     })();
 
     return () => {

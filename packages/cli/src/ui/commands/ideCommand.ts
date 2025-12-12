@@ -135,7 +135,6 @@ async function setIdeModeAndSyncConnection(
 
 export const ideCommand = async (): Promise<SlashCommand> => {
   const ideClient = await IdeClient.getInstance();
-
   const currentIDE = ideClient.getCurrentIde();
   if (!currentIDE) {
     return {
