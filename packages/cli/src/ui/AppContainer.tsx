@@ -234,18 +234,13 @@ export const AppContainer = (props: AppContainerProps) => {
       }
     })();
     registerCleanup(async () => {
-      try {
-        await Promise.race([
-          (async () => {
-            const ideClient = await IdeClient.getInstance();
-            await ideClient.disconnect();
-          })(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Cleanup timeout')), 2000),
-          ),
-        ]);
-      } catch {
-        // Ignore timeout or other errors
+      const ideClient = IdeClient.tryGetInstance();
+      if (ideClient) {
+        try {
+          await ideClient.disconnect();
+        } catch (error) {
+          console.debug('IDE cleanup warning:', error);
+        }
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps

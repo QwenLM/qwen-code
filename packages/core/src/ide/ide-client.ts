@@ -79,6 +79,7 @@ function getRealPath(path: string): string {
  */
 export class IdeClient {
   private static instancePromise: Promise<IdeClient> | null = null;
+  private static instance: IdeClient | undefined;
   private client: Client | undefined = undefined;
   private state: IDEConnectionState = {
     status: IDEConnectionStatus.Disconnected,
@@ -114,10 +115,15 @@ export class IdeClient {
           client.ideProcessInfo,
           client.connectionConfig?.ideInfo,
         );
+        IdeClient.instance = client;
         return client;
       })();
     }
     return IdeClient.instancePromise;
+  }
+
+  static tryGetInstance(): IdeClient | undefined {
+    return IdeClient.instance;
   }
 
   addStatusChangeListener(listener: (state: IDEConnectionState) => void) {

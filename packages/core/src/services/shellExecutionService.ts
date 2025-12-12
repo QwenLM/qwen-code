@@ -159,7 +159,7 @@ export class ShellExecutionService {
     try {
       const isWindows = os.platform() === 'win32';
 
-      const child = cpSpawn(commandToExecute, {
+      const child = cpSpawn(commandToExecute, [], {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsVerbatimArguments: true,
