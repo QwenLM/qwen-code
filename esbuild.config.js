@@ -33,7 +33,7 @@ const external = [
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
-  'tiktoken',
+  '*.wasm',
 ];
 
 esbuild
@@ -55,6 +55,10 @@ esbuild
       'is-in-ci': path.resolve(
         __dirname,
         'packages/cli/src/patches/is-in-ci.ts',
+      ),
+      tiktoken: path.join(
+        path.dirname(require.resolve('tiktoken')),
+        'tiktoken.js',
       ),
     },
     define: {
