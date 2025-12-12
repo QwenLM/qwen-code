@@ -303,6 +303,8 @@ export async function start_sandbox(
           sandboxEnv['NO_PROXY'] = noProxy;
           sandboxEnv['no_proxy'] = noProxy;
         }
+        // CLI tool intentionally executes user-provided proxy commands
+        // codeql-disable-next-line js/shell-command-injection-from-environment
         proxyProcess = spawn('bash', ['-c', proxyCommand], {
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: true,
@@ -797,6 +799,8 @@ export async function start_sandbox(
       const proxyShellArgs = isWindows
         ? ['/c', proxyContainerCommand]
         : ['-c', proxyContainerCommand];
+      // CLI tool intentionally executes user-provided proxy commands in container
+      // codeql-disable-next-line js/shell-command-injection-from-environment
       proxyProcess = spawn(proxyShell, proxyShellArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: true,

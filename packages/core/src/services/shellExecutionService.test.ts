@@ -580,9 +580,11 @@ describe('ShellExecutionService child_process fallback', () => {
       });
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
-        'ls -l',
-        [],
-        expect.objectContaining({ shell: 'bash' }),
+        'bash',
+        ['-c', 'ls -l'],
+        expect.objectContaining({
+          detached: true,
+        }),
       );
       expect(result.exitCode).toBe(0);
       expect(result.signal).toBeNull();

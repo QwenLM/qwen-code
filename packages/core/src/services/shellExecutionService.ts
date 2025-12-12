@@ -163,6 +163,8 @@ export class ShellExecutionService {
         ? ['/c', commandToExecute]
         : ['-c', commandToExecute];
 
+      // CLI tool intentionally executes user-provided shell commands
+      // codeql-disable-next-line js/shell-command-injection-from-environment
       const child = cpSpawn(shell, shellArgs, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
