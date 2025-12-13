@@ -933,6 +933,58 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  git: {
+    type: 'object',
+    label: 'Git',
+    category: 'Git',
+    requiresRestart: false,
+    default: {},
+    description: 'Git-related settings.',
+    showInDialog: false,
+    properties: {
+      gitCoAuthor: {
+        type: 'object',
+        label: 'Git Co-Author',
+        category: 'Git',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for automatic Co-authored-by trailer in git commits.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Git Co-Author',
+            category: 'Git',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Automatically add Co-authored-by trailer to git commit messages.',
+            showInDialog: true,
+          },
+          name: {
+            type: 'string',
+            label: 'Co-Author Name',
+            category: 'Git',
+            requiresRestart: false,
+            default: 'Qwen-Coder' as string | undefined,
+            description: 'The name to use in the Co-authored-by trailer.',
+            showInDialog: true,
+          },
+          email: {
+            type: 'string',
+            label: 'Co-Author Email',
+            category: 'Git',
+            requiresRestart: false,
+            default: 'qwen-coder@alibabacloud.com' as string | undefined,
+            description: 'The email to use in the Co-authored-by trailer.',
+            showInDialog: true,
+          },
+        },
+      },
+    },
+  },
+
   mcp: {
     type: 'object',
     label: 'MCP',

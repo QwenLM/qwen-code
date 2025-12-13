@@ -306,6 +306,20 @@ Settings are organized into categories. All settings should be placed within the
   - **Default:** `1000`
   - **Requires restart:** Yes
 
+#### `git`
+
+- **`git.gitCoAuthor.enabled`** (boolean):
+  - **Description:** Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.
+  - **Default:** `true`
+
+- **`git.gitCoAuthor.name`** (string):
+  - **Description:** The name to use in the Co-authored-by trailer.
+  - **Default:** `"Qwen-Coder"`
+
+- **`git.gitCoAuthor.email`** (string):
+  - **Description:** The email to use in the Co-authored-by trailer.
+  - **Default:** `"qwen-coder@alibabacloud.com"`
+
 #### `mcp`
 
 - **`mcp.serverCommand`** (string):
@@ -417,6 +431,11 @@ Here is an example of a `settings.json` file with the nested structure, new as o
     "discoveryCommand": "bin/get_tools",
     "callCommand": "bin/call_tool",
     "exclude": ["write_file"]
+  },
+  "git": {
+    "gitCoAuthor": {
+      "enabled": false
+    }
   },
   "mcpServers": {
     "mainServer": {
