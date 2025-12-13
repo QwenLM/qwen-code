@@ -15,6 +15,8 @@ import { SettingScope } from '../../config/settings.js';
 import {
   setLanguageAsync,
   getCurrentLanguage,
+  detectSystemLanguage,
+  getLanguageNameFromLocale,
   type SupportedLanguage,
   t,
 } from '../../i18n/index.js';
@@ -71,6 +73,33 @@ function getLlmOutputLanguageRulePath(): string {
     Storage.getGlobalQwenDir(),
     LLM_OUTPUT_LANGUAGE_RULE_FILENAME,
   );
+}
+
+/**
+ * Initializes the LLM output language rule file on first startup.
+ * If the file already exists, it is not overwritten (respects user preference).
+ */
+export function initializeLlmOutputLanguage(): void {
+  const filePath = getLlmOutputLanguageRulePath();
+
+  // Skip if file already exists (user preference)
+  if (fs.existsSync(filePath)) {
+    return;
+  }
+
+  // Detect system language and map to language name
+  const detectedLocale = detectSystemLanguage();
+  const languageName = getLanguageNameFromLocale(detectedLocale);
+
+  // Generate the rule file
+  const content = generateLlmOutputLanguageRule(languageName);
+
+  // Ensure directory exists
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  // Write file
+  fs.writeFileSync(filePath, content, 'utf-8');
 }
 
 /**
