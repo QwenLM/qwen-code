@@ -92,7 +92,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
     );
   }
 
-  if (process.env['GEMINI_CLI_NO_RELAUNCH']) {
+  if (process.env['QWEN_CODE_NO_RELAUNCH']) {
     return [];
   }
 
