@@ -46,22 +46,40 @@ const getLocalePath = (
   return path.join(baseDir, `${lang}.js`);
 };
 
+// Supported locale codes mapped to English language names
+const LOCALE_TO_LANGUAGE_NAME: Record<string, string> = {
+  zh: 'Chinese',
+  en: 'English',
+  ru: 'Russian',
+  de: 'German',
+};
+
 // Language detection
 export function detectSystemLanguage(): SupportedLanguage {
   const envLang = process.env['QWEN_CODE_LANG'] || process.env['LANG'];
   if (envLang?.startsWith('zh')) return 'zh';
   if (envLang?.startsWith('en')) return 'en';
   if (envLang?.startsWith('ru')) return 'ru';
+  if (envLang?.startsWith('de')) return 'de';
 
   try {
     const locale = Intl.DateTimeFormat().resolvedOptions().locale;
     if (locale.startsWith('zh')) return 'zh';
     if (locale.startsWith('ru')) return 'ru';
+    if (locale.startsWith('de')) return 'de';
   } catch {
     // Fallback to default
   }
 
   return 'en';
+}
+
+/**
+ * Maps a locale code to its English language name.
+ * Used for LLM output language instructions.
+ */
+export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
+  return LOCALE_TO_LANGUAGE_NAME[locale] || 'English';
 }
 
 // Translation loading

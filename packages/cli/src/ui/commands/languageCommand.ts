@@ -15,6 +15,8 @@ import { SettingScope } from '../../config/settings.js';
 import {
   setLanguageAsync,
   getCurrentLanguage,
+  detectSystemLanguage,
+  getLanguageNameFromLocale,
   type SupportedLanguage,
   t,
 } from '../../i18n/index.js';
@@ -71,6 +73,50 @@ function getLlmOutputLanguageRulePath(): string {
     Storage.getGlobalQwenDir(),
     LLM_OUTPUT_LANGUAGE_RULE_FILENAME,
   );
+}
+
+/**
+ * Normalizes a language input to its full English name.
+ * If the input is a known locale code (e.g., "ru", "zh"), converts it to the full name.
+ * Otherwise, returns the input as-is (e.g., "Japanese" stays "Japanese").
+ */
+function normalizeLanguageName(language: string): string {
+  const lowered = language.toLowerCase();
+  // Check if it's a known locale code and convert to full name
+  const fullName = getLanguageNameFromLocale(lowered);
+  // If getLanguageNameFromLocale returned a different value, use it
+  // Otherwise, use the original input (preserves case for unknown languages)
+  if (fullName !== 'English' || lowered === 'en') {
+    return fullName;
+  }
+  return language;
+}
+
+/**
+ * Initializes the LLM output language rule file on first startup.
+ * If the file already exists, it is not overwritten (respects user preference).
+ */
+export function initializeLlmOutputLanguage(): void {
+  const filePath = getLlmOutputLanguageRulePath();
+
+  // Skip if file already exists (user preference)
+  if (fs.existsSync(filePath)) {
+    return;
+  }
+
+  // Detect system language and map to language name
+  const detectedLocale = detectSystemLanguage();
+  const languageName = getLanguageNameFromLocale(detectedLocale);
+
+  // Generate the rule file
+  const content = generateLlmOutputLanguageRule(languageName);
+
+  // Ensure directory exists
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  // Write file
+  fs.writeFileSync(filePath, content, 'utf-8');
 }
 
 /**
@@ -151,7 +197,9 @@ function generateLlmOutputLanguageRuleFile(
 ): Promise<MessageActionReturn> {
   try {
     const filePath = getLlmOutputLanguageRulePath();
-    const content = generateLlmOutputLanguageRule(language);
+    // Normalize locale codes (e.g., "ru" -> "Russian") to full language names
+    const normalizedLanguage = normalizeLanguageName(language);
+    const content = generateLlmOutputLanguageRule(normalizedLanguage);
 
     // Ensure directory exists
     const dir = path.dirname(filePath);
@@ -218,7 +266,7 @@ export const languageCommand: SlashCommand = {
           : t('LLM output language not set'),
         '',
         t('Available subcommands:'),
-        `  /language ui [zh-CN|en-US|ru-RU] - ${t('Set UI language')}`,
+        `  /language ui [zh-CN|en-US|ru-RU|de-DE] - ${t('Set UI language')}`,
         `  /language output <language> - ${t('Set LLM output language')}`,
       ].join('\n');
 
@@ -234,7 +282,7 @@ export const languageCommand: SlashCommand = {
     const subcommand = parts[0].toLowerCase();
 
     if (subcommand === 'ui') {
-      // Handle /language ui [zh-CN|en-US|ru-RU]
+      // Handle /language ui [zh-CN|en-US|ru-RU|de-DE]
       if (parts.length === 1) {
         // Show UI language subcommand help
         return {
@@ -243,7 +291,7 @@ export const languageCommand: SlashCommand = {
           content: [
             t('Set UI language'),
             '',
-            t('Usage: /language ui [zh-CN|en-US|ru-RU]'),
+            t('Usage: /language ui [zh-CN|en-US|ru-RU|de-DE]'),
             '',
             t('Available options:'),
             t('  - zh-CN: Simplified Chinese'),
@@ -271,16 +319,23 @@ export const languageCommand: SlashCommand = {
         targetLang = 'zh';
       } else if (
         langArg === 'ru' ||
-        langArg === 'ru-RU' ||
+        langArg === 'ru-ru' ||
         langArg === 'russian' ||
         langArg === 'русский'
       ) {
         targetLang = 'ru';
+      } else if (
+        langArg === 'de' ||
+        langArg === 'de-de' ||
+        langArg === 'german' ||
+        langArg === 'deutsch'
+      ) {
+        targetLang = 'de';
       } else {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('Invalid language. Available: en-US, zh-CN, ru-RU'),
+          content: t('Invalid language. Available: en-US, zh-CN, ru-RU, de-DE'),
         };
       }
 
@@ -319,18 +374,26 @@ export const languageCommand: SlashCommand = {
         targetLang = 'zh';
       } else if (
         langArg === 'ru' ||
-        langArg === 'ru-RU' ||
+        langArg === 'ru-ru' ||
         langArg === 'russian' ||
         langArg === 'русский'
       ) {
         targetLang = 'ru';
+      } else if (
+        langArg === 'de' ||
+        langArg === 'de-de' ||
+        langArg === 'german' ||
+        langArg === 'deutsch'
+      ) {
+        targetLang = 'de';
       } else {
         return {
           type: 'message',
           messageType: 'error',
           content: [
             t('Invalid command. Available subcommands:'),
-            '  - /language ui [zh-CN|en-US|ru-RU] - ' + t('Set UI language'),
+            '  - /language ui [zh-CN|en-US|ru-RU|de-DE] - ' +
+              t('Set UI language'),
             '  - /language output <language> - ' + t('Set LLM output language'),
           ].join('\n'),
         };
@@ -358,11 +421,13 @@ export const languageCommand: SlashCommand = {
             content: [
               t('Set UI language'),
               '',
-              t('Usage: /language ui [zh-CN|en-US]'),
+              t('Usage: /language ui [zh-CN|en-US|ru-RU|de-DE]'),
               '',
               t('Available options:'),
               t('  - zh-CN: Simplified Chinese'),
               t('  - en-US: English'),
+              t('  - ru-RU: Russian'),
+              t('  - de-DE: German'),
               '',
               t(
                 'To request additional UI language packs, please open an issue on GitHub.',
@@ -383,11 +448,27 @@ export const languageCommand: SlashCommand = {
           langArg === 'zh-cn'
         ) {
           targetLang = 'zh';
+        } else if (
+          langArg === 'ru' ||
+          langArg === 'ru-ru' ||
+          langArg === 'russian' ||
+          langArg === 'русский'
+        ) {
+          targetLang = 'ru';
+        } else if (
+          langArg === 'de' ||
+          langArg === 'de-de' ||
+          langArg === 'german' ||
+          langArg === 'deutsch'
+        ) {
+          targetLang = 'de';
         } else {
           return {
             type: 'message',
             messageType: 'error',
-            content: t('Invalid language. Available: en-US, zh-CN'),
+            content: t(
+              'Invalid language. Available: en-US, zh-CN, ru-RU, de-DE',
+            ),
           };
         }
 
@@ -461,6 +542,29 @@ export const languageCommand: SlashCommand = {
               };
             }
             return setUiLanguage(context, 'ru');
+          },
+        },
+        {
+          name: 'de-DE',
+          altNames: ['de', 'german', 'deutsch'],
+          get description() {
+            return t('Set UI language to German (de-DE)');
+          },
+          kind: CommandKind.BUILT_IN,
+          action: async (
+            context: CommandContext,
+            args: string,
+          ): Promise<MessageActionReturn> => {
+            if (args.trim().length > 0) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: t(
+                  'Language subcommands do not accept additional arguments.',
+                ),
+              };
+            }
+            return setUiLanguage(context, 'de');
           },
         },
       ],
