@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 const MAX_TRAVERSAL_DEPTH = 32;
 
@@ -36,7 +37,13 @@ async function getProcessInfo(pid: number): Promise<{
         '| ConvertTo-Json',
         '}',
       ].join(' ');
-      const { stdout } = await execAsync(`powershell "${powershellCommand}"`);
+
+      const { stdout } = await execFileAsync('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        powershellCommand,
+      ]);
       const output = stdout.trim();
       if (!output) return { parentPid: 0, name: '', command: '' };
       const {
@@ -124,6 +131,37 @@ async function getIdeProcessInfoForUnix(): Promise<{
   return { pid: currentPid, command };
 }
 
+async function getProcessTreeForWindows(): Promise<
+  Map<number, { parentPid: number; name: string; command: string }>
+> {
+  try {
+    const powershellCommand =
+      'Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine | ConvertTo-Json -Depth 1';
+    const { stdout } = await execFileAsync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', powershellCommand],
+      { maxBuffer: 10 * 1024 * 1024 },
+    );
+
+    const processes = JSON.parse(stdout);
+    const map = new Map();
+
+    const list = Array.isArray(processes) ? processes : [processes];
+
+    for (const p of list) {
+      map.set(p.ProcessId, {
+        parentPid: p.ParentProcessId,
+        name: p.Name,
+        command: p.CommandLine || '',
+      });
+    }
+    return map;
+  } catch (e) {
+    console.error('Failed to get process tree:', e);
+    return new Map();
+  }
+}
+
 /**
  * Finds the IDE process info on Windows.
  *
@@ -135,39 +173,33 @@ async function getIdeProcessInfoForWindows(): Promise<{
   pid: number;
   command: string;
 }> {
+  const processMap = await getProcessTreeForWindows();
   let currentPid = process.pid;
   let previousPid = process.pid;
 
   for (let i = 0; i < MAX_TRAVERSAL_DEPTH; i++) {
-    try {
-      const { parentPid } = await getProcessInfo(currentPid);
+    const proc = processMap.get(currentPid);
+    if (!proc) break;
 
-      if (parentPid > 0) {
-        try {
-          const { parentPid: grandParentPid } = await getProcessInfo(parentPid);
-          if (grandParentPid === 0) {
-            // We've found the grandchild of the root (`currentPid`). The IDE
-            // process is its child, which we've stored in `previousPid`.
-            const { command } = await getProcessInfo(previousPid);
-            return { pid: previousPid, command };
-          }
-        } catch {
-          // getting grandparent failed, proceed
-        }
-      }
+    const parentPid = proc.parentPid;
 
-      if (parentPid <= 0) {
-        break; // Reached the root
+    if (parentPid > 0) {
+      const parentProc = processMap.get(parentPid);
+      if (parentProc && parentProc.parentPid === 0) {
+        // We've found the grandchild of the root (`currentPid`). The IDE
+        // process is its child, which we've stored in `previousPid`.
+        const ideProc = processMap.get(previousPid);
+        return { pid: previousPid, command: ideProc?.command || '' };
       }
-      previousPid = currentPid;
-      currentPid = parentPid;
-    } catch {
-      // Process in chain died
-      break;
     }
+
+    if (parentPid <= 0) break;
+    previousPid = currentPid;
+    currentPid = parentPid;
   }
-  const { command } = await getProcessInfo(currentPid);
-  return { pid: currentPid, command };
+
+  const currentProc = processMap.get(currentPid);
+  return { pid: currentPid, command: currentProc?.command || '' };
 }
 
 /**
