@@ -22,6 +22,10 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import {
+  convertSchema,
+  type SchemaComplianceMode,
+} from '../../utils/schemaConverter.js';
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -80,11 +84,13 @@ interface ParsedParts {
  */
 export class OpenAIContentConverter {
   private model: string;
+  private schemaCompliance: SchemaComplianceMode;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
 
-  constructor(model: string) {
+  constructor(model: string, schemaCompliance: SchemaComplianceMode = 'auto') {
     this.model = model;
+    this.schemaCompliance = schemaCompliance;
   }
 
   /**
@@ -203,6 +209,10 @@ export class OpenAIContentConverter {
               parameters = this.convertGeminiToolParametersToOpenAI(
                 func.parameters as Record<string, unknown>,
               );
+            }
+
+            if (parameters) {
+              parameters = convertSchema(parameters, this.schemaCompliance);
             }
 
             openAITools.push({

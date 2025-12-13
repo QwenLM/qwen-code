@@ -639,6 +639,22 @@ const SETTINGS_SCHEMA = {
             childKey: 'disableCacheControl',
             showInDialog: true,
           },
+          schemaCompliance: {
+            type: 'enum',
+            label: 'Tool Schema Compliance',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: 'auto',
+            description:
+              'The compliance mode for tool schemas sent to the model. Use "openapi_30" for strict OpenAPI 3.0 compatibility (e.g., for Gemini).',
+            parentKey: 'generationConfig',
+            childKey: 'schemaCompliance',
+            showInDialog: true,
+            options: [
+              { value: 'auto', label: 'Auto (Default)' },
+              { value: 'openapi_30', label: 'OpenAPI 3.0 Strict' },
+            ],
+          },
         },
       },
     },

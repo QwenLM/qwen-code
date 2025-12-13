@@ -627,7 +627,12 @@ The MCP integration tracks several states:
 
 ### Schema Compatibility
 
-- **Property stripping:** The system automatically removes certain schema properties (`$schema`, `additionalProperties`) for Qwen API compatibility
+- **Schema compliance mode:** By default (`schemaCompliance: "auto"`), tool schemas are passed through as-is. Set `"model": { "generationConfig": { "schemaCompliance": "openapi_30" } }` in your `settings.json` to convert models to Strict OpenAPI 3.0 format.
+- **OpenAPI 3.0 transformations:** When `openapi_30` mode is enabled, the system handles:
+  - Nullable types: `["string", "null"]` -> `type: "string", nullable: true`
+  - Const values: `const: "foo"` -> `enum: ["foo"]`
+  - Exclusive limits: numeric `exclusiveMinimum` -> boolean form with `minimum`
+  - Keyword removal: `$schema`, `$id`, `dependencies`, `patternProperties`
 - **Name sanitization:** Tool names are automatically sanitized to meet API requirements
 - **Conflict resolution:** Tool name conflicts between servers are resolved through automatic prefixing
 

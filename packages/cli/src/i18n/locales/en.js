@@ -310,6 +310,7 @@ export default {
   'Tool Output Truncation Lines': 'Tool Output Truncation Lines',
   'Folder Trust': 'Folder Trust',
   'Vision Model Preview': 'Vision Model Preview',
+  'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   Text: 'Text',
