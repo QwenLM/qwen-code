@@ -413,6 +413,34 @@ describe('languageCommand', () => {
       });
     });
 
+    it('should normalize locale code "ru" to "Russian"', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'output ru');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Russian'),
+        'utf-8',
+      );
+    });
+
+    it('should normalize locale code "de" to "German"', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'output de');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('German'),
+        'utf-8',
+      );
+    });
+
     it('should handle file write errors gracefully', async () => {
       vi.mocked(fs.writeFileSync).mockImplementation(() => {
         throw new Error('Permission denied');
@@ -494,6 +522,8 @@ describe('languageCommand', () => {
       const nestedNames = uiSubcommand?.subCommands?.map((c) => c.name);
       expect(nestedNames).toContain('zh-CN');
       expect(nestedNames).toContain('en-US');
+      expect(nestedNames).toContain('ru-RU');
+      expect(nestedNames).toContain('de-DE');
     });
 
     it('should have action that sets language', async () => {
@@ -555,6 +585,9 @@ describe('languageCommand', () => {
     const enUSSubcommand = uiSubcommand?.subCommands?.find(
       (c) => c.name === 'en-US',
     );
+    const deDESubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'de-DE',
+    );
 
     it('zh-CN should have aliases', () => {
       expect(zhCNSubcommand?.altNames).toContain('zh');
@@ -564,6 +597,12 @@ describe('languageCommand', () => {
     it('en-US should have aliases', () => {
       expect(enUSSubcommand?.altNames).toContain('en');
       expect(enUSSubcommand?.altNames).toContain('english');
+    });
+
+    it('de-DE should have aliases', () => {
+      expect(deDESubcommand?.altNames).toContain('de');
+      expect(deDESubcommand?.altNames).toContain('german');
+      expect(deDESubcommand?.altNames).toContain('deutsch');
     });
 
     it('zh-CN action should set Chinese', async () => {
@@ -589,6 +628,21 @@ describe('languageCommand', () => {
       const result = await enUSSubcommand.action(mockContext, '');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('en');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('de-DE action should set German', async () => {
+      if (!deDESubcommand?.action) {
+        throw new Error('de-DE subcommand must have an action.');
+      }
+
+      const result = await deDESubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('de');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
