@@ -282,6 +282,46 @@ export OPENAI_MODEL="qwen/qwen3-coder:free"
 
 </details>
 
+## Multiple Models Support (OpenAI-Compatible APIs)
+
+Qwen Code supports dynamic model switching with OpenAI-compatible API endpoints. Instead of being limited to a single model, you can configure an API endpoint and switch between all available models at runtime.
+
+### Quick Setup
+
+```bash
+# Set your API configuration
+export OPENAI_BASE_URL="http://localhost:8317"     # Your API URL
+export OPENAI_API_KEY="your-api-key"               # Your API key
+
+# Start Qwen Code
+qwen
+
+# Switch models anytime during your session
+> /model
+# Select from all available models provided by your API!
+```
+
+### Supported APIs
+
+This feature works with any OpenAI-compatible API:
+
+- **LocalAI** - Local OpenAI-compatible server
+- **Ollama** - Local model runner
+- **LM Studio** - Local model server
+- **OpenRouter** - Cloud model aggregator
+- **Azure OpenAI** - Microsoft's implementation
+- **Custom OpenAI-compatible servers**
+
+### Key Features
+
+- ✨ **Unlimited Models** - Access all models from your API
+- 🔄 **Dynamic Switching** - Change models without restarting
+- ⚡ **Fast Loading** - Models fetched in under 1 second
+- 🛡️ **Error Handling** - Clear messages if API is unavailable
+- 💾 **Session Persistence** - Your model choice stays for the session
+
+For detailed setup guide, see [QUICK_START.md](./QUICK_START.md) and [MULTIPLE_MODELS_SETUP.md](./MULTIPLE_MODELS_SETUP.md).
+
 ## Usage Examples
 
 ### 🔍 Explore Codebases
@@ -387,6 +427,9 @@ qwen
 - `/compress` - Compress history to save tokens
 - `/stats` - Show current session information
 - `/exit` or `/quit` - Exit Qwen Code
+- `/model` - Switch AI model for the session (OpenAI-compatible APIs only)
+- `/auth` - Switch authentication type
+- `/settings` - Configure application settings
 
 ### Keyboard Shortcuts
 
