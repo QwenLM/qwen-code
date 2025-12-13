@@ -53,6 +53,7 @@ import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
@@ -203,7 +204,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stdout } = useStdout();
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats } = useSessionStats();
+  const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
 
@@ -435,6 +436,64 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isModelDialogOpen, openModelDialog, closeModelDialog } =
     useModelCommand();
 
+  const { isResumeDialogOpen, openResumeDialog, closeResumeDialog } =
+    useResumeCommand();
+
+  // Handle resume session selection
+  const handleResumeSessionSelect = useCallback(
+    async (sessionId: string) => {
+      if (!config) {
+        return;
+      }
+
+      // Close dialog immediately to prevent input capture during async operations
+      closeResumeDialog();
+
+      const {
+        SessionService,
+        buildApiHistoryFromConversation,
+        replayUiTelemetryFromConversation,
+        uiTelemetryService,
+      } = await import('@qwen-code/qwen-code-core');
+      const { buildResumedHistoryItems } = await import(
+        './utils/resumeHistoryUtils.js'
+      );
+
+      const cwd = config.getTargetDir();
+      const sessionService = new SessionService(cwd);
+      const sessionData = await sessionService.loadSession(sessionId);
+
+      if (!sessionData) {
+        return;
+      }
+
+      // Reset and replay UI telemetry to restore metrics
+      uiTelemetryService.reset();
+      replayUiTelemetryFromConversation(sessionData.conversation);
+
+      // Build UI history items using existing utility
+      const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
+
+      // Build API history for the LLM client
+      const clientHistory = buildApiHistoryFromConversation(
+        sessionData.conversation,
+      );
+
+      // Update client history
+      config.getGeminiClient()?.setHistory(clientHistory);
+      config.getGeminiClient()?.stripThoughtsFromHistory();
+
+      // Update session in config
+      config.startNewSession(sessionId);
+      startNewSession(sessionId);
+
+      // Clear and load history
+      historyManager.clearItems();
+      historyManager.loadHistory(uiHistoryItems);
+    },
+    [config, closeResumeDialog, historyManager, startNewSession],
+  );
+
   const {
     showWorkspaceMigrationDialog,
     workspaceExtensions,
@@ -488,6 +547,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openResumeDialog,
     }),
     [
       openAuthDialog,
@@ -502,6 +562,7 @@ export const AppContainer = (props: AppContainerProps) => {
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openResumeDialog,
     ],
   );
 
@@ -1194,7 +1255,8 @@ export const AppContainer = (props: AppContainerProps) => {
     !!proQuotaRequest ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
-    isApprovalModeDialogOpen;
+    isApprovalModeDialogOpen ||
+    isResumeDialogOpen;
 
   const pendingHistoryItems = useMemo(
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
@@ -1222,6 +1284,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isModelDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isResumeDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1312,6 +1375,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isModelDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isResumeDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1421,6 +1485,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Resume session dialog
+      openResumeDialog,
+      closeResumeDialog,
+      handleResumeSessionSelect,
     }),
     [
       handleThemeSelect,
@@ -1453,6 +1521,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Resume session dialog
+      openResumeDialog,
+      closeResumeDialog,
+      handleResumeSessionSelect,
     ],
   );
 

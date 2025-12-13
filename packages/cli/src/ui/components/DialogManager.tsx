@@ -36,6 +36,7 @@ import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { ModelSwitchDialog } from './ModelSwitchDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { ResumeSessionDialog } from './ResumeSessionDialog.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -286,6 +287,19 @@ export const DialogManager = ({
       <AgentsManagerDialog
         onClose={uiActions.closeAgentsManagerDialog}
         config={config}
+      />
+    );
+  }
+
+  if (uiState.isResumeDialogOpen) {
+    return (
+      <ResumeSessionDialog
+        cwd={config.getTargetDir()}
+        onSelect={uiActions.handleResumeSessionSelect}
+        onCancel={uiActions.closeResumeDialog}
+        availableTerminalHeight={
+          constrainHeight ? terminalHeight - staticExtraHeight : undefined
+        }
       />
     );
   }

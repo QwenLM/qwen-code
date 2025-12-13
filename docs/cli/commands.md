@@ -93,6 +93,16 @@ Slash commands provide meta-level control over the CLI itself.
   - **Usage:** `/restore [tool_call_id]`
   - **Note:** Only available if the CLI is invoked with the `--checkpointing` option or configured via [settings](./configuration.md). See [Checkpointing documentation](../checkpointing.md) for more details.
 
+- **`/resume`**
+  - **Description:** Resume a previous conversation session. Opens a session picker dialog to browse and select from saved sessions.
+  - **Usage:** `/resume`
+  - **Features:**
+    - Browse all saved sessions for the current project
+    - Filter sessions by git branch with the **B** key
+    - Sessions show first prompt, message count, and timestamp
+    - Navigate with arrow keys or **j/k**, select with **Enter**
+  - **Note:** For command-line session resumption, see `--resume` and `--continue` flags. For more details, see [Session Resume](../features/session-resume.md).
+
 - **`/settings`**
   - **Description:** Open the settings editor to view and modify Qwen Code settings.
   - **Details:** This command provides a user-friendly interface for changing settings that control the behavior and appearance of Qwen Code. It is equivalent to manually editing the `.qwen/settings.json` file, but with validation and guidance to prevent errors.

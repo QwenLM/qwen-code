@@ -60,6 +60,7 @@ export interface UIState {
   isModelDialogOpen: boolean;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
+  isResumeDialogOpen: boolean;
   slashCommands: readonly SlashCommand[];
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
