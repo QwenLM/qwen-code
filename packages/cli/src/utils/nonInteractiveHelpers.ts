@@ -240,8 +240,33 @@ export async function buildSystemMessage(
   sessionId: string,
   permissionMode: PermissionMode,
 ): Promise<CLISystemMessage> {
+  // Ensure ToolRegistry is initialized before accessing it
+  // In headless mode, config.initialize() should have been called before this,
+  // but we need to handle the case where it hasn't been called yet
   const toolRegistry = config.getToolRegistry();
-  const tools = toolRegistry ? toolRegistry.getAllToolNames() : [];
+  if (!toolRegistry) {
+    // Log a warning and return empty tools list instead of throwing
+    // This can happen if config.initialize() hasn't been called yet
+    if (config.getDebugMode()) {
+      console.warn(
+        '[buildSystemMessage] ToolRegistry is not initialized. Tools will not be available until config.initialize() is called.',
+      );
+    }
+    return {
+      type: 'system',
+      subtype: 'init',
+      uuid: '',
+      session_id: sessionId,
+      model: config.getModel(),
+      permission_mode: permissionMode,
+      tools: [],
+      mcp_servers: [],
+      slash_commands: [],
+      subagents: [],
+      timestamp: new Date().toISOString(),
+    };
+  }
+  const tools = toolRegistry.getAllToolNames();
 
   const mcpServers = config.getMcpServers();
   const mcpServerList = mcpServers
