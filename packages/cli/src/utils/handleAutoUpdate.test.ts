@@ -241,9 +241,12 @@ describe('handleAutoUpdate', () => {
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      'npm i -g @qwen-code/qwen-code@nightly',
+      expect.stringMatching(/^(bash|cmd\.exe)$/),
+      expect.arrayContaining([
+        expect.stringMatching(/^(-c|\/c)$/),
+        'npm i -g @qwen-code/qwen-code@nightly',
+      ]),
       {
-        shell: true,
         stdio: 'pipe',
       },
     );

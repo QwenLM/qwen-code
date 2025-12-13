@@ -12,6 +12,7 @@ import type { HistoryItem } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
 import type { spawn } from 'node:child_process';
+import os from 'node:os';
 
 export function handleAutoUpdate(
   info: UpdateObject | null,
@@ -53,7 +54,10 @@ export function handleAutoUpdate(
     '@latest',
     isNightly ? '@nightly' : `@${info.update.latest}`,
   );
-  const updateProcess = spawnFn(updateCommand, { stdio: 'pipe', shell: true });
+  const isWindows = os.platform() === 'win32';
+  const shell = isWindows ? 'cmd.exe' : 'bash';
+  const shellArgs = isWindows ? ['/c', updateCommand] : ['-c', updateCommand];
+  const updateProcess = spawnFn(shell, shellArgs, { stdio: 'pipe' });
   let errorOutput = '';
   updateProcess.stderr.on('data', (data) => {
     errorOutput += data.toString();
