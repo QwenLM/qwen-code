@@ -22,8 +22,10 @@ import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const root = join(__dirname, '..');
 const distDir = join(root, 'dist');
 const coreVendorDir = join(root, 'packages', 'core', 'vendor');
@@ -49,6 +51,15 @@ if (existsSync(coreVendorDir)) {
   console.log('Copied vendor directory to dist/');
 } else {
   console.warn(`Warning: Vendor directory not found at ${coreVendorDir}`);
+}
+
+// Copy tiktoken wasm file
+try {
+  const tiktokenWasm = require.resolve('tiktoken/tiktoken_bg.wasm');
+  copyFileSync(tiktokenWasm, join(distDir, 'tiktoken_bg.wasm'));
+  console.log('Copied tiktoken_bg.wasm to dist/');
+} catch (error) {
+  console.error('Error copying tiktoken_bg.wasm:', error);
 }
 
 console.log('\n✅ All bundle assets copied to dist/');
