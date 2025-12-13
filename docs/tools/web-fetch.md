@@ -52,3 +52,4 @@ web_fetch(url="https://github.com/QwenLM/Qwen/blob/main/README.md", prompt="What
 - **Content processing:** The tool fetches content directly and processes it using an AI model, converting HTML to readable text format.
 - **Output quality:** The quality of the output will depend on the clarity of the instructions in the prompt.
 - **MCP tools:** If an MCP-provided web fetch tool is available (starting with "mcp\_\_"), prefer using that tool as it may have fewer restrictions.
+- **Proxy support:** The tool will use a configured proxy if available. Additionally, when `GEMINI_SANDBOX_PROXY_COMMAND` is set, the tool will automatically use the sandbox proxy which listens on `http://localhost:8877`.
