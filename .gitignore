@@ -26,7 +26,7 @@ package-lock.json
 
 # OS metadata
 .DS_Store
-Thumbs.db
+Thumbsmb.db
 
 # TypeScript build info files
 *.tsbuildinfo
@@ -57,3 +57,7 @@ gha-creds-*.json
 
 # Log files
 patch_output.log
+
+# Sync upstream backup files
+.backup/
+.backup-sync/
