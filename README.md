@@ -87,6 +87,17 @@ cd qwen-сode
       - npm install -g .
 ```
 
+### Установить из исходного кода c поддержкой русского языка за один раз
+
+```bash
+git clone https://github.com/Killtip74/qwen-code
+cd qwen-сode
+QWEN_CODE_LANG=ru npm run bundle
+npm run prepare:package
+cd dist
+npm install -g .
+```
+
 ### Глобальная установка с помощью Homebrew (macOS/Linux)
 
 ```bash
