@@ -69,7 +69,7 @@ curl -qL https://www.npmjs.com/install.sh | sh
 ### Установить из npm
 
 ```bash
-npm install -g @qwen-code/qwen-code@последняя версия
+npm install -g @qwen-code/qwen-code@latest
 qwen --версия
 ```
 
