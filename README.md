@@ -70,7 +70,7 @@ curl -qL https://www.npmjs.com/install.sh | sh
 
 ```bash
 npm install -g @qwen-code/qwen-code@latest
-qwen --версия
+qwen --version
 ```
 
 ### Установить из исходного кода c поддержкой русского языка
