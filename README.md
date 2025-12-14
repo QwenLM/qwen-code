@@ -119,7 +119,7 @@ qwen
 
 Создайте или отредактируйте файл ".qwen/settings.json" в вашем домашнем каталоге:
 
-```json"
+```json
 {
   "sessionTokenLimit": 32000
 }
@@ -143,8 +143,8 @@ qwen
 
 ```json
 {
-  "экспериментальный": {
-    "vlmSwitchMode": "один раз"
+  "experimental": {
+    "vlmSwitchMode": "once"
   }
 }
 ```
@@ -177,8 +177,8 @@ qwen --vlm-переключение в постоянный режим
 
 ```json
 {
-  "экспериментальный": {
-    "visionModelPreview": ложь
+  "experimental": {
+    "visionModelPreview": false
   }
 }
 ```
@@ -260,8 +260,8 @@ qwen
 
 ```bash
 export OPENAI_API_KEY="ваш_api_key_here"
-экспорт OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1 "
-экспорт OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Инструкция"
+export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1 "
+export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Инструкция"
 ```
 
 </подробности>
@@ -273,16 +273,16 @@ export OPENAI_API_KEY="ваш_api_key_here"
 
 ```bash
 export OPENAI_API_KEY="ваш_api_key_here"
-экспорт OPENAI_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1 "
-экспорт OPENAI_MODEL="qwen3-coder-plus"
+export OPENAI_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1 "
+export OPENAI_MODEL="qwen3-coder-plus"
 ```
 
 **Вариант 2: OpenRouter (доступен бесплатный уровень) ** ([Подать заявку на получение ключа API](https://openrouter.ai /))
 
 ```bash
-экспортирует OPENAI_API_KEY="your_api_key_here"
-экспорт OPENAI_BASE_URL="https://openrouter.ai/api/v1 "
-экспорт OPENAI_MODEL="qwen/qwen3-кодер:бесплатный"
+export OPENAI_API_KEY="your_api_key_here"
+export OPENAI_BASE_URL="https://openrouter.ai/api/v1 "
+export OPENAI_MODEL="qwen/qwen3-кодер:бесплатный"
 ```
 
 </подробности>
