@@ -68,15 +68,15 @@ curl -qL https://www.npmjs.com/install.sh | sh
 
 ### Установить из npm
 
-`bash
+```bash
 npm install -g @qwen-code/qwen-code@последняя версия
 qwen --версия
 ```
 
 ### Установить из исходного кода c поддержкой русского языка
 
-`клонировать bash
-git clone https://github.com/Killtip74/qwen-code/tree/main
+```bash
+git clone https://github.com/Killtip74/qwen-code
 cd qwen-сode
 Решение:
    1. Перед установкой пакета необходимо выполнить полный процесс подготовки, включающий:
@@ -89,7 +89,7 @@ cd qwen-сode
 
 ### Глобальная установка с помощью Homebrew (macOS/Linux)
 
-`bash
+```bash
 brew устанавливает qwen-код
 ```
 
