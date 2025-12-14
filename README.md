@@ -73,13 +73,18 @@ npm install -g @qwen-code/qwen-code@последняя версия
 qwen --версия
 ```
 
-### Установить из исходного кода
+### Установить из исходного кода c поддержкой русского языка
 
 `клонировать bash
-git clone https://github.com/QwenLM/qwen-code.git
-cd qwen-код
-npm install
-npm install -g .
+git clone https://github.com/Killtip74/qwen-code/tree/main
+cd qwen-сode
+Решение:
+   1. Перед установкой пакета необходимо выполнить полный процесс подготовки, включающий:
+      - QWEN_CODE_LANG=ru npm run bundle
+      - npm run prepare:package
+   2. Затем переустановить пакет из папки dist:
+      - cd dist
+      - npm install -g .
 ```
 
 ### Глобальная установка с помощью Homebrew (macOS/Linux)
