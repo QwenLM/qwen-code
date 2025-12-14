@@ -62,7 +62,7 @@ Qwen Code - это мощный инструмент для работы с ИИ
 
 Убедитесь, что у вас установлена [Node.js версия 20](https://nodejs.org/en/download ) или более поздняя.
 
-``bash
+```bash
 curl -qL https://www.npmjs.com/install.sh | sh
 ```
 
