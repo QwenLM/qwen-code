@@ -1,29 +1,29 @@
-# Qwen-код
+# Qwen Code
 
 <div align="center">
 
-![Скриншот Qwen-кода](./docs/assets/qwen-screenshot.png)
+![Qwen Code Screenshot](./docs/assets/qwen-screenshot.png)
 
 [![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
-[![Лицензия](https://img.shields.io/github/license/QwenLM/qwen-code.svg )](./ЛИЦЕНЗИЯ)
-[![Node.js Версия](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg )](https://nodejs.org /)
+[![License](https://img.shields.io/github/license/QwenLM/qwen-code.svg)](./LICENSE)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
-**Инструмент командной строки на базе искусственного интеллекта для разработчиков**
+**AI-powered command-line workflow tool for developers**
 
-[Установка](#installation) • [Быстрый запуск](#quick-start) • [Функции](#key-features) • [Документация](./docs/) • [Дополнительные материалы](./CONTRIBUTING.md )
+[Installation](#installation) • [Quick Start](#quick-start) • [Features](#key-features) • [Documentation](./docs/) • [Contributing](./CONTRIBUTING.md)
 
-деленья
+</div>
 
 <div align="center">
-
-  <a href="https://qwenlm.github.io/qwen-code-docs/de /">Немецкий</a> |
-  <a href="https://qwenlm.github.io/qwen-code-docs/fr ">английский</a> |
-  <a href="https://qwenlm.github.io/qwen-code-docs/ja /">日本語</a> |
-  <a href="https://qwenlm.github.io/qwen-code-docs/ru ">Русский</a> |
-  <a href="https://qwenlm.github.io/qwen-code-docs/zh /">中文</a>
-
-деленья
+  
+  <a href="https://qwenlm.github.io/qwen-code-docs/de/">Deutsch</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/fr">français</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/ja/">日本語</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/ru">Русский</a> | 
+  <a href="https://qwenlm.github.io/qwen-code-docs/zh/">中文</a>
+  
+</div>
 
 Qwen Code - это мощный инструмент для работы с ИИ в командной строке, адаптированный из [**Gemini CLI**](https://github.com/google-gemini/gemini-cli ) и специально оптимизированный для моделей [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder ). Это расширяет рабочий процесс разработки за счет расширенного понимания кода, автоматизированных задач и интеллектуальной поддержки.
 
