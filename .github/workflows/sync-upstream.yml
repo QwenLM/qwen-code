@@ -2,144 +2,85 @@ name: Sync with Upstream
 
 on:
   schedule:
-    # Каждый день в 00:00 UTC (05:00 по Челябинску)
-    - cron: '0 0 * * *'
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
-  sync:
+  sync-upstream:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     
     steps:
-      - name: Checkout
+      - name: Checkout fork
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Setup Git
+          
+      - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-      
-      # Сохраняем ваши файлы перед синхронизацией
-      - name: Backup custom files
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          
+      - name: Add upstream and fetch
         run: |
-          mkdir -p .backup
-          cp -r README.md .backup/ 2>/dev/null || true
-          cp -r docs/assets .backup/ 2>/dev/null || true
-          ls -la .backup/
-      
-      # Добавляем upstream репозиторий
-      - name: Add upstream remote
+          git remote add upstream https://github.com/QwenLM/qwen-code.git || true
+          git fetch upstream main --tags
+          
+      - name: Check for updates
+        id: check
         run: |
-          git remote add upstream https://github.com/QwenLM/qwen-code.git
-          git fetch upstream main
-      
-      # Проверяем есть ли изменения
-      - name: Check for differences
-        id: check_diff
-        run: |
-          # Сравниваем основные ветки
-          DIFF_COUNT=$(git diff --name-only main upstream/main | wc -l)
-          if [ "$DIFF_COUNT" -gt 0 ]; then
-            echo "has_changes=true" >> $GITHUB_OUTPUT
-            echo "Найдено $DIFF_COUNT измененных файлов"
-            git diff --name-only main upstream/main
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "commits_behind=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -gt 0 ]; then
+            echo "need_sync=true" >> $GITHUB_OUTPUT
           else
-            echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "Нет новых изменений от upstream"
-          fi
-      
-      # Если есть изменения - синхронизируем
-      - name: Merge upstream with strategy
-        if: steps.check_diff.outputs.has_changes == 'true'
-        run: |
-          # Создаём временную ветку для слияния
-          git checkout -b sync-upstream
-          
-          # Берём все файлы из upstream
-          git merge -X theirs upstream/main --allow-unrelated-histories --no-commit
-          
-          echo "Синхронизация выполнена, восстанавливаем ваши файлы..."
-      
-      # Восстанавливаем ваши файлы
-      - name: Restore custom files
-        if: steps.check_diff.outputs.has_changes == 'true'
-        run: |
-          # Восстанавливаем README.md
-          if [ -f ".backup/README.md" ]; then
-            cp .backup/README.md README.md
-            echo "✓ README.md восстановлен"
+            echo "need_sync=false" >> $GITHUB_OUTPUT
           fi
           
-          # Восстанавливаем docs/assets
-          if [ -d ".backup/assets" ]; then
-            mkdir -p docs
-            cp -r .backup/assets docs/
-            echo "✓ docs/assets восстановлены"
-          fi
-          
-          # Показываем что поменялось
-          echo "\nСтатус изменений:"
-          git status
-      
-      # Коммитим изменения
-      - name: Commit changes
-        if: steps.check_diff.outputs.has_changes == 'true'
+      - name: Create sync branch
+        if: steps.check.outputs.need_sync == 'true'
         run: |
-          git add -A
-          git commit -m "chore: sync with upstream QwenLM/qwen-code
+          BRANCH_NAME="sync/upstream-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH_NAME"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           
-Основные обновления:
-- Синхронизация с официальным репозиторием
-- Сохранены локальные файлы: README.md, docs/assets/
-- Автоматическое обновление через GitHub Actions
-
-Upstream: https://github.com/QwenLM/qwen-code" || echo "Нечего коммитить"
-      
-      # Создаём pull request
+      - name: Merge upstream
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          git merge upstream/main -m "chore: sync with upstream qwen-code" || {
+            echo "Merge conflicts detected, attempting auto-resolution"
+            git checkout --ours README.ru.md || true
+            git checkout --ours CONTRIBUTING.ru.md || true
+            git checkout --ours .github/workflows/sync-upstream.yml || true
+            git add .
+            git commit -m "chore: sync with upstream (auto-resolved conflicts)" || true
+          }
+          
+      - name: Push sync branch
+        if: steps.check.outputs.need_sync == 'true'
+        run: |
+          git push -u origin HEAD
+          
       - name: Create Pull Request
-        if: steps.check_diff.outputs.has_changes == 'true'
-        uses: peter-evans/create-pull-request@v5
+        if: steps.check.outputs.need_sync == 'true'
+        uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: sync with upstream QwenLM/qwen-code"
-          title: "🔄 chore: синхронизация с upstream"
+          title: '🔄 Sync with upstream (${{ steps.check.outputs.commits_behind }} commits)'
           body: |
-            ## Синхронизация с основным репозиторием
+            ## 🔄 Автоматическая синхронизация с upstream
             
-            Автоматическое обновление из [QwenLM/qwen-code](https://github.com/QwenLM/qwen-code)
+            **Коммитов позади:** ${{ steps.check.outputs.commits_behind }}
+            **Upstream:** https://github.com/QwenLM/qwen-code
             
-            ### Что сохранено:
-            - ✅ `README.md` (ваша локальная версия)
-            - ✅ `docs/assets/` (все ваши локальные файлы)
+            ### ⚠️ Защищённые файлы:
+            - ✅ README.ru.md (сохранён)
+            - ✅ CONTRIBUTING.ru.md (сохранён)
+            - ✅ sync-upstream.yml (сохранён)
             
-            ### Что обновлено:
-            - 🔄 Все остальные файлы из upstream
-            - 🔄 Версия пакета (если изменилась)
-            
-            ### Дальнейшие действия:
-            1. Проверьте изменения
-            2. Разрешите конфликты если они есть
-            3. Слейте PR в main
-            
-            **Время выполнения:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          branch: sync-upstream
-          delete-branch: true
-          labels: |
-            chore
-            upstream-sync
-            automated
-      
-      # Логирование
-      - name: Log sync result
-        if: always()
-        run: |
-          echo "=== Результат синхронизации ==="
-          echo "Дата: $(date)"
-          echo "Найдено изменений: ${{ steps.check_diff.outputs.has_changes }}"
-          echo "============================="
+            Проверьте изменения перед merge!
+          labels: sync,automated
