@@ -1,16 +1,16 @@
-name: Sync with Upstream
+name: Sync with Nightly Build
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: '0 2 * * *'
-  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  sync-upstream:
+  sync-nightly:
     runs-on: ubuntu-latest
     
     steps:
@@ -22,65 +22,27 @@ jobs:
           
       - name: Configure Git
         run: |
-          git config user.name "GitHub Actions Bot"
+          git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           
-      - name: Add upstream and fetch
+      - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/QwenLM/qwen-code.git || true
-          git fetch upstream main --tags
+          git fetch upstream main --tags --force
           
-      - name: Check for updates
-        id: check
+      - name: Reset to upstream latest
         run: |
-          BEHIND=$(git rev-list --count HEAD..upstream/main)
-          echo "commits_behind=$BEHIND" >> $GITHUB_OUTPUT
-          if [ "$BEHIND" -gt 0 ]; then
-            echo "need_sync=true" >> $GITHUB_OUTPUT
-          else
-            echo "need_sync=false" >> $GITHUB_OUTPUT
+          git reset --hard upstream/main
+          
+      - name: Push to fork
+        run: |
+          git push origin main --force
+          
+      - name: Log version
+        run: |
+          echo "Latest commit:"
+          git log --oneline -1
+          if [ -f package.json ]; then
+            echo "Version in package.json:"
+            grep '"version"' package.json
           fi
-          
-      - name: Create sync branch
-        if: steps.check.outputs.need_sync == 'true'
-        run: |
-          BRANCH_NAME="sync/upstream-$(date +%Y%m%d-%H%M%S)"
-          git checkout -b "$BRANCH_NAME"
-          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          
-      - name: Merge upstream
-        if: steps.check.outputs.need_sync == 'true'
-        run: |
-          git merge upstream/main -m "chore: sync with upstream qwen-code" || {
-            echo "Merge conflicts detected, attempting auto-resolution"
-            git checkout --ours README.ru.md || true
-            git checkout --ours CONTRIBUTING.ru.md || true
-            git checkout --ours .github/workflows/sync-upstream.yml || true
-            git add .
-            git commit -m "chore: sync with upstream (auto-resolved conflicts)" || true
-          }
-          
-      - name: Push sync branch
-        if: steps.check.outputs.need_sync == 'true'
-        run: |
-          git push -u origin HEAD
-          
-      - name: Create Pull Request
-        if: steps.check.outputs.need_sync == 'true'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          title: '🔄 Sync with upstream (${{ steps.check.outputs.commits_behind }} commits)'
-          body: |
-            ## 🔄 Автоматическая синхронизация с upstream
-            
-            **Коммитов позади:** ${{ steps.check.outputs.commits_behind }}
-            **Upstream:** https://github.com/QwenLM/qwen-code
-            
-            ### ⚠️ Защищённые файлы:
-            - ✅ README.ru.md (сохранён)
-            - ✅ CONTRIBUTING.ru.md (сохранён)
-            - ✅ sync-upstream.yml (сохранён)
-            
-            Проверьте изменения перед merge!
-          labels: sync,automated
