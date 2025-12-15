@@ -130,6 +130,11 @@ export interface CliArgs {
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
+  /**
+   * If chat recording is disabled, the chat history would not be recorded,
+   * so --continue and --resume would not take effect.
+   */
+  chatRecording: boolean | undefined;
   /** Resume the most recent session for the current project */
   continue: boolean | undefined;
   /** Resume a specific session by its ID */
@@ -138,6 +143,7 @@ export interface CliArgs {
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   authType: string | undefined;
+  channel: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -232,6 +238,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
       'proxy',
       'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
     )
+    .option('chat-recording', {
+      type: 'boolean',
+      description:
+        'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
+    })
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
       yargsInstance
         .positional('query', {
@@ -296,6 +307,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .option('experimental-acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
+        })
+        .option('channel', {
+          type: 'string',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -559,6 +575,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
 
   // The import format is now only controlled by settings.memoryImportFormat
   // We no longer accept it as a CLI argument
+
+  // Apply ACP fallback: if experimental-acp is present but no explicit --channel, treat as ACP
+  if (result['experimentalAcp'] && !result['channel']) {
+    (result as Record<string, unknown>)['channel'] = 'ACP';
+  }
+
   return result as unknown as CliArgs;
 }
 
@@ -983,6 +1005,12 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
+    channel: argv.channel,
+    // Precedence: explicit CLI flag > settings file > default(true).
+    // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
+    // always be true and the settings file can never disable recording.
+    chatRecording:
+      argv.chatRecording ?? settings.general?.chatRecording ?? true,
   });
 }
 

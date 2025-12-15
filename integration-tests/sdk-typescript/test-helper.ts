@@ -73,15 +73,26 @@ export class SDKTestHelper {
     await mkdir(this.testDir, { recursive: true });
 
     // Optionally create .qwen/settings.json for CLI configuration
-    if (options.createQwenConfig) {
+    if (options.createQwenConfig !== false) {
       const qwenDir = join(this.testDir, '.qwen');
       await mkdir(qwenDir, { recursive: true });
 
+      const optionsSettings = options.settings ?? {};
+      const generalSettings =
+        typeof optionsSettings['general'] === 'object' &&
+        optionsSettings['general'] !== null
+          ? (optionsSettings['general'] as Record<string, unknown>)
+          : {};
+
       const settings = {
+        ...optionsSettings,
         telemetry: {
           enabled: false, // SDK tests don't need telemetry
         },
-        ...options.settings,
+        general: {
+          ...generalSettings,
+          chatRecording: false, // SDK tests don't need chat recording
+        },
       };
 
       await writeFile(

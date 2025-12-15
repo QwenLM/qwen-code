@@ -139,6 +139,7 @@ export class ProcessTransport implements Transport {
       'stream-json',
       '--output-format',
       'stream-json',
+      '--channel=SDK',
     ];
 
     if (this.options.model) {

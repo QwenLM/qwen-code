@@ -191,7 +191,28 @@ const SETTINGS_SCHEMA = {
           { value: 'auto', label: 'Auto (detect from system)' },
           { value: 'en', label: 'English' },
           { value: 'zh', label: '中文 (Chinese)' },
+          { value: 'ru', label: 'Русский (Russian)' },
         ],
+      },
+      terminalBell: {
+        type: 'boolean',
+        label: 'Terminal Bell',
+        category: 'General',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Play terminal bell sound when response completes or needs approval.',
+        showInDialog: true,
+      },
+      chatRecording: {
+        type: 'boolean',
+        label: 'Chat Recording',
+        category: 'General',
+        requiresRestart: true,
+        default: true,
+        description:
+          'Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.',
+        showInDialog: false,
       },
     },
   },

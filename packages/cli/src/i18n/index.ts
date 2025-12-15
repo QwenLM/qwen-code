@@ -9,7 +9,7 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 
-export type SupportedLanguage = 'en' | 'zh' | string; // Allow custom language codes
+export type SupportedLanguage = 'en' | 'zh' | 'ru' | string; // Allow custom language codes
 
 // State
 let currentLanguage: SupportedLanguage = 'en';
@@ -51,10 +51,12 @@ export function detectSystemLanguage(): SupportedLanguage {
   const envLang = process.env['QWEN_CODE_LANG'] || process.env['LANG'];
   if (envLang?.startsWith('zh')) return 'zh';
   if (envLang?.startsWith('en')) return 'en';
+  if (envLang?.startsWith('ru')) return 'ru';
 
   try {
     const locale = Intl.DateTimeFormat().resolvedOptions().locale;
     if (locale.startsWith('zh')) return 'zh';
+    if (locale.startsWith('ru')) return 'ru';
   } catch {
     // Fallback to default
   }

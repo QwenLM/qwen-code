@@ -28,5 +28,6 @@ export type DashScopeRequestMetadata = {
   metadata: {
     sessionId?: string;
     promptId: string;
+    channel?: string;
   };
 };

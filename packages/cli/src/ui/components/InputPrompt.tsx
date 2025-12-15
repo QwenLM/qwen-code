@@ -707,15 +707,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     statusText = t('Accepting edits');
   }
 
+  const borderColor =
+    isShellFocused && !isEmbeddedShellFocused
+      ? (statusColor ?? theme.border.focused)
+      : theme.border.default;
+
   return (
     <>
       <Box
-        borderStyle="round"
-        borderColor={
-          isShellFocused && !isEmbeddedShellFocused
-            ? (statusColor ?? theme.border.focused)
-            : theme.border.default
-        }
+        borderStyle="single"
+        borderTop={true}
+        borderBottom={true}
+        borderLeft={false}
+        borderRight={false}
+        borderColor={borderColor}
         paddingX={1}
       >
         <Text
@@ -829,9 +834,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
                 isOnCursorLine &&
                 cursorVisualColAbsolute === cpLen(lineText)
               ) {
+                // Add zero-width space after cursor to prevent Ink from trimming trailing whitespace
                 renderedLine.push(
                   <Text key={`cursor-end-${cursorVisualColAbsolute}`}>
-                    {showCursor ? chalk.inverse(' ') : ' '}
+                    {showCursor ? chalk.inverse(' ') + '\u200B' : ' \u200B'}
                   </Text>,
                 );
               }

@@ -10,19 +10,21 @@ The `/language` command allows you to customize the language settings for both t
 To change the UI language of Qwen Code, use the `ui` subcommand:
 
 ```
-/language ui [zh-CN|en-US]
+/language ui [zh-CN|en-US|ru-RU]
 ```
 
 ### Available UI Languages
 
 - **zh-CN**: Simplified Chinese (简体中文)
 - **en-US**: English
+- **ru-RU**: Russian (Русский)
 
 ### Examples
 
 ```
 /language ui zh-CN    # Set UI language to Simplified Chinese
 /language ui en-US    # Set UI language to English
+/language ui ru-RU    # Set UI language to Russian
 ```
 
 ### UI Language Subcommands
@@ -31,6 +33,7 @@ You can also use direct subcommands for convenience:
 
 - `/language ui zh-CN` or `/language ui zh` or `/language ui 中文`
 - `/language ui en-US` or `/language ui en` or `/language ui english`
+- `/language ui ru-RU` or `/language ui ru` or `/language ui русский`
 
 ## LLM Output Language Settings
 

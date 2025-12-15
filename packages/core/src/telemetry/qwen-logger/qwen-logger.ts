@@ -249,6 +249,9 @@ export class QwenLogger {
           authType === AuthType.USE_OPENAI
             ? this.config?.getContentGeneratorConfig().baseUrl || ''
             : '',
+        ...(this.config?.getChannel?.()
+          ? { channel: this.config.getChannel() }
+          : {}),
       },
       _v: `qwen-code@${version}`,
     } as RumPayload;

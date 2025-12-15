@@ -136,7 +136,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
   useMemoryMonitor(historyManager);
-  const [corgiMode, setCorgiMode] = useState(false);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
     HistoryItem[] | null
@@ -485,7 +484,6 @@ export const AppContainer = (props: AppContainerProps) => {
         }, 100);
       },
       setDebugMessage,
-      toggleCorgiMode: () => setCorgiMode((prev) => !prev),
       dispatchExtensionStateUpdate,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
@@ -498,7 +496,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       openModelDialog,
       setDebugMessage,
-      setCorgiMode,
       dispatchExtensionStateUpdate,
       openPermissionsDialog,
       openApprovalModeDialog,
@@ -945,6 +942,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFocused,
     streamingState,
     elapsedTime,
+    settings,
   });
 
   // Dialog close functionality
@@ -1218,7 +1216,6 @@ export const AppContainer = (props: AppContainerProps) => {
       qwenAuthState,
       editorError,
       isEditorDialogOpen,
-      corgiMode,
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
@@ -1309,7 +1306,6 @@ export const AppContainer = (props: AppContainerProps) => {
       qwenAuthState,
       editorError,
       isEditorDialogOpen,
-      corgiMode,
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,

@@ -193,13 +193,11 @@ export class OpenAIContentConverter {
             // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
             if (func.parametersJsonSchema) {
               // MCP tool format - use parametersJsonSchema directly
-              if (func.parametersJsonSchema) {
-                // Create a shallow copy to avoid mutating the original object
-                const paramsCopy = {
-                  ...(func.parametersJsonSchema as Record<string, unknown>),
-                };
-                parameters = paramsCopy;
-              }
+              // Create a shallow copy to avoid mutating the original object
+              const paramsCopy = {
+                ...(func.parametersJsonSchema as Record<string, unknown>),
+              };
+              parameters = paramsCopy;
             } else if (func.parameters) {
               // Gemini tool format - convert parameters to OpenAI format
               parameters = this.convertGeminiToolParametersToOpenAI(

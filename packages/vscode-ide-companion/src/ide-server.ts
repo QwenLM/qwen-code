@@ -164,6 +164,7 @@ export class IDEServer {
         const allowedHosts = [
           `localhost:${this.port}`,
           `127.0.0.1:${this.port}`,
+          `host.docker.internal:${this.port}`, // Add Docker support
         ];
         if (!allowedHosts.includes(host)) {
           return res.status(403).json({ error: 'Invalid Host header' });
@@ -437,6 +438,7 @@ const createMcpServer = (diffManager: DiffManager) => {
       inputSchema: OpenDiffRequestSchema.shape,
     },
     async ({ filePath, newContent }: z.infer<typeof OpenDiffRequestSchema>) => {
+      // Minimal call site: only pass newContent; DiffManager reads old content itself
       await diffManager.showDiff(filePath, newContent);
       return { content: [] };
     },

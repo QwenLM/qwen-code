@@ -98,8 +98,6 @@ cd dist
 npm install -g .
 ```
 
-### Глобальная установка с помощью Homebrew (macOS/Linux)
-
 ```bash
 brew устанавливает qwen-код
 ```

@@ -130,10 +130,13 @@ export class DashScopeOpenAICompatibleProvider
   }
 
   buildMetadata(userPromptId: string): DashScopeRequestMetadata {
+    const channel = this.cliConfig.getChannel?.();
+
     return {
       metadata: {
         sessionId: this.cliConfig.getSessionId?.(),
         promptId: userPromptId,
+        ...(channel ? { channel } : {}),
       },
     };
   }

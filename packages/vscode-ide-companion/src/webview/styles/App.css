@@ -1,0 +1,602 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* ===========================
+   CSS Variables (Root Level)
+   =========================== */
+:root {
+  /* Qwen Brand Colors */
+  --app-qwen-theme: #615fff;
+  --app-qwen-clay-button-orange: #4f46e5;
+  --app-qwen-ivory: #f5f5ff;
+  --app-qwen-slate: #141420;
+  --app-qwen-green: #6bcf7f;
+
+  /* Spacing */
+  --app-spacing-small: 4px;
+  --app-spacing-medium: 8px;
+  --app-spacing-large: 12px;
+  --app-spacing-xlarge: 16px;
+
+  /* Border Radius */
+  --corner-radius-small: 4px;
+  --corner-radius-medium: 6px;
+  --corner-radius-large: 8px;
+
+  /* Typography */
+  --app-monospace-font-family: var(--vscode-editor-font-family, monospace);
+  --app-monospace-font-size: var(--vscode-editor-font-size, 12px);
+
+  /* Foreground & Background */
+  --app-primary-foreground: var(--vscode-foreground);
+  --app-primary-background: var(--vscode-sideBar-background);
+  --app-primary-border-color: var(--vscode-sideBarActivityBarTop-border);
+  --app-secondary-foreground: var(--vscode-descriptionForeground);
+
+  /* Input Colors */
+  --app-input-foreground: var(--vscode-input-foreground);
+  --app-input-background: var(--vscode-input-background);
+  --app-input-border: var(--vscode-inlineChatInput-border);
+  --app-input-active-border: var(--vscode-inputOption-activeBorder);
+  --app-input-placeholder-foreground: var(--vscode-input-placeholderForeground);
+  --app-input-secondary-background: var(--vscode-menu-background);
+  /* Input Highlight (focus ring/border) */
+  --app-input-highlight: var(--app-qwen-theme);
+
+  /* Code Highlighting */
+  --app-code-background: var(
+    --vscode-textCodeBlock-background,
+    rgba(0, 0, 0, 0.05)
+  );
+  --app-link-foreground: var(--vscode-textLink-foreground, #007acc);
+  --app-link-active-foreground: var(
+    --vscode-textLink-activeForeground,
+    #005a9e
+  );
+
+  /* List Styles */
+  --app-list-hover-background: var(--vscode-list-hoverBackground);
+  --app-list-active-background: var(--vscode-list-activeSelectionBackground);
+  --app-list-active-foreground: var(--vscode-list-activeSelectionForeground);
+
+  /* Buttons */
+  --app-ghost-button-hover-background: var(--vscode-toolbar-hoverBackground);
+  --app-button-foreground: var(--vscode-button-foreground);
+  --app-button-background: var(--vscode-button-background);
+  --app-button-hover-background: var(--vscode-button-hoverBackground);
+
+  /* Border Transparency */
+  --app-transparent-inner-border: rgba(255, 255, 255, 0.1);
+
+  /* Header */
+  --app-header-background: var(--vscode-sideBar-background);
+
+  /* List Styles*/
+  --app-list-padding: 0px;
+  --app-list-item-padding: 4px 8px;
+  --app-list-border-color: transparent;
+  --app-list-border-radius: 4px;
+  --app-list-gap: 2px;
+
+  /* Menu Colors*/
+  --app-menu-background: var(--vscode-menu-background);
+  --app-menu-border: var(--vscode-menu-border);
+  --app-menu-foreground: var(--vscode-menu-foreground);
+  --app-menu-selection-background: var(--vscode-menu-selectionBackground);
+  --app-menu-selection-foreground: var(--vscode-menu-selectionForeground);
+
+  /* Modal */
+  --app-modal-background: rgba(0, 0, 0, 0.75);
+
+  /* Widget */
+  --app-widget-border: var(--vscode-editorWidget-border);
+  --app-widget-shadow: var(--vscode-widget-shadow);
+}
+
+/* Light Theme Overrides */
+.vscode-light {
+  --app-transparent-inner-border: rgba(0, 0, 0, 0.07);
+  /* Slightly different brand shade in light theme for better contrast */
+  --app-input-highlight: var(--app-qwen-clay-button-orange);
+}
+
+/* Icon SVG styles */
+.icon-svg {
+  display: block;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--vscode-chat-font-family, var(--vscode-font-family));
+  background-color: var(--app-primary-background);
+  color: var(--app-primary-foreground);
+  overflow: hidden;
+  font-size: var(--vscode-chat-font-size, 13px);
+  padding: 0;
+}
+
+/* Ensure tool call containers keep a consistent left indent even if Tailwind utilities are purged */
+.toolcall-container {
+  /* Consistent indent for tool call blocks */
+  padding-left: 30px;
+}
+
+.toolcall-card {
+  /* Consistent indent for card-style tool calls */
+  padding-left: 30px;
+}
+
+button {
+  color: var(--app-primary-foreground);
+  font-family: var(--vscode-chat-font-family);
+  font-size: var(--vscode-chat-font-size, 13px);
+}
+
+/* ===========================
+   Main Chat Container
+   =========================== */
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100%;
+  background-color: var(--app-primary-background);
+  color: var(--app-primary-foreground);
+}
+
+/* Message list container: prevent browser scroll anchoring from fighting our manual pin-to-bottom logic */
+.chat-messages > * {
+  /* Disable overflow anchoring on individual items so the UA doesn't auto-adjust scroll */
+  overflow-anchor: none;
+}
+
+/* ===========================
+   Animations (used by message components)
+   =========================== */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes typingPulse {
+  0%,
+  60%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.6;
+  }
+  30% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ===========================
+   Input Form Styles
+   =========================== */
+.input-form {
+  display: flex;
+  background-color: var(--app-primary-background);
+  border-top: 1px solid var(--app-primary-border-color);
+}
+
+.input-field {
+  flex: 1;
+  padding: 10px 12px;
+  background-color: var(--app-input-background);
+  color: var(--app-input-foreground);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-small);
+  font-size: var(--vscode-chat-font-size, 13px);
+  font-family: var(--vscode-chat-font-family);
+  outline: none;
+  line-height: 1.5;
+}
+
+.input-field:focus {
+  border-color: var(--app-qwen-theme);
+}
+
+.input-field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.input-field::placeholder {
+  color: var(--app-input-placeholder-foreground);
+}
+
+.send-button {
+  padding: 10px 20px;
+  background-color: var(--app-qwen-clay-button-orange);
+  color: var(--app-qwen-ivory);
+  border: none;
+  border-radius: var(--corner-radius-small);
+  font-size: var(--vscode-chat-font-size, 13px);
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.send-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.send-button:active:not(:disabled) {
+  filter: brightness(0.9);
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Animation for in-progress status (used by pseudo bullets and spinners) */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.code-block {
+  font-family: var(--app-monospace-font-family);
+  font-size: var(--app-monospace-font-size);
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-small);
+  padding: var(--app-spacing-medium);
+  overflow-x: auto;
+  margin: 4px 0 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ===========================
+   Diff Display Styles
+   =========================== */
+.diff-display-container {
+  margin: 8px 0;
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-medium);
+  overflow: hidden;
+}
+
+.diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--app-input-secondary-background);
+  border-bottom: 1px solid var(--app-input-border);
+}
+
+.diff-file-path {
+  font-family: var(--app-monospace-font-family);
+  font-size: 13px;
+  color: var(--app-primary-foreground);
+}
+
+.open-diff-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-small);
+  color: var(--app-primary-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  transition: background-color 0.15s;
+}
+
+.open-diff-button:hover {
+  background: var(--app-ghost-button-hover-background);
+}
+
+.open-diff-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.diff-section {
+  margin: 0;
+}
+
+.diff-label {
+  padding: 8px 12px;
+  background: var(--app-primary-background);
+  border-bottom: 1px solid var(--app-input-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  text-transform: uppercase;
+}
+
+.diff-section .code-block {
+  border: none;
+  border-radius: 0;
+  margin: 0;
+  max-height: none; /* Remove height limit for diffs */
+  overflow-y: visible;
+}
+
+.diff-section .code-content {
+  display: block;
+}
+
+/* ===========================
+   Permission Request Card Styles
+   =========================== */
+.permission-request-card {
+  background: var(--app-input-background);
+  border: 1px solid var(--app-qwen-theme);
+  border-radius: var(--corner-radius-medium);
+  margin: var(--app-spacing-medium) 0;
+  margin-bottom: var(--app-spacing-xlarge);
+  overflow: visible;
+  animation: fadeIn 0.2s ease-in;
+}
+
+.permission-card-body {
+  padding: var(--app-spacing-large);
+  min-height: fit-content;
+  height: auto;
+}
+
+.permission-header {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-large);
+  margin-bottom: var(--app-spacing-large);
+}
+
+.permission-icon-wrapper {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(97, 95, 255, 0.1);
+  border-radius: var(--corner-radius-medium);
+  flex-shrink: 0;
+}
+
+.permission-icon {
+  font-size: 20px;
+}
+
+.permission-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.permission-title {
+  font-weight: 600;
+  color: var(--app-primary-foreground);
+  margin-bottom: 2px;
+}
+
+.permission-subtitle {
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+}
+
+.permission-command-section {
+  margin-bottom: var(--app-spacing-large);
+}
+
+.permission-command-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  margin-bottom: var(--app-spacing-small);
+  text-transform: uppercase;
+}
+
+.permission-command-code {
+  display: block;
+  font-family: var(--app-monospace-font-family);
+  font-size: var(--app-monospace-font-size);
+  color: var(--app-primary-foreground);
+  background: var(--app-primary-background);
+  padding: var(--app-spacing-medium);
+  border-radius: var(--corner-radius-small);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.permission-locations-section {
+  margin-bottom: var(--app-spacing-large);
+}
+
+.permission-locations-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  margin-bottom: var(--app-spacing-small);
+  text-transform: uppercase;
+}
+
+.permission-location-item {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-small);
+  padding: var(--app-spacing-small) 0;
+  font-size: 12px;
+}
+
+.permission-location-icon {
+  flex-shrink: 0;
+}
+
+.permission-location-path {
+  color: var(--app-primary-foreground);
+  font-family: var(--app-monospace-font-family);
+}
+
+.permission-location-line {
+  color: var(--app-secondary-foreground);
+}
+
+.permission-options-section {
+  margin-top: var(--app-spacing-large);
+}
+
+.permission-options-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--app-primary-foreground);
+  margin-bottom: var(--app-spacing-medium);
+}
+
+.permission-options-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--app-spacing-small);
+}
+
+.permission-option {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-medium);
+  padding: var(--app-spacing-medium) var(--app-spacing-large);
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--corner-radius-small);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.permission-option:hover {
+  background: var(--app-list-hover-background);
+  border-color: var(--app-input-active-border);
+}
+
+.permission-option.selected {
+  border-color: var(--app-qwen-theme);
+  background: rgba(97, 95, 255, 0.1);
+}
+
+.permission-radio {
+  flex-shrink: 0;
+}
+
+.permission-option-content {
+  display: flex;
+  align-items: center;
+  gap: var(--app-spacing-small);
+  flex: 1;
+}
+
+.permission-option-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  background-color: var(--app-list-hover-background);
+  border-radius: 4px;
+  margin-right: 4px;
+}
+
+.permission-option.selected .permission-option-number {
+  color: var(--app-qwen-ivory);
+  background-color: var(--app-qwen-theme);
+}
+
+.permission-always-badge {
+  font-size: 12px;
+}
+
+.permission-no-options {
+  text-align: center;
+  padding: var(--app-spacing-large);
+  color: var(--app-secondary-foreground);
+}
+
+.permission-actions {
+  margin-top: var(--app-spacing-large);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.permission-confirm-button {
+  padding: var(--app-spacing-medium) var(--app-spacing-xlarge);
+  background: var(--app-qwen-clay-button-orange);
+  color: var(--app-qwen-ivory);
+  border: none;
+  border-radius: var(--corner-radius-small);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.permission-confirm-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.permission-confirm-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.permission-success {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--app-spacing-medium);
+  padding: var(--app-spacing-large);
+  background: rgba(76, 175, 80, 0.1);
+  border-radius: var(--corner-radius-small);
+  margin-top: var(--app-spacing-large);
+}
+
+.permission-success-icon {
+  color: #4caf50;
+  font-weight: bold;
+}
+
+.permission-success-text {
+  color: #4caf50;
+  font-size: 13px;
+}

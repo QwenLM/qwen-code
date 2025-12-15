@@ -35,6 +35,8 @@ export interface ToolCallStartParams {
   callId: string;
   /** Arguments passed to the tool */
   args?: Record<string, unknown>;
+  /** Status of the tool call */
+  status?: 'pending' | 'in_progress' | 'completed' | 'failed';
 }
 
 /**

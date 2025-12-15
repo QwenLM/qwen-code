@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -54,6 +54,15 @@
       {
         "command": "qwen-code.showNotices",
         "title": "Qwen Code: View Third-Party Notices"
+      },
+      {
+        "command": "qwen-code.openChat",
+        "title": "Qwen Code: Open",
+        "icon": "./assets/icon.png"
+      },
+      {
+        "command": "qwen-code.login",
+        "title": "Qwen Code: Login"
       }
     ],
     "menus": {
@@ -65,6 +74,10 @@
         {
           "command": "qwen.diff.cancel",
           "when": "qwen.diff.isVisible"
+        },
+        {
+          "command": "qwen-code.login",
+          "when": "false"
         }
       ],
       "editor/title": [
@@ -76,6 +89,10 @@
         {
           "command": "qwen.diff.cancel",
           "when": "qwen.diff.isVisible",
+          "group": "navigation"
+        },
+        {
+          "command": "qwen-code.openChat",
           "group": "navigation"
         }
       ]
@@ -96,7 +113,7 @@
   "main": "./dist/extension.cjs",
   "type": "module",
   "scripts": {
-    "prepackage": "npm run generate:notices && npm run check-types && npm run lint && npm run build:prod",
+    "prepackage": "node ./scripts/prepackage.js",
     "build": "npm run build:dev",
     "build:dev": "npm run check-types && npm run lint && node esbuild.js",
     "build:prod": "node esbuild.js --production",
@@ -115,21 +132,33 @@
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "20.x",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@types/semver": "^7.7.1",
     "@types/vscode": "^1.99.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
     "@vscode/vsce": "^3.6.0",
+    "autoprefixer": "^10.4.22",
     "esbuild": "^0.25.3",
     "eslint": "^9.25.1",
+    "eslint-plugin-react-hooks": "^5.2.0",
     "npm-run-all2": "^8.0.2",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.18",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },
   "dependencies": {
+    "semver": "^7.7.2",
     "@modelcontextprotocol/sdk": "^1.15.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
+    "markdown-it": "^14.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
     "zod": "^3.25.76"
   }
 }
