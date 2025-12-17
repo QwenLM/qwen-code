@@ -9,7 +9,7 @@ import { darkSemanticColors } from './semantic-tokens.js';
 
 const qwenDarkColors: ColorsTheme = {
   type: 'dark',
-  Background: '#0b0e14',
+  Background: '#00FF00',
   Foreground: '#bfbdb6',
   LightBlue: '#59C2FF',
   AccentBlue: '#39BAE6',
