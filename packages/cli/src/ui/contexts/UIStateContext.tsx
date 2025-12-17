@@ -54,13 +54,13 @@ export interface UIState {
   qwenAuthState: QwenAuthState;
   editorError: string | null;
   isEditorDialogOpen: boolean;
-  corgiMode: boolean;
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
+  isResumeDialogOpen: boolean;
   slashCommands: readonly SlashCommand[];
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;

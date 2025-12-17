@@ -20,6 +20,7 @@ export const AGENT_METHODS = {
 export const CLIENT_METHODS = {
   fs_read_text_file: 'fs/read_text_file',
   fs_write_text_file: 'fs/write_text_file',
+  authenticate_update: 'authenticate/update',
   session_request_permission: 'session/request_permission',
   session_update: 'session/update',
 };
@@ -56,8 +57,6 @@ export type ListSessionsResponse = z.infer<typeof listSessionsResponseSchema>;
 export type CancelNotification = z.infer<typeof cancelNotificationSchema>;
 
 export type AuthenticateRequest = z.infer<typeof authenticateRequestSchema>;
-
-export type AuthenticateResponse = z.infer<typeof authenticateResponseSchema>;
 
 export type NewSessionResponse = z.infer<typeof newSessionResponseSchema>;
 
@@ -247,7 +246,13 @@ export const authenticateRequestSchema = z.object({
   methodId: z.string(),
 });
 
-export const authenticateResponseSchema = z.null();
+export const authenticateUpdateSchema = z.object({
+  _meta: z.object({
+    authUri: z.string(),
+  }),
+});
+
+export type AuthenticateUpdate = z.infer<typeof authenticateUpdateSchema>;
 
 export const newSessionResponseSchema = z.object({
   sessionId: z.string(),
@@ -315,6 +320,23 @@ export const annotationsSchema = z.object({
   lastModified: z.string().optional().nullable(),
   priority: z.number().optional().nullable(),
 });
+
+export const usageSchema = z.object({
+  promptTokens: z.number().optional().nullable(),
+  completionTokens: z.number().optional().nullable(),
+  thoughtsTokens: z.number().optional().nullable(),
+  totalTokens: z.number().optional().nullable(),
+  cachedTokens: z.number().optional().nullable(),
+});
+
+export type Usage = z.infer<typeof usageSchema>;
+
+export const sessionUpdateMetaSchema = z.object({
+  usage: usageSchema.optional().nullable(),
+  durationMs: z.number().optional().nullable(),
+});
+
+export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
 
 export const requestPermissionResponseSchema = z.object({
   outcome: requestPermissionOutcomeSchema,
@@ -500,10 +522,12 @@ export const sessionUpdateSchema = z.union([
   z.object({
     content: contentBlockSchema,
     sessionUpdate: z.literal('agent_message_chunk'),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
   }),
   z.object({
     content: contentBlockSchema,
     sessionUpdate: z.literal('agent_thought_chunk'),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
   }),
   z.object({
     content: z.array(toolCallContentSchema).optional(),
@@ -536,7 +560,6 @@ export const sessionUpdateSchema = z.union([
 
 export const agentResponseSchema = z.union([
   initializeResponseSchema,
-  authenticateResponseSchema,
   newSessionResponseSchema,
   loadSessionResponseSchema,
   promptResponseSchema,

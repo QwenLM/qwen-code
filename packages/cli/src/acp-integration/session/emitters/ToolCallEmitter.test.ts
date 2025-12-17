@@ -71,7 +71,7 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'tool_call',
         toolCallId: 'call-123',
-        status: 'in_progress',
+        status: 'pending',
         title: 'unknown_tool', // Falls back to tool name
         content: [],
         locations: [],
@@ -94,7 +94,7 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'tool_call',
         toolCallId: 'call-456',
-        status: 'in_progress',
+        status: 'pending',
         title: 'edit_file: Test tool description',
         content: [],
         locations: [{ path: '/test/file.ts', line: 10 }],
@@ -144,7 +144,7 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'tool_call',
         toolCallId: 'call-fail',
-        status: 'in_progress',
+        status: 'pending',
         title: 'failing_tool', // Fallback to tool name
         content: [],
         locations: [], // Fallback to empty
@@ -493,7 +493,7 @@ describe('ToolCallEmitter', () => {
                 type: 'content',
                 content: {
                   type: 'text',
-                  text: '{"output":"test output"}',
+                  text: 'test output',
                 },
               },
             ],
@@ -650,7 +650,7 @@ describe('ToolCallEmitter', () => {
             content: [
               {
                 type: 'content',
-                content: { type: 'text', text: '{"output":"Function output"}' },
+                content: { type: 'text', text: 'Function output' },
               },
             ],
             rawOutput: 'raw result',

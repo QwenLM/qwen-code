@@ -58,7 +58,7 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
-import { showResumeSessionPicker } from './ui/components/ResumeSessionPicker.js';
+import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -92,7 +92,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
     );
   }
 
-  if (process.env['GEMINI_CLI_NO_RELAUNCH']) {
+  if (process.env['QWEN_CODE_NO_RELAUNCH']) {
     return [];
   }
 

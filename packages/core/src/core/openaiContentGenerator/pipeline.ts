@@ -34,6 +34,7 @@ export class ContentGenerationPipeline {
     this.client = this.config.provider.buildClient();
     this.converter = new OpenAIContentConverter(
       this.contentGeneratorConfig.model,
+      this.contentGeneratorConfig.schemaCompliance,
     );
   }
 

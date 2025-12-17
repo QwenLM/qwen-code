@@ -22,6 +22,10 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
+import {
+  convertSchema,
+  type SchemaComplianceMode,
+} from '../../utils/schemaConverter.js';
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -93,6 +97,7 @@ interface ParsedParts {
  */
 export class OpenAIContentConverter {
   private model: string;
+  private schemaCompliance: SchemaComplianceMode;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
   /**
@@ -102,8 +107,9 @@ export class OpenAIContentConverter {
    */
   private thoughtSignatureCache = new Map<number, string>();
 
-  constructor(model: string) {
+  constructor(model: string, schemaCompliance: SchemaComplianceMode = 'auto') {
     this.model = model;
+    this.schemaCompliance = schemaCompliance;
   }
 
   /**
@@ -213,18 +219,20 @@ export class OpenAIContentConverter {
             // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
             if (func.parametersJsonSchema) {
               // MCP tool format - use parametersJsonSchema directly
-              if (func.parametersJsonSchema) {
-                // Create a shallow copy to avoid mutating the original object
-                const paramsCopy = {
-                  ...(func.parametersJsonSchema as Record<string, unknown>),
-                };
-                parameters = paramsCopy;
-              }
+              // Create a shallow copy to avoid mutating the original object
+              const paramsCopy = {
+                ...(func.parametersJsonSchema as Record<string, unknown>),
+              };
+              parameters = paramsCopy;
             } else if (func.parameters) {
               // Gemini tool format - convert parameters to OpenAI format
               parameters = this.convertGeminiToolParametersToOpenAI(
                 func.parameters as Record<string, unknown>,
               );
+            }
+
+            if (parameters) {
+              parameters = convertSchema(parameters, this.schemaCompliance);
             }
 
             openAITools.push({

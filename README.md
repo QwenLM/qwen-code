@@ -88,6 +88,12 @@ npm install -g .
 brew install qwen-code
 ```
 
+## VS Code Extension
+
+In addition to the CLI tool, Qwen Code also provides a **VS Code extension** that brings AI-powered coding assistance directly into your editor with features like file system operations, native diffing, interactive chat, and more.
+
+> 📦 The extension is currently in development. For installation, features, and development guide, see the [VS Code Extension README](./packages/vscode-ide-companion/README.md).
+
 ## Quick Start
 
 ```bash

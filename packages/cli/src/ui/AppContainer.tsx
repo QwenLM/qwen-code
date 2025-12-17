@@ -53,6 +53,7 @@ import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { useConsoleMessages } from './hooks/useConsoleMessages.js';
@@ -136,7 +137,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
   const historyManager = useHistory();
   useMemoryMonitor(historyManager);
-  const [corgiMode, setCorgiMode] = useState(false);
   const [debugMessage, setDebugMessage] = useState<string>('');
   const [quittingMessages, setQuittingMessages] = useState<
     HistoryItem[] | null
@@ -204,7 +204,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stdout } = useStdout();
 
   // Additional hooks moved from App.tsx
-  const { stats: sessionStats } = useSessionStats();
+  const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
 
@@ -437,6 +437,18 @@ export const AppContainer = (props: AppContainerProps) => {
     useModelCommand();
 
   const {
+    isResumeDialogOpen,
+    openResumeDialog,
+    closeResumeDialog,
+    handleResume,
+  } = useResumeCommand({
+    config,
+    historyManager,
+    startNewSession,
+    remount: refreshStatic,
+  });
+
+  const {
     showWorkspaceMigrationDialog,
     workspaceExtensions,
     onWorkspaceMigrationDialogOpen,
@@ -485,11 +497,11 @@ export const AppContainer = (props: AppContainerProps) => {
         }, 100);
       },
       setDebugMessage,
-      toggleCorgiMode: () => setCorgiMode((prev) => !prev),
       dispatchExtensionStateUpdate,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openResumeDialog,
     }),
     [
       openAuthDialog,
@@ -498,13 +510,13 @@ export const AppContainer = (props: AppContainerProps) => {
       openSettingsDialog,
       openModelDialog,
       setDebugMessage,
-      setCorgiMode,
       dispatchExtensionStateUpdate,
       openPermissionsDialog,
       openApprovalModeDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
+      openResumeDialog,
     ],
   );
 
@@ -945,6 +957,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFocused,
     streamingState,
     elapsedTime,
+    settings,
   });
 
   // Dialog close functionality
@@ -1196,7 +1209,8 @@ export const AppContainer = (props: AppContainerProps) => {
     !!proQuotaRequest ||
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
-    isApprovalModeDialogOpen;
+    isApprovalModeDialogOpen ||
+    isResumeDialogOpen;
 
   const pendingHistoryItems = useMemo(
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
@@ -1218,13 +1232,13 @@ export const AppContainer = (props: AppContainerProps) => {
       qwenAuthState,
       editorError,
       isEditorDialogOpen,
-      corgiMode,
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isResumeDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1309,13 +1323,13 @@ export const AppContainer = (props: AppContainerProps) => {
       qwenAuthState,
       editorError,
       isEditorDialogOpen,
-      corgiMode,
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isResumeDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -1425,6 +1439,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Resume session dialog
+      openResumeDialog,
+      closeResumeDialog,
+      handleResume,
     }),
     [
       handleThemeSelect,
@@ -1457,6 +1475,10 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
+      // Resume session dialog
+      openResumeDialog,
+      closeResumeDialog,
+      handleResume,
     ],
   );
 

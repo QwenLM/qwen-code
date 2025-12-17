@@ -1307,7 +1307,7 @@ describe('InputPrompt', () => {
       mockBuffer.text = text;
       mockBuffer.lines = [text];
       mockBuffer.viewportVisualLines = [text];
-      mockBuffer.visualCursor = [0, 8]; // cursor after '👍' (length is 6 + 2 for emoji)
+      mockBuffer.visualCursor = [0, 7]; // cursor after '👍' (emoji is 1 code point, so total is 7)
 
       const { stdout, unmount } = renderWithProviders(
         <InputPrompt {...props} />,

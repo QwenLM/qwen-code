@@ -1,0 +1,22 @@
+{
+  "name": "docs-site",
+  "version": "1.0.0",
+  "description": "",
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "link": "ln -s ../docs content",
+    "clean": "rm -rf .next",
+    "dev": "npm run clean && next --turbopack",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "next": "^16.0.8",
+    "nextra": "^4.6.1",
+    "nextra-theme-docs": "^4.6.1",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1"
+  }
+}

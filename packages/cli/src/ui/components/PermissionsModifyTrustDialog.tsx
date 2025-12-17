@@ -115,7 +115,7 @@ export function PermissionsModifyTrustDialog({
       {needsRestart && (
         <Box marginLeft={1} marginTop={1}>
           <Text color={theme.status.warning}>
-            To apply the trust changes, Gemini CLI must be restarted. Press
+            To apply the trust changes, Qwen Code must be restarted. Press
             &apos;r&apos; to restart CLI now.
           </Text>
         </Box>

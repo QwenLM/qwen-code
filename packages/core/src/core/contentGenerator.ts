@@ -76,6 +76,8 @@ export type ContentGeneratorConfig = {
   };
   proxy?: string | undefined;
   userAgent?: string;
+  // Schema compliance mode for tool definitions
+  schemaCompliance?: 'auto' | 'openapi_30';
 };
 
 export function createContentGeneratorConfig(
