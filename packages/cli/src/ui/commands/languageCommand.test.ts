@@ -54,10 +54,11 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-// Mock Storage from core
+// Mock Storage and createSecureDir from core
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const fs = await import('node:fs');
   return {
     ...actual,
     Storage: {
@@ -66,6 +67,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         .fn()
         .mockReturnValue('/mock/.qwen/settings.json'),
     },
+    createSecureDir: vi.fn().mockImplementation((dir: string) => {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    }),
   };
 });
 
