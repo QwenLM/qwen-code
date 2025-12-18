@@ -8,6 +8,7 @@ import crypto from 'crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import * as os from 'os';
+import { createSecureDirAsync } from '../utils/fileUtils.js';
 
 import open from 'open';
 import { EventEmitter } from 'events';
@@ -952,7 +953,7 @@ async function authWithQwenDeviceFlow(
 async function cacheQwenCredentials(credentials: QwenCredentials) {
   const filePath = getQwenCachedCredentialPath();
   try {
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await createSecureDirAsync(path.dirname(filePath));
 
     const credString = JSON.stringify(credentials, null, 2);
     await fs.writeFile(filePath, credString);
