@@ -10,6 +10,8 @@ import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   AVAILABLE_MODELS_QWEN,
@@ -27,9 +29,15 @@ vi.mock('./shared/DescriptiveRadioButtonSelect.js', () => ({
 }));
 const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 
+const createMockSettings = () =>
+  ({
+    setValue: vi.fn(),
+  }) as unknown as LoadedSettings;
+
 const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
+  settingsValue: LoadedSettings | undefined = createMockSettings(),
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -58,15 +66,18 @@ const renderComponent = (
     : undefined;
 
   const renderResult = render(
-    <ConfigContext.Provider value={mockConfig}>
-      <ModelDialog {...combinedProps} />
-    </ConfigContext.Provider>,
+    <SettingsContext.Provider value={settingsValue}>
+      <ConfigContext.Provider value={mockConfig}>
+        <ModelDialog {...combinedProps} />
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 
   return {
     ...renderResult,
     props: combinedProps,
     mockConfig,
+    mockSettings: settingsValue,
   };
 };
 
@@ -139,8 +150,8 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
   });
 
-  it('calls config.setModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', () => {
-    const { props, mockConfig } = renderComponent({}, {}); // Pass empty object for contextValue
+  it('calls config.setModel, settings.setValue, and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', () => {
+    const { props, mockConfig, mockSettings } = renderComponent({}, {}); // Pass empty object for contextValue
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
@@ -149,6 +160,39 @@ describe('<ModelDialog />', () => {
 
     // Assert against the default mock provided by renderComponent
     expect(mockConfig?.setModel).toHaveBeenCalledWith(MAINLINE_CODER);
+    // Assert that the model is persisted to settings
+    expect(mockSettings?.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      MAINLINE_CODER,
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists selected model to settings.json', () => {
+    const mockSettings = createMockSettings();
+    const { mockConfig } = renderComponent({}, {}, mockSettings);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    childOnSelect(MAINLINE_VLM);
+
+    expect(mockConfig?.setModel).toHaveBeenCalledWith(MAINLINE_VLM);
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      MAINLINE_VLM,
+    );
+  });
+
+  it('does not call settings.setValue when settings context is not available', () => {
+    const { mockConfig, props } = renderComponent({}, {}, undefined);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    childOnSelect(MAINLINE_CODER);
+
+    // setModel should still be called
+    expect(mockConfig?.setModel).toHaveBeenCalledWith(MAINLINE_CODER);
+    // onClose should still be called
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 

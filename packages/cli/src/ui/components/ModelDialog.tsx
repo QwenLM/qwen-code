@@ -16,6 +16,8 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { SettingScope } from '../../config/settings.js';
 import {
   getAvailableModelsForAuthType,
   MAINLINE_CODER,
@@ -28,6 +30,7 @@ interface ModelDialogProps {
 
 export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
+  const settings = useContext(SettingsContext);
 
   // Get auth type from config, default to QWEN_OAUTH if not available
   const authType = config?.getAuthType() ?? AuthType.QWEN_OAUTH;
@@ -74,10 +77,15 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
         config.setModel(model);
         const event = new ModelSlashCommandEvent(model);
         logModelSlashCommand(config, event);
+
+        // Persist the selected model to settings.json
+        if (settings) {
+          settings.setValue(SettingScope.User, 'model.name', model);
+        }
       }
       onClose();
     },
-    [config, onClose],
+    [config, settings, onClose],
   );
 
   return (
