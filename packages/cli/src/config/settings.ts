@@ -14,6 +14,7 @@ import {
   QWEN_DIR,
   getErrorMessage,
   Storage,
+  createSecureDir,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -930,10 +931,10 @@ export function migrateDeprecatedSettings(
 
 export function saveSettings(settingsFile: SettingsFile): void {
   try {
-    // Ensure the directory exists
+    // Ensure the directory exists with secure permissions
     const dirPath = path.dirname(settingsFile.path);
     if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
+      createSecureDir(dirPath);
     }
 
     let settingsToSave = settingsFile.originalSettings;

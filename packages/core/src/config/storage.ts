@@ -7,7 +7,6 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
-import * as fs from 'node:fs';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -82,10 +81,6 @@ export class Storage {
     const hash = this.getFilePathHash(this.getProjectRoot());
     const tempDir = Storage.getGlobalTempDir();
     return path.join(tempDir, hash);
-  }
-
-  ensureProjectTempDirExists(): void {
-    fs.mkdirSync(this.getProjectTempDir(), { recursive: true });
   }
 
   static getOAuthCredsPath(): string {

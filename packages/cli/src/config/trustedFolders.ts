@@ -12,6 +12,7 @@ import {
   getErrorMessage,
   isWithinRoot,
   ideContextStore,
+  createSecureDir,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import stripJsonComments from 'strip-json-comments';
@@ -172,10 +173,10 @@ export function saveTrustedFolders(
   trustedFoldersFile: TrustedFoldersFile,
 ): void {
   try {
-    // Ensure the directory exists
+    // Ensure the directory exists with secure permissions
     const dirPath = path.dirname(trustedFoldersFile.path);
     if (!fs.existsSync(dirPath)) {
-      fs.mkdirSync(dirPath, { recursive: true });
+      createSecureDir(dirPath);
     }
 
     fs.writeFileSync(

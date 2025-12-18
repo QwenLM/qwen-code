@@ -503,3 +503,44 @@ export async function fileExists(filePath: string): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Create a directory with restricted permissions (owner-only access: 0o700).
+ * Throws a user-friendly error on permission denied.
+ * @param dirPath Path to the directory to create.
+ */
+export function createSecureDir(dirPath: string): void {
+  try {
+    fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+      throw new Error(`Permission denied creating directory: ${dirPath}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Async version: Create a directory with restricted permissions (owner-only access: 0o700).
+ * Throws a user-friendly error on permission denied.
+ * @param dirPath Path to the directory to create.
+ */
+export async function createSecureDirAsync(dirPath: string): Promise<void> {
+  try {
+    await fsPromises.mkdir(dirPath, { recursive: true, mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EACCES') {
+      throw new Error(`Permission denied creating directory: ${dirPath}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Write a file with restricted permissions (owner read/write only: 0o600).
+ * @param filePath Path to the file to write.
+ * @param content Content to write.
+ */
+export function writeSecureFile(filePath: string, content: string): void {
+  fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o600 });
+}
