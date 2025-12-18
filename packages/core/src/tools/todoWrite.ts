@@ -13,6 +13,7 @@ import * as path from 'path';
 import * as process from 'process';
 
 import { QWEN_DIR } from '../utils/paths.js';
+import { createSecureDirAsync } from '../utils/fileUtils.js';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 
@@ -281,7 +282,7 @@ async function writeTodosToFile(
   const todoFilePath = getTodoFilePath(sessionId);
   const todoDir = path.dirname(todoFilePath);
 
-  await fs.mkdir(todoDir, { recursive: true });
+  await createSecureDirAsync(todoDir);
 
   const data = {
     todos,
