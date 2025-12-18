@@ -29,6 +29,9 @@ import {
   detectBOM,
   readFileWithEncoding,
   fileExists,
+  createSecureDir,
+  createSecureDirAsync,
+  writeSecureFile,
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
 
@@ -964,6 +967,109 @@ describe('fileUtils', () => {
       } finally {
         statSpy.mockRestore();
       }
+    });
+  });
+
+  describe('createSecureDir', () => {
+    it('should create directory with mode 0o700', () => {
+      const testDir = path.join(tempRootDir, 'secure-dir');
+      createSecureDir(testDir);
+
+      expect(actualNodeFs.existsSync(testDir)).toBe(true);
+      const stats = actualNodeFs.statSync(testDir);
+      // Check that mode includes 0o700 (owner rwx)
+      expect(stats.mode & 0o700).toBe(0o700);
+    });
+
+    it('should create nested directories', () => {
+      const nestedDir = path.join(tempRootDir, 'a', 'b', 'c');
+      createSecureDir(nestedDir);
+
+      expect(actualNodeFs.existsSync(nestedDir)).toBe(true);
+    });
+
+    it('should not fail if directory already exists', () => {
+      const testDir = path.join(tempRootDir, 'existing-dir');
+      actualNodeFs.mkdirSync(testDir);
+
+      expect(() => createSecureDir(testDir)).not.toThrow();
+    });
+
+    it('should throw user-friendly error on EACCES', () => {
+      const mkdirSyncSpy = vi
+        .spyOn(fs, 'mkdirSync')
+        .mockImplementationOnce(() => {
+          const error = new Error('Permission denied') as NodeJS.ErrnoException;
+          error.code = 'EACCES';
+          throw error;
+        });
+
+      expect(() => createSecureDir('/some/path')).toThrow(
+        'Permission denied creating directory: /some/path',
+      );
+
+      mkdirSyncSpy.mockRestore();
+    });
+
+    it('should rethrow other errors', () => {
+      const mkdirSyncSpy = vi
+        .spyOn(fs, 'mkdirSync')
+        .mockImplementationOnce(() => {
+          throw new Error('Some other error');
+        });
+
+      expect(() => createSecureDir('/some/path')).toThrow('Some other error');
+
+      mkdirSyncSpy.mockRestore();
+    });
+  });
+
+  describe('createSecureDirAsync', () => {
+    it('should create directory with mode 0o700', async () => {
+      const testDir = path.join(tempRootDir, 'secure-dir-async');
+      await createSecureDirAsync(testDir);
+
+      expect(actualNodeFs.existsSync(testDir)).toBe(true);
+      const stats = actualNodeFs.statSync(testDir);
+      expect(stats.mode & 0o700).toBe(0o700);
+    });
+
+    it('should throw user-friendly error on EACCES', async () => {
+      const mkdirSpy = vi
+        .spyOn(fsPromises, 'mkdir')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+        );
+
+      await expect(createSecureDirAsync('/some/path')).rejects.toThrow(
+        'Permission denied creating directory: /some/path',
+      );
+
+      mkdirSpy.mockRestore();
+    });
+  });
+
+  describe('writeSecureFile', () => {
+    it('should write file with mode 0o600', () => {
+      const testFile = path.join(tempRootDir, 'secure-file.txt');
+      writeSecureFile(testFile, 'secret content');
+
+      expect(actualNodeFs.existsSync(testFile)).toBe(true);
+      expect(actualNodeFs.readFileSync(testFile, 'utf-8')).toBe(
+        'secret content',
+      );
+
+      const stats = actualNodeFs.statSync(testFile);
+      // Check that mode includes 0o600 (owner rw)
+      expect(stats.mode & 0o600).toBe(0o600);
+    });
+
+    it('should write file with utf-8 encoding', () => {
+      const testFile = path.join(tempRootDir, 'utf8-file.txt');
+      const content = 'Hello, 世界!';
+      writeSecureFile(testFile, content);
+
+      expect(actualNodeFs.readFileSync(testFile, 'utf-8')).toBe(content);
     });
   });
 });
