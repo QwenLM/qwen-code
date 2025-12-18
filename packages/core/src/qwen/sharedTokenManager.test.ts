@@ -43,6 +43,10 @@ vi.mock('node:path', () => ({
   default: {
     join: vi.fn(),
     dirname: vi.fn(),
+    extname: vi.fn((p: string) => {
+      const match = p.match(/\.[^.]+$/);
+      return match ? match[0] : '';
+    }),
   },
 }));
 
