@@ -8,6 +8,7 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import type { Content } from '@google/genai';
 import type { Storage } from '../config/storage.js';
+import { createSecureDirAsync } from '../utils/fileUtils.js';
 
 const LOG_FILE_NAME = 'logs.json';
 
@@ -145,7 +146,7 @@ export class Logger {
     this.logFilePath = path.join(this.qwenDir, LOG_FILE_NAME);
 
     try {
-      await fs.mkdir(this.qwenDir, { recursive: true });
+      await createSecureDirAsync(this.qwenDir);
       let fileExisted = true;
       try {
         await fs.access(this.logFilePath);
