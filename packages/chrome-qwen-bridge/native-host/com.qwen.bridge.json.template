@@ -1,0 +1,9 @@
+{
+  "name": "com.qwen.bridge",
+  "description": "Native messaging host for Qwen CLI Bridge",
+  "path": "__PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "__EXTENSION_ID__"
+  ]
+}

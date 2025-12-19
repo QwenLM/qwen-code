@@ -1,0 +1,43 @@
+{
+  "name": "@qwen-code/chrome-bridge",
+  "version": "1.0.0",
+  "description": "Chrome extension bridge for Qwen CLI - enables AI-powered browser interactions",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/chrome-qwen-bridge"
+  },
+  "keywords": [
+    "chrome-extension",
+    "qwen",
+    "cli",
+    "bridge",
+    "native-messaging",
+    "mcp",
+    "ai"
+  ],
+  "author": "Qwen Team",
+  "license": "Apache-2.0",
+  "files": [
+    "extension/",
+    "native-host/",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "./debug.sh",
+    "install:extension": "./first-install.sh",
+    "install:host": "cd native-host && ./smart-install.sh",
+    "install:all": "./first-install.sh",
+    "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
+    "dev:server": "qwen server --port 8080",
+    "build": "./build.sh",
+    "package": "zip -r chrome-qwen-bridge.zip extension/",
+    "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id",
+    "logs": "tail -f /tmp/qwen-bridge-host.log",
+    "logs:qwen": "tail -f /tmp/qwen-server.log"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
