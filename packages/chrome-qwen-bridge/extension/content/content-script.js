@@ -389,6 +389,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       });
       break;
 
+    case 'GET_CONSOLE_LOGS':
+      // Get captured console logs
+      sendResponse({
+        success: true,
+        data: consoleLogs.slice() // Return a copy
+      });
+      break;
+
     case 'GET_SELECTED_TEXT':
       // Get currently selected text
       sendResponse({

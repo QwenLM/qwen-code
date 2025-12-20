@@ -19,6 +19,7 @@
   ],
   "author": "Qwen Team",
   "license": "Apache-2.0",
+  "type": "module",
   "files": [
     "extension/",
     "native-host/",
@@ -26,18 +27,33 @@
   ],
   "scripts": {
     "dev": "./debug.sh",
+    "build:ui": "node esbuild.config.js",
+    "build:ui:watch": "node esbuild.config.js --watch",
+    "build": "npm run build:ui",
     "install:extension": "./first-install.sh",
     "install:host": "cd native-host && ./smart-install.sh",
     "install:all": "./first-install.sh",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
-    "dev:server": "qwen server --port 8080",
-    "build": "./build.sh",
     "package": "zip -r chrome-qwen-bridge.zip extension/",
     "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id",
-    "logs": "tail -f /tmp/qwen-bridge-host.log",
-    "logs:qwen": "tail -f /tmp/qwen-server.log"
+    "logs": "tail -f /tmp/qwen-bridge-host.log"
   },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "autoprefixer": "^10.4.22",
+    "esbuild": "^0.25.3",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.18",
+    "typescript": "^5.8.3"
   }
 }

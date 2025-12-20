@@ -318,10 +318,33 @@ getSelectedBtn.addEventListener('click', async () => {
       throw new Error('No active tab found');
     }
 
+    // Check if we can access this page
+    if (tab.url && (tab.url.startsWith('chrome://') ||
+        tab.url.startsWith('chrome-extension://') ||
+        tab.url.startsWith('edge://') ||
+        tab.url.startsWith('about:'))) {
+      throw new Error('Cannot access this page (browser internal page)');
+    }
+
+    // Try to inject content script first
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content/content-script.js']
+      });
+    } catch (injectError) {
+      console.log('Script injection skipped:', injectError.message);
+    }
+
     // Get selected text from content script
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      type: 'GET_SELECTED_TEXT'
-    });
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tab.id, {
+        type: 'GET_SELECTED_TEXT'
+      });
+    } catch (msgError) {
+      throw new Error('Cannot connect to page. Please refresh the page and try again.');
+    }
 
     if (response.success && response.data) {
       // Send to Qwen CLI
@@ -379,10 +402,33 @@ consoleLogsBtn.addEventListener('click', async () => {
       throw new Error('No active tab found');
     }
 
+    // Check if we can access this page
+    if (tab.url && (tab.url.startsWith('chrome://') ||
+        tab.url.startsWith('chrome-extension://') ||
+        tab.url.startsWith('edge://') ||
+        tab.url.startsWith('about:'))) {
+      throw new Error('Cannot access this page (browser internal page)');
+    }
+
+    // Try to inject content script first
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ['content/content-script.js']
+      });
+    } catch (injectError) {
+      console.log('Script injection skipped:', injectError.message);
+    }
+
     // Get console logs from content script
-    const response = await chrome.tabs.sendMessage(tab.id, {
-      type: 'EXTRACT_DATA'
-    });
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tab.id, {
+        type: 'EXTRACT_DATA'
+      });
+    } catch (msgError) {
+      throw new Error('Cannot connect to page. Please refresh the page and try again.');
+    }
 
     if (response.success) {
       const consoleLogs = response.data.consoleLogs || [];

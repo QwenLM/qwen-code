@@ -32,7 +32,14 @@ function connectToNativeHost() {
       }
 
       nativePort.onMessage.addListener((message) => {
-        console.log('Native message received:', message);
+        // 简化日志输出，直接显示 data 内容
+        if (message.type === 'event' && message.data) {
+          console.log('[Native Event]', message.data.type, message.data.update || message.data);
+        } else if (message.type === 'response') {
+          console.log('[Native Response]', 'id:', message.id, message.success ? '✓' : '✗', message.data || message.error);
+        } else {
+          console.log('[Native Message]', message.type, message.data || message);
+        }
         handleNativeMessage(message);
       });
 
@@ -41,6 +48,7 @@ function connectToNativeHost() {
         console.log('Native host disconnected');
         if (error) {
           console.error('Disconnect error:', error);
+          console.error('Disconnect error message:', error.message);
         }
         nativePort = null;
         isConnected = false;
@@ -97,14 +105,35 @@ function handleNativeMessage(message) {
       delete nativePort._handshakeTimeout;
     }
 
-    qwenCliStatus = message.qwenStatus || 'connected';
+    // Native host is connected, but Qwen CLI might not be running yet
+    // 'disconnected' from host means Qwen CLI is not running, but we ARE connected to native host
+    const hostQwenStatus = message.qwenStatus || 'disconnected';
+    // Set our status to 'connected' (to native host), or 'running' if Qwen CLI is already running
+    qwenCliStatus = hostQwenStatus === 'running' ? 'running' : 'connected';
 
     // Notify popup of connection
     chrome.runtime.sendMessage({
       type: 'STATUS_UPDATE',
       status: qwenCliStatus,
-      capabilities: message.capabilities
+      capabilities: message.capabilities,
+      qwenInstalled: message.qwenInstalled,
+      qwenVersion: message.qwenVersion
     }).catch(() => {});
+  } else if (message.type === 'browser_request') {
+    // Handle browser requests from Qwen CLI via Native Host
+    handleBrowserRequest(message);
+  } else if (message.type === 'permission_request') {
+    // Forward permission request from Native Host to UI
+    console.log('[Permission Request]', message);
+    broadcastToUI({
+      type: 'permissionRequest',
+      data: {
+        requestId: message.requestId,
+        sessionId: message.sessionId,
+        toolCall: message.toolCall,
+        options: message.options
+      }
+    });
   } else if (message.type === 'response' && message.id !== undefined) {
     // Handle response to a specific request
     const handler = pendingRequests.get(message.id);
@@ -147,24 +176,226 @@ async function sendToNativeHost(message) {
   });
 }
 
-// Handle events from Qwen CLI
-function handleQwenEvent(event) {
-  console.log('Qwen event:', event);
+// Handle browser requests from Qwen CLI (via Native Host)
+async function handleBrowserRequest(message) {
+  const { browserRequestId, requestType, params } = message;
+  console.log('Browser request:', requestType, params);
 
-  // Forward event to content scripts and popup
+  try {
+    let data;
+
+    switch (requestType) {
+      case 'read_page':
+        data = await getBrowserPageContent();
+        break;
+
+      case 'capture_screenshot':
+        data = await getBrowserScreenshot();
+        break;
+
+      case 'get_network_logs':
+        data = await getBrowserNetworkLogs();
+        break;
+
+      case 'get_console_logs':
+        data = await getBrowserConsoleLogs();
+        break;
+
+      default:
+        throw new Error(`Unknown browser request type: ${requestType}`);
+    }
+
+    // Send response back to native host
+    nativePort.postMessage({
+      type: 'browser_response',
+      browserRequestId,
+      data
+    });
+  } catch (error) {
+    console.error('Browser request error:', error);
+    nativePort.postMessage({
+      type: 'browser_response',
+      browserRequestId,
+      error: error.message
+    });
+  }
+}
+
+// Get current page content
+async function getBrowserPageContent() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+
+  if (!tab) {
+    throw new Error('No active tab found');
+  }
+
+  // Check if we can access this page
+  if (tab.url && (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  // Try to inject content script
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js']
+    });
+  } catch (injectError) {
+    console.log('Script injection skipped:', injectError.message);
+  }
+
+  // Request page data from content script
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_DATA' }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message + '. Try refreshing the page.'));
+      } else if (response && response.success) {
+        resolve({
+          url: tab.url,
+          title: tab.title,
+          content: response.data?.content || { text: '', markdown: '' },
+          links: response.data?.links || [],
+          images: response.data?.images || []
+        });
+      } else {
+        reject(new Error(response?.error || 'Failed to extract page data'));
+      }
+    });
+  });
+}
+
+// Capture screenshot of current tab
+async function getBrowserScreenshot() {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve({ dataUrl });
+      }
+    });
+  });
+}
+
+// Get network logs
+async function getBrowserNetworkLogs() {
+  // Use the existing getNetworkLogs function
+  const logs = await getNetworkLogs(null);
+  return { logs };
+}
+
+// Get console logs (requires content script)
+async function getBrowserConsoleLogs() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+
+  if (!tab) {
+    throw new Error('No active tab found');
+  }
+
+  // Check if we can access this page
+  if (tab.url && (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  // Try to inject content script
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js']
+    });
+  } catch (injectError) {
+    console.log('Script injection skipped:', injectError.message);
+  }
+
+  // Request console logs from content script
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(tab.id, { type: 'GET_CONSOLE_LOGS' }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else if (response && response.success) {
+        resolve({ logs: response.data || [] });
+      } else {
+        reject(new Error(response?.error || 'Failed to get console logs'));
+      }
+    });
+  });
+}
+
+// Handle events from Qwen CLI (ACP events)
+function handleQwenEvent(event) {
+  const eventData = event.data;
+
+  // 简化日志：显示事件类型和关键信息
+  if (eventData?.type === 'session_update') {
+    const update = eventData.update;
+    console.log('[Qwen]', update?.sessionUpdate, update?.content?.text?.slice(0, 50) || update);
+  } else {
+    console.log('[Qwen]', eventData?.type, eventData);
+  }
+
+  // Map ACP events to UI-compatible messages
+  if (eventData?.type === 'session_update') {
+    const update = eventData.update;
+
+    if (update?.sessionUpdate === 'agent_message_chunk') {
+      // Stream chunk
+      broadcastToUI({
+        type: 'streamChunk',
+        data: { chunk: update.content?.text || '' }
+      });
+    } else if (update?.sessionUpdate === 'user_message_chunk') {
+      // User message (usually echo)
+      broadcastToUI({
+        type: 'message',
+        data: {
+          role: 'user',
+          content: update.content?.text || '',
+          timestamp: Date.now()
+        }
+      });
+    } else if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') {
+      // Tool call
+      broadcastToUI({
+        type: 'toolCall',
+        data: update
+      });
+    } else if (update?.sessionUpdate === 'plan') {
+      // Plan update
+      broadcastToUI({
+        type: 'plan',
+        data: { entries: update.entries }
+      });
+    }
+  } else if (eventData?.type === 'qwen_stopped') {
+    qwenCliStatus = 'stopped';
+    broadcastToUI({
+      type: 'STATUS_UPDATE',
+      status: 'stopped'
+    });
+  }
+
+  // Also forward raw event for compatibility
   chrome.tabs.query({}, (tabs) => {
     tabs.forEach(tab => {
       chrome.tabs.sendMessage(tab.id, {
         type: 'QWEN_EVENT',
-        event: event.data
-      }).catch(() => {}); // Ignore errors for tabs without content script
+        event: eventData
+      }).catch(() => {});
     });
   });
+}
 
-  chrome.runtime.sendMessage({
-    type: 'QWEN_EVENT',
-    event: event.data
-  }).catch(() => {});
+// Broadcast message to all UI components (side panel, popup, etc.)
+function broadcastToUI(message) {
+  chrome.runtime.sendMessage(message).catch(() => {});
 }
 
 // Message handlers from extension components
@@ -192,17 +423,114 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return false;
   }
 
+  // Handle sendMessage from side panel (for chat)
+  if (request.type === 'sendMessage') {
+    const text = request.data?.text;
+    if (!text) {
+      sendResponse({ success: false, error: 'No text provided' });
+      return false;
+    }
+
+    // First ensure Qwen CLI is started
+    const startAndSend = async () => {
+      try {
+        // Check if connected
+        if (!isConnected) {
+          await connectToNativeHost();
+        }
+
+        // Start Qwen CLI if not running
+        if (qwenCliStatus !== 'running') {
+          broadcastToUI({ type: 'streamStart' });
+          await sendToNativeHost({
+            type: 'start_qwen',
+            cwd: request.data?.cwd || '/'
+          });
+          qwenCliStatus = 'running';
+        }
+
+        // Send the prompt
+        await sendToNativeHost({
+          type: 'qwen_prompt',
+          text: text
+        });
+
+        sendResponse({ success: true });
+      } catch (error) {
+        console.error('sendMessage error:', error);
+        broadcastToUI({
+          type: 'error',
+          data: { message: error.message }
+        });
+        sendResponse({ success: false, error: error.message });
+      }
+    };
+
+    startAndSend();
+    return true; // Will respond asynchronously
+  }
+
+  // Handle cancel streaming
+  if (request.type === 'cancelStreaming') {
+    sendToNativeHost({ type: 'qwen_cancel' })
+      .then(() => {
+        broadcastToUI({ type: 'streamEnd' });
+        sendResponse({ success: true });
+      })
+      .catch(error => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true;
+  }
+
+  // Handle permission response
+  if (request.type === 'permissionResponse') {
+    sendToNativeHost({
+      type: 'permission_response',
+      requestId: request.data?.requestId,
+      optionId: request.data?.optionId
+    })
+    .then(() => sendResponse({ success: true }))
+    .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
   if (request.type === 'EXTRACT_PAGE_DATA') {
     // Request page data from content script
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
       if (tabs[0]) {
-        chrome.tabs.sendMessage(tabs[0].id, {
+        const tab = tabs[0];
+
+        // Check if we can inject content script (skip chrome:// and other protected pages)
+        if (tab.url && (tab.url.startsWith('chrome://') ||
+            tab.url.startsWith('chrome-extension://') ||
+            tab.url.startsWith('edge://') ||
+            tab.url.startsWith('about:'))) {
+          sendResponse({
+            success: false,
+            error: 'Cannot access this page (browser internal page)'
+          });
+          return;
+        }
+
+        // Try to inject content script first in case it's not loaded
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content/content-script.js']
+          });
+        } catch (injectError) {
+          // Script might already be injected or page doesn't allow injection
+          console.log('Script injection skipped:', injectError.message);
+        }
+
+        chrome.tabs.sendMessage(tab.id, {
           type: 'EXTRACT_DATA'
         }, (response) => {
           if (chrome.runtime.lastError) {
             sendResponse({
               success: false,
-              error: chrome.runtime.lastError.message
+              error: chrome.runtime.lastError.message + '. Try refreshing the page.'
             });
           } else {
             sendResponse(response);
