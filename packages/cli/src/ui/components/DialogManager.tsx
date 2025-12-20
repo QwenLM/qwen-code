@@ -211,11 +211,10 @@ export const DialogManager = ({
       const defaults = getDefaultOpenAIConfig();
       return (
         <OpenAIKeyPrompt
-          onSubmit={(apiKey, baseUrl, model) => {
+          onSubmit={(apiKey, baseUrl) => {
             uiActions.handleAuthSelect(AuthType.USE_OPENAI, SettingScope.User, {
               apiKey,
               baseUrl,
-              model,
             });
           }}
           onCancel={() => {
@@ -224,7 +223,6 @@ export const DialogManager = ({
           }}
           defaultApiKey={defaults.apiKey}
           defaultBaseUrl={defaults.baseUrl}
-          defaultModel={defaults.model}
         />
       );
     }
