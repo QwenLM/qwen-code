@@ -73,32 +73,18 @@ EOF
 
 echo -e "${GREEN}✓${NC} Native Host 已配置"
 
-# 第三步：检查 Qwen CLI（可选）
+# 第三步：检查 Qwen CLI
 echo -e "\n${BLUE}[3/5]${NC} 检查 Qwen CLI..."
 
 QWEN_AVAILABLE=false
 if command -v qwen &> /dev/null; then
     QWEN_AVAILABLE=true
-    echo -e "${GREEN}✓${NC} Qwen CLI $(qwen --version 2>/dev/null || echo "已安装")"
-
-    # 尝试启动 Qwen server
-    if ! lsof -i:8080 &> /dev/null; then
-        echo -e "${CYAN}→${NC} 启动 Qwen server (端口 8080)..."
-        qwen server --port 8080 > /tmp/qwen-server.log 2>&1 &
-        QWEN_PID=$!
-        sleep 2
-
-        if kill -0 $QWEN_PID 2>/dev/null; then
-            echo -e "${GREEN}✓${NC} Qwen server 已启动 (PID: $QWEN_PID)"
-        else
-            echo -e "${YELLOW}!${NC} Qwen server 启动失败，继续运行..."
-            QWEN_AVAILABLE=false
-        fi
-    else
-        echo -e "${YELLOW}!${NC} 端口 8080 已被占用"
-    fi
+    QWEN_VERSION=$(qwen --version 2>/dev/null || echo "已安装")
+    echo -e "${GREEN}✓${NC} Qwen CLI ${QWEN_VERSION}"
+    echo -e "${CYAN}→${NC} 使用 ACP 模式与 Chrome 插件通信"
 else
     echo -e "${YELLOW}!${NC} Qwen CLI 未安装（插件基础功能仍可使用）"
+    echo -e "   安装方法: npm install -g @anthropic-ai/qwen-code"
 fi
 
 # 第四步：启动测试页面
@@ -338,7 +324,7 @@ echo -e "   • 测试页面: ${BLUE}http://localhost:3000/qwen-test.html${NC}"
 echo -e "   • 插件: 已加载到工具栏"
 
 if [ "$QWEN_AVAILABLE" = true ]; then
-    echo -e "   • Qwen Server: ${BLUE}http://localhost:8080${NC}"
+    echo -e "   • Qwen CLI: 可用 (ACP 模式)"
 fi
 
 echo ""
@@ -346,10 +332,6 @@ echo -e "${CYAN}🔍 调试位置：${NC}"
 echo -e "   • 插件日志: Chrome DevTools Console"
 echo -e "   • 后台脚本: chrome://extensions → Service Worker"
 echo -e "   • Native Host: /tmp/qwen-bridge-host.log"
-
-if [ "$QWEN_AVAILABLE" = true ]; then
-    echo -e "   • Qwen 日志: /tmp/qwen-server.log"
-fi
 
 echo ""
 echo -e "${YELLOW}按 Ctrl+C 停止所有服务${NC}"
@@ -361,7 +343,6 @@ cleanup() {
 
     # 停止进程
     [ ! -z "$TEST_PID" ] && kill $TEST_PID 2>/dev/null
-    [ ! -z "$QWEN_PID" ] && kill $QWEN_PID 2>/dev/null
 
     echo -e "${GREEN}✓${NC} 已停止所有服务"
     exit 0
