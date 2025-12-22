@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/sdk",
-  "version": "0.1.1",
+  "version": "0.5.1-nightly.20251222.a92be72e",
   "description": "TypeScript SDK for programmatic access to qwen-code CLI",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
