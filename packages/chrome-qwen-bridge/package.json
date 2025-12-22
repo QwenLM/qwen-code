@@ -33,6 +33,7 @@
     "install:extension": "./first-install.sh",
     "install:host": "cd native-host && ./smart-install.sh",
     "install:all": "./first-install.sh",
+    "update:host": "cd native-host && ./update-host-config.sh",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
     "package": "zip -r chrome-qwen-bridge.zip extension/",
     "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id",

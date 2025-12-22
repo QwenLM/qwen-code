@@ -20,6 +20,11 @@
   "host_permissions": [
     "<all_urls>"
   ],
+  
+  "externally_connectable": {
+    "ids": ["aohjeidlpcjalobgghfkkehjbdhacjlo"],
+    "matches": ["https://*/*"]
+  },
 
   "background": {
     "service_worker": "background/service-worker.js"

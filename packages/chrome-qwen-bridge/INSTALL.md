@@ -114,6 +114,25 @@ npm run clean
 npm run install:all
 ```
 
+### 更换电脑或浏览器后的配置更新
+
+如果你更换了电脑、浏览器或得到了新的扩展ID，可以使用专用的更新脚本：
+
+```bash
+# 进入Native Host目录
+cd native-host
+
+# 运行配置更新脚本
+./update-host-config.sh
+```
+
+这个脚本会引导你：
+1. 选择特定扩展ID或通用配置模式
+2. 更新Native Host配置文件
+3. 验证配置是否正确
+
+使用这个脚本比完全重新安装更快捷方便。
+
 ## 📚 更多信息
 
 - [调试指南](./docs/debugging.md)

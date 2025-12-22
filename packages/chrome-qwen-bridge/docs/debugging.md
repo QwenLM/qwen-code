@@ -42,6 +42,7 @@ npm run dev:server       # 仅启动 Qwen 服务器
 npm run install:host           # 安装 Native Host 依赖
 npm run install:host:macos     # macOS 安装 Native Host
 npm run install:host:windows   # Windows 安装 Native Host
+npm run update:host            # 更新 Native Host 配置（更换电脑/浏览器后使用）
 
 # 构建打包
 npm run build            # 构建项目

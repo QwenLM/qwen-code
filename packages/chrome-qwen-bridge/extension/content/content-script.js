@@ -3,6 +3,11 @@
  * Extracts data from web pages and communicates with background script
  */
 
+if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
+  console.debug('Qwen Bridge content script already loaded, skipping.');
+} else {
+  window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__ = true;
+
 // Data extraction functions
 function extractPageData() {
   const data = {
@@ -471,4 +476,5 @@ if (typeof module !== 'undefined' && module.exports) {
     getSelectedText,
     highlightElement
   };
+}
 }

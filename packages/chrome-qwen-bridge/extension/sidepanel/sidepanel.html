@@ -54,6 +54,16 @@
             <div class="loading-text">Loading Qwen Code...</div>
         </div>
     </div>
+    <script>
+        // Inject extension URI for resource loading
+        try {
+            const extensionUri = chrome.runtime.getURL('');
+            document.body.setAttribute('data-extension-uri', extensionUri);
+            window.__EXTENSION_URI__ = extensionUri;
+        } catch (e) {
+            console.warn('Failed to inject extension URI:', e);
+        }
+    </script>
     <script src="sidepanel-app.js"></script>
 </body>
 </html>
