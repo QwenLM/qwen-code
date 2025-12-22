@@ -12,6 +12,117 @@ let isConnected = false;
 let qwenCliStatus = 'disconnected';
 let pendingRequests = new Map();
 let requestId = 0;
+// Cache the latest available commands so late listeners (e.g. sidepanel opened later)
+// can fetch them via GET_STATUS.
+let lastAvailableCommands = [];
+// Cache latest MCP tools list (from notifications/tools/list_changed)
+let lastMcpTools = [];
+// Static list of internal Chrome browser MCP tools exposed by this extension
+const INTERNAL_MCP_TOOLS = [
+  {
+    name: 'browser_read_page',
+    description:
+      'Read content of the current active tab (url, title, text, links, images).',
+  },
+  {
+    name: 'browser_capture_screenshot',
+    description:
+      'Capture a screenshot (PNG) of the current visible tab (base64).',
+  },
+  {
+    name: 'browser_get_network_logs',
+    description:
+      'Get recent Network.* events from Chrome debugger for the active tab.',
+  },
+  {
+    name: 'browser_get_console_logs',
+    description: 'Get recent console logs from the active tab.',
+  },
+];
+
+// Heuristic: detect if user intent asks to read current page
+function shouldTriggerReadPage(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  const keywords = [
+    'read this page',
+    'read the page',
+    'read current page',
+    'read page',
+    '读取当前页面',
+    '读取页面',
+    '读取网页',
+    '读这个页面',
+  ];
+  return keywords.some((k) => t.includes(k));
+}
+
+// Heuristic: detect if user intent asks for console logs
+function shouldTriggerConsoleLogs(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  const keywords = [
+    'console log',
+    'console logs',
+    'get console',
+    'show console',
+    'browser console',
+    'console 日志',
+    'console日志',
+    '控制台日志',
+    '获取控制台',
+    '查看控制台',
+    '读取日志',
+    '日志信息',
+    '获取日志',
+    '查看日志',
+    'log信息',
+    '错误日志',
+    'error log',
+  ];
+  return keywords.some((k) => t.includes(k));
+}
+
+// Heuristic: detect if user intent asks for screenshot
+function shouldTriggerScreenshot(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  const keywords = [
+    'screenshot',
+    'capture screen',
+    'take screenshot',
+    'screen capture',
+    '截图',
+    '截屏',
+    '屏幕截图',
+    '页面截图',
+  ];
+  return keywords.some((k) => t.includes(k));
+}
+
+// Heuristic: detect if user intent asks for network logs
+function shouldTriggerNetworkLogs(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  const keywords = [
+    'network log',
+    'network logs',
+    'network request',
+    'api call',
+    'http request',
+    '网络日志',
+    '网络请求',
+    'api请求',
+    '请求日志',
+    '接口请求',
+    '接口日志',
+    'xhr',
+    'fetch',
+    '请求记录',
+    '网络记录',
+  ];
+  return keywords.some((k) => t.includes(k));
+}
 
 // Connection management
 function connectToNativeHost() {
@@ -34,11 +145,25 @@ function connectToNativeHost() {
       nativePort.onMessage.addListener((message) => {
         // 简化日志输出，直接显示 data 内容
         if (message.type === 'event' && message.data) {
-          console.log('[Native Event]', message.data.type, message.data.update || message.data);
+          console.log(
+            '[Native Event]',
+            message.data.type,
+            message.data.update || message.data,
+          );
         } else if (message.type === 'response') {
-          console.log('[Native Response]', 'id:', message.id, message.success ? '✓' : '✗', message.data || message.error);
+          console.log(
+            '[Native Response]',
+            'id:',
+            message.id,
+            message.success ? '✓' : '✗',
+            message.data || message.error,
+          );
         } else {
-          console.log('[Native Message]', message.type, message.data || message);
+          console.log(
+            '[Native Message]',
+            message.type,
+            message.data || message,
+          );
         }
         handleNativeMessage(message);
       });
@@ -61,10 +186,12 @@ function connectToNativeHost() {
         pendingRequests.clear();
 
         // Notify popup of disconnection
-        chrome.runtime.sendMessage({
-          type: 'STATUS_UPDATE',
-          status: 'disconnected'
-        }).catch(() => {}); // Ignore errors if popup is closed
+        chrome.runtime
+          .sendMessage({
+            type: 'STATUS_UPDATE',
+            status: 'disconnected',
+          })
+          .catch(() => {}); // Ignore errors if popup is closed
       });
 
       // Send initial handshake
@@ -112,13 +239,15 @@ function handleNativeMessage(message) {
     qwenCliStatus = hostQwenStatus === 'running' ? 'running' : 'connected';
 
     // Notify popup of connection
-    chrome.runtime.sendMessage({
-      type: 'STATUS_UPDATE',
-      status: qwenCliStatus,
-      capabilities: message.capabilities,
-      qwenInstalled: message.qwenInstalled,
-      qwenVersion: message.qwenVersion
-    }).catch(() => {});
+    chrome.runtime
+      .sendMessage({
+        type: 'STATUS_UPDATE',
+        status: qwenCliStatus,
+        capabilities: message.capabilities,
+        qwenInstalled: message.qwenInstalled,
+        qwenVersion: message.qwenVersion,
+      })
+      .catch(() => {});
   } else if (message.type === 'browser_request') {
     // Handle browser requests from Qwen CLI via Native Host
     handleBrowserRequest(message);
@@ -131,8 +260,8 @@ function handleNativeMessage(message) {
         requestId: message.requestId,
         sessionId: message.sessionId,
         toolCall: message.toolCall,
-        options: message.options
-      }
+        options: message.options,
+      },
     });
   } else if (message.type === 'response' && message.id !== undefined) {
     // Handle response to a specific request
@@ -144,6 +273,21 @@ function handleNativeMessage(message) {
         handler.resolve(message.data);
       }
       pendingRequests.delete(message.id);
+    }
+
+    // Heuristic: when a prompt completes, native returns a response with a stop reason.
+    // We use that as the end-of-stream signal so the UI can finalize the assistant message.
+    try {
+      if (
+        message?.data &&
+        (message.data.stopReason ||
+          message.data.stop_reason ||
+          message.data.status === 'done')
+      ) {
+        broadcastToUI({ type: 'streamEnd' });
+      }
+    } catch (_) {
+      // ignore
     }
   } else if (message.type === 'event') {
     // Handle events from Qwen CLI
@@ -163,16 +307,24 @@ async function sendToNativeHost(message) {
 
     nativePort.postMessage({
       ...message,
-      id
+      id,
     });
 
     // Set timeout for request
+    // Default 30s, but ACP session creation and MCP discovery can take longer
+    let timeoutMs = 30000;
+    if (message && message.type === 'start_qwen') timeoutMs = 180000; // 3 minutes for startup + MCP discovery
+    if (
+      message &&
+      (message.type === 'qwen_prompt' || message.type === 'qwen_request')
+    )
+      timeoutMs = 180000;
     setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
         reject(new Error('Request timeout'));
       }
-    }, 30000); // 30 second timeout
+    }, timeoutMs);
   });
 }
 
@@ -182,6 +334,14 @@ async function handleBrowserRequest(message) {
   console.log('Browser request:', requestType, params);
 
   try {
+    // Notify UI tool start
+    try {
+      broadcastToUI({
+        type: 'toolProgress',
+        data: { name: requestType, stage: 'start' },
+      });
+    } catch (_) {}
+
     let data;
 
     switch (requestType) {
@@ -209,15 +369,36 @@ async function handleBrowserRequest(message) {
     nativePort.postMessage({
       type: 'browser_response',
       browserRequestId,
-      data
+      data,
     });
+
+    // Notify UI tool end (success)
+    try {
+      broadcastToUI({
+        type: 'toolProgress',
+        data: { name: requestType, stage: 'end', ok: true },
+      });
+    } catch (_) {}
   } catch (error) {
     console.error('Browser request error:', error);
     nativePort.postMessage({
       type: 'browser_response',
       browserRequestId,
-      error: error.message
+      error: error.message,
     });
+
+    // Notify UI tool end (failure)
+    try {
+      broadcastToUI({
+        type: 'toolProgress',
+        data: {
+          name: requestType,
+          stage: 'end',
+          ok: false,
+          error: String(error?.message || error),
+        },
+      });
+    } catch (_) {}
   }
 }
 
@@ -231,10 +412,13 @@ async function getBrowserPageContent() {
   }
 
   // Check if we can access this page
-  if (tab.url && (tab.url.startsWith('chrome://') ||
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
       tab.url.startsWith('chrome-extension://') ||
       tab.url.startsWith('edge://') ||
-      tab.url.startsWith('about:'))) {
+      tab.url.startsWith('about:'))
+  ) {
     throw new Error('Cannot access browser internal page');
   }
 
@@ -242,7 +426,7 @@ async function getBrowserPageContent() {
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ['content/content-script.js']
+      files: ['content/content-script.js'],
     });
   } catch (injectError) {
     console.log('Script injection skipped:', injectError.message);
@@ -252,14 +436,18 @@ async function getBrowserPageContent() {
   return new Promise((resolve, reject) => {
     chrome.tabs.sendMessage(tab.id, { type: 'EXTRACT_DATA' }, (response) => {
       if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message + '. Try refreshing the page.'));
+        reject(
+          new Error(
+            chrome.runtime.lastError.message + '. Try refreshing the page.',
+          ),
+        );
       } else if (response && response.success) {
         resolve({
           url: tab.url,
           title: tab.title,
           content: response.data?.content || { text: '', markdown: '' },
           links: response.data?.links || [],
-          images: response.data?.images || []
+          images: response.data?.images || [],
         });
       } else {
         reject(new Error(response?.error || 'Failed to extract page data'));
@@ -298,10 +486,13 @@ async function getBrowserConsoleLogs() {
   }
 
   // Check if we can access this page
-  if (tab.url && (tab.url.startsWith('chrome://') ||
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
       tab.url.startsWith('chrome-extension://') ||
       tab.url.startsWith('edge://') ||
-      tab.url.startsWith('about:'))) {
+      tab.url.startsWith('about:'))
+  ) {
     throw new Error('Cannot access browser internal page');
   }
 
@@ -309,7 +500,7 @@ async function getBrowserConsoleLogs() {
   try {
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ['content/content-script.js']
+      files: ['content/content-script.js'],
     });
   } catch (injectError) {
     console.log('Script injection skipped:', injectError.message);
@@ -317,15 +508,19 @@ async function getBrowserConsoleLogs() {
 
   // Request console logs from content script
   return new Promise((resolve, reject) => {
-    chrome.tabs.sendMessage(tab.id, { type: 'GET_CONSOLE_LOGS' }, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else if (response && response.success) {
-        resolve({ logs: response.data || [] });
-      } else {
-        reject(new Error(response?.error || 'Failed to get console logs'));
-      }
-    });
+    chrome.tabs.sendMessage(
+      tab.id,
+      { type: 'GET_CONSOLE_LOGS' },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else if (response && response.success) {
+          resolve({ logs: response.data || [] });
+        } else {
+          reject(new Error(response?.error || 'Failed to get console logs'));
+        }
+      },
+    );
   });
 }
 
@@ -336,7 +531,11 @@ function handleQwenEvent(event) {
   // 简化日志：显示事件类型和关键信息
   if (eventData?.type === 'session_update') {
     const update = eventData.update;
-    console.log('[Qwen]', update?.sessionUpdate, update?.content?.text?.slice(0, 50) || update);
+    console.log(
+      '[Qwen]',
+      update?.sessionUpdate,
+      update?.content?.text?.slice(0, 50) || update,
+    );
   } else {
     console.log('[Qwen]', eventData?.type, eventData);
   }
@@ -349,46 +548,74 @@ function handleQwenEvent(event) {
       // Stream chunk
       broadcastToUI({
         type: 'streamChunk',
-        data: { chunk: update.content?.text || '' }
+        data: { chunk: update.content?.text || '' },
+      });
+    } else if (update?.sessionUpdate === 'available_commands_update') {
+      // Cache and forward available commands list to UI for visibility/debugging
+      lastAvailableCommands = Array.isArray(update.availableCommands)
+        ? update.availableCommands
+        : [];
+      broadcastToUI({
+        type: 'availableCommands',
+        data: { availableCommands: lastAvailableCommands },
       });
     } else if (update?.sessionUpdate === 'user_message_chunk') {
-      // User message (usually echo)
-      broadcastToUI({
-        type: 'message',
-        data: {
-          role: 'user',
-          content: update.content?.text || '',
-          timestamp: Date.now()
-        }
-      });
-    } else if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') {
+      // Ignore echo of the user's own message to avoid duplicates in UI.
+      // The sidepanel already appends the user message on submit.
+      // If needed in the future, we can gate this by a feature flag.
+      return;
+    } else if (
+      update?.sessionUpdate === 'tool_call' ||
+      update?.sessionUpdate === 'tool_call_update'
+    ) {
       // Tool call
       broadcastToUI({
         type: 'toolCall',
-        data: update
+        data: update,
       });
     } else if (update?.sessionUpdate === 'plan') {
       // Plan update
       broadcastToUI({
         type: 'plan',
-        data: { entries: update.entries }
+        data: { entries: update.entries },
       });
     }
   } else if (eventData?.type === 'qwen_stopped') {
     qwenCliStatus = 'stopped';
     broadcastToUI({
       type: 'STATUS_UPDATE',
-      status: 'stopped'
+      status: 'stopped',
     });
+  } else if (eventData?.type === 'auth_update') {
+    const authUri = eventData.authUri;
+    // Forward auth update to UI and try to open auth URL
+    broadcastToUI({ type: 'authUpdate', data: { authUri } });
+    if (authUri) {
+      try {
+        chrome.tabs.create({ url: authUri });
+      } catch (_) {}
+    }
+  } else if (eventData?.type === 'tools_list_changed') {
+    // Forward MCP tools list to UI and cache it
+    lastMcpTools = Array.isArray(eventData.tools) ? eventData.tools : [];
+    broadcastToUI({ type: 'mcpTools', data: { tools: lastMcpTools } });
+  } else if (eventData?.type === 'host_info') {
+    console.log('[Host] Info', eventData);
+    broadcastToUI({ type: 'hostInfo', data: eventData });
+  } else if (eventData?.type === 'cli_stderr') {
+    console.log('[Qwen STDERR]', eventData.line);
+    broadcastToUI({ type: 'hostLog', data: { line: eventData.line } });
   }
 
   // Also forward raw event for compatibility
   chrome.tabs.query({}, (tabs) => {
-    tabs.forEach(tab => {
-      chrome.tabs.sendMessage(tab.id, {
-        type: 'QWEN_EVENT',
-        event: eventData
-      }).catch(() => {});
+    tabs.forEach((tab) => {
+      chrome.tabs
+        .sendMessage(tab.id, {
+          type: 'QWEN_EVENT',
+          event: eventData,
+        })
+        .catch(() => {});
     });
   });
 }
@@ -406,9 +633,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Connect to native host
     connectToNativeHost()
       .then(() => {
-        sendResponse({ success: true, status: qwenCliStatus });
+        sendResponse({
+          success: true,
+          status: qwenCliStatus,
+          internalTools: INTERNAL_MCP_TOOLS,
+        });
+        // Broadcast internal tools so UI can render tools panel
+        try {
+          broadcastToUI({
+            type: 'internalMcpTools',
+            data: { tools: INTERNAL_MCP_TOOLS },
+          });
+        } catch (_) {}
       })
-      .catch(error => {
+      .catch((error) => {
         sendResponse({ success: false, error: error.message });
       });
     return true; // Will respond asynchronously
@@ -418,7 +656,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Get current connection status
     sendResponse({
       connected: isConnected,
-      status: qwenCliStatus
+      status: qwenCliStatus,
+      availableCommands: lastAvailableCommands,
+      mcpTools: lastMcpTools,
+      internalTools: INTERNAL_MCP_TOOLS,
     });
     return false;
   }
@@ -441,26 +682,250 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         // Start Qwen CLI if not running
         if (qwenCliStatus !== 'running') {
-          broadcastToUI({ type: 'streamStart' });
-          await sendToNativeHost({
-            type: 'start_qwen',
-            cwd: request.data?.cwd || '/'
-          });
-          qwenCliStatus = 'running';
+          try {
+            await sendToNativeHost({
+              type: 'start_qwen',
+              cwd: request.data?.cwd || '/',
+            });
+            qwenCliStatus = 'running';
+          } catch (startError) {
+            // If CLI is already running (but session might still be initializing),
+            // treat it as running and continue
+            if (
+              startError.message &&
+              startError.message.includes('already running')
+            ) {
+              console.log('Qwen CLI already running, continuing...');
+              qwenCliStatus = 'running';
+            } else {
+              throw startError;
+            }
+          }
         }
 
-        // Send the prompt
-        await sendToNativeHost({
-          type: 'qwen_prompt',
-          text: text
-        });
+        // Fallback: if user intent asks to read page (and MCP might not be available),
+        // directly read the page via content script and send to Qwen for analysis.
+        try {
+          if (shouldTriggerReadPage(text)) {
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'read_page', stage: 'start' },
+            });
+            const data = await getBrowserPageContent();
+            // start stream for qwen_request path
+            broadcastToUI({ type: 'streamStart' });
+            await sendToNativeHost({
+              type: 'qwen_request',
+              action: 'analyze_page',
+              data: data,
+              userPrompt: text, // Include user's full request for context
+            });
+            // do not send original prompt to avoid duplication
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'read_page', stage: 'end', ok: true },
+            });
+            sendResponse({ success: true });
+            return;
+          }
+        } catch (e) {
+          console.warn('Fallback read_page failed:', e);
+          broadcastToUI({
+            type: 'toolProgress',
+            data: {
+              name: 'read_page',
+              stage: 'end',
+              ok: false,
+              error: String((e && e.message) || e),
+            },
+          });
+          // continue to send prompt normally
+        }
 
+        // Fallback: get console logs
+        try {
+          const shouldGetConsole = shouldTriggerConsoleLogs(text);
+          console.log(
+            '[Fallback] shouldTriggerConsoleLogs:',
+            shouldGetConsole,
+            'text:',
+            text,
+          );
+          if (shouldGetConsole) {
+            console.log('[Fallback] Triggering console logs...');
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'console_logs', stage: 'start' },
+            });
+            const data = await getBrowserConsoleLogs();
+            console.log('[Fallback] Console logs data:', data);
+            const logs = data.logs || [];
+            const formatted = logs
+              .slice(-50)
+              .map((log) => `[${log.type}] ${log.message}`)
+              .join('\n');
+            broadcastToUI({ type: 'streamStart' });
+            await sendToNativeHost({
+              type: 'qwen_request',
+              action: 'process_text',
+              data: {
+                text: `Console logs (last ${Math.min(logs.length, 50)} entries):\n${formatted || '(no logs captured)'}`,
+                context: 'console logs from browser',
+              },
+              userPrompt: text, // Include user's full request
+            });
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'console_logs', stage: 'end', ok: true },
+            });
+            sendResponse({ success: true });
+            return;
+          }
+        } catch (e) {
+          console.error('[Fallback] Console logs failed:', e);
+          broadcastToUI({
+            type: 'toolProgress',
+            data: {
+              name: 'console_logs',
+              stage: 'end',
+              ok: false,
+              error: String((e && e.message) || e),
+            },
+          });
+        }
+
+        // Fallback: capture screenshot
+        try {
+          if (shouldTriggerScreenshot(text)) {
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'screenshot', stage: 'start' },
+            });
+            const screenshot = await getBrowserScreenshot();
+            const tabs = await chrome.tabs.query({
+              active: true,
+              currentWindow: true,
+            });
+            broadcastToUI({ type: 'streamStart' });
+            await sendToNativeHost({
+              type: 'qwen_request',
+              action: 'analyze_screenshot',
+              data: {
+                dataUrl: screenshot.dataUrl,
+                url: tabs[0]?.url || 'unknown',
+              },
+              userPrompt: text, // Include user's full request
+            });
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'screenshot', stage: 'end', ok: true },
+            });
+            sendResponse({ success: true });
+            return;
+          }
+        } catch (e) {
+          console.warn('Fallback screenshot failed:', e);
+          broadcastToUI({
+            type: 'toolProgress',
+            data: {
+              name: 'screenshot',
+              stage: 'end',
+              ok: false,
+              error: String((e && e.message) || e),
+            },
+          });
+        }
+
+        // Fallback: get network logs
+        try {
+          const shouldGetNetwork = shouldTriggerNetworkLogs(text);
+          console.log(
+            '[Fallback] shouldTriggerNetworkLogs:',
+            shouldGetNetwork,
+            'text:',
+            text,
+          );
+          if (shouldGetNetwork) {
+            console.log('[Fallback] Triggering network logs...');
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'network_logs', stage: 'start' },
+            });
+            const logs = await getNetworkLogs(null);
+            console.log('[Fallback] Network logs count:', logs?.length);
+            const summary = logs.slice(-50).map((log) => ({
+              method: log.method,
+              url: log.params?.request?.url || log.params?.documentURL,
+              status: log.params?.response?.status,
+              timestamp: log.timestamp,
+            }));
+            broadcastToUI({ type: 'streamStart' });
+            await sendToNativeHost({
+              type: 'qwen_request',
+              action: 'process_text',
+              data: {
+                text: `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`,
+                context: 'network request logs from browser',
+              },
+              userPrompt: text, // Include user's full request
+            });
+            broadcastToUI({
+              type: 'toolProgress',
+              data: { name: 'network_logs', stage: 'end', ok: true },
+            });
+            sendResponse({ success: true });
+            return;
+          }
+        } catch (e) {
+          console.error('[Fallback] Network logs failed:', e);
+          broadcastToUI({
+            type: 'toolProgress',
+            data: {
+              name: 'network_logs',
+              stage: 'end',
+              ok: false,
+              error: String((e && e.message) || e),
+            },
+          });
+        }
+
+        // Send the prompt with retry logic for session initialization
+        // Notify UI that a new stream is starting right before sending prompt
+        broadcastToUI({ type: 'streamStart' });
+
+        // Helper to send prompt with retries (session might still be initializing)
+        const sendPromptWithRetry = async (maxRetries = 3, delayMs = 2000) => {
+          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+              await sendToNativeHost({
+                type: 'qwen_prompt',
+                text: text,
+              });
+              return; // Success
+            } catch (err) {
+              const isSessionError =
+                err.message &&
+                (err.message.includes('No active session') ||
+                  err.message.includes('session'));
+              if (isSessionError && attempt < maxRetries) {
+                console.log(
+                  `Session not ready, retry ${attempt}/${maxRetries} in ${delayMs}ms...`,
+                );
+                await new Promise((r) => setTimeout(r, delayMs));
+              } else {
+                throw err;
+              }
+            }
+          }
+        };
+
+        await sendPromptWithRetry();
         sendResponse({ success: true });
       } catch (error) {
         console.error('sendMessage error:', error);
         broadcastToUI({
           type: 'error',
-          data: { message: error.message }
+          data: { message: error.message },
         });
         sendResponse({ success: false, error: error.message });
       }
@@ -477,7 +942,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         broadcastToUI({ type: 'streamEnd' });
         sendResponse({ success: true });
       })
-      .catch(error => {
+      .catch((error) => {
         sendResponse({ success: false, error: error.message });
       });
     return true;
@@ -488,10 +953,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     sendToNativeHost({
       type: 'permission_response',
       requestId: request.data?.requestId,
-      optionId: request.data?.optionId
+      optionId: request.data?.optionId,
     })
-    .then(() => sendResponse({ success: true }))
-    .catch(error => sendResponse({ success: false, error: error.message }));
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
   }
 
@@ -502,13 +967,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const tab = tabs[0];
 
         // Check if we can inject content script (skip chrome:// and other protected pages)
-        if (tab.url && (tab.url.startsWith('chrome://') ||
+        if (
+          tab.url &&
+          (tab.url.startsWith('chrome://') ||
             tab.url.startsWith('chrome-extension://') ||
             tab.url.startsWith('edge://') ||
-            tab.url.startsWith('about:'))) {
+            tab.url.startsWith('about:'))
+        ) {
           sendResponse({
             success: false,
-            error: 'Cannot access this page (browser internal page)'
+            error: 'Cannot access this page (browser internal page)',
           });
           return;
         }
@@ -517,29 +985,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ['content/content-script.js']
+            files: ['content/content-script.js'],
           });
         } catch (injectError) {
           // Script might already be injected or page doesn't allow injection
           console.log('Script injection skipped:', injectError.message);
         }
 
-        chrome.tabs.sendMessage(tab.id, {
-          type: 'EXTRACT_DATA'
-        }, (response) => {
-          if (chrome.runtime.lastError) {
-            sendResponse({
-              success: false,
-              error: chrome.runtime.lastError.message + '. Try refreshing the page.'
-            });
-          } else {
-            sendResponse(response);
-          }
-        });
+        chrome.tabs.sendMessage(
+          tab.id,
+          {
+            type: 'EXTRACT_DATA',
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              sendResponse({
+                success: false,
+                error:
+                  chrome.runtime.lastError.message +
+                  '. Try refreshing the page.',
+              });
+            } else {
+              sendResponse(response);
+            }
+          },
+        );
       } else {
         sendResponse({
           success: false,
-          error: 'No active tab found'
+          error: 'No active tab found',
         });
       }
     });
@@ -548,17 +1022,57 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === 'SEND_TO_QWEN') {
     // Send data to Qwen CLI via native host
-    sendToNativeHost({
-      type: 'qwen_request',
-      action: request.action,
-      data: request.data
-    })
-    .then(response => {
-      sendResponse({ success: true, data: response });
-    })
-    .catch(error => {
-      sendResponse({ success: false, error: error.message });
-    });
+    const send = async () => {
+      try {
+        // Ensure native host connection
+        if (!isConnected) {
+          await connectToNativeHost();
+        }
+
+        // Ensure CLI is running
+        if (qwenCliStatus !== 'running') {
+          await sendToNativeHost({
+            type: 'start_qwen',
+            cwd: request.data?.cwd || '/',
+          });
+          qwenCliStatus = 'running';
+        }
+
+        // Inform UI that a stream is starting
+        try {
+          broadcastToUI({ type: 'streamStart' });
+        } catch (_) {}
+
+        const response = await sendToNativeHost({
+          type: 'qwen_request',
+          action: request.action,
+          data: request.data,
+        });
+        sendResponse({ success: true, data: response });
+      } catch (error) {
+        try {
+          broadcastToUI({
+            type: 'toolProgress',
+            data: {
+              name: request.action || 'request',
+              stage: 'end',
+              ok: false,
+              error: String(error?.message || error),
+            },
+          });
+          broadcastToUI({
+            type: 'error',
+            data: { message: String(error?.message || error) },
+          });
+        } catch (_) {}
+        const errMsg =
+          error && error && error.message
+            ? error && error.message
+            : String(error);
+        sendResponse({ success: false, error: errMsg });
+      }
+    };
+    send();
     return true; // Will respond asynchronously
   }
 
@@ -566,30 +1080,30 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // Request native host to start Qwen CLI
     sendToNativeHost({
       type: 'start_qwen',
-      config: request.config || {}
+      config: request.config || {},
     })
-    .then(response => {
-      qwenCliStatus = 'running';
-      sendResponse({ success: true, data: response });
-    })
-    .catch(error => {
-      sendResponse({ success: false, error: error.message });
-    });
+      .then((response) => {
+        qwenCliStatus = 'running';
+        sendResponse({ success: true, data: response });
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
     return true; // Will respond asynchronously
   }
 
   if (request.type === 'STOP_QWEN_CLI') {
     // Request native host to stop Qwen CLI
     sendToNativeHost({
-      type: 'stop_qwen'
+      type: 'stop_qwen',
     })
-    .then(response => {
-      qwenCliStatus = 'stopped';
-      sendResponse({ success: true, data: response });
-    })
-    .catch(error => {
-      sendResponse({ success: false, error: error.message });
-    });
+      .then((response) => {
+        qwenCliStatus = 'stopped';
+        sendResponse({ success: true, data: response });
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
     return true; // Will respond asynchronously
   }
 
@@ -599,12 +1113,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (chrome.runtime.lastError) {
         sendResponse({
           success: false,
-          error: chrome.runtime.lastError.message
+          error: chrome.runtime.lastError.message,
         });
       } else {
         sendResponse({
           success: true,
-          data: dataUrl
+          data: dataUrl,
         });
       }
     });
@@ -614,10 +1128,22 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === 'GET_NETWORK_LOGS') {
     // Get network logs (requires debugger API)
     getNetworkLogs(sender.tab?.id)
-      .then(logs => {
+      .then((logs) => {
         sendResponse({ success: true, data: logs });
       })
-      .catch(error => {
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true; // Will respond asynchronously
+  }
+
+  if (request.type === 'GET_CONSOLE_LOGS') {
+    // Get console logs via content script
+    getBrowserConsoleLogs()
+      .then((res) => {
+        sendResponse({ success: true, data: res.logs || [] });
+      })
+      .catch((error) => {
         sendResponse({ success: false, error: error.message });
       });
     return true; // Will respond asynchronously
@@ -650,7 +1176,7 @@ async function getNetworkLogs(tabId) {
           target.logs.push({
             method,
             params,
-            timestamp: Date.now()
+            timestamp: Date.now(),
           });
         }
       }
@@ -678,17 +1204,69 @@ chrome.runtime.onInstalled.addListener((details) => {
     console.log('Extension installed for the first time');
     // Users can access options from popup menu
   }
+
+  // Ensure clicking the action icon opens the side panel (Chrome API)
+  try {
+    if (
+      chrome.sidePanel &&
+      typeof chrome.sidePanel.setPanelBehavior === 'function'
+    ) {
+      // Open side panel when the action icon is clicked
+      // This is the recommended way in recent Chrome versions
+      chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+    }
+  } catch (e) {
+    console.warn('Failed to set side panel behavior:', e);
+  }
 });
 
 // Open side panel when extension icon is clicked
 chrome.action.onClicked.addListener((tab) => {
-  chrome.sidePanel.open({ windowId: tab.windowId });
+  try {
+    const openForWindow = (winId) => {
+      try {
+        chrome.sidePanel.open({ windowId: winId });
+      } catch (e) {
+        console.error('Failed to open side panel:', e);
+      }
+    };
+    if (tab && typeof tab.windowId === 'number') {
+      openForWindow(tab.windowId);
+    } else {
+      // Fallback: get current window and open
+      chrome.windows.getCurrent({}, (win) => {
+        if (win && typeof win.id === 'number') {
+          openForWindow(win.id);
+        } else {
+          console.error('No active window to open side panel');
+        }
+      });
+    }
+  } catch (e) {
+    console.error('onClicked handler error:', e);
+  }
 });
+
+// Also configure side panel behavior on startup (in addition to onInstalled)
+try {
+  if (
+    chrome.sidePanel &&
+    typeof chrome.sidePanel.setPanelBehavior === 'function'
+  ) {
+    chrome.runtime.onStartup.addListener(() => {
+      try {
+        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+      } catch (e) {
+        console.warn('setPanelBehavior onStartup failed:', e);
+      }
+    });
+  }
+} catch (_) {}
 
 // Export for testing
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     connectToNativeHost,
-    sendToNativeHost
+    sendToNativeHost,
   };
 }

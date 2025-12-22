@@ -127,7 +127,51 @@ class AcpConnection {
     }
 
     try {
-      log(`Starting Qwen CLI with ACP mode in ${cwd}`);
+      // Normalize CWD: use a dedicated clean directory for Chrome extension
+      // to avoid slow QWEN.md scanning in directories with many files
+      let normalizedCwd = cwd;
+      try {
+        const home = os.homedir();
+        // Use a dedicated directory for Chrome bridge to minimize file scanning
+        const chromeBridgeDir = path.join(home, '.qwen', 'chrome-bridge');
+
+        // Ensure the directory exists
+        if (!fs.existsSync(chromeBridgeDir)) {
+          fs.mkdirSync(chromeBridgeDir, { recursive: true });
+        }
+
+        // Create an empty QWEN.md to immediately satisfy memory discovery
+        // This prevents BfsFileSearch from scanning many directories
+        const qwenMdPath = path.join(chromeBridgeDir, 'QWEN.md');
+        if (!fs.existsSync(qwenMdPath)) {
+          fs.writeFileSync(
+            qwenMdPath,
+            '# Chrome Browser Bridge\n\nThis is the Qwen CLI Chrome extension workspace.\n',
+            'utf8',
+          );
+        }
+
+        // Always use the dedicated chrome-bridge directory unless a specific CWD is requested
+        if (
+          !normalizedCwd ||
+          normalizedCwd === '/' ||
+          normalizedCwd === '\\' ||
+          !fs.existsSync(normalizedCwd)
+        ) {
+          normalizedCwd = chromeBridgeDir;
+        }
+      } catch (_) {
+        try {
+          const fallback = path.join(os.homedir(), '.qwen', 'chrome-bridge');
+          if (!fs.existsSync(fallback))
+            fs.mkdirSync(fallback, { recursive: true });
+          normalizedCwd = fallback;
+        } catch (_) {
+          normalizedCwd = os.homedir();
+        }
+      }
+
+      log(`Starting Qwen CLI with ACP mode in ${normalizedCwd}`);
 
       // Chrome 环境没有用户 PATH，需要手动设置
       const env = {
@@ -137,22 +181,59 @@ class AcpConnection {
           (process.env.PATH || ''),
       };
 
-      this.process = spawn(
-        '/Users/yiliang/.npm-global/bin/qwen',
-        [
-          '--experimental-acp',
-          '--allowed-mcp-server-names',
-          'chrome-browser',
-          '--debug',
-        ],
-        {
-          cwd,
-          env,
-          shell: true,
-          windowsHide: true,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        },
-      );
+      // Resolve qwen CLI path more robustly
+      const qwenPath = (() => {
+        try {
+          // Prefer local monorepo build: packages/cli/dist/index.js
+          const localCli = path.resolve(
+            __dirname,
+            '..',
+            '..',
+            'cli',
+            'dist',
+            'index.js',
+          );
+          if (fs.existsSync(localCli)) {
+            return localCli;
+          }
+        } catch {}
+        try {
+          // Prefer explicit env override
+          if (
+            process.env.QWEN_CLI_PATH &&
+            fs.existsSync(process.env.QWEN_CLI_PATH)
+          ) {
+            return process.env.QWEN_CLI_PATH;
+          }
+        } catch {}
+        try {
+          // Fallback to previously used absolute path if it exists
+          if (fs.existsSync('/Users/yiliang/.npm-global/bin/qwen')) {
+            return '/Users/yiliang/.npm-global/bin/qwen';
+          }
+        } catch {}
+        // Last resort: rely on PATH
+        return 'qwen';
+      })();
+
+      // Support both executable CLI (e.g., 'qwen') and Node script paths (e.g., '/.../dist/index.js')
+      const isNodeScript = /\.(mjs|cjs|js)$/i.test(qwenPath);
+      const spawnCommand = isNodeScript ? process.execPath || 'node' : qwenPath;
+      const spawnArgs = [
+        ...(isNodeScript ? [qwenPath] : []),
+        '--experimental-acp',
+        '--allowed-mcp-server-names',
+        'chrome-browser,chrome-devtools',
+        '--debug',
+      ];
+
+      this.process = spawn(spawnCommand, spawnArgs, {
+        cwd: normalizedCwd,
+        env,
+        shell: true,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
 
       if (!this.process || !this.process.pid) {
         this.process = null;
@@ -172,6 +253,12 @@ class AcpConnection {
         const message = data.toString().trim();
         if (message) {
           log(`Qwen stderr: ${message}`);
+          try {
+            sendMessageToExtension({
+              type: 'event',
+              data: { type: 'cli_stderr', line: message },
+            });
+          } catch (_) {}
         }
       });
 
@@ -207,7 +294,7 @@ class AcpConnection {
       }
 
       // Create a new session
-      const sessionResult = await this.createSession(cwd);
+      const sessionResult = await this.createSession(normalizedCwd);
       if (!sessionResult.success) {
         this.stop();
         return sessionResult;
@@ -297,6 +384,17 @@ class AcpConnection {
           data: {
             type: 'auth_update',
             authUri: params._meta?.authUri,
+          },
+        });
+        break;
+
+      case 'notifications/tools/list_changed':
+        // Forward MCP tool list change notifications to the extension
+        sendMessageToExtension({
+          type: 'event',
+          data: {
+            type: 'tools_list_changed',
+            tools: params?.tools || [],
           },
         });
         break;
@@ -468,7 +566,7 @@ class AcpConnection {
     this.process.stdin.write(json);
   }
 
-  sendAcpRequest(method, params) {
+  sendAcpRequest(method, params, timeoutMs = 30000) {
     return new Promise((resolve, reject) => {
       const id = this.nextRequestId++;
       this.pendingRequests.set(id, { resolve, reject });
@@ -485,13 +583,13 @@ class AcpConnection {
         reject(err);
       }
 
-      // Timeout after 30 seconds
-      setTimeout(() => {
+      // Timeout after specified duration
+      const timer = setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`Request ${method} timed out`));
         }
-      }, 30000);
+      }, timeoutMs);
     });
   }
 
@@ -513,21 +611,20 @@ class AcpConnection {
 
   async initialize() {
     try {
-      const result = await this.sendAcpRequest('initialize', {
-        protocolVersion: ACP_PROTOCOL_VERSION,
-        clientCapabilities: {
-          fs: {
-            readTextFile: true,
-            writeTextFile: true,
-          },
-          browser: {
-            readPage: true,
-            captureScreenshot: true,
-            getNetworkLogs: true,
-            getConsoleLogs: true,
+      const result = await this.sendAcpRequest(
+        'initialize',
+        {
+          protocolVersion: ACP_PROTOCOL_VERSION,
+          clientCapabilities: {
+            fs: {
+              // Only advertise filesystem capabilities; CLI schema accepts only 'fs' here.
+              readTextFile: true,
+              writeTextFile: true,
+            },
           },
         },
-      });
+        30000,
+      );
 
       log(`Qwen CLI initialized: ${JSON.stringify(result)}`);
       return { success: true, data: result };
@@ -539,6 +636,39 @@ class AcpConnection {
 
   async createSession(cwd) {
     try {
+      // Helper to discover Chrome DevTools WS URL from env or default port
+      const http = require('http');
+      async function fetchJson(url) {
+        return new Promise((resolve) => {
+          try {
+            const req = http.get(url, (res) => {
+              let body = '';
+              res.on('data', (c) => (body += c));
+              res.on('end', () => {
+                try {
+                  resolve(JSON.parse(body));
+                } catch (_) {
+                  resolve(null);
+                }
+              });
+            });
+            req.on('error', () => resolve(null));
+            req.end();
+          } catch (_) {
+            resolve(null);
+          }
+        });
+      }
+      async function discoverDevToolsWsUrl() {
+        // 1) Explicit env
+        if (process.env.DEVTOOLS_WS_URL) return process.env.DEVTOOLS_WS_URL;
+        // 2) Provided port
+        const port = process.env.CHROME_REMOTE_DEBUG_PORT || '9222';
+        const json = await fetchJson(`http://127.0.0.1:${port}/json/version`);
+        if (json && json.webSocketDebuggerUrl) return json.webSocketDebuggerUrl;
+        return null;
+      }
+
       // Get the path to browser-mcp-server.js
       const browserMcpServerPath = path.join(
         __dirname,
@@ -547,24 +677,65 @@ class AcpConnection {
 
       log(`Creating session with MCP server: ${browserMcpServerPath}`);
 
+      // Use the same Node runtime that's running this host process to launch the MCP server.
+      // This avoids hard-coded paths like /usr/local/bin/node which may not exist on all systems
+      // (e.g., Homebrew on Apple Silicon uses /opt/homebrew/bin/node, or users may use nvm).
+      const nodeCommand = process.execPath || 'node';
+
       const mcpServersConfig = [
         {
           name: 'chrome-browser',
-          command: '/usr/local/bin/node',
+          command: nodeCommand,
           args: [browserMcpServerPath],
           env: [],
+          timeout: 180000, // 3 minutes timeout for MCP operations
+          trust: true, // Auto-approve browser tools
         },
       ];
 
+      // Optionally add open-source DevTools MCP if a WS URL is available
+      try {
+        const wsUrl = await discoverDevToolsWsUrl();
+        if (wsUrl) {
+          mcpServersConfig.push({
+            name: 'chrome-devtools',
+            command: 'chrome-devtools-mcp',
+            args: ['--ws-url', wsUrl],
+            env: [{ name: 'DEVTOOLS_WS_URL', value: wsUrl }],
+            timeout: 180000,
+            trust: true,
+          });
+          log(`Adding DevTools MCP with wsUrl: ${wsUrl}`);
+        } else {
+          log(
+            'DevTools WS URL not found (is Chrome running with --remote-debugging-port=9222?). Skipping chrome-devtools MCP.',
+          );
+        }
+      } catch (e) {
+        log(`Failed to prepare DevTools MCP: ${e.message}`);
+      }
+
       log(`MCP servers config: ${JSON.stringify(mcpServersConfig)}`);
 
-      const result = await this.sendAcpRequest('session/new', {
-        cwd,
-        mcpServers: mcpServersConfig,
-      });
+      // Skip MCP server configuration to avoid slow tool discovery.
+      // Browser tools are handled via fallback mechanism in service-worker.js.
+      // To enable MCP (slower startup), set useMcp = true
+      const useMcp = false;
+
+      const result = await this.sendAcpRequest(
+        'session/new',
+        {
+          cwd,
+          mcpServers: useMcp ? mcpServersConfig : [],
+        },
+        useMcp ? 180000 : 30000, // Fast startup without MCP
+      );
 
       this.sessionId = result.sessionId;
       log(`Session created: ${this.sessionId}`);
+      try {
+        log(`Session/new result: ${JSON.stringify(result)}`);
+      } catch (_) {}
       return { success: true, data: result };
     } catch (err) {
       logError(`Failed to create session: ${err.message}`);
@@ -699,14 +870,14 @@ const acpConnection = new AcpConnection();
 async function checkQwenInstallation() {
   return new Promise((resolve) => {
     try {
-      const checkProcess = spawn(
-        '/Users/yiliang/.npm-global/bin/qwen',
-        ['--version'],
-        {
-          shell: true,
-          windowsHide: true,
-        },
-      );
+      const qwenPath =
+        process.env.QWEN_CLI_PATH ||
+        '/Users/yiliang/.npm-global/bin/qwen' ||
+        'qwen';
+      const checkProcess = spawn(qwenPath, ['--version'], {
+        shell: true,
+        windowsHide: true,
+      });
 
       let output = '';
       checkProcess.stdout.on('data', (data) => {
@@ -740,28 +911,33 @@ async function checkQwenInstallation() {
 // ============================================================================
 
 /**
- * Build a prompt string from action and data
+ * Build a prompt string from action, data, and optional user prompt
  */
-function buildPromptFromAction(action, data) {
+function buildPromptFromAction(action, data, userPrompt) {
+  // If user provided additional instructions, append them
+  const userInstructions = userPrompt
+    ? `\n\nUser's request: ${userPrompt}`
+    : '';
+
   switch (action) {
     case 'analyze_page':
-      return `Please analyze the following webpage data and provide insights:\n\nURL: ${data.url}\nTitle: ${data.title}\n\nContent:\n${data.content?.text || data.content?.markdown || 'No content available'}\n\nPlease provide a summary and any notable observations.`;
+      return `Here is the webpage content:\n\nURL: ${data.url}\nTitle: ${data.title}\n\nContent:\n${data.content?.text || data.content?.markdown || 'No content available'}${userInstructions || '\n\nPlease provide a summary and any notable observations.'}`;
 
     case 'analyze_screenshot':
-      return `Please analyze the screenshot from this URL: ${data.url}\n\n[Screenshot data provided as base64 image]`;
+      return `Here is a screenshot from URL: ${data.url}\n\n[Screenshot data provided as base64 image]${userInstructions || '\n\nPlease analyze this screenshot.'}`;
 
     case 'ai_analyze':
       return (
         data.prompt ||
-        `Please analyze the following webpage:\n\nURL: ${data.pageData?.url}\nTitle: ${data.pageData?.title}\n\nContent:\n${data.pageData?.content?.text || 'No content available'}`
+        `Here is the webpage:\n\nURL: ${data.pageData?.url}\nTitle: ${data.pageData?.title}\n\nContent:\n${data.pageData?.content?.text || 'No content available'}${userInstructions}`
       );
 
     case 'process_text':
-      return `Please process the following ${data.context || 'text'}:\n\n${data.text}`;
+      return `Here is the ${data.context || 'text'}:\n\n${data.text}${userInstructions || '\n\nPlease process this information.'}`;
 
     default:
       // For unknown actions, just stringify the data
-      return `Action: ${action}\nData: ${JSON.stringify(data, null, 2)}`;
+      return `Action: ${action}\nData: ${JSON.stringify(data, null, 2)}${userInstructions}`;
   }
 }
 
@@ -786,6 +962,20 @@ async function handleExtensionMessage(message) {
         qwenVersion: 'checking...',
         qwenStatus: acpConnection.getStatus().status,
       };
+      // Send host info event (log path, runtime) to help debugging
+      try {
+        sendMessageToExtension({
+          type: 'event',
+          data: {
+            type: 'host_info',
+            logFile: LOG_FILE,
+            node: process.execPath,
+            pid: process.pid,
+          },
+        });
+      } catch (e) {
+        logError(`Failed to send host_info: ${e.message}`);
+      }
       break;
 
     case 'start_qwen':
@@ -836,8 +1026,12 @@ async function handleExtensionMessage(message) {
 
     case 'qwen_request':
       // Handle generic requests from extension (analyze_page, analyze_screenshot, etc.)
-      // Convert action + data to a prompt for Qwen CLI
-      const promptText = buildPromptFromAction(message.action, message.data);
+      // Convert action + data to a prompt for Qwen CLI, including user's original request
+      const promptText = buildPromptFromAction(
+        message.action,
+        message.data,
+        message.userPrompt,
+      );
       if (acpConnection.status !== 'running') {
         response = {
           type: 'response',

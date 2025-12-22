@@ -14,4 +14,13 @@ if [ ! -f "$NODE_PATH" ]; then
 fi
 
 # 执行 Native Host
+
+# Prefer local CLI build if available and QWEN_CLI_PATH is not set
+if [ -z "$QWEN_CLI_PATH" ]; then
+  LOCAL_CLI="$DIR/../../cli/dist/index.js"
+  if [ -f "$LOCAL_CLI" ]; then
+    export QWEN_CLI_PATH="$LOCAL_CLI"
+  fi
+fi
+
 exec "$NODE_PATH" "$DIR/host.js"
