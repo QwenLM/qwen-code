@@ -48,6 +48,11 @@ export function AuthDialog(): React.JSX.Element {
       label: t('OpenAI'),
       value: AuthType.USE_OPENAI,
     },
+    {
+      key: AuthType.USE_BEDROCK,
+      label: t('Amazon Bedrock'),
+      value: AuthType.USE_BEDROCK,
+    },
   ];
 
   const initialAuthIndex = Math.max(
