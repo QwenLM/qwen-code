@@ -22,6 +22,7 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { FatalAuthenticationError, getErrorMessage } from '../utils/errors.js';
+import { createSecureDirAsync } from '../utils/fileUtils.js';
 import { UserAccountManager } from '../utils/userAccountManager.js';
 import { OAuthCredentialStorage } from './oauth-credential-storage.js';
 import { FORCE_ENCRYPTED_FILE_ENV_VAR } from '../mcp/token-storage/index.js';
@@ -474,7 +475,7 @@ async function loadCachedCredentials(client: OAuth2Client): Promise<boolean> {
 
 async function cacheCredentials(credentials: Credentials) {
   const filePath = Storage.getOAuthCredsPath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await createSecureDirAsync(path.dirname(filePath));
 
   const credString = JSON.stringify(credentials, null, 2);
   await fs.writeFile(filePath, credString, { mode: 0o600 });

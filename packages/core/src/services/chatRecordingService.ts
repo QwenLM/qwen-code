@@ -8,6 +8,7 @@ import { type Config } from '../config/config.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { createSecureDir } from '../utils/fileUtils.js';
 import {
   type PartListUnion,
   type Content,
@@ -177,7 +178,7 @@ export class ChatRecordingService {
     const chatsDir = path.join(projectDir, 'chats');
 
     try {
-      fs.mkdirSync(chatsDir, { recursive: true });
+      createSecureDir(chatsDir);
     } catch {
       // Ignore errors - directory will be created if it doesn't exist
     }

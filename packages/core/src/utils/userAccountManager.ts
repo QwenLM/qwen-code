@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { promises as fsp, readFileSync } from 'node:fs';
 import { Storage } from '../config/storage.js';
+import { createSecureDirAsync } from './fileUtils.js';
 
 interface UserAccounts {
   active: string | null;
@@ -91,7 +92,7 @@ export class UserAccountManager {
 
   async cacheGoogleAccount(email: string): Promise<void> {
     const filePath = this.getGoogleAccountsCachePath();
-    await fsp.mkdir(path.dirname(filePath), { recursive: true });
+    await createSecureDirAsync(path.dirname(filePath));
 
     const accounts = await this.readAccounts(filePath);
 
