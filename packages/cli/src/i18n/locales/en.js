@@ -325,6 +325,39 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'View current conversation context usage':
+    'View current conversation context usage',
+  'Configuration is unavailable, cannot analyze context.':
+    'Configuration is unavailable, cannot analyze context.',
+  'Chat history is unavailable, cannot analyze context.':
+    'Chat history is unavailable, cannot analyze context.',
+  'Failed to analyze context: {error}': 'Failed to analyze context: {{error}}',
+  'Context Usage': 'Context Usage',
+  Overview: 'Overview',
+  'Total Context:': 'Total Context:',
+  'Session Limit:': 'Session Limit:',
+  'Usage:': 'Usage:',
+  'Remaining:': 'Remaining:',
+  'Est. Exchanges:': 'Est. Exchanges:',
+  'more exchanges': 'more exchanges',
+  tokens: 'tokens',
+  'Content Type': 'Content Type',
+  Percent: 'Percent',
+  'User Messages': 'User Messages',
+  'Assistant Responses': 'Assistant Responses',
+  'Tool Calls': 'Tool Calls',
+  'Tool Responses': 'Tool Responses',
+  'System Instructions': 'System Instructions',
+  'Context is critically high! Consider taking action soon.':
+    'Context is critically high! Consider taking action soon.',
+  'Suggestions: Use /compress to reduce context, or /clear to start fresh.':
+    'Suggestions: Use /compress to reduce context, or /clear to start fresh.',
+  'Context usage is approaching the limit.':
+    'Context usage is approaching the limit.',
+  'Suggestions: Consider using /compress if conversation gets too long.':
+    'Suggestions: Consider using /compress if conversation gets too long.',
+  'Tip: Use /stats to see session performance and token usage by model.':
+    'Tip: Use /stats to see session performance and token usage by model.',
   'exit the cli': 'exit the cli',
   'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     'list configured MCP servers and tools, or authenticate with OAuth-enabled servers',

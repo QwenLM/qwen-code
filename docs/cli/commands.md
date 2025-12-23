@@ -98,6 +98,23 @@ Slash commands provide meta-level control over the CLI itself.
   - **Details:** This command provides a user-friendly interface for changing settings that control the behavior and appearance of Qwen Code. It is equivalent to manually editing the `.qwen/settings.json` file, but with validation and guidance to prevent errors.
   - **Usage:** Simply run `/settings` and the editor will open. You can then browse or search for specific settings, view their current values, and modify them as desired. Changes to some settings are applied immediately, while others require a restart.
 
+- **`/context`** (aliases: `ctx`)
+  - **Description:** View the current conversation context usage, including total token count, breakdown by content type (user messages, assistant responses, tool calls, etc.), and comparison with session limits. Provides visual representation of context usage and warnings when approaching limits.
+  - **Usage:** `/context`
+  - **Features:**
+    - Shows total tokens used in current conversation
+    - Displays usage percentage vs. session limit
+    - Breaks down tokens by content type
+    - Visualizes usage with progress bar
+    - Warns when context is approaching or exceeding limits
+    - Estimates remaining conversation exchanges
+  - **Output Example:**
+    - Total Context: 15,432 tokens
+    - Usage: ████████░░░░ 68.5%
+    - Breakdown table showing tokens for user messages, assistant responses, tool calls, tool responses, system instructions, thoughts, and cached tokens
+  - **Tip:** Use `/context` regularly during long conversations to monitor context usage. Pair with `/compress` to reduce context or `/clear` to start fresh when approaching limits.
+  - **Difference from `/stats`**: While `/stats` focuses on session performance metrics (tool calls, success rate, API time), `/context` focuses specifically on conversation context and token usage breakdown. They complement each other for comprehensive session monitoring.
+
 - **`/stats`**
   - **Description:** Display detailed statistics for the current Qwen Code session, including token usage, cached token savings (when available), and session duration. Note: Cached token information is only displayed when cached tokens are being used, which occurs with API key authentication but not with OAuth authentication at this time.
 

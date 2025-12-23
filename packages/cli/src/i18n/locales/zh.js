@@ -313,6 +313,37 @@ export default {
     '检查会话统计信息。用法：/stats [model|tools]',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',
+  'View current conversation context usage': '查看当前对话上下文使用情况',
+  'Configuration is unavailable, cannot analyze context.':
+    '配置不可用,无法分析上下文。',
+  'Chat history is unavailable, cannot analyze context.':
+    '聊天历史不可用,无法分析上下文。',
+  'Failed to analyze context: {error}': '分析上下文失败：{{error}}',
+  'Context Usage': '上下文使用情况',
+  Overview: '概览',
+  'Total Context:': '总上下文：',
+  'Session Limit:': '会话限制：',
+  'Usage:': '使用率：',
+  'Remaining:': '剩余：',
+  'Est. Exchanges:': '预计轮次：',
+  'more exchanges': '更多轮次',
+  tokens: '个token',
+  'Content Type': '内容类型',
+  Percent: '百分比',
+  'User Messages': '用户消息',
+  'Assistant Responses': '助手回复',
+  'Tool Calls': '工具调用',
+  'Tool Responses': '工具响应',
+  'System Instructions': '系统指令',
+  'Context is critically high! Consider taking action soon.':
+    '上下文使用极高！请尽快采取行动。',
+  'Suggestions: Use /compress to reduce context, or /clear to start fresh.':
+    '建议：使用 /compress 压缩上下文，或使用 /clear 开始新会话。',
+  'Context usage is approaching the limit.': '上下文使用接近限制。',
+  'Suggestions: Consider using /compress if conversation gets too long.':
+    '建议：如果对话过长，考虑使用 /compress。',
+  'Tip: Use /stats to see session performance and token usage by model.':
+    '提示：使用 /stats 查看会话性能和按模型的token使用情况。',
   'exit the cli': '退出命令行界面',
   'list configured MCP servers and tools, or authenticate with OAuth-enabled servers':
     '列出已配置的 MCP 服务器和工具，或使用支持 OAuth 的服务器进行身份验证',

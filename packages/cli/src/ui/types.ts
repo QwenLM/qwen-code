@@ -166,6 +166,27 @@ export type HistoryItemToolStats = HistoryItemBase & {
   type: 'tool_stats';
 };
 
+export interface ContextBreakdown {
+  userMessages: number;
+  assistantResponses: number;
+  toolCalls: number;
+  toolResponses: number;
+  systemInstructions: number;
+  cached: number;
+  thoughts: number;
+  total: number;
+}
+
+export type HistoryItemContext = HistoryItemBase & {
+  type: 'context';
+  totalTokens: number;
+  breakdown: ContextBreakdown;
+  sessionLimit: number;
+  usagePercentage: number;
+  remainingTokens: number;
+  estimatedExchanges: number;
+};
+
 export type HistoryItemQuit = HistoryItemBase & {
   type: 'quit';
   duration: string;
@@ -262,6 +283,7 @@ export type HistoryItemWithoutId =
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
+  | HistoryItemContext
   | HistoryItemQuit
   | HistoryItemCompression
   | HistoryItemSummary
@@ -283,6 +305,7 @@ export enum MessageType {
   STATS = 'stats',
   MODEL_STATS = 'model_stats',
   TOOL_STATS = 'tool_stats',
+  CONTEXT = 'context',
   QUIT = 'quit',
   GEMINI = 'gemini',
   COMPRESSION = 'compression',

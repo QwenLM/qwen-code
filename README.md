@@ -122,6 +122,7 @@ Create or edit `.qwen/settings.json` in your home directory:
 
 #### Session Commands
 
+- **`/context`** - View conversation context usage with detailed breakdown and visualization
 - **`/compress`** - Compress conversation history to continue within token limits
 - **`/clear`** - Clear all conversation history and start fresh
 - **`/stats`** - Check current token usage and limits

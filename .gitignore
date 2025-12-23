@@ -23,6 +23,7 @@ package-lock.json
 .idea
 *.iml
 .cursor
+openspec/
 
 # OS metadata
 .DS_Store
