@@ -275,5 +275,28 @@ instructions`;
         '<file_tree>No files found in skill directory.</file_tree>',
       );
     });
+    it('should ignore files with dangerous names to prevent prototype pollution', async () => {
+      const skillDir = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'danger-skill',
+      );
+      await fs.mkdir(skillDir, { recursive: true });
+
+      const { glob } = await import('glob');
+      const mockedGlob = vi.mocked(glob);
+      mockedGlob.mockResolvedValueOnce([
+        path.join(skillDir, 'safe.txt'),
+        path.join(skillDir, '__proto__'),
+        path.join(skillDir, 'constructor', 'file.txt'),
+      ]);
+
+      const treeString = await skillManager.getSkillFileTree(skillDir);
+
+      expect(treeString).toContain('safe.txt');
+      expect(treeString).not.toContain('__proto__');
+      expect(treeString).not.toContain('constructor');
+    });
   });
 });

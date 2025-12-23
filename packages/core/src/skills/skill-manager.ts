@@ -179,6 +179,16 @@ export class SkillManager {
       let currentLevel: TreeNode = tree;
       for (let i = 0; i < parts.length; i++) {
         const part = parts[i];
+
+        // Prevent prototype pollution
+        if (
+          part === '__proto__' ||
+          part === 'constructor' ||
+          part === 'prototype'
+        ) {
+          break;
+        }
+
         if (i === parts.length - 1) {
           // File
           currentLevel[part] = `[file]`;
