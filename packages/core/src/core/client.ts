@@ -29,6 +29,7 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   getSubagentSystemReminder,
+  getSkillSystemReminder,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -77,6 +78,7 @@ import { type File, type IdeContext } from '../ide/types.js';
 
 // Fallback handling
 import { handleFallback } from '../fallback/handler.js';
+import { SkillTool } from '../tools/skill.js';
 
 export function isThinkingSupported(model: string) {
   return model.startsWith('gemini-2.5') || model === DEFAULT_GEMINI_MODEL_AUTO;
@@ -549,6 +551,14 @@ export class GeminiClient {
         );
       }
 
+      // add skill system reminder
+      const hasSkillTool = this.config
+        .getToolRegistry()
+        .getTool(SkillTool.Name);
+      const skills = (await this.config.getSkillManager()?.listSkills()) ?? [];
+      if (hasSkillTool && skills.length > 0) {
+        systemReminders.push(getSkillSystemReminder());
+      }
       requestToSent = [...systemReminders, ...requestToSent];
     }
 

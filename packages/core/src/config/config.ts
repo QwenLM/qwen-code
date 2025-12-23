@@ -102,6 +102,10 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 
+// skill
+import { SkillManager } from '../skills/skill-manager.js';
+import { SkillTool } from '../tools/skill.js';
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -351,6 +355,9 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  // skill
+  skillManager?: SkillManager;
+  skillsEnabled?: boolean;
 }
 
 function normalizeConfigOutputFormat(
@@ -489,6 +496,8 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
   private readonly channel: string | undefined;
+  private skillManager: SkillManager | undefined;
+  private readonly skillsEnabled: boolean;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -610,6 +619,8 @@ export class Config {
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+    this.skillsEnabled = params.skillsEnabled ?? false;
+
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -644,6 +655,7 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.subagentManager = new SubagentManager(this);
+    this.skillManager = new SkillManager(this);
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
@@ -1306,6 +1318,17 @@ export class Config {
     return this.subagentManager;
   }
 
+  getSkillEnabled(): boolean {
+    return this.skillsEnabled;
+  }
+
+  getSkillManager(): SkillManager | undefined {
+    if (!this.skillsEnabled) {
+      return undefined;
+    }
+    return this.skillManager;
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ): Promise<ToolRegistry> {
@@ -1390,6 +1413,9 @@ export class Config {
     registerCoreTool(TodoWriteTool, this);
     !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
     registerCoreTool(WebFetchTool, this);
+    if (this.getSkillEnabled()) {
+      registerCoreTool(SkillTool, this);
+    }
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist

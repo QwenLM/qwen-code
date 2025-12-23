@@ -99,6 +99,7 @@ describe('BuiltinCommandLoader', () => {
     mockConfig = {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
+      getSkillEnabled: () => true,
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({

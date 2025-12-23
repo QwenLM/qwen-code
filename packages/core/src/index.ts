@@ -55,6 +55,7 @@ export * from './utils/workspaceContext.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/partUtils.js';
 export * from './utils/subagentGenerator.js';
+export * from './utils/skillGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
@@ -132,3 +133,7 @@ export { Storage } from './config/storage.js';
 
 // Export test utils
 export * from './test-utils/index.js';
+
+// Export skills
+export * from './skills/types.js';
+export * from './skills/skill-manager.js';

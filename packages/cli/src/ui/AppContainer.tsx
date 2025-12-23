@@ -99,6 +99,8 @@ import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useSkillCreateDialog } from './hooks/useSkillCreateDialog.js';
+import { useSkillManagerDialog } from './hooks/useSkillManagerDialog.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -468,6 +470,18 @@ export const AppContainer = (props: AppContainerProps) => {
     closeAgentsManagerDialog,
   } = useAgentsManagerDialog();
 
+  const {
+    isSkillCreateDialogOpen,
+    openSkillCreateDialog,
+    closeSkillCreateDialog,
+  } = useSkillCreateDialog();
+
+  const {
+    isSkillManagerDialogOpen,
+    openSkillManagerDialog,
+    closeSkillManagerDialog,
+  } = useSkillManagerDialog();
+
   // Vision model auto-switch dialog state (must be before slashCommandActions)
   const [isVisionSwitchDialogOpen, setIsVisionSwitchDialogOpen] =
     useState(false);
@@ -502,6 +516,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openSubagentCreateDialog,
       openAgentsManagerDialog,
       openResumeDialog,
+      // skill
+      openSkillCreateDialog,
+      openSkillManagerDialog,
     }),
     [
       openAuthDialog,
@@ -517,6 +534,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openSubagentCreateDialog,
       openAgentsManagerDialog,
       openResumeDialog,
+      // skill
+      openSkillCreateDialog,
+      openSkillManagerDialog,
     ],
   );
 
@@ -1210,7 +1230,9 @@ export const AppContainer = (props: AppContainerProps) => {
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
     isApprovalModeDialogOpen ||
-    isResumeDialogOpen;
+    isResumeDialogOpen ||
+    isSkillCreateDialogOpen ||
+    isSkillManagerDialogOpen;
 
   const pendingHistoryItems = useMemo(
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
@@ -1310,6 +1332,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skill dialogs
+      isSkillCreateDialogOpen,
+      isSkillManagerDialogOpen,
     }),
     [
       isThemeDialogOpen,
@@ -1402,6 +1427,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Subagent dialogs
       isSubagentCreateDialogOpen,
       isAgentsManagerDialogOpen,
+      // Skill dialogs
+      isSkillCreateDialogOpen,
+      isSkillManagerDialogOpen,
     ],
   );
 
@@ -1443,6 +1471,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Skill dialogs
+      closeSkillCreateDialog,
+      closeSkillManagerDialog,
     }),
     [
       handleThemeSelect,
@@ -1479,6 +1510,9 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Skill dialogs
+      closeSkillCreateDialog,
+      closeSkillManagerDialog,
     ],
   );
 

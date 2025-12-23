@@ -311,6 +311,7 @@ export default {
   'Folder Trust': 'Folder Trust',
   'Vision Model Preview': 'Vision Model Preview',
   'Tool Schema Compliance': 'Tool Schema Compliance',
+  'Enable Skills': 'Enable Skills',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   Text: 'Text',
@@ -1115,4 +1116,113 @@ export default {
   'Have you tried turning it off and on again? (The loading screen, not me.)':
     'Have you tried turning it off and on again? (The loading screen, not me.)',
   'Constructing additional pylons...': 'Constructing additional pylons...',
+
+  // ============================================================================
+  // Commands - Skills
+  // ============================================================================
+  'Manage and inspect skills.': 'Manage and inspect skills.',
+  'Manage existing skills (view, edit, delete).':
+    'Manage existing skills (view, edit, delete).',
+  'Create a new skill with guided setup.':
+    'Create a new skill with guided setup.',
+
+  // ============================================================================
+  // Skills - Management Dialog
+  // ============================================================================
+  'skills.title': 'Skills',
+  'skills.chooseAction': 'Choose Action',
+  'skills.edit': 'Edit {{name}}',
+  'skills.delete': 'Delete {{name}}',
+  'skills.unknownStep': 'Unknown Step',
+  'skills.escToClose': 'Esc to close',
+  'skills.nav.select': 'Enter to select, ↑↓ to navigate, Esc to close',
+  'skills.nav.back': 'Esc to go back',
+  'skills.nav.confirm': 'Enter to confirm, Esc to cancel',
+  'skills.nav.selectAndBack': 'Enter to select, ↑↓ to navigate, Esc to go back',
+  'skills.error.invalidStep': 'Invalid step: {{step}}',
+  'skills.noSkills': 'No skills found.',
+  'skills.createPrompt': 'Use /skill create to create your first skill.',
+  'skills.overridden': '(overridden by project level skill)',
+  'skills.projectLevel': 'Project Level ({{path}})',
+  'skills.globalLevel': 'Global Level ({{path}})',
+  'skills.builtin': 'Built-in Skills',
+  'skills.usingCount': 'Using: {{count}} skills',
+  'skills.view': 'View Skill',
+  'skills.editAction': 'Edit Skill',
+  'skills.deleteAction': 'Delete Skill',
+  'skills.noSkillSelected': 'No skill selected',
+  'skills.deleteConfirmation':
+    'Are you sure you want to delete skill "{{name}}"?',
+  'skills.openInEditor': 'Open SKILL.md in editor',
+  'skills.error.launchEditor': 'Failed to launch editor: {{error}}',
+  'skills.error.generic': '❌ Error:',
+  'skills.filePath': 'File Path: ',
+  'skills.allowedTools': 'Allowed Tools: ',
+  'skills.instructions': 'Instructions:',
+  'skills.path': 'Path: ',
+  'skills.scope': 'Scope: ',
+
+  // ============================================================================
+  // Skills - Creation Wizard
+  // ============================================================================
+  'skills.create.success': '✅ Skill Created Successfully!',
+  'skills.create.saved': 'Skill "{{name}}" has been saved to {{level}} level.',
+  'skills.create.projectLevel': 'Project Level (.qwen/skills/)',
+  'skills.create.userLevel': 'User Level (~/.qwen/skills/)',
+  'skills.create.error.save': '❌ Error saving skill:',
+  'skills.create.warnings': 'Warnings:',
+  'skills.create.warn.overwrite':
+    'Name "{{name}}" already exists at {{level}} level - will overwrite existing skill',
+  'skills.create.warn.userPrecedence':
+    'Name "{{name}}" exists at user level - project level will take precedence',
+  'skills.create.warn.projectPrecedence':
+    'Name "{{name}}" exists at project level - existing skill will take precedence',
+  'skills.create.warn.descLength': 'Description is over {{length}} characters',
+  'skills.create.error.saveAndEdit': 'Failed to save and edit skill: {{error}}',
+  'skills.create.error.config': 'Configuration not available',
+  'skills.create.error.projectRoot': 'Project root not available',
+  'skills.create.error.skillManager': 'Skill manager not available',
+  'skills.create.step.location': 'Step {{n}}: Choose Location',
+  'skills.create.step.method': 'Step {{n}}: Choose Generation Method',
+  'skills.create.step.name': 'Step {{n}}: Enter Skill Name',
+  'skills.create.step.description': 'Step {{n}}: Enter Description',
+  'skills.create.step.instructions': 'Step {{n}}: Enter Instructions',
+  'skills.create.step.color': 'Step {{n}}: Choose Background Color',
+  'skills.create.step.confirm': 'Step {{n}}: Confirm and Save',
+  'skills.create.nav.save':
+    'Press Enter to save, e to save and edit, Esc to go back',
+  'skills.create.nav.continue':
+    'Press Enter to continue, {{navigation}}Esc to {{action}}',
+  'skills.create.cancel': 'cancel',
+  'skills.create.goBack': 'go back',
+  'skills.create.nav.arrows': '↑↓ to navigate, ',
+  'skills.create.prompt.name': 'Enter a clear, unique name for this skill.',
+  'skills.create.placeholder.name': 'e.g., my-awesome-skill',
+  'skills.create.error.nameEmpty': 'Name cannot be empty.',
+  'skills.create.error.nameFormat':
+    'Name must only contain lowercase letters, numbers, and hyphens.',
+  'skills.create.error.nameLength': 'Name cannot exceed 64 characters.',
+  'skills.create.error.nameReserved':
+    'Name cannot contain "anthropic", "claude" or "qwen".',
+  'skills.create.error.generator: {{error}}':
+    'Failed to generate skill: {{error}}',
+  'skills.create.generating': 'Generating skill configuration...',
+  'skills.create.prompt.description':
+    'Describe when and how this skill should be used.',
+  'skills.create.placeholder.description':
+    'e.g., This skill helps to create a new component.',
+  'skills.create.error.descriptionEmpty': 'Description cannot be empty.',
+  'skills.create.error.descriptionLength':
+    'Description cannot exceed 1024 characters.',
+  'skills.create.error.descriptionXml': 'Description cannot contain XML tags.',
+  'skills.create.prompt.instructions':
+    'Provide detailed instructions for when and how to use this skill.\n\n💡 Best Practices:\n• Conciseness: Aim for ~5000 tokens. Assume the model is smart.\n• High Freedom (Analysis): Use natural language descriptions.\n• Low Freedom (Migration): Use precise steps or scripts.',
+  'skills.create.placeholder.instructions':
+    'e.g., To use this skill, run the following command...',
+  'skills.create.error.instructionsEmpty': 'Instructions cannot be empty.',
+  'skills.create.error.valueEmpty': 'Please enter a value.',
+  'skills.create.description.llmDescription':
+    'Describe what this skill should do and when it should be used. (Be comprehensive for best results)',
+  'skills.create.description.placeholder':
+    'e.g., A skill that formats JSON strings into pretty-printed JSON...',
 };

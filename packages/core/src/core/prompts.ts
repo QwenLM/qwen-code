@@ -825,6 +825,49 @@ export function getSubagentSystemReminder(agentTypes: string[]): string {
 }
 
 /**
+ * Generates a system reminder message about available skills for the AI assistant.
+ * This function creates an internal system message that informs the AI about available skills
+ * and how to use them.
+ *
+ * @param skills - Array of available Skill objects
+ * @returns A formatted system reminder string wrapped in XML tags
+ */
+export function getSkillSystemReminder(): string {
+  return `<system-reminder>
+
+# SKILL EXECUTION PROTOCOL
+
+This protocol defines the strict rules for behavior AFTER a skill has been successfully activated via the \`${ToolNames.SKILL}\` tool and you have received an \`<activated_skill>\` block.
+
+Failure to follow these rules will result in task failure.
+
+## Core Principles
+
+1.  **Just-in-Time File Reading (CRITICAL)**: You MUST NOT read all referenced files at the beginning. Instead, when a step in the skill's \`<instructions>\` refers to a file (e.g., via \`{{file:./path.txt}}\`), you MUST read that file **within that specific step** using the \`${ToolNames.READ_FILE}\` tool. This conserves context.
+2.  **File Tree is the Source of Truth**: When reading a file or executing a script, you MUST construct its absolute path by combining the \`<absolute_base_path>\` with the relative path from the \`<file_tree>\`. Do not guess paths or use other tools to find them.
+3.  **Blind Trust on Scripts**: If a step instructs you to run a script, construct its absolute path from the \`<file_tree>\` and execute it IMMEDIATELY with the \`${ToolNames.SHELL}\` tool. No pre-flight checks.
+4.  **Skill Immutability**: All files within the skill's directory are STRICTLY READ-ONLY. Do not attempt to modify them.
+
+## Execution Workflow
+
+1.  **Create Todo List**: Your FIRST action is to call \`${ToolNames.TODO_WRITE}\` to create a checklist based on the main steps outlined in the skill's \`<instructions>\`.
+2.  **Sequential Execution**: Execute the todo list steps in strict order.
+3.  **On-Demand Reading**: During any step, if you need the content of a referenced file, use \`${ToolNames.READ_FILE}\` with the resolved absolute path. **CRITICAL**: You are strictly forbidden from using \`${ToolNames.READ_MANY_FILES}\` for this purpose. Using it to read multiple skill files will lead to incomplete data and guaranteed task failure. You must read files one by one as needed.
+4.  **Termination**: Once the last todo item is marked complete, your ONLY permitted action is to deliver a final summary to the user. Do not use any more tools.
+</system-reminder>`;
+}
+
+export function getSkillProtocolReminder(): string {
+  return `
+  <protocol_reminder>
+    **CRITICAL SKILL EXECUTION RULES:**
+    1.  **Just-in-Time Reading**: Do NOT read all files at once. Read files using \`${ToolNames.READ_FILE}\` only when a step requires them. Never use \`${ToolNames.READ_MANY_FILES}\` for skill files; it will cause task failure.
+    2.  **Use File Tree for Paths**: Construct absolute paths for all files and scripts using the \`<file_tree>\` and \`<absolute_base_path>\`.
+    3.  **Blind Trust on Scripts**: Execute scripts immediately with \`${ToolNames.SHELL}\`. Do not verify their existence beforehand.
+    4.  **Skills are Read-Only**: Do not attempt to modify any skill files.
+  </protocol_reminder>`;
+}
+/**
  * Generates a system reminder message for plan mode operation.
  *
  * This function creates an internal system message that enforces plan mode constraints,

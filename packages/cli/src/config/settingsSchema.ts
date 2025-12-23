@@ -1007,6 +1007,30 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+
+  skills: {
+    type: 'object',
+    label: 'Skills',
+    category: 'Experimental',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for dynamic skills.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable Skills',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: true,
+        description: 'Enable loading of dynamic skills from the workspace.',
+        showInDialog: true,
+        parentKey: 'skills',
+        childKey: 'enabled',
+      },
+    },
+  },
+
   useSmartEdit: {
     type: 'boolean',
     label: 'Use Smart Edit',

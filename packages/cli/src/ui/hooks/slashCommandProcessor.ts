@@ -74,6 +74,9 @@ interface SlashCommandProcessorActions {
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
   openSubagentCreateDialog: () => void;
   openAgentsManagerDialog: () => void;
+  // skill
+  openSkillCreateDialog: () => void;
+  openSkillManagerDialog: () => void;
 }
 
 /**
@@ -423,6 +426,12 @@ export const useSlashCommandProcessor = (
                       actions.openResumeDialog();
                       return { type: 'handled' };
                     case 'help':
+                      return { type: 'handled' };
+                    case 'skill_create':
+                      actions.openSkillCreateDialog();
+                      return { type: 'handled' };
+                    case 'skill_list':
+                      actions.openSkillManagerDialog();
                       return { type: 'handled' };
                     default: {
                       const unhandled: never = result.dialog;
