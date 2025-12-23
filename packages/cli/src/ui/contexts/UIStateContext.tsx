@@ -136,6 +136,9 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Skill dialogs
+  isSkillCreateDialogOpen: boolean;
+  isSkillManagerDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

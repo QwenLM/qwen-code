@@ -301,6 +301,7 @@ export default {
   'Folder Trust': '文件夹信任',
   'Vision Model Preview': '视觉模型预览',
   'Tool Schema Compliance': '工具 Schema 兼容性',
+  'Enable Skills': '启用技能',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   Text: '文本',
@@ -1041,4 +1042,104 @@ export default {
   'Have you tried turning it off and on again? (The loading screen, not me.)':
     '你试过把它关掉再打开吗？（加载屏幕，不是我。）',
   'Constructing additional pylons...': '正在建造额外的能量塔...',
+
+  // ============================================================================
+  // Commands - Skills
+  // ============================================================================
+  'Manage and inspect skills.': '管理和检查技能',
+  'Manage existing skills (view, edit, delete).':
+    '管理现有技能（查看、编辑、删除）',
+  'Create a new skill with guided setup.': '通过引导式设置创建新技能',
+
+  // ============================================================================
+  // Skills - Management Dialog
+  // ============================================================================
+  'skills.title': '技能',
+  'skills.chooseAction': '选择操作',
+  'skills.edit': '编辑 {{name}}',
+  'skills.delete': '删除 {{name}}',
+  'skills.unknownStep': '未知步骤',
+  'skills.escToClose': '按 Esc 关闭',
+  'skills.nav.select': 'Enter 选择，↑↓ 导航，Esc 关闭',
+  'skills.nav.back': '按 Esc 返回',
+  'skills.nav.confirm': 'Enter 确认，Esc 取消',
+  'skills.nav.selectAndBack': 'Enter 选择，↑↓ 导航，Esc 返回',
+  'skills.error.invalidStep': '无效步骤: {{step}}',
+  'skills.noSkills': '未找到技能。',
+  'skills.createPrompt': '使用 /skill create 创建您的第一个技能。',
+  'skills.overridden': '(已被项目级技能覆盖)',
+  'skills.projectLevel': '项目级 ({{path}})',
+  'skills.globalLevel': '全局级 ({{path}})',
+  'skills.builtin': '内置技能',
+  'skills.usingCount': '使用中: {{count}} 个技能',
+  'skills.view': '查看技能',
+  'skills.editAction': '编辑技能',
+  'skills.deleteAction': '删除技能',
+  'skills.noSkillSelected': '未选择技能',
+  'skills.deleteConfirmation': '您确定要删除技能 "{{name}}" 吗？',
+  'skills.openInEditor': '在编辑器中打开 SKILL.md',
+  'skills.error.launchEditor': '启动编辑器失败: {{error}}',
+  'skills.error.generic': '❌ 错误:',
+  'skills.filePath': '文件路径: ',
+  'skills.allowedTools': '允许的工具: ',
+  'skills.instructions': '说明:',
+  'skills.path': '路径: ',
+  'skills.scope': '范围: ',
+
+  // ============================================================================
+  // Skills - Creation Wizard
+  // ============================================================================
+  'skills.create.success': '✅ 技能创建成功！',
+  'skills.create.saved': '技能 "{{name}}" 已保存到 {{level}} 级别。',
+  'skills.create.projectLevel': '项目级 (.qwen/skills/)',
+  'skills.create.userLevel': '用户级 (~/.qwen/skills/)',
+  'skills.create.error.save': '❌ 保存技能时出错:',
+  'skills.create.warnings': '警告:',
+  'skills.create.warn.overwrite':
+    '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有技能',
+  'skills.create.warn.userPrecedence':
+    '名称 "{{name}}" 在用户级别存在 - 项目级别将优先',
+  'skills.create.warn.projectPrecedence':
+    '名称 "{{name}}" 在项目级别存在 - 现有技能将优先',
+  'skills.create.warn.descLength': '描述超过 {{length}} 个字符',
+  'skills.create.error.saveAndEdit': '保存并编辑技能失败: {{error}}',
+  'skills.create.error.config': '配置不可用',
+  'skills.create.error.projectRoot': '项目根目录不可用',
+  'skills.create.error.skillManager': '技能管理器不可用',
+  'skills.create.step.location': '步骤 {{n}}: 选择位置',
+  'skills.create.step.method': '步骤 {{n}}: 选择生成方式',
+  'skills.create.step.name': '步骤 {{n}}: 输入技能名称',
+  'skills.create.step.description': '步骤 {{n}}: 输入描述',
+  'skills.create.step.instructions': '步骤 {{n}}: 输入说明',
+  'skills.create.step.color': '步骤 {{n}}: 选择背景颜色',
+  'skills.create.step.confirm': '步骤 {{n}}: 确认并保存',
+  'skills.create.nav.save': '按 Enter 保存，e 保存并编辑，Esc 返回',
+  'skills.create.nav.continue': '按 Enter 继续，{{navigation}}Esc {{action}}',
+  'skills.create.cancel': '取消',
+  'skills.create.goBack': '返回',
+  'skills.create.nav.arrows': '↑↓ 导航，',
+  'skills.create.prompt.name': '为此技能输入一个清晰、唯一的名称。',
+  'skills.create.placeholder.name': '例如：my-awesome-skill',
+  'skills.create.error.nameEmpty': '名称不能为空。',
+  'skills.create.error.nameFormat': '名称只能包含小写字母、数字和连字符。',
+  'skills.create.error.nameLength': '名称不能超过 64 个字符。',
+  'skills.create.error.nameReserved':
+    '名称不能包含 "anthropic"、"claude" 或 "qwen"。',
+  'skills.create.error.generator: {{error}}': '生成技能失败: {{error}}',
+  'skills.create.generating': '正在生成技能配置...',
+  'skills.create.prompt.description': '描述何时以及如何使用此技能。',
+  'skills.create.placeholder.description': '例如：此技能有助于创建新组件。',
+  'skills.create.error.descriptionEmpty': '描述不能为空。',
+  'skills.create.error.descriptionLength': '描述不能超过 1024 个字符。',
+  'skills.create.error.descriptionXml': '描述不能包含 XML 标签。',
+  'skills.create.prompt.instructions':
+    '提供有关何时以及如何使用此技能的详细说明。\n\n💡 最佳实践：\n• 简洁性：目标约 5000 个 token。假设模型很聪明。\n• 高自由度（分析）：使用自然语言描述。\n• 低自由度（迁移）：使用精确步骤或脚本。',
+  'skills.create.placeholder.instructions':
+    '例如：要使用此技能，请运行以下命令...',
+  'skills.create.error.instructionsEmpty': '说明不能为空。',
+  'skills.create.error.valueEmpty': '请输入一个值。',
+  'skills.create.description.llmDescription':
+    '描述此技能应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
+  'skills.create.description.placeholder':
+    '例如：将 JSON 字符串格式化为易读的 JSON 的技能...',
 };

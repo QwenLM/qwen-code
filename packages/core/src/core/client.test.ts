@@ -322,6 +322,10 @@ describe('Gemini Client (client.ts)', () => {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn().mockReturnValue(() => {}),
     };
+    const mockSkillManager = {
+      listSkills: vi.fn().mockResolvedValue([]),
+      addChangeListener: vi.fn().mockReturnValue(() => {}),
+    };
     mockConfig = {
       getContentGeneratorConfig: vi
         .fn()
@@ -377,6 +381,7 @@ describe('Gemini Client (client.ts)', () => {
         }),
       }),
       getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
+      getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),

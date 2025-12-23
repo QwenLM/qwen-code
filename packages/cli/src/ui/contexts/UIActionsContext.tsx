@@ -68,6 +68,9 @@ export interface UIActions {
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
+  // Skill dialogs
+  closeSkillCreateDialog: () => void;
+  closeSkillManagerDialog: () => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

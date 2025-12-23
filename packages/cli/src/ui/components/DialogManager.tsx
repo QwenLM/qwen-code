@@ -37,6 +37,9 @@ import { ModelSwitchDialog } from './ModelSwitchDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { useSkillsManager } from '../hooks/useSkillsManager.js';
+import { SkillCreationWizard } from './skills/create/SkillCreationWizard.js';
+import { SkillsManagerDialog } from './skills/manage/SkillsManagerDialog.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -50,6 +53,7 @@ export const DialogManager = ({
 }: DialogManagerProps) => {
   const config = useConfig();
   const settings = useSettings();
+  const { refreshSkills } = useSkillsManager(config);
 
   const uiState = useUIState();
   const uiActions = useUIActions();
@@ -298,6 +302,28 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+      />
+    );
+  }
+
+  if (uiState.isSkillCreateDialogOpen) {
+    return (
+      <SkillCreationWizard
+        onClose={uiActions.closeSkillCreateDialog}
+        onSuccess={() => {
+          refreshSkills();
+          uiActions.closeSkillCreateDialog();
+        }}
+        config={config}
+      />
+    );
+  }
+
+  if (uiState.isSkillManagerDialogOpen) {
+    return (
+      <SkillsManagerDialog
+        onClose={uiActions.closeSkillManagerDialog}
+        config={config}
       />
     );
   }
