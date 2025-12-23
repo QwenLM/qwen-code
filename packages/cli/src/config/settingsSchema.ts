@@ -1022,7 +1022,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Skills',
         category: 'Experimental',
         requiresRestart: true,
-        default: true,
+        default: false,
         description: 'Enable loading of dynamic skills from the workspace.',
         showInDialog: true,
         parentKey: 'skills',

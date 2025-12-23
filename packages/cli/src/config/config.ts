@@ -1013,7 +1013,7 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
-    skillsEnabled: settings.skills?.enabled ?? true,
+    skillsEnabled: settings.skills?.enabled ?? false,
   });
 }
 
