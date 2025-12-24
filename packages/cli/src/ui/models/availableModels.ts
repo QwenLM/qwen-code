@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  DEFAULT_QWEN_MODEL,
+  type Config,
+  type AvailableModel as CoreAvailableModel,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 export type AvailableModel = {
@@ -60,24 +65,56 @@ export function getOpenAIAvailableModelFromEnv(): AvailableModel | null {
   return id ? { id, label: id } : null;
 }
 
-export function getAvailableModelsForAuthType(
-  authType: AuthType,
-): AvailableModel[] {
-  switch (authType) {
-    case AuthType.QWEN_OAUTH:
-      return AVAILABLE_MODELS_QWEN;
-    case AuthType.USE_OPENAI: {
-      const openAIModel = getOpenAIAvailableModelFromEnv();
-      return openAIModel ? [openAIModel] : [];
-    }
-    default:
-      // For other auth types, return empty array for now
-      // This can be expanded later according to the design doc
-      return [];
-  }
+/**
+ * Convert core AvailableModel to CLI AvailableModel format
+ */
+function convertCoreModelToCliModel(
+  coreModel: CoreAvailableModel,
+): AvailableModel {
+  return {
+    id: coreModel.id,
+    label: coreModel.label,
+    description: coreModel.description,
+    isVision: coreModel.isVision ?? coreModel.capabilities?.vision ?? false,
+  };
 }
 
 /**
+ * Get available models for the given authType.
+ *
+ * If a Config object is provided, uses the model registry to get models.
+ * For qwen-oauth, always returns the hard-coded models.
+ * For openai authType, falls back to environment variable if no config provided.
+ */
+export function getAvailableModelsForAuthType(
+  authType: AuthType,
+  config?: Config,
+): AvailableModel[] {
+  // For qwen-oauth, always use hard-coded models, this aligns with the API gateway.
+  if (authType === AuthType.QWEN_OAUTH) {
+    return AVAILABLE_MODELS_QWEN;
+  }
+
+  if (config) {
+    try {
+      const models = config.getAvailableModels();
+      if (models.length > 0) {
+        return models.map(convertCoreModelToCliModel);
+      }
+    } catch (error) {
+      console.error('Failed to get models from model registry', error);
+    }
+  }
+
+  if (authType === AuthType.USE_OPENAI) {
+    const openAIModel = getOpenAIAvailableModelFromEnv();
+    return openAIModel ? [openAIModel] : [];
+  }
+
+  // For other auth types, return empty array
+  return [];
+}
+
 /**
  * Hard code the default vision model as a string literal,
  * until our coding model supports multimodal.

@@ -102,6 +102,15 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 
+// Models
+import {
+  ModelSelectionManager,
+  type ModelProvidersConfig,
+  type AvailableModel,
+  type ResolvedModelConfig,
+  SelectionSource,
+} from '../models/index.js';
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -351,6 +360,8 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /** Model providers configuration grouped by authType */
+  modelProvidersConfig?: ModelProvidersConfig;
 }
 
 function normalizeConfigOutputFormat(
@@ -490,6 +501,10 @@ export class Config {
   private readonly useSmartEdit: boolean;
   private readonly channel: string | undefined;
 
+  // Model selection manager (ModelRegistry is internal to it)
+  private modelSelectionManager?: ModelSelectionManager;
+  private readonly modelProvidersConfig?: ModelProvidersConfig;
+
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
     this.sessionData = params.sessionData;
@@ -609,6 +624,7 @@ export class Config {
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
+    this.modelProvidersConfig = params.modelProvidersConfig;
     this.eventEmitter = params.eventEmitter;
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
@@ -767,13 +783,111 @@ export class Config {
 
   async setModel(
     newModel: string,
-    _metadata?: { reason?: string; context?: string },
+    metadata?: { reason?: string; context?: string },
   ): Promise<void> {
-    if (this.contentGeneratorConfig) {
-      this.contentGeneratorConfig.model = newModel;
+    const manager = this.getModelSelectionManager();
+    await manager.switchModel(
+      newModel,
+      SelectionSource.PROGRAMMATIC_OVERRIDE,
+      metadata,
+    );
+  }
+
+  /**
+   * Get or lazily initialize the ModelSelectionManager.
+   * This is the single entry point for all model-related operations.
+   */
+  getModelSelectionManager(): ModelSelectionManager {
+    if (!this.modelSelectionManager) {
+      const currentAuthType = this.contentGeneratorConfig?.authType;
+      const currentModelId = this.contentGeneratorConfig?.model;
+
+      this.modelSelectionManager = new ModelSelectionManager({
+        initialAuthType: currentAuthType,
+        initialModelId: currentModelId,
+        onModelChange: this.handleModelChange.bind(this),
+        modelProvidersConfig: this.modelProvidersConfig,
+      });
     }
-    // TODO: Log _metadata for telemetry if needed
-    // This _metadata can be used for tracking model switches (reason, context)
+    return this.modelSelectionManager;
+  }
+
+  /**
+   * Handle model change from the selection manager.
+   * This updates the content generator config with the new model settings.
+   */
+  private async handleModelChange(
+    authType: AuthType,
+    model: ResolvedModelConfig,
+  ): Promise<void> {
+    if (!this.contentGeneratorConfig) {
+      return;
+    }
+
+    this._generationConfig.model = model.id;
+
+    // Read API key from environment variable if envKey is specified
+    if (model.envKey !== undefined) {
+      const apiKey = process.env[model.envKey];
+      if (apiKey) {
+        this._generationConfig.apiKey = apiKey;
+      } else {
+        console.warn(
+          `[Config] Environment variable '${model.envKey}' is not set for model '${model.id}'. ` +
+            `API key will not be available.`,
+        );
+      }
+    }
+
+    if (model.baseUrl !== undefined) {
+      this._generationConfig.baseUrl = model.baseUrl;
+    }
+
+    if (model.generationConfig) {
+      this._generationConfig.samplingParams = {
+        temperature: model.generationConfig.temperature,
+        top_p: model.generationConfig.top_p,
+        top_k: model.generationConfig.top_k,
+        max_tokens: model.generationConfig.max_tokens,
+        presence_penalty: model.generationConfig.presence_penalty,
+        frequency_penalty: model.generationConfig.frequency_penalty,
+        repetition_penalty: model.generationConfig.repetition_penalty,
+      };
+
+      if (model.generationConfig.timeout !== undefined) {
+        this._generationConfig.timeout = model.generationConfig.timeout;
+      }
+      if (model.generationConfig.maxRetries !== undefined) {
+        this._generationConfig.maxRetries = model.generationConfig.maxRetries;
+      }
+      if (model.generationConfig.disableCacheControl !== undefined) {
+        this._generationConfig.disableCacheControl =
+          model.generationConfig.disableCacheControl;
+      }
+    }
+
+    await this.refreshAuth(authType);
+  }
+
+  /**
+   * Get available models for the current authType.
+   * This is used by the /model command and ModelDialog.
+   */
+  getAvailableModels(): AvailableModel[] {
+    return this.getModelSelectionManager().getAvailableModels();
+  }
+
+  /**
+   * Switch to a different model within the current authType.
+   * @param modelId - The model ID to switch to
+   * @param metadata - Optional metadata for telemetry
+   */
+  async switchModel(
+    modelId: string,
+    metadata?: { reason?: string; context?: string },
+  ): Promise<void> {
+    const manager = this.getModelSelectionManager();
+    await manager.switchModel(modelId, SelectionSource.USER_MANUAL, metadata);
   }
 
   isInFallbackMode(): boolean {

@@ -40,7 +40,8 @@ const renderComponent = (
     ? ({
         // --- Functions used by ModelDialog ---
         getModel: vi.fn(() => MAINLINE_CODER),
-        setModel: vi.fn(),
+        setModel: vi.fn().mockResolvedValue(undefined),
+        switchModel: vi.fn().mockResolvedValue(undefined),
         getAuthType: vi.fn(() => 'qwen-oauth'),
 
         // --- Functions used by ClearcutLogger ---
@@ -139,16 +140,19 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
   });
 
-  it('calls config.setModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', () => {
+  it('calls config.switchModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', async () => {
     const { props, mockConfig } = renderComponent({}, {}); // Pass empty object for contextValue
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    childOnSelect(MAINLINE_CODER);
+    await childOnSelect(MAINLINE_CODER);
 
-    // Assert against the default mock provided by renderComponent
-    expect(mockConfig?.setModel).toHaveBeenCalledWith(MAINLINE_CODER);
+    // Assert that switchModel is called with the model and metadata
+    expect(mockConfig?.switchModel).toHaveBeenCalledWith(MAINLINE_CODER, {
+      reason: 'user_manual',
+      context: 'Model switched via /model dialog',
+    });
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 

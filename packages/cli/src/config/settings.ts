@@ -14,6 +14,11 @@ import {
   QWEN_DIR,
   getErrorMessage,
   Storage,
+  type AuthType,
+  type ProviderModelConfig as ModelConfig,
+  type ModelProvidersConfig,
+  type ModelCapabilities,
+  type ModelGenerationConfig,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -47,7 +52,14 @@ function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   return current?.mergeStrategy;
 }
 
-export type { Settings, MemoryImportFormat };
+export type {
+  Settings,
+  MemoryImportFormat,
+  ModelConfig,
+  ModelProvidersConfig,
+  ModelCapabilities,
+  ModelGenerationConfig,
+};
 
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
 export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
@@ -861,4 +873,32 @@ export function saveSettings(settingsFile: SettingsFile): void {
     console.error('Error saving user settings file:', error);
     throw error;
   }
+}
+
+/**
+ * Get models configuration from settings, grouped by authType.
+ * Returns the models config from the merged settings without mutating files.
+ *
+ * @param settings - The merged settings object
+ * @returns ModelProvidersConfig object (keyed by authType) or empty object if not configured
+ */
+export function getModelProvidersConfigFromSettings(
+  settings: Settings,
+): ModelProvidersConfig {
+  return (settings.modelProviders as ModelProvidersConfig) || {};
+}
+
+/**
+ * Get models for a specific authType from settings.
+ *
+ * @param settings - The merged settings object
+ * @param authType - The authType to get models for
+ * @returns Array of ModelConfig for the authType, or empty array if not configured
+ */
+export function getModelsForAuthType(
+  settings: Settings,
+  authType: string,
+): ModelConfig[] {
+  const modelProvidersConfig = getModelProvidersConfigFromSettings(settings);
+  return modelProvidersConfig[authType as AuthType] || [];
 }

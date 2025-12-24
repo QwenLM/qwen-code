@@ -9,6 +9,25 @@ export * from './config/config.js';
 export * from './output/types.js';
 export * from './output/json-formatter.js';
 
+// Export models
+export {
+  type ModelCapabilities,
+  type ModelGenerationConfig,
+  type ModelConfig as ProviderModelConfig,
+  type ModelProvidersConfig,
+  type ResolvedModelConfig,
+  type AvailableModel,
+  type ModelSwitchMetadata,
+  type CurrentModelInfo,
+  SelectionSource,
+  DEFAULT_GENERATION_CONFIG,
+  DEFAULT_BASE_URLS,
+  QWEN_OAUTH_MODELS,
+  ModelSelectionManager,
+  type ModelChangeCallback,
+  type ModelSelectionManagerOptions,
+} from './models/index.js';
+
 // Export Core Logic
 export * from './core/client.js';
 export * from './core/contentGenerator.js';

@@ -29,6 +29,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
+import { getModelProvidersConfigFromSettings } from './settings.js';
 import yargs, { type Argv } from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
@@ -870,11 +871,16 @@ export async function loadCliConfig(
     );
   }
 
-  const resolvedModel =
-    argv.model ||
-    process.env['OPENAI_MODEL'] ||
-    process.env['QWEN_MODEL'] ||
-    settings.model?.name;
+  let resolvedModel: string | undefined;
+
+  if (argv.model) {
+    resolvedModel = argv.model;
+  } else {
+    resolvedModel =
+      process.env['OPENAI_MODEL'] ||
+      process.env['QWEN_MODEL'] ||
+      settings.model?.name;
+  }
 
   const sandboxConfig = await loadSandboxConfig(settings, argv);
   const screenReader =
@@ -907,6 +913,8 @@ export async function loadCliConfig(
       }
     }
   }
+
+  const modelProvidersConfig = getModelProvidersConfigFromSettings(settings);
 
   return new Config({
     sessionId,
@@ -966,6 +974,7 @@ export async function loadCliConfig(
     inputFormat,
     outputFormat,
     includePartialMessages,
+    modelProvidersConfig,
     generationConfig: {
       ...(settings.model?.generationConfig || {}),
       model: resolvedModel,

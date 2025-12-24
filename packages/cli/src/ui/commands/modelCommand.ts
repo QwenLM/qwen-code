@@ -52,7 +52,7 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const availableModels = getAvailableModelsForAuthType(authType);
+    const availableModels = getAvailableModelsForAuthType(authType, config);
 
     if (availableModels.length === 0) {
       return {

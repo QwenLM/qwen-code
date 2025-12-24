@@ -29,13 +29,11 @@ interface ModelDialogProps {
 export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
 
-  // Get auth type from config, default to QWEN_OAUTH if not available
   const authType = config?.getAuthType() ?? AuthType.QWEN_OAUTH;
 
-  // Get available models based on auth type
   const availableModels = useMemo(
-    () => getAvailableModelsForAuthType(authType),
-    [authType],
+    () => getAvailableModelsForAuthType(authType, config ?? undefined),
+    [authType, config],
   );
 
   const MODEL_OPTIONS = useMemo(
@@ -49,7 +47,6 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     [availableModels],
   );
 
-  // Determine the Preferred Model (read once when the dialog opens).
   const preferredModel = config?.getModel() || MAINLINE_CODER;
 
   useKeypress(
@@ -61,17 +58,18 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     { isActive: true },
   );
 
-  // Calculate the initial index based on the preferred model.
   const initialIndex = useMemo(
     () => MODEL_OPTIONS.findIndex((option) => option.value === preferredModel),
     [MODEL_OPTIONS, preferredModel],
   );
 
-  // Handle selection internally (Autonomous Dialog).
   const handleSelect = useCallback(
-    (model: string) => {
+    async (model: string) => {
       if (config) {
-        config.setModel(model);
+        await config.switchModel(model, {
+          reason: 'user_manual',
+          context: 'Model switched via /model dialog',
+        });
         const event = new ModelSlashCommandEvent(model);
         logModelSlashCommand(config, event);
       }

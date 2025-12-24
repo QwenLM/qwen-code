@@ -135,6 +135,69 @@ Settings are organized into categories. All settings should be placed within the
 - `"./custom-logs"` - Logs to `./custom-logs` relative to current directory
 - `"/tmp/openai-logs"` - Logs to absolute path `/tmp/openai-logs`
 
+#### `modelProviders`
+
+The `modelProviders` configuration allows you to define multiple models for a specific authentication type. Currently we support only `openai` authentication type.
+
+| Field                                  | Type    | Required | Description                                                                                                                                                                                                                                     | Default      |
+| -------------------------------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `id`                                   | string  | Yes      | Unique identifier for the model within the authentication type.                                                                                                                                                                                 | -            |
+| `name`                                 | string  | No       | Display name for the model.                                                                                                                                                                                                                     | Same as `id` |
+| `description`                          | string  | No       | A brief description of the model.                                                                                                                                                                                                               | `undefined`  |
+| `envKey`                               | string  | No       | The name of the environment variable containing the API key for this model. For example, if set to `"OPENAI_API_KEY"`, the system will read the API key from `process.env.OPENAI_API_KEY`. This keeps API keys secure in environment variables. | `undefined`  |
+| `baseUrl`                              | string  | No       | Custom API endpoint URL. If not specified, uses the default URL for the authentication type.                                                                                                                                                    | `undefined`  |
+| `capabilities.vision`                  | boolean | No       | Whether the model supports vision/image inputs.                                                                                                                                                                                                 | `false`      |
+| `generationConfig.temperature`         | number  | No       | Sampling temperature. Refer to your providers' document.                                                                                                                                                                                        | `undefined`  |
+| `generationConfig.top_p`               | number  | No       | Nucleus sampling parameter. Refer to your providers' document.                                                                                                                                                                                  | `undefined`  |
+| `generationConfig.top_k`               | number  | No       | Top-k sampling parameter. Refer to your providers' document.                                                                                                                                                                                    | `undefined`  |
+| `generationConfig.max_tokens`          | number  | No       | Maximum output tokens.                                                                                                                                                                                                                          | `undefined`  |
+| `generationConfig.timeout`             | number  | No       | Request timeout in milliseconds.                                                                                                                                                                                                                | `undefined`  |
+| `generationConfig.maxRetries`          | number  | No       | Maximum retry attempts.                                                                                                                                                                                                                         | `undefined`  |
+| `generationConfig.disableCacheControl` | boolean | No       | Disable cache control for DashScope providers.                                                                                                                                                                                                  | `false`      |
+
+**Example Configuration:**
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "gpt-4-turbo",
+        "name": "GPT-4 Turbo",
+        "description": "Most capable GPT-4 model",
+        "envKey": "OPENAI_API_KEY",
+        "baseUrl": "https://api.openai.com/v1",
+        "capabilities": {
+          "vision": true
+        },
+        "generationConfig": {
+          "temperature": 0.7,
+          "max_tokens": 4096
+        }
+      },
+      {
+        "id": "deepseek-coder",
+        "name": "DeepSeek Coder",
+        "description": "DeepSeek coding model",
+        "envKey": "DEEPSEEK_API_KEY",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "generationConfig": {
+          "temperature": 0.5,
+          "max_tokens": 8192
+        }
+      }
+    ]
+  }
+}
+```
+
+**Security Note:** API keys should never be stored directly in configuration files. Always use the `envKey` field to reference environment variables where your API keys are stored. Set these environment variables in your shell profile or `.env` files:
+
+```bash
+export OPENAI_API_KEY="your-api-key-here"
+export DEEPSEEK_API_KEY="your-deepseek-key-here"
+```
+
 #### context
 
 | Setting                                           | Type                       | Description                                                                                                                                                                                                                                                                                                                                                           | Default     |
