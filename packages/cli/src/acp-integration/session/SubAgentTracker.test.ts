@@ -208,7 +208,7 @@ describe('SubAgentTracker', () => {
         expect.objectContaining({
           sessionUpdate: 'tool_call',
           toolCallId: 'call-123',
-          status: 'in_progress',
+          status: 'pending',
           title: 'read_file',
           content: [],
           locations: [],

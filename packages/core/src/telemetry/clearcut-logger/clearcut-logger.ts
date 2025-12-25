@@ -34,7 +34,6 @@ import type {
 import { EventMetadataKey } from './event-metadata-key.js';
 import type { Config } from '../../config/config.js';
 import { InstallationManager } from '../../utils/installationManager.js';
-import { UserAccountManager } from '../../utils/userAccountManager.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { FixedDeque } from 'mnemonist';
 import { GIT_COMMIT_INFO, CLI_VERSION } from '../../generated/git-commit.js';
@@ -157,7 +156,6 @@ export class ClearcutLogger {
   private sessionData: EventValue[] = [];
   private promptId: string = '';
   private readonly installationManager: InstallationManager;
-  private readonly userAccountManager: UserAccountManager;
 
   /**
    * Queue of pending events that need to be flushed to the server.  New events
@@ -186,7 +184,6 @@ export class ClearcutLogger {
     this.events = new FixedDeque<LogEventEntry[]>(Array, MAX_EVENTS);
     this.promptId = config?.getSessionId() ?? '';
     this.installationManager = new InstallationManager();
-    this.userAccountManager = new UserAccountManager();
   }
 
   static getInstance(config?: Config): ClearcutLogger | undefined {
@@ -233,14 +230,11 @@ export class ClearcutLogger {
   }
 
   createLogEvent(eventName: EventNames, data: EventValue[] = []): LogEvent {
-    const email = this.userAccountManager.getCachedGoogleAccount();
-
     if (eventName !== EventNames.START_SESSION) {
       data.push(...this.sessionData);
     }
-    const totalAccounts = this.userAccountManager.getLifetimeGoogleAccounts();
 
-    data = this.addDefaultFields(data, totalAccounts);
+    data = this.addDefaultFields(data);
 
     const logEvent: LogEvent = {
       console_type: 'GEMINI_CLI',
@@ -249,12 +243,7 @@ export class ClearcutLogger {
       event_metadata: [data],
     };
 
-    // Should log either email or install ID, not both. See go/cloudmill-1p-oss-instrumentation#define-sessionable-id
-    if (email) {
-      logEvent.client_email = email;
-    } else {
-      logEvent.client_install_id = this.installationManager.getInstallationId();
-    }
+    logEvent.client_install_id = this.installationManager.getInstallationId();
 
     return logEvent;
   }
@@ -1018,7 +1007,7 @@ export class ClearcutLogger {
    * Adds default fields to data, and returns a new data array.  This fields
    * should exist on all log events.
    */
-  addDefaultFields(data: EventValue[], totalAccounts: number): EventValue[] {
+  addDefaultFields(data: EventValue[]): EventValue[] {
     const surface = determineSurface();
 
     const defaultLogMetadata: EventValue[] = [
@@ -1031,10 +1020,6 @@ export class ClearcutLogger {
         value: JSON.stringify(
           this.config?.getContentGeneratorConfig()?.authType,
         ),
-      },
-      {
-        gemini_cli_key: EventMetadataKey.GEMINI_CLI_GOOGLE_ACCOUNTS_COUNT,
-        value: `${totalAccounts}`,
       },
       {
         gemini_cli_key: EventMetadataKey.GEMINI_CLI_SURFACE,

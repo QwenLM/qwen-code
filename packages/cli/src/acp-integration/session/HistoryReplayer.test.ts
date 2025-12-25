@@ -411,4 +411,48 @@ describe('HistoryReplayer', () => {
       ]);
     });
   });
+
+  describe('usage metadata replay', () => {
+    it('should emit usage metadata after assistant message content', async () => {
+      const record: ChatRecord = {
+        uuid: 'assistant-uuid',
+        parentUuid: 'user-uuid',
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: '/test',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [{ text: 'Hello!' }],
+        },
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 150,
+        },
+      };
+
+      await replayer.replay([record]);
+
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(1, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Hello!' },
+      });
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(2, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: {
+            promptTokens: 100,
+            completionTokens: 50,
+            thoughtsTokens: undefined,
+            totalTokens: 150,
+            cachedTokens: undefined,
+          },
+        },
+      });
+    });
+  });
 });

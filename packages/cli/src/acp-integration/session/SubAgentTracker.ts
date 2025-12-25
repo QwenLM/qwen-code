@@ -9,6 +9,7 @@ import type {
   SubAgentToolCallEvent,
   SubAgentToolResultEvent,
   SubAgentApprovalRequestEvent,
+  SubAgentUsageEvent,
   ToolCallConfirmationDetails,
   AnyDeclarativeTool,
   AnyToolInvocation,
@@ -20,6 +21,7 @@ import {
 import { z } from 'zod';
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type * as acp from '../acp.js';
 
 /**
@@ -62,6 +64,7 @@ const basicPermissionOptions: readonly PermissionOptionConfig[] = [
  */
 export class SubAgentTracker {
   private readonly toolCallEmitter: ToolCallEmitter;
+  private readonly messageEmitter: MessageEmitter;
   private readonly toolStates = new Map<
     string,
     {
@@ -76,6 +79,7 @@ export class SubAgentTracker {
     private readonly client: acp.Client,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
+    this.messageEmitter = new MessageEmitter(ctx);
   }
 
   /**
@@ -92,16 +96,19 @@ export class SubAgentTracker {
     const onToolCall = this.createToolCallHandler(abortSignal);
     const onToolResult = this.createToolResultHandler(abortSignal);
     const onApproval = this.createApprovalHandler(abortSignal);
+    const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
 
     eventEmitter.on(SubAgentEventType.TOOL_CALL, onToolCall);
     eventEmitter.on(SubAgentEventType.TOOL_RESULT, onToolResult);
     eventEmitter.on(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+    eventEmitter.on(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
 
     return [
       () => {
         eventEmitter.off(SubAgentEventType.TOOL_CALL, onToolCall);
         eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
         eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
+        eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
         // Clean up any remaining states
         this.toolStates.clear();
       },
@@ -249,6 +256,20 @@ export class SubAgentTracker {
         );
         await event.respond(ToolConfirmationOutcome.Cancel);
       }
+    };
+  }
+
+  /**
+   * Creates a handler for usage metadata events.
+   */
+  private createUsageMetadataHandler(
+    abortSignal: AbortSignal,
+  ): (...args: unknown[]) => void {
+    return (...args: unknown[]) => {
+      const event = args[0] as SubAgentUsageEvent;
+      if (abortSignal.aborted) return;
+
+      this.messageEmitter.emitUsageMetadata(event.usage, '', event.durationMs);
     };
   }
 

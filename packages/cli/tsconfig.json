@@ -38,7 +38,6 @@
     "src/ui/commands/clearCommand.test.ts",
     "src/ui/commands/compressCommand.test.ts",
     "src/ui/commands/copyCommand.test.ts",
-    "src/ui/commands/corgiCommand.test.ts",
     "src/ui/commands/docsCommand.test.ts",
     "src/ui/commands/editorCommand.test.ts",
     "src/ui/commands/extensionsCommand.test.ts",

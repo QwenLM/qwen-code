@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ChatRecord } from '@qwen-code/qwen-code-core';
-import type { Content } from '@google/genai';
+import type { ChatRecord, TaskResultDisplay } from '@qwen-code/qwen-code-core';
+import type {
+  Content,
+  GenerateContentResponseUsageMetadata,
+} from '@google/genai';
 import type { SessionContext } from './types.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
@@ -52,6 +55,9 @@ export class HistoryReplayer {
         if (record.message) {
           await this.replayContent(record.message, 'assistant');
         }
+        if (record.usageMetadata) {
+          await this.replayUsageMetadata(record.usageMetadata);
+        }
         break;
 
       case 'tool_result':
@@ -88,9 +94,20 @@ export class HistoryReplayer {
           toolName: functionName,
           callId,
           args: part.functionCall.args as Record<string, unknown>,
+          status: 'in_progress',
         });
       }
     }
+  }
+
+  /**
+   * Replays usage metadata.
+   * @param usageMetadata - The usage metadata to replay
+   */
+  private async replayUsageMetadata(
+    usageMetadata: GenerateContentResponseUsageMetadata,
+  ): Promise<void> {
+    await this.messageEmitter.emitUsageMetadata(usageMetadata);
   }
 
   /**
@@ -118,6 +135,54 @@ export class HistoryReplayer {
       // Note: args aren't stored in tool_result records by default
       args: undefined,
     });
+
+    // Special handling: Task tool execution summary contains token usage
+    const { resultDisplay } = result ?? {};
+    if (
+      !!resultDisplay &&
+      typeof resultDisplay === 'object' &&
+      'type' in resultDisplay &&
+      (resultDisplay as { type?: unknown }).type === 'task_execution'
+    ) {
+      await this.emitTaskUsageFromResultDisplay(
+        resultDisplay as TaskResultDisplay,
+      );
+    }
+  }
+
+  /**
+   * Emits token usage from a TaskResultDisplay execution summary, if present.
+   */
+  private async emitTaskUsageFromResultDisplay(
+    resultDisplay: TaskResultDisplay,
+  ): Promise<void> {
+    const summary = resultDisplay.executionSummary;
+    if (!summary) {
+      return;
+    }
+
+    const usageMetadata: GenerateContentResponseUsageMetadata = {};
+
+    if (Number.isFinite(summary.inputTokens)) {
+      usageMetadata.promptTokenCount = summary.inputTokens;
+    }
+    if (Number.isFinite(summary.outputTokens)) {
+      usageMetadata.candidatesTokenCount = summary.outputTokens;
+    }
+    if (Number.isFinite(summary.thoughtTokens)) {
+      usageMetadata.thoughtsTokenCount = summary.thoughtTokens;
+    }
+    if (Number.isFinite(summary.cachedTokens)) {
+      usageMetadata.cachedContentTokenCount = summary.cachedTokens;
+    }
+    if (Number.isFinite(summary.totalTokens)) {
+      usageMetadata.totalTokenCount = summary.totalTokens;
+    }
+
+    // Only emit if we captured at least one token metric
+    if (Object.keys(usageMetadata).length > 0) {
+      await this.messageEmitter.emitUsageMetadata(usageMetadata);
+    }
   }
 
   /**

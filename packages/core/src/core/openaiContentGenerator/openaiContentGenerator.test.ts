@@ -99,6 +99,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
         },
       } as unknown as OpenAI),
       buildRequest: vi.fn().mockImplementation((req) => req),
+      getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
     };
 
     generator = new OpenAIContentGenerator(
@@ -211,6 +212,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
           },
         } as unknown as OpenAI),
         buildRequest: vi.fn().mockImplementation((req) => req),
+        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
       };
 
       const testGenerator = new TestGenerator(
@@ -277,6 +279,7 @@ describe('OpenAIContentGenerator (Refactored)', () => {
           },
         } as unknown as OpenAI),
         buildRequest: vi.fn().mockImplementation((req) => req),
+        getDefaultGenerationConfig: vi.fn().mockReturnValue({}),
       };
 
       const testGenerator = new TestGenerator(

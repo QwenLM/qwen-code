@@ -115,7 +115,7 @@ describe('relaunchAppInChildProcess', () => {
     vi.clearAllMocks();
 
     process.env = { ...originalEnv };
-    delete process.env['GEMINI_CLI_NO_RELAUNCH'];
+    delete process.env['QWEN_CODE_NO_RELAUNCH'];
 
     process.execArgv = [...originalExecArgv];
     process.argv = [...originalArgv];
@@ -145,9 +145,9 @@ describe('relaunchAppInChildProcess', () => {
     stdinResumeSpy.mockRestore();
   });
 
-  describe('when GEMINI_CLI_NO_RELAUNCH is set', () => {
+  describe('when QWEN_CODE_NO_RELAUNCH is set', () => {
     it('should return early without spawning a child process', async () => {
-      process.env['GEMINI_CLI_NO_RELAUNCH'] = 'true';
+      process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
 
       await relaunchAppInChildProcess(['--test'], ['--verbose']);
 
@@ -156,9 +156,9 @@ describe('relaunchAppInChildProcess', () => {
     });
   });
 
-  describe('when GEMINI_CLI_NO_RELAUNCH is not set', () => {
+  describe('when QWEN_CODE_NO_RELAUNCH is not set', () => {
     beforeEach(() => {
-      delete process.env['GEMINI_CLI_NO_RELAUNCH'];
+      delete process.env['QWEN_CODE_NO_RELAUNCH'];
     });
 
     it('should construct correct node arguments from execArgv, additionalNodeArgs, script, additionalScriptArgs, and argv', () => {

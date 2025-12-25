@@ -6,15 +6,19 @@
 
 import type { ReadableStream, WritableStream } from 'node:stream/web';
 
-import type { Config, ConversationRecord } from '@qwen-code/qwen-code-core';
 import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
   clearCachedCredentialFile,
+  QwenOAuth2Event,
+  qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
   buildApiHistoryFromConversation,
+  type Config,
+  type ConversationRecord,
+  type DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
 import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
@@ -123,13 +127,33 @@ class GeminiAgent {
   async authenticate({ methodId }: acp.AuthenticateRequest): Promise<void> {
     const method = z.nativeEnum(AuthType).parse(methodId);
 
+    let authUri: string | undefined;
+    const authUriHandler = (deviceAuth: DeviceAuthorizationData) => {
+      authUri = deviceAuth.verification_uri_complete;
+      // Send the auth URL to ACP client as soon as it's available (refreshAuth is blocking).
+      void this.client.authenticateUpdate({ _meta: { authUri } });
+    };
+
+    if (method === AuthType.QWEN_OAUTH) {
+      qwenOAuth2Events.once(QwenOAuth2Event.AuthUri, authUriHandler);
+    }
+
     await clearCachedCredentialFile();
-    await this.config.refreshAuth(method);
-    this.settings.setValue(
-      SettingScope.User,
-      'security.auth.selectedType',
-      method,
-    );
+    try {
+      await this.config.refreshAuth(method);
+      this.settings.setValue(
+        SettingScope.User,
+        'security.auth.selectedType',
+        method,
+      );
+    } finally {
+      // Ensure we don't leak listeners if auth fails early.
+      if (method === AuthType.QWEN_OAUTH) {
+        qwenOAuth2Events.off(QwenOAuth2Event.AuthUri, authUriHandler);
+      }
+    }
+
+    return;
   }
 
   async newSession({
@@ -268,14 +292,17 @@ class GeminiAgent {
   private async ensureAuthenticated(config: Config): Promise<void> {
     const selectedType = this.settings.merged.security?.auth?.selectedType;
     if (!selectedType) {
-      throw acp.RequestError.authRequired();
+      throw acp.RequestError.authRequired('No Selected Type');
     }
 
     try {
-      await config.refreshAuth(selectedType);
+      // Use true for the second argument to ensure only cached credentials are used
+      await config.refreshAuth(selectedType, true);
     } catch (e) {
       console.error(`Authentication failed: ${e}`);
-      throw acp.RequestError.authRequired();
+      throw acp.RequestError.authRequired(
+        'Authentication failed: ' + (e as Error).message,
+      );
     }
   }
 

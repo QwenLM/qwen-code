@@ -10,6 +10,7 @@ import {
   IdeContextNotificationSchema,
   OpenDiffRequestSchema,
 } from '@qwen-code/qwen-code-core/src/ide/types.js';
+import { detectIdeFromEnv } from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -38,12 +39,24 @@ class CORSError extends Error {
 const MCP_SESSION_ID_HEADER = 'mcp-session-id';
 const IDE_SERVER_PORT_ENV_VAR = 'QWEN_CODE_IDE_SERVER_PORT';
 const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
+const QWEN_DIR = '.qwen';
+const IDE_DIR = 'ide';
+
+async function getGlobalIdeDir(): Promise<string> {
+  const homeDir = os.homedir();
+  // Prefer home dir, but fall back to tmpdir if unavailable (matches core Storage behavior).
+  const baseDir = homeDir
+    ? path.join(homeDir, QWEN_DIR)
+    : path.join(os.tmpdir(), QWEN_DIR);
+  const ideDir = path.join(baseDir, IDE_DIR);
+  await fs.mkdir(ideDir, { recursive: true });
+  return ideDir;
+}
 
 interface WritePortAndWorkspaceArgs {
   context: vscode.ExtensionContext;
   port: number;
-  portFile: string;
-  ppidPortFile: string;
+  lockFile: string;
   authToken: string;
   log: (message: string) => void;
 }
@@ -51,8 +64,7 @@ interface WritePortAndWorkspaceArgs {
 async function writePortAndWorkspace({
   context,
   port,
-  portFile,
-  ppidPortFile,
+  lockFile,
   authToken,
   log,
 }: WritePortAndWorkspaceArgs): Promise<void> {
@@ -71,26 +83,24 @@ async function writePortAndWorkspace({
     workspacePath,
   );
 
+  const ideInfo = detectIdeFromEnv();
   const content = JSON.stringify({
     port,
     workspacePath,
     ppid: process.ppid,
     authToken,
+    ideName: ideInfo.displayName,
   });
 
-  log(`Writing port file to: ${portFile}`);
-  log(`Writing ppid port file to: ${ppidPortFile}`);
+  log(`Writing IDE lock file to: ${lockFile}`);
 
   try {
-    await Promise.all([
-      fs.writeFile(portFile, content).then(() => fs.chmod(portFile, 0o600)),
-      fs
-        .writeFile(ppidPortFile, content)
-        .then(() => fs.chmod(ppidPortFile, 0o600)),
-    ]);
+    await fs.mkdir(path.dirname(lockFile), { recursive: true });
+    await fs.writeFile(lockFile, content);
+    await fs.chmod(lockFile, 0o600);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    log(`Failed to write port to file: ${message}`);
+    log(`Failed to write IDE lock file: ${message}`);
   }
 }
 
@@ -121,8 +131,7 @@ export class IDEServer {
   private server: HTTPServer | undefined;
   private context: vscode.ExtensionContext | undefined;
   private log: (message: string) => void;
-  private portFile: string | undefined;
-  private ppidPortFile: string | undefined;
+  private lockFile: string | undefined;
   private port: number | undefined;
   private authToken: string | undefined;
   private transports: { [sessionId: string]: StreamableHTTPServerTransport } =
@@ -164,6 +173,7 @@ export class IDEServer {
         const allowedHosts = [
           `localhost:${this.port}`,
           `127.0.0.1:${this.port}`,
+          `host.docker.internal:${this.port}`, // Add Docker support
         ];
         if (!allowedHosts.includes(host)) {
           return res.status(403).json({ error: 'Invalid Host header' });
@@ -173,19 +183,24 @@ export class IDEServer {
 
       app.use((req, res, next) => {
         const authHeader = req.headers.authorization;
-        if (authHeader) {
-          const parts = authHeader.split(' ');
-          if (parts.length !== 2 || parts[0] !== 'Bearer') {
-            this.log('Malformed Authorization header. Rejecting request.');
-            res.status(401).send('Unauthorized');
-            return;
-          }
-          const token = parts[1];
-          if (token !== this.authToken) {
-            this.log('Invalid auth token provided. Rejecting request.');
-            res.status(401).send('Unauthorized');
-            return;
-          }
+        if (!authHeader) {
+          this.log('Missing Authorization header. Rejecting request.');
+          res.status(401).send('Unauthorized');
+          return;
+        }
+
+        const parts = authHeader.split(' ');
+        if (parts.length !== 2 || parts[0] !== 'Bearer') {
+          this.log('Malformed Authorization header. Rejecting request.');
+          res.status(401).send('Unauthorized');
+          return;
+        }
+
+        const token = parts[1];
+        if (token !== this.authToken) {
+          this.log('Invalid auth token provided. Rejecting request.');
+          res.status(401).send('Unauthorized');
+          return;
         }
         next();
       });
@@ -326,22 +341,21 @@ export class IDEServer {
         const address = (this.server as HTTPServer).address();
         if (address && typeof address !== 'string') {
           this.port = address.port;
-          this.portFile = path.join(
-            os.tmpdir(),
-            `qwen-code-ide-server-${this.port}.json`,
-          );
-          this.ppidPortFile = path.join(
-            os.tmpdir(),
-            `qwen-code-ide-server-${process.ppid}.json`,
-          );
+          try {
+            const ideDir = await getGlobalIdeDir();
+            // Name the lock file by port to support multiple server instances.
+            this.lockFile = path.join(ideDir, `${this.port}.lock`);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            this.log(`Failed to determine IDE lock directory: ${message}`);
+          }
           this.log(`IDE server listening on http://127.0.0.1:${this.port}`);
 
-          if (this.authToken) {
+          if (this.authToken && this.lockFile) {
             await writePortAndWorkspace({
               context,
               port: this.port,
-              portFile: this.portFile,
-              ppidPortFile: this.ppidPortFile,
+              lockFile: this.lockFile,
               authToken: this.authToken,
               log: this.log,
             });
@@ -370,15 +384,13 @@ export class IDEServer {
       this.context &&
       this.server &&
       this.port &&
-      this.portFile &&
-      this.ppidPortFile &&
+      this.lockFile &&
       this.authToken
     ) {
       await writePortAndWorkspace({
         context: this.context,
         port: this.port,
-        portFile: this.portFile,
-        ppidPortFile: this.ppidPortFile,
+        lockFile: this.lockFile,
         authToken: this.authToken,
         log: this.log,
       });
@@ -404,16 +416,9 @@ export class IDEServer {
     if (this.context) {
       this.context.environmentVariableCollection.clear();
     }
-    if (this.portFile) {
+    if (this.lockFile) {
       try {
-        await fs.unlink(this.portFile);
-      } catch (_err) {
-        // Ignore errors if the file doesn't exist.
-      }
-    }
-    if (this.ppidPortFile) {
-      try {
-        await fs.unlink(this.ppidPortFile);
+        await fs.unlink(this.lockFile);
       } catch (_err) {
         // Ignore errors if the file doesn't exist.
       }
@@ -437,6 +442,7 @@ const createMcpServer = (diffManager: DiffManager) => {
       inputSchema: OpenDiffRequestSchema.shape,
     },
     async ({ filePath, newContent }: z.infer<typeof OpenDiffRequestSchema>) => {
+      // Minimal call site: only pass newContent; DiffManager reads old content itself
       await diffManager.showDiff(filePath, newContent);
       return { content: [] };
     },

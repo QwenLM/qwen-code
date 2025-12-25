@@ -23,6 +23,8 @@ export interface SubagentStatsSummary {
   successRate: number;
   inputTokens: number;
   outputTokens: number;
+  thoughtTokens: number;
+  cachedTokens: number;
   totalTokens: number;
   estimatedCost: number;
   toolUsage: ToolUsageStats[];
@@ -36,6 +38,8 @@ export class SubagentStatistics {
   private failedToolCalls = 0;
   private inputTokens = 0;
   private outputTokens = 0;
+  private thoughtTokens = 0;
+  private cachedTokens = 0;
   private toolUsage = new Map<string, ToolUsageStats>();
 
   start(now = Date.now()) {
@@ -74,9 +78,16 @@ export class SubagentStatistics {
     this.toolUsage.set(name, tu);
   }
 
-  recordTokens(input: number, output: number) {
+  recordTokens(
+    input: number,
+    output: number,
+    thought: number = 0,
+    cached: number = 0,
+  ) {
     this.inputTokens += Math.max(0, input || 0);
     this.outputTokens += Math.max(0, output || 0);
+    this.thoughtTokens += Math.max(0, thought || 0);
+    this.cachedTokens += Math.max(0, cached || 0);
   }
 
   getSummary(now = Date.now()): SubagentStatsSummary {
@@ -86,7 +97,11 @@ export class SubagentStatistics {
       totalToolCalls > 0
         ? (this.successfulToolCalls / totalToolCalls) * 100
         : 0;
-    const totalTokens = this.inputTokens + this.outputTokens;
+    const totalTokens =
+      this.inputTokens +
+      this.outputTokens +
+      this.thoughtTokens +
+      this.cachedTokens;
     const estimatedCost = this.inputTokens * 3e-5 + this.outputTokens * 6e-5;
     return {
       rounds: this.rounds,
@@ -97,6 +112,8 @@ export class SubagentStatistics {
       successRate,
       inputTokens: this.inputTokens,
       outputTokens: this.outputTokens,
+      thoughtTokens: this.thoughtTokens,
+      cachedTokens: this.cachedTokens,
       totalTokens,
       estimatedCost,
       toolUsage: Array.from(this.toolUsage.values()),
@@ -116,8 +133,12 @@ export class SubagentStatistics {
       `⏱️ Duration: ${this.fmtDuration(stats.totalDurationMs)} | 🔁 Rounds: ${stats.rounds}`,
     ];
     if (typeof stats.totalTokens === 'number') {
+      const parts = [
+        `in ${stats.inputTokens ?? 0}`,
+        `out ${stats.outputTokens ?? 0}`,
+      ];
       lines.push(
-        `🔢 Tokens: ${stats.totalTokens.toLocaleString()}${stats.inputTokens || stats.outputTokens ? ` (in ${stats.inputTokens ?? 0}, out ${stats.outputTokens ?? 0})` : ''}`,
+        `🔢 Tokens: ${stats.totalTokens.toLocaleString()}${parts.length ? ` (${parts.join(', ')})` : ''}`,
       );
     }
     return lines.join('\n');
@@ -152,8 +173,12 @@ export class SubagentStatistics {
       `🔧 Tools: ${stats.totalToolCalls} calls, ${sr.toFixed(1)}% success (${stats.successfulToolCalls} ok, ${stats.failedToolCalls} failed)`,
     );
     if (typeof stats.totalTokens === 'number') {
+      const parts = [
+        `in ${stats.inputTokens ?? 0}`,
+        `out ${stats.outputTokens ?? 0}`,
+      ];
       lines.push(
-        `🔢 Tokens: ${stats.totalTokens.toLocaleString()} (in ${stats.inputTokens ?? 0}, out ${stats.outputTokens ?? 0})`,
+        `🔢 Tokens: ${stats.totalTokens.toLocaleString()} (${parts.join(', ')})`,
       );
     }
     if (stats.toolUsage && stats.toolUsage.length) {

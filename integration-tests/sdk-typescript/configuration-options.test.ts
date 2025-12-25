@@ -438,12 +438,8 @@ describe('Configuration Options (E2E)', () => {
       }
     });
 
-    // Skip in containerized sandbox environments - qwen-oauth requires user interaction
-    // which is not possible in Docker/Podman CI environments
-    it.skipIf(
-      process.env['SANDBOX'] === 'sandbox:docker' ||
-        process.env['SANDBOX'] === 'sandbox:podman',
-    )('should accept authType: qwen-oauth', async () => {
+    // Skip - qwen-oauth requires user interaction which is not possible in CI environments
+    it.skip('should accept authType: qwen-oauth', async () => {
       // Note: qwen-oauth requires credentials in ~/.qwen and user interaction
       // Without credentials, the auth process will timeout waiting for user
       // This test verifies the option is accepted and passed correctly to CLI

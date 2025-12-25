@@ -17,7 +17,6 @@ import { AuthDialog } from '../auth/AuthDialog.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
-import { ProQuotaDialog } from './ProQuotaDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
@@ -36,6 +35,7 @@ import { WelcomeBackDialog } from './WelcomeBackDialog.js';
 import { ModelSwitchDialog } from './ModelSwitchDialog.js';
 import { AgentCreationWizard } from './subagents/create/AgentCreationWizard.js';
 import { AgentsManagerDialog } from './subagents/manage/AgentsManagerDialog.js';
+import { SessionPicker } from './SessionPicker.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -83,15 +83,6 @@ export const DialogManager = ({
         workspaceExtensions={uiState.workspaceExtensions}
         onOpen={uiActions.onWorkspaceMigrationDialogOpen}
         onClose={uiActions.onWorkspaceMigrationDialogClose}
-      />
-    );
-  }
-  if (uiState.proQuotaRequest) {
-    return (
-      <ProQuotaDialog
-        failedModel={uiState.proQuotaRequest.failedModel}
-        fallbackModel={uiState.proQuotaRequest.fallbackModel}
-        onChoice={uiActions.handleProQuotaChoice}
       />
     );
   }
@@ -286,6 +277,17 @@ export const DialogManager = ({
       <AgentsManagerDialog
         onClose={uiActions.closeAgentsManagerDialog}
         config={config}
+      />
+    );
+  }
+
+  if (uiState.isResumeDialogOpen) {
+    return (
+      <SessionPicker
+        sessionService={config.getSessionService()}
+        currentBranch={uiState.branchName}
+        onSelect={uiActions.handleResume}
+        onCancel={uiActions.closeResumeDialog}
       />
     );
   }

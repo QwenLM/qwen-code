@@ -13,9 +13,8 @@ npm install @qwen-code/sdk
 ## Requirements
 
 - Node.js >= 20.0.0
-- [Qwen Code](https://github.com/QwenLM/qwen-code) >= 0.4.0 (stable) installed and accessible in PATH
 
-> **Note for nvm users**: If you use nvm to manage Node.js versions, the SDK may not be able to auto-detect the Qwen Code executable. You should explicitly set the `pathToQwenExecutable` option to the full path of the `qwen` binary.
+> From v0.1.1, the CLI is bundled with the SDK. So no standalone CLI installation is needed.
 
 ## Quick Start
 
@@ -371,6 +370,23 @@ try {
   }
 }
 ```
+
+## FAQ / Troubleshooting
+
+### Version 0.1.0 Requirements
+
+If you're using SDK version **0.1.0**, please note the following requirements:
+
+#### Qwen Code Installation Required
+
+Version 0.1.0 requires [Qwen Code](https://github.com/QwenLM/qwen-code) **>= 0.4.0** to be installed separately and accessible in your PATH.
+
+```bash
+# Install Qwen Code globally
+npm install -g qwen-code@^0.4.0
+```
+
+**Note**: From version **0.1.1** onwards, the CLI is bundled with the SDK, so no separate Qwen Code installation is needed.
 
 ## License
 

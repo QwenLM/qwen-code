@@ -15,6 +15,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -22,7 +23,9 @@ vi.mock('./messages/ToolGroupMessage.js', () => ({
 }));
 
 describe('<HistoryItemDisplay />', () => {
-  const mockConfig = {} as unknown as Config;
+  const mockConfig = {
+    getChatRecordingService: () => undefined,
+  } as unknown as Config;
   const baseItem = {
     id: 1,
     timestamp: 12345,
@@ -133,9 +136,11 @@ describe('<HistoryItemDisplay />', () => {
       duration: '1s',
     };
     const { lastFrame } = renderWithProviders(
-      <SessionStatsProvider>
-        <HistoryItemDisplay {...baseItem} item={item} />
-      </SessionStatsProvider>,
+      <ConfigContext.Provider value={mockConfig as never}>
+        <SessionStatsProvider>
+          <HistoryItemDisplay {...baseItem} item={item} />
+        </SessionStatsProvider>
+      </ConfigContext.Provider>,
     );
     expect(lastFrame()).toContain('Agent powering down. Goodbye!');
   });

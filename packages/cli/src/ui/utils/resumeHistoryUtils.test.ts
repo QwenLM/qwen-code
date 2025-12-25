@@ -20,6 +20,11 @@ const makeConfig = (tools: Record<string, AnyDeclarativeTool>) =>
     getToolRegistry: () => ({
       getTool: (name: string) => tools[name],
     }),
+    getContentGenerator: () => ({
+      // Default to showing full thinking content during resume unless explicitly
+      // summarized; tests don't care about summarized thinking behavior.
+      useSummarizedThinking: () => false,
+    }),
   }) as unknown as Config;
 
 describe('resumeHistoryUtils', () => {

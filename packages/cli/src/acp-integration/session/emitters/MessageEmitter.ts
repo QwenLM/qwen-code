@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import type { Usage } from '../../schema.js';
 import { BaseEmitter } from './BaseEmitter.js';
 
 /**
@@ -25,6 +27,16 @@ export class MessageEmitter extends BaseEmitter {
   }
 
   /**
+   * Emits an agent thought chunk.
+   */
+  async emitAgentThought(text: string): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_thought_chunk',
+      content: { type: 'text', text },
+    });
+  }
+
+  /**
    * Emits an agent message chunk.
    */
   async emitAgentMessage(text: string): Promise<void> {
@@ -35,12 +47,28 @@ export class MessageEmitter extends BaseEmitter {
   }
 
   /**
-   * Emits an agent thought chunk.
+   * Emits usage metadata.
    */
-  async emitAgentThought(text: string): Promise<void> {
+  async emitUsageMetadata(
+    usageMetadata: GenerateContentResponseUsageMetadata,
+    text: string = '',
+    durationMs?: number,
+  ): Promise<void> {
+    const usage: Usage = {
+      promptTokens: usageMetadata.promptTokenCount,
+      completionTokens: usageMetadata.candidatesTokenCount,
+      thoughtsTokens: usageMetadata.thoughtsTokenCount,
+      totalTokens: usageMetadata.totalTokenCount,
+      cachedTokens: usageMetadata.cachedContentTokenCount,
+    };
+
+    const meta =
+      typeof durationMs === 'number' ? { usage, durationMs } : { usage };
+
     await this.sendUpdate({
-      sessionUpdate: 'agent_thought_chunk',
+      sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
+      _meta: meta,
     });
   }
 

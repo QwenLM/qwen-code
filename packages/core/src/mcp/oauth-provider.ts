@@ -13,6 +13,11 @@ import type { OAuthToken } from './token-storage/types.js';
 import { MCPOAuthTokenStorage } from './oauth-token-storage.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { OAuthUtils } from './oauth-utils.js';
+import {
+  MCP_OAUTH_CLIENT_NAME,
+  OAUTH_REDIRECT_PORT,
+  OAUTH_REDIRECT_PATH,
+} from './constants.js';
 
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
 
@@ -89,8 +94,6 @@ interface PKCEParams {
   state: string;
 }
 
-const REDIRECT_PORT = 7777;
-const REDIRECT_PATH = '/oauth/callback';
 const HTTP_OK = 200;
 
 /**
@@ -115,10 +118,11 @@ export class MCPOAuthProvider {
     config: MCPOAuthConfig,
   ): Promise<OAuthClientRegistrationResponse> {
     const redirectUri =
-      config.redirectUri || `http://localhost:${REDIRECT_PORT}${REDIRECT_PATH}`;
+      config.redirectUri ||
+      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
 
     const registrationRequest: OAuthClientRegistrationRequest = {
-      client_name: 'Gemini CLI (Google ADC)',
+      client_name: MCP_OAUTH_CLIENT_NAME,
       redirect_uris: [redirectUri],
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
@@ -192,9 +196,12 @@ export class MCPOAuthProvider {
       const server = http.createServer(
         async (req: http.IncomingMessage, res: http.ServerResponse) => {
           try {
-            const url = new URL(req.url!, `http://localhost:${REDIRECT_PORT}`);
+            const url = new URL(
+              req.url!,
+              `http://localhost:${OAUTH_REDIRECT_PORT}`,
+            );
 
-            if (url.pathname !== REDIRECT_PATH) {
+            if (url.pathname !== OAUTH_REDIRECT_PATH) {
               res.writeHead(404);
               res.end('Not found');
               return;
@@ -257,8 +264,10 @@ export class MCPOAuthProvider {
       );
 
       server.on('error', reject);
-      server.listen(REDIRECT_PORT, () => {
-        console.log(`OAuth callback server listening on port ${REDIRECT_PORT}`);
+      server.listen(OAUTH_REDIRECT_PORT, () => {
+        console.log(
+          `OAuth callback server listening on port ${OAUTH_REDIRECT_PORT}`,
+        );
       });
 
       // Timeout after 5 minutes
@@ -286,7 +295,8 @@ export class MCPOAuthProvider {
     mcpServerUrl?: string,
   ): string {
     const redirectUri =
-      config.redirectUri || `http://localhost:${REDIRECT_PORT}${REDIRECT_PATH}`;
+      config.redirectUri ||
+      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
 
     const params = new URLSearchParams({
       client_id: config.clientId!,
@@ -343,7 +353,8 @@ export class MCPOAuthProvider {
     mcpServerUrl?: string,
   ): Promise<OAuthTokenResponse> {
     const redirectUri =
-      config.redirectUri || `http://localhost:${REDIRECT_PORT}${REDIRECT_PATH}`;
+      config.redirectUri ||
+      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
 
     const params = new URLSearchParams({
       grant_type: 'authorization_code',

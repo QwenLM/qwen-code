@@ -1,88 +1,48 @@
-# Qwen Code
-
 <div align="center">
-
-![Qwen Code Screenshot](./docs/assets/qwen-screenshot.png)
 
 [![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 [![License](https://img.shields.io/github/license/QwenLM/qwen-code.svg)](./LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
-**AI-powered command-line workflow tool for developers**
+**An open-source AI agent that lives in your terminal.**
 
-[Installation](#installation) • [Quick Start](#quick-start) • [Features](#key-features) • [Documentation](./docs/) • [Contributing](./CONTRIBUTING.md)
+<a href="https://qwenlm.github.io/qwen-code-docs/zh/users/overview">中文</a> |
+<a href="https://qwenlm.github.io/qwen-code-docs/de/users/overview">Deutsch</a> |
+<a href="https://qwenlm.github.io/qwen-code-docs/fr/users/overview">français</a> |
+<a href="https://qwenlm.github.io/qwen-code-docs/ja/users/overview">日本語</a> |
+<a href="https://qwenlm.github.io/qwen-code-docs/ru/users/overview">Русский</a> |
+<a href="https://qwenlm.github.io/qwen-code-docs/pt-BR/users/overview">Português (Brasil)</a>
 
 </div>
 
-<div align="center">
-  
-  <a href="https://qwenlm.github.io/qwen-code-docs/de/">Deutsch</a> | 
-  <a href="https://qwenlm.github.io/qwen-code-docs/fr">français</a> | 
-  <a href="https://qwenlm.github.io/qwen-code-docs/ja/">日本語</a> | 
-  <a href="https://qwenlm.github.io/qwen-code-docs/ru">Русский</a> | 
-  <a href="https://qwenlm.github.io/qwen-code-docs/zh/">中文</a>
-  
-</div>
+Qwen Code is an open-source AI agent for the terminal, optimized for [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder). It helps you understand large codebases, automate tedious work, and ship faster.
 
-Qwen Code is a powerful command-line AI workflow tool adapted from [**Gemini CLI**](https://github.com/google-gemini/gemini-cli), specifically optimized for [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder) models. It enhances your development workflow with advanced code understanding, automated tasks, and intelligent assistance.
+![](https://gw.alicdn.com/imgextra/i1/O1CN01D2DviS1wwtEtMwIzJ_!!6000000006373-2-tps-1600-900.png)
 
-## 💡 Free Options Available
+## Why Qwen Code?
 
-Get started with Qwen Code at no cost using any of these free options:
-
-### 🔥 Qwen OAuth (Recommended)
-
-- **2,000 requests per day** with no token limits
-- **60 requests per minute** rate limit
-- Simply run `qwen` and authenticate with your qwen.ai account
-- Automatic credential management and refresh
-- Use `/auth` command to switch to Qwen OAuth if you have initialized with OpenAI compatible mode
-
-### 🌏 Regional Free Tiers
-
-- **Mainland China**: ModelScope offers **2,000 free API calls per day**
-- **International**: OpenRouter provides **up to 1,000 free API calls per day** worldwide
-
-For detailed setup instructions, see [Authorization](#authorization).
-
-> [!WARNING]
-> **Token Usage Notice**: Qwen Code may issue multiple API calls per cycle, resulting in higher token usage (similar to Claude Code). We're actively optimizing API efficiency.
-
-## Key Features
-
-- **Code Understanding & Editing** - Query and edit large codebases beyond traditional context window limits
-- **Workflow Automation** - Automate operational tasks like handling pull requests and complex rebases
-- **Enhanced Parser** - Adapted parser specifically optimized for Qwen-Coder models
-- **Vision Model Support** - Automatically detect images in your input and seamlessly switch to vision-capable models for multimodal analysis
+- **OpenAI-compatible, OAuth free tier**: use an OpenAI-compatible API, or sign in with Qwen OAuth to get 2,000 free requests/day.
+- **Open-source, co-evolving**: both the framework and the Qwen3-Coder model are open-source—and they ship and evolve together.
+- **Agentic workflow, feature-rich**: rich built-in tools (Skills, SubAgents, Plan Mode) for a full agentic workflow and a Claude Code-like experience.
+- **Terminal-first, IDE-friendly**: built for developers who live in the command line, with optional integration for VS Code and Zed.
 
 ## Installation
 
-### Prerequisites
-
-Ensure you have [Node.js version 20](https://nodejs.org/en/download) or higher installed.
+#### Prerequisites
 
 ```bash
+# Node.js 20+
 curl -qL https://www.npmjs.com/install.sh | sh
 ```
 
-### Install from npm
+#### NPM (recommended)
 
 ```bash
 npm install -g @qwen-code/qwen-code@latest
-qwen --version
 ```
 
-### Install from source
-
-```bash
-git clone https://github.com/QwenLM/qwen-code.git
-cd qwen-code
-npm install
-npm install -g .
-```
-
-### Install globally with Homebrew (macOS/Linux)
+#### Homebrew (macOS, Linux)
 
 ```bash
 brew install qwen-code
@@ -91,286 +51,102 @@ brew install qwen-code
 ## Quick Start
 
 ```bash
-# Start Qwen Code
+# Start Qwen Code (interactive)
 qwen
 
-# Example commands
-> Explain this codebase structure
-> Help me refactor this function
-> Generate unit tests for this module
+# Then, in the session:
+/help
+/auth
 ```
 
-### Session Management
+On first use, you'll be prompted to sign in. You can run `/auth` anytime to switch authentication methods.
 
-Control your token usage with configurable session limits to optimize costs and performance.
+Example prompts:
 
-#### Configure Session Token Limit
-
-Create or edit `.qwen/settings.json` in your home directory:
-
-```json
-{
-  "sessionTokenLimit": 32000
-}
+```text
+What does this project do?
+Explain the codebase structure.
+Help me refactor this function.
+Generate unit tests for this module.
 ```
-
-#### Session Commands
-
-- **`/compress`** - Compress conversation history to continue within token limits
-- **`/clear`** - Clear all conversation history and start fresh
-- **`/stats`** - Check current token usage and limits
-
-> 📝 **Note**: Session token limit applies to a single conversation, not cumulative API calls.
-
-### Vision Model Configuration
-
-Qwen Code includes intelligent vision model auto-switching that detects images in your input and can automatically switch to vision-capable models for multimodal analysis. **This feature is enabled by default** - when you include images in your queries, you'll see a dialog asking how you'd like to handle the vision model switch.
-
-#### Skip the Switch Dialog (Optional)
-
-If you don't want to see the interactive dialog each time, configure the default behavior in your `.qwen/settings.json`:
-
-```json
-{
-  "experimental": {
-    "vlmSwitchMode": "once"
-  }
-}
-```
-
-**Available modes:**
-
-- **`"once"`** - Switch to vision model for this query only, then revert
-- **`"session"`** - Switch to vision model for the entire session
-- **`"persist"`** - Continue with current model (no switching)
-- **Not set** - Show interactive dialog each time (default)
-
-#### Command Line Override
-
-You can also set the behavior via command line:
-
-```bash
-# Switch once per query
-qwen --vlm-switch-mode once
-
-# Switch for entire session
-qwen --vlm-switch-mode session
-
-# Never switch automatically
-qwen --vlm-switch-mode persist
-```
-
-#### Disable Vision Models (Optional)
-
-To completely disable vision model support, add to your `.qwen/settings.json`:
-
-```json
-{
-  "experimental": {
-    "visionModelPreview": false
-  }
-}
-```
-
-> 💡 **Tip**: In YOLO mode (`--yolo`), vision switching happens automatically without prompts when images are detected.
-
-### Authorization
-
-Choose your preferred authentication method based on your needs:
-
-#### 1. Qwen OAuth (🚀 Recommended - Start in 30 seconds)
-
-The easiest way to get started - completely free with generous quotas:
-
-```bash
-# Just run this command and follow the browser authentication
-qwen
-```
-
-**What happens:**
-
-1. **Instant Setup**: CLI opens your browser automatically
-2. **One-Click Login**: Authenticate with your qwen.ai account
-3. **Automatic Management**: Credentials cached locally for future use
-4. **No Configuration**: Zero setup required - just start coding!
-
-**Free Tier Benefits:**
-
-- ✅ **2,000 requests/day** (no token counting needed)
-- ✅ **60 requests/minute** rate limit
-- ✅ **Automatic credential refresh**
-- ✅ **Zero cost** for individual users
-- ℹ️ **Note**: Model fallback may occur to maintain service quality
-
-#### 2. OpenAI-Compatible API
-
-Use API keys for OpenAI or other compatible providers:
-
-**Configuration Methods:**
-
-1. **Environment Variables**
-
-   ```bash
-   export OPENAI_API_KEY="your_api_key_here"
-   export OPENAI_BASE_URL="your_api_endpoint"
-   export OPENAI_MODEL="your_model_choice"
-   ```
-
-2. **Project `.env` File**
-   Create a `.env` file in your project root:
-   ```env
-   OPENAI_API_KEY=your_api_key_here
-   OPENAI_BASE_URL=your_api_endpoint
-   OPENAI_MODEL=your_model_choice
-   ```
-
-**API Provider Options**
-
-> ⚠️ **Regional Notice:**
->
-> - **Mainland China**: Use Alibaba Cloud Bailian or ModelScope
-> - **International**: Use Alibaba Cloud ModelStudio or OpenRouter
 
 <details>
-<summary><b>🇨🇳 For Users in Mainland China</b></summary>
+<summary>Click to watch a demo video</summary>
 
-**Option 1: Alibaba Cloud Bailian** ([Apply for API Key](https://bailian.console.aliyun.com/))
-
-```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-coder-plus"
-```
-
-**Option 2: ModelScope (Free Tier)** ([Apply for API Key](https://modelscope.cn/docs/model-service/API-Inference/intro))
-
-- ✅ **2,000 free API calls per day**
-- ⚠️ Connect your Aliyun account to avoid authentication errors
-
-```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://api-inference.modelscope.cn/v1"
-export OPENAI_MODEL="Qwen/Qwen3-Coder-480B-A35B-Instruct"
-```
+<video src="https://cloud.video.taobao.com/vod/HLfyppnCHplRV9Qhz2xSqeazHeRzYtG-EYJnHAqtzkQ.mp4" controls>
+Your browser does not support the video tag.
+</video>
 
 </details>
 
-<details>
-<summary><b>🌍 For International Users</b></summary>
+## Authentication
 
-**Option 1: Alibaba Cloud ModelStudio** ([Apply for API Key](https://modelstudio.console.alibabacloud.com/))
+Qwen Code supports two authentication methods:
 
-```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-export OPENAI_MODEL="qwen3-coder-plus"
-```
+- **Qwen OAuth (recommended & free)**: sign in with your `qwen.ai` account in a browser.
+- **OpenAI-compatible API**: use `OPENAI_API_KEY` (and optionally a custom base URL / model).
 
-**Option 2: OpenRouter (Free Tier Available)** ([Apply for API Key](https://openrouter.ai/))
+#### Qwen OAuth (recommended)
+
+Start `qwen`, then run:
 
 ```bash
-export OPENAI_API_KEY="your_api_key_here"
-export OPENAI_BASE_URL="https://openrouter.ai/api/v1"
-export OPENAI_MODEL="qwen/qwen3-coder:free"
+/auth
 ```
 
-</details>
+Choose **Qwen OAuth** and complete the browser flow. Your credentials are cached locally so you usually won't need to log in again.
 
-## Usage Examples
+#### OpenAI-compatible API (API key)
 
-### 🔍 Explore Codebases
+Environment variables (recommended for CI / headless environments):
+
+```bash
+export OPENAI_API_KEY="your-api-key-here"
+export OPENAI_BASE_URL="https://api.openai.com/v1"  # optional
+export OPENAI_MODEL="gpt-4o"                        # optional
+```
+
+For details (including `.qwen/.env` loading and security notes), see the [authentication guide](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/auth/).
+
+## Usage
+
+As an open-source terminal agent, you can use Qwen Code in four primary ways:
+
+1. Interactive mode (terminal UI)
+2. Headless mode (scripts, CI)
+3. IDE integration (VS Code, Zed)
+4. TypeScript SDK
+
+#### Interactive mode
 
 ```bash
 cd your-project/
 qwen
-
-# Architecture analysis
-> Describe the main pieces of this system's architecture
-> What are the key dependencies and how do they interact?
-> Find all API endpoints and their authentication methods
 ```
 
-### 💻 Code Development
+Run `qwen` in your project folder to launch the interactive terminal UI. Use `@` to reference local files (for example `@src/main.ts`).
+
+#### Headless mode
 
 ```bash
-# Refactoring
-> Refactor this function to improve readability and performance
-> Convert this class to use dependency injection
-> Split this large module into smaller, focused components
-
-# Code generation
-> Create a REST API endpoint for user management
-> Generate unit tests for the authentication module
-> Add error handling to all database operations
+cd your-project/
+qwen -p "your question"
 ```
 
-### 🔄 Automate Workflows
+Use `-p` to run Qwen Code without the interactive UI—ideal for scripts, automation, and CI/CD. Learn more: [Headless mode](https://qwenlm.github.io/qwen-code-docs/en/users/features/headless).
 
-```bash
-# Git automation
-> Analyze git commits from the last 7 days, grouped by feature
-> Create a changelog from recent commits
-> Find all TODO comments and create GitHub issues
+#### IDE integration
 
-# File operations
-> Convert all images in this directory to PNG format
-> Rename all test files to follow the *.test.ts pattern
-> Find and remove all console.log statements
-```
+Use Qwen Code inside your editor (VS Code and Zed):
 
-### 🐛 Debugging & Analysis
+- [Use in VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/)
+- [Use in Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/)
 
-```bash
-# Performance analysis
-> Identify performance bottlenecks in this React component
-> Find all N+1 query problems in the codebase
+#### TypeScript SDK
 
-# Security audit
-> Check for potential SQL injection vulnerabilities
-> Find all hardcoded credentials or API keys
-```
+Build on top of Qwen Code with the TypeScript SDK:
 
-## Popular Tasks
-
-### 📚 Understand New Codebases
-
-```text
-> What are the core business logic components?
-> What security mechanisms are in place?
-> How does the data flow through the system?
-> What are the main design patterns used?
-> Generate a dependency graph for this module
-```
-
-### 🔨 Code Refactoring & Optimization
-
-```text
-> What parts of this module can be optimized?
-> Help me refactor this class to follow SOLID principles
-> Add proper error handling and logging
-> Convert callbacks to async/await pattern
-> Implement caching for expensive operations
-```
-
-### 📝 Documentation & Testing
-
-```text
-> Generate comprehensive JSDoc comments for all public APIs
-> Write unit tests with edge cases for this component
-> Create API documentation in OpenAPI format
-> Add inline comments explaining complex algorithms
-> Generate a README for this module
-```
-
-### 🚀 Development Acceleration
-
-```text
-> Set up a new Express server with authentication
-> Create a React component with TypeScript and tests
-> Implement a rate limiter middleware
-> Add database migrations for new schema
-> Configure CI/CD pipeline for this project
-```
+- [Use the Qwen Code SDK](./packages/sdk-typescript/README.md)
 
 ## Commands & Shortcuts
 
@@ -380,6 +156,7 @@ qwen
 - `/clear` - Clear conversation history
 - `/compress` - Compress history to save tokens
 - `/stats` - Show current session information
+- `/bug` - Submit a bug report
 - `/exit` or `/quit` - Exit Qwen Code
 
 ### Keyboard Shortcuts
@@ -387,6 +164,19 @@ qwen
 - `Ctrl+C` - Cancel current operation
 - `Ctrl+D` - Exit (on empty line)
 - `Up/Down` - Navigate command history
+
+> Learn more about [Commands](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/)
+>
+> **Tip**: In YOLO mode (`--yolo`), vision switching happens automatically without prompts when images are detected. Learn more about [Approval Mode](https://qwenlm.github.io/qwen-code-docs/en/users/features/approval-mode/)
+
+## Configuration
+
+Qwen Code can be configured via `settings.json`, environment variables, and CLI flags.
+
+- **User settings**: `~/.qwen/settings.json`
+- **Project settings**: `.qwen/settings.json`
+
+See [settings](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/) for available options and precedence.
 
 ## Benchmark Results
 
@@ -397,24 +187,18 @@ qwen
 | Qwen Code | Qwen3-Coder-480A35 | 37.5%    |
 | Qwen Code | Qwen3-Coder-30BA3B | 31.3%    |
 
-## Development & Contributing
+## Ecosystem
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) to learn how to contribute to the project.
+Looking for a graphical interface?
 
-For detailed authentication setup, see the [authentication guide](./docs/cli/authentication.md).
+- [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) A cross-platform desktop/web/mobile UI for Qwen Code
 
 ## Troubleshooting
 
-If you encounter issues, check the [troubleshooting guide](docs/troubleshooting.md).
+If you encounter issues, check the [troubleshooting guide](https://qwenlm.github.io/qwen-code-docs/en/users/support/troubleshooting/).
+
+To report a bug from within the CLI, run `/bug` and include a short title and repro steps.
 
 ## Acknowledgments
 
 This project is based on [Google Gemini CLI](https://github.com/google-gemini/gemini-cli). We acknowledge and appreciate the excellent work of the Gemini CLI team. Our main contribution focuses on parser-level adaptations to better support Qwen-Coder models.
-
-## License
-
-[LICENSE](./LICENSE)
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=QwenLM/qwen-code&type=Date)](https://www.star-history.com/#QwenLM/qwen-code&Date)

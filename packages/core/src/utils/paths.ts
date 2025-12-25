@@ -120,6 +120,10 @@ export function makeRelative(
   const resolvedTargetPath = path.resolve(targetPath);
   const resolvedRootDirectory = path.resolve(rootDirectory);
 
+  if (!isSubpath(resolvedRootDirectory, resolvedTargetPath)) {
+    return resolvedTargetPath;
+  }
+
   const relativePath = path.relative(resolvedRootDirectory, resolvedTargetPath);
 
   // If the paths are the same, path.relative returns '', return '.' instead

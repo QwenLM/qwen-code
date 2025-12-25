@@ -100,6 +100,7 @@ describe('GeminiChat', () => {
       countTokens: vi.fn(),
       embedContent: vi.fn(),
       batchEmbedContents: vi.fn(),
+      useSummarizedThinking: vi.fn().mockReturnValue(false),
     } as unknown as ContentGenerator;
 
     mockHandleFallback.mockClear();
@@ -111,7 +112,7 @@ describe('GeminiChat', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getContentGeneratorConfig: vi.fn().mockReturnValue({
-        authType: 'oauth-personal', // Ensure this is set for fallback tests
+        authType: 'gemini-api-key', // Ensure this is set for fallback tests
         model: 'test-model',
       }),
       getModel: vi.fn().mockReturnValue('gemini-pro'),
@@ -717,6 +718,39 @@ describe('GeminiChat', () => {
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
       );
+    });
+
+    it('should keep parts with thoughtSignature when consolidating history', async () => {
+      const stream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'p1',
+                    thoughtSignature: 's1',
+                  } as unknown as { text: string; thoughtSignature: string },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        stream,
+      );
+
+      const res = await chat.sendMessageStream('m1', { message: 'h1' }, 'p1');
+      for await (const _ of res);
+
+      const history = chat.getHistory();
+      expect(history[1].parts![0]).toEqual({
+        text: 'p1',
+        thoughtSignature: 's1',
+      });
     });
   });
 
@@ -1382,7 +1416,7 @@ describe('GeminiChat', () => {
     });
 
     it('should call handleFallback with the specific failed model and retry if handler returns true', async () => {
-      const authType = AuthType.LOGIN_WITH_GOOGLE;
+      const authType = AuthType.USE_GEMINI;
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'test-model',
         authType,
@@ -1532,7 +1566,7 @@ describe('GeminiChat', () => {
   });
 
   describe('stripThoughtsFromHistory', () => {
-    it('should strip thought signatures', () => {
+    it('should strip thoughts and thought signatures, and remove empty content objects', () => {
       chat.setHistory([
         {
           role: 'user',
@@ -1544,9 +1578,14 @@ describe('GeminiChat', () => {
             { text: 'thinking...', thought: true },
             { text: 'hi' },
             {
-              functionCall: { name: 'test', args: {} },
-            },
+              text: 'hidden metadata',
+              thoughtSignature: 'abc',
+            } as unknown as { text: string; thoughtSignature: string },
           ],
+        },
+        {
+          role: 'model',
+          parts: [{ text: 'only thinking', thought: true }],
         },
       ]);
 
@@ -1559,7 +1598,7 @@ describe('GeminiChat', () => {
         },
         {
           role: 'model',
-          parts: [{ text: 'hi' }, { functionCall: { name: 'test', args: {} } }],
+          parts: [{ text: 'hi' }, { text: 'hidden metadata' }],
         },
       ]);
     });

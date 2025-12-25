@@ -56,6 +56,17 @@ vi.mock('simple-git', () => ({
   }),
 }));
 
+vi.mock('./extensions/github.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./extensions/github.js')>();
+  return {
+    ...actual,
+    downloadFromGitHubRelease: vi
+      .fn()
+      .mockRejectedValue(new Error('Mocked GitHub release download failure')),
+  };
+});
+
 vi.mock('os', async (importOriginal) => {
   const mockedOs = await importOriginal<typeof os>();
   return {

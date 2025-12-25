@@ -1323,7 +1323,7 @@ describe('useGeminiStream', () => {
     it('should call parseAndFormatApiError with the correct authType on stream initialization failure', async () => {
       // 1. Setup
       const mockError = new Error('Rate limit exceeded');
-      const mockAuthType = AuthType.LOGIN_WITH_GOOGLE;
+      const mockAuthType = AuthType.USE_VERTEX_AI;
       mockParseAndFormatApiError.mockClear();
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -1374,9 +1374,6 @@ describe('useGeminiStream', () => {
         expect(mockParseAndFormatApiError).toHaveBeenCalledWith(
           'Rate limit exceeded',
           mockAuthType,
-          undefined,
-          'gemini-2.5-pro',
-          'gemini-2.5-flash',
         );
       });
     });
@@ -2493,9 +2490,6 @@ describe('useGeminiStream', () => {
       expect(mockParseAndFormatApiError).toHaveBeenCalledWith(
         { message: 'Test error' },
         expect.any(String),
-        undefined,
-        'gemini-2.5-pro',
-        'gemini-2.5-flash',
       );
     });
   });

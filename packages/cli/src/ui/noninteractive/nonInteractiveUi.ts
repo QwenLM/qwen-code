@@ -20,7 +20,6 @@ export function createNonInteractiveUI(): CommandContext['ui'] {
     loadHistory: (_newHistory) => {},
     pendingItem: null,
     setPendingItem: (_item) => {},
-    toggleCorgiMode: () => {},
     toggleVimEnabled: async () => false,
     setGeminiMdFileCount: (_count) => {},
     reloadCommands: () => {},

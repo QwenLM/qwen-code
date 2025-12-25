@@ -148,4 +148,59 @@ describe('MessageEmitter', () => {
       });
     });
   });
+
+  describe('emitUsageMetadata', () => {
+    it('should emit agent_message_chunk with _meta.usage containing token counts', async () => {
+      const usageMetadata = {
+        promptTokenCount: 100,
+        candidatesTokenCount: 50,
+        thoughtsTokenCount: 25,
+        totalTokenCount: 175,
+        cachedContentTokenCount: 10,
+      };
+
+      await emitter.emitUsageMetadata(usageMetadata);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: {
+            promptTokens: 100,
+            completionTokens: 50,
+            thoughtsTokens: 25,
+            totalTokens: 175,
+            cachedTokens: 10,
+          },
+        },
+      });
+    });
+
+    it('should include durationMs in _meta when provided', async () => {
+      const usageMetadata = {
+        promptTokenCount: 10,
+        candidatesTokenCount: 5,
+        thoughtsTokenCount: 2,
+        totalTokenCount: 17,
+        cachedContentTokenCount: 1,
+      };
+
+      await emitter.emitUsageMetadata(usageMetadata, 'done', 1234);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'done' },
+        _meta: {
+          usage: {
+            promptTokens: 10,
+            completionTokens: 5,
+            thoughtsTokens: 2,
+            totalTokens: 17,
+            cachedTokens: 1,
+          },
+          durationMs: 1234,
+        },
+      });
+    });
+  });
 });

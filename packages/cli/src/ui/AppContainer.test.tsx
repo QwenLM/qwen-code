@@ -23,7 +23,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
-import { useQuotaAndFallback } from './hooks/useQuotaAndFallback.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
 import {
   UIActionsContext,
@@ -56,7 +55,6 @@ vi.mock('./App.js', () => ({
   App: TestContextConsumer,
 }));
 
-vi.mock('./hooks/useQuotaAndFallback.js');
 vi.mock('./hooks/useHistoryManager.js');
 vi.mock('./hooks/useThemeCommand.js');
 vi.mock('./auth/useAuth.js');
@@ -122,7 +120,6 @@ describe('AppContainer State Management', () => {
   let mockInitResult: InitializationResult;
 
   // Create typed mocks for all hooks
-  const mockedUseQuotaAndFallback = useQuotaAndFallback as Mock;
   const mockedUseHistory = useHistory as Mock;
   const mockedUseThemeCommand = useThemeCommand as Mock;
   const mockedUseAuthCommand = useAuthCommand as Mock;
@@ -164,10 +161,6 @@ describe('AppContainer State Management', () => {
     capturedUIActions = null!;
 
     // **Provide a default return value for EVERY mocked hook.**
-    mockedUseQuotaAndFallback.mockReturnValue({
-      proQuotaRequest: null,
-      handleProQuotaChoice: vi.fn(),
-    });
     mockedUseHistory.mockReturnValue({
       history: [],
       addItem: vi.fn(),
@@ -564,75 +557,6 @@ describe('AppContainer State Management', () => {
       );
 
       expect(() => unmount()).not.toThrow();
-    });
-  });
-
-  describe('Quota and Fallback Integration', () => {
-    it('passes a null proQuotaRequest to UIStateContext by default', () => {
-      // The default mock from beforeEach already sets proQuotaRequest to null
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-
-      // Assert that the context value is as expected
-      expect(capturedUIState.proQuotaRequest).toBeNull();
-    });
-
-    it('passes a valid proQuotaRequest to UIStateContext when provided by the hook', () => {
-      // Arrange: Create a mock request object that a UI dialog would receive
-      const mockRequest = {
-        failedModel: 'gemini-pro',
-        fallbackModel: 'gemini-flash',
-        resolve: vi.fn(),
-      };
-      mockedUseQuotaAndFallback.mockReturnValue({
-        proQuotaRequest: mockRequest,
-        handleProQuotaChoice: vi.fn(),
-      });
-
-      // Act: Render the container
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-
-      // Assert: The mock request is correctly passed through the context
-      expect(capturedUIState.proQuotaRequest).toEqual(mockRequest);
-    });
-
-    it('passes the handleProQuotaChoice function to UIActionsContext', () => {
-      // Arrange: Create a mock handler function
-      const mockHandler = vi.fn();
-      mockedUseQuotaAndFallback.mockReturnValue({
-        proQuotaRequest: null,
-        handleProQuotaChoice: mockHandler,
-      });
-
-      // Act: Render the container
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
-
-      // Assert: The action in the context is the mock handler we provided
-      expect(capturedUIActions.handleProQuotaChoice).toBe(mockHandler);
-
-      // You can even verify that the plumbed function is callable
-      capturedUIActions.handleProQuotaChoice('auth');
-      expect(mockHandler).toHaveBeenCalledWith('auth');
     });
   });
 

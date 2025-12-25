@@ -23,6 +23,12 @@ export type UiEvent =
   | (ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR })
   | (ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
 
+export {
+  EVENT_API_ERROR,
+  EVENT_API_RESPONSE,
+  EVENT_TOOL_CALL,
+} from './constants.js';
+
 export interface ToolCallStats {
   count: number;
   success: number;

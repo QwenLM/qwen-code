@@ -112,6 +112,7 @@ export interface CliArgs {
   allowedMcpServerNames: string[] | undefined;
   allowedTools: string[] | undefined;
   experimentalAcp: boolean | undefined;
+  experimentalSkills: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -130,6 +131,11 @@ export interface CliArgs {
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
+  /**
+   * If chat recording is disabled, the chat history would not be recorded,
+   * so --continue and --resume would not take effect.
+   */
+  chatRecording: boolean | undefined;
   /** Resume the most recent session for the current project */
   continue: boolean | undefined;
   /** Resume a specific session by its ID */
@@ -138,6 +144,7 @@ export interface CliArgs {
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   authType: string | undefined;
+  channel: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -232,6 +239,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
       'proxy',
       'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
     )
+    .option('chat-recording', {
+      type: 'boolean',
+      description:
+        'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
+    })
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
       yargsInstance
         .positional('query', {
@@ -288,7 +300,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
         })
         .option('checkpointing', {
-          alias: 'c',
           type: 'boolean',
           description: 'Enables checkpointing of file edits',
           default: false,
@@ -296,6 +307,16 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .option('experimental-acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
+        })
+        .option('experimental-skills', {
+          type: 'boolean',
+          description: 'Enable experimental Skills feature',
+          default: false,
+        })
+        .option('channel', {
+          type: 'string',
+          choices: ['VSCode', 'ACP', 'SDK', 'CI'],
+          description: 'Channel identifier (VSCode, ACP, SDK, CI)',
         })
         .option('allowed-mcp-server-names', {
           type: 'array',
@@ -406,12 +427,14 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           default: false,
         })
         .option('continue', {
+          alias: 'c',
           type: 'boolean',
           description:
             'Resume the most recent session for the current project.',
           default: false,
         })
         .option('resume', {
+          alias: 'r',
           type: 'string',
           description:
             'Resume a specific session by its ID. Use without an ID to show session picker.',
@@ -443,7 +466,13 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('auth-type', {
           type: 'string',
-          choices: [AuthType.USE_OPENAI, AuthType.QWEN_OAUTH],
+          choices: [
+            AuthType.USE_OPENAI,
+            AuthType.USE_ANTHROPIC,
+            AuthType.QWEN_OAUTH,
+            AuthType.USE_GEMINI,
+            AuthType.USE_VERTEX_AI,
+          ],
           description: 'Authentication type',
         })
         .deprecateOption(
@@ -559,6 +588,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
 
   // The import format is now only controlled by settings.memoryImportFormat
   // We no longer accept it as a CLI argument
+
+  // Apply ACP fallback: if experimental-acp is present but no explicit --channel, treat as ACP
+  if (result['experimentalAcp'] && !result['channel']) {
+    (result as Record<string, unknown>)['channel'] = 'ACP';
+  }
+
   return result as unknown as CliArgs;
 }
 
@@ -842,11 +877,30 @@ export async function loadCliConfig(
     );
   }
 
+  const selectedAuthType =
+    (argv.authType as AuthType | undefined) ||
+    settings.security?.auth?.selectedType;
+
+  const apiKey =
+    (selectedAuthType === AuthType.USE_OPENAI
+      ? argv.openaiApiKey ||
+        process.env['OPENAI_API_KEY'] ||
+        settings.security?.auth?.apiKey
+      : '') || '';
+  const baseUrl =
+    (selectedAuthType === AuthType.USE_OPENAI
+      ? argv.openaiBaseUrl ||
+        process.env['OPENAI_BASE_URL'] ||
+        settings.security?.auth?.baseUrl
+      : '') || '';
   const resolvedModel =
     argv.model ||
-    process.env['OPENAI_MODEL'] ||
-    process.env['QWEN_MODEL'] ||
-    settings.model?.name;
+    (selectedAuthType === AuthType.USE_OPENAI
+      ? process.env['OPENAI_MODEL'] ||
+        process.env['QWEN_MODEL'] ||
+        settings.model?.name
+      : '') ||
+    '';
 
   const sandboxConfig = await loadSandboxConfig(settings, argv);
   const screenReader =
@@ -928,27 +982,20 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.experimentalAcp || false,
+    experimentalSkills: argv.experimentalSkills || false,
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
     blockedMcpServers,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType:
-      (argv.authType as AuthType | undefined) ||
-      settings.security?.auth?.selectedType,
+    authType: selectedAuthType,
     inputFormat,
     outputFormat,
     includePartialMessages,
     generationConfig: {
       ...(settings.model?.generationConfig || {}),
       model: resolvedModel,
-      apiKey:
-        argv.openaiApiKey ||
-        process.env['OPENAI_API_KEY'] ||
-        settings.security?.auth?.apiKey,
-      baseUrl:
-        argv.openaiBaseUrl ||
-        process.env['OPENAI_BASE_URL'] ||
-        settings.security?.auth?.baseUrl,
+      apiKey,
+      baseUrl,
       enableOpenAILogging:
         (typeof argv.openaiLogging === 'undefined'
           ? settings.model?.enableOpenAILogging
@@ -980,9 +1027,16 @@ export async function loadCliConfig(
     enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,
     eventEmitter: appEvents,
     useSmartEdit: argv.useSmartEdit ?? settings.useSmartEdit,
+    gitCoAuthor: settings.general?.gitCoAuthor,
     output: {
       format: outputSettingsFormat,
     },
+    channel: argv.channel,
+    // Precedence: explicit CLI flag > settings file > default(true).
+    // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
+    // always be true and the settings file can never disable recording.
+    chatRecording:
+      argv.chatRecording ?? settings.general?.chatRecording ?? true,
   });
 }
 

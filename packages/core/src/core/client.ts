@@ -15,11 +15,7 @@ import type {
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
-import {
-  DEFAULT_GEMINI_FLASH_MODEL,
-  DEFAULT_GEMINI_MODEL_AUTO,
-  DEFAULT_THINKING_MODE,
-} from '../config/models.js';
+import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
@@ -78,25 +74,10 @@ import { type File, type IdeContext } from '../ide/types.js';
 // Fallback handling
 import { handleFallback } from '../fallback/handler.js';
 
-export function isThinkingSupported(model: string) {
-  return model.startsWith('gemini-2.5') || model === DEFAULT_GEMINI_MODEL_AUTO;
-}
-
-export function isThinkingDefault(model: string) {
-  if (model.startsWith('gemini-2.5-flash-lite')) {
-    return false;
-  }
-  return model.startsWith('gemini-2.5') || model === DEFAULT_GEMINI_MODEL_AUTO;
-}
-
 const MAX_TURNS = 100;
 
 export class GeminiClient {
   private chat?: GeminiChat;
-  private readonly generateContentConfig: GenerateContentConfig = {
-    temperature: 0,
-    topP: 1,
-  };
   private sessionTurnCount = 0;
 
   private readonly loopDetector: LoopDetectionService;
@@ -208,20 +189,10 @@ export class GeminiClient {
       const model = this.config.getModel();
       const systemInstruction = getCoreSystemPrompt(userMemory, model);
 
-      const config: GenerateContentConfig = { ...this.generateContentConfig };
-
-      if (isThinkingSupported(model)) {
-        config.thinkingConfig = {
-          includeThoughts: true,
-          thinkingBudget: DEFAULT_THINKING_MODE,
-        };
-      }
-
       return new GeminiChat(
         this.config,
         {
           systemInstruction,
-          ...config,
           tools,
         },
         history,
@@ -618,11 +589,6 @@ export class GeminiClient {
   ): Promise<GenerateContentResponse> {
     let currentAttemptModel: string = model;
 
-    const configToUse: GenerateContentConfig = {
-      ...this.generateContentConfig,
-      ...generationConfig,
-    };
-
     try {
       const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
@@ -631,7 +597,7 @@ export class GeminiClient {
 
       const requestConfig: GenerateContentConfig = {
         abortSignal,
-        ...configToUse,
+        ...generationConfig,
         systemInstruction: finalSystemInstruction,
       };
 
@@ -672,7 +638,7 @@ export class GeminiClient {
         `Error generating content via API with model ${currentAttemptModel}.`,
         {
           requestContents: contents,
-          requestConfig: configToUse,
+          requestConfig: generationConfig,
         },
         'generateContent-api',
       );

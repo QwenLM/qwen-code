@@ -8,10 +8,8 @@
  * Tool definition helper for SDK-embedded MCP servers
  */
 
-import type { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { z, ZodRawShape, ZodObject, ZodTypeAny } from 'zod';
-
-type CallToolResult = z.infer<typeof CallToolResultSchema>;
 
 /**
  * SDK MCP Tool Definition with Zod schema type inference

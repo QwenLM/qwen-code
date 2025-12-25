@@ -221,8 +221,6 @@ export async function runNonInteractive(
               const errorText = parseAndFormatApiError(
                 event.value.error,
                 config.getContentGeneratorConfig()?.authType,
-                undefined,
-                config.getModel(),
               );
               process.stderr.write(`${errorText}\n`);
             }

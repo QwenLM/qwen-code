@@ -30,7 +30,6 @@ import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
-  ShellExecutionResult,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
@@ -159,12 +158,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // On Windows, we rely on the race logic below to handle background tasks.
       // We just ensure the command string is clean.
       if (isWindows && shouldRunInBackground) {
-        let cmd = finalCommand.trim();
-        // Remove trailing & (common Linux habit, invalid on Windows at end of line)
-        while (cmd.endsWith('&')) {
-          cmd = cmd.slice(0, -1).trim();
-        }
-        finalCommand = cmd;
+        finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
@@ -234,59 +228,48 @@ export class ShellToolInvocation extends BaseToolInvocation<
         setPidCallback(pid);
       }
 
-      let result: ShellExecutionResult;
-      if (shouldRunInBackground && isWindows) {
-        // For Windows background tasks, we wait a short time to catch immediate errors.
-        // If it's still running, we return early.
-        const startupDelay = 1000;
-        const raceResult = await Promise.race([
-          resultPromise,
-          new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), startupDelay),
-          ),
-        ]);
+      if (shouldRunInBackground) {
+        // Check for obvious startup errors from captured output
+        const outputStr =
+          typeof cumulativeOutput === 'string'
+            ? cumulativeOutput
+            : JSON.stringify(cumulativeOutput);
 
-        if (raceResult === null) {
-          // Timeout reached, process is still running.
-          // throw new Error(`DEBUG: raceResult is null. Output: ${JSON.stringify(cumulativeOutput)}`);
+        const errorPatterns = [
+          'is not recognized as an internal or external command',
+          'The system cannot find the path specified',
+          'Access is denied',
+          'command not found',
+          'No such file or directory',
+          'Permission denied',
+        ];
 
-          // Check for common Windows error messages in the output
-          const outputStr =
-            typeof cumulativeOutput === 'string'
-              ? cumulativeOutput
-              : JSON.stringify(cumulativeOutput);
-          console.log('DEBUG: outputStr:', outputStr);
-          const errorPatterns = [
-            'is not recognized as an internal or external command',
-            'The system cannot find the path specified',
-            'Access is denied',
-          ];
+        const hasEarlyError = errorPatterns.some((pat) =>
+          outputStr.includes(pat),
+        );
 
-          if (errorPatterns.some((pattern) => outputStr.includes(pattern))) {
-            return {
-              llmContent: `Command failed to start: ${outputStr}`,
-              returnDisplay: `Command failed to start: ${outputStr}`,
-              error: {
-                type: ToolErrorType.EXECUTION_FAILED,
-                message: `Command failed to start: ${outputStr}`,
-              },
-            };
-          }
-
-          const pidMsg = pid ? ` PID: ${pid}` : '';
-          const winHint = isWindows
-            ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
-            : '';
+        if (hasEarlyError) {
           return {
-            llmContent: `Background command started.${pidMsg}${winHint}`,
-            returnDisplay: `Background command started.${pidMsg}${winHint}`,
+            llmContent: `Command failed to start: ${outputStr}`,
+            returnDisplay: `Command failed to start: ${outputStr}`,
+            error: {
+              type: ToolErrorType.EXECUTION_FAILED,
+              message: `Command failed to start: ${outputStr}`,
+            },
           };
-        } else {
-          result = raceResult;
         }
-      } else {
-        result = await resultPromise;
+
+        const pidMsg = pid ? ` PID: ${pid}` : '';
+        const winHint = isWindows
+          ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
+          : '';
+        return {
+          llmContent: `Background command started.${pidMsg}${winHint}`,
+          returnDisplay: `Background command started.${pidMsg}${winHint}`,
+        };
       }
+
+      const result = await resultPromise;
 
       const backgroundPIDs: number[] = [];
       if (os.platform() !== 'win32') {
@@ -401,13 +384,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
   private addCoAuthorToGitCommit(command: string): string {
     // Check if co-author feature is enabled
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
+
     if (!gitCoAuthorSettings.enabled) {
       return command;
     }
 
-    // Check if this is a git commit command
-    const gitCommitPattern = /^git\s+commit/;
-    if (!gitCommitPattern.test(command.trim())) {
+    // Check if this is a git commit command (anywhere in the command, e.g., after "cd /path &&")
+    const gitCommitPattern = /\bgit\s+commit\b/;
+    if (!gitCommitPattern.test(command)) {
       return command;
     }
 
@@ -416,15 +400,27 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
 Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
 
-    // Handle different git commit patterns
-    // Match -m "message" or -m 'message'
-    const messagePattern = /(-m\s+)(['"])((?:\\.|[^\\])*?)(\2)/;
-    const match = command.match(messagePattern);
+    // Handle different git commit patterns:
+    // Match -m "message" or -m 'message', including combined flags like -am
+    // Use separate patterns to avoid ReDoS (catastrophic backtracking)
+    //
+    // Pattern breakdown:
+    //   -[a-zA-Z]*m  matches -m, -am, -nm, etc. (combined short flags)
+    //   \s+          matches whitespace after the flag
+    //   [^"\\]       matches any char except double-quote and backslash
+    //   \\.          matches escape sequences like \" or \\
+    //   (?:...|...)* matches normal chars or escapes, repeated
+    const doubleQuotePattern = /(-[a-zA-Z]*m\s+)"((?:[^"\\]|\\.)*)"/;
+    const singleQuotePattern = /(-[a-zA-Z]*m\s+)'((?:[^'\\]|\\.)*)'/;
+    const doubleMatch = command.match(doubleQuotePattern);
+    const singleMatch = command.match(singleQuotePattern);
+    const match = doubleMatch ?? singleMatch;
+    const quote = doubleMatch ? '"' : "'";
 
     if (match) {
-      const [fullMatch, prefix, quote, existingMessage, closingQuote] = match;
+      const [fullMatch, prefix, existingMessage] = match;
       const newMessage = existingMessage + coAuthor;
-      const replacement = prefix + quote + newMessage + closingQuote;
+      const replacement = prefix + quote + newMessage + quote;
 
       return command.replace(fullMatch, replacement);
     }

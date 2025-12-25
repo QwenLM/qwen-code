@@ -31,9 +31,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
   beforeEach(async () => {
     helper = new SDKTestHelper();
-    testDir = await helper.setup('tool-control', {
-      createQwenConfig: false,
-    });
+    testDir = await helper.setup('tool-control');
   });
 
   afterEach(async () => {

@@ -69,6 +69,8 @@ async function createMockConfig(
     targetDir: '.',
     debugMode: false,
     cwd: process.cwd(),
+    // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
+    chatRecording: false,
   };
   const config = new Config(configParams);
   await config.initialize();
