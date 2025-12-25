@@ -15,6 +15,23 @@ import {
   LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS,
   useAttentionNotifications,
 } from './useAttentionNotifications.js';
+import type { LoadedSettings } from '../../config/settings.js';
+
+const mockSettings: LoadedSettings = {
+  merged: {
+    general: {
+      terminalBell: true,
+    },
+  },
+} as LoadedSettings;
+
+const mockSettingsDisabled: LoadedSettings = {
+  merged: {
+    general: {
+      terminalBell: false,
+    },
+  },
+} as LoadedSettings;
 
 vi.mock('../../utils/attentionNotification.js', () => ({
   notifyTerminalAttention: vi.fn(),
@@ -40,6 +57,7 @@ describe('useAttentionNotifications', () => {
           isFocused: true,
           streamingState: StreamingState.Idle,
           elapsedTime: 0,
+          settings: mockSettings,
           ...props,
         },
       },
@@ -53,11 +71,13 @@ describe('useAttentionNotifications', () => {
         isFocused: false,
         streamingState: StreamingState.WaitingForConfirmation,
         elapsedTime: 0,
+        settings: mockSettings,
       },
     });
 
     expect(mockedNotify).toHaveBeenCalledWith(
       AttentionNotificationReason.ToolApproval,
+      { enabled: true },
     );
   });
 
@@ -72,6 +92,7 @@ describe('useAttentionNotifications', () => {
         isFocused: false,
         streamingState: StreamingState.WaitingForConfirmation,
         elapsedTime: 0,
+        settings: mockSettings,
       },
     });
 
@@ -86,6 +107,7 @@ describe('useAttentionNotifications', () => {
         isFocused: false,
         streamingState: StreamingState.Responding,
         elapsedTime: LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS + 5,
+        settings: mockSettings,
       },
     });
 
@@ -94,11 +116,13 @@ describe('useAttentionNotifications', () => {
         isFocused: false,
         streamingState: StreamingState.Idle,
         elapsedTime: 0,
+        settings: mockSettings,
       },
     });
 
     expect(mockedNotify).toHaveBeenCalledWith(
       AttentionNotificationReason.LongTaskComplete,
+      { enabled: true },
     );
   });
 
@@ -110,6 +134,7 @@ describe('useAttentionNotifications', () => {
         isFocused: true,
         streamingState: StreamingState.Responding,
         elapsedTime: LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS + 2,
+        settings: mockSettings,
       },
     });
 
@@ -118,6 +143,7 @@ describe('useAttentionNotifications', () => {
         isFocused: true,
         streamingState: StreamingState.Idle,
         elapsedTime: 0,
+        settings: mockSettings,
       },
     });
 
@@ -135,6 +161,7 @@ describe('useAttentionNotifications', () => {
         isFocused: false,
         streamingState: StreamingState.Responding,
         elapsedTime: 5,
+        settings: mockSettings,
       },
     });
 
@@ -143,9 +170,30 @@ describe('useAttentionNotifications', () => {
         isFocused: false,
         streamingState: StreamingState.Idle,
         elapsedTime: 0,
+        settings: mockSettings,
       },
     });
 
     expect(mockedNotify).not.toHaveBeenCalled();
+  });
+
+  it('does not notify when terminalBell setting is disabled', () => {
+    const { rerender } = render({
+      settings: mockSettingsDisabled,
+    });
+
+    rerender({
+      hookProps: {
+        isFocused: false,
+        streamingState: StreamingState.WaitingForConfirmation,
+        elapsedTime: 0,
+        settings: mockSettingsDisabled,
+      },
+    });
+
+    expect(mockedNotify).toHaveBeenCalledWith(
+      AttentionNotificationReason.ToolApproval,
+      { enabled: false },
+    );
   });
 });

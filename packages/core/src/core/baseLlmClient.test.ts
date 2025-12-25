@@ -146,13 +146,11 @@ describe('BaseLlmClient', () => {
       // Validate the parameters passed to the underlying generator
       expect(mockGenerateContent).toHaveBeenCalledTimes(1);
       expect(mockGenerateContent).toHaveBeenCalledWith(
-        {
+        expect.objectContaining({
           model: 'test-model',
           contents: defaultOptions.contents,
-          config: {
+          config: expect.objectContaining({
             abortSignal: defaultOptions.abortSignal,
-            temperature: 0,
-            topP: 1,
             tools: [
               {
                 functionDeclarations: [
@@ -164,9 +162,8 @@ describe('BaseLlmClient', () => {
                 ],
               },
             ],
-            // Crucial: systemInstruction should NOT be in the config object if not provided
-          },
-        },
+          }),
+        }),
         'test-prompt-id',
       );
     });
@@ -189,7 +186,6 @@ describe('BaseLlmClient', () => {
         expect.objectContaining({
           config: expect.objectContaining({
             temperature: 0.8,
-            topP: 1, // Default should remain if not overridden
             topK: 10,
             tools: expect.any(Array),
           }),

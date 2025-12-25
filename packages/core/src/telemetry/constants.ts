@@ -33,6 +33,7 @@ export const EVENT_MALFORMED_JSON_RESPONSE =
 export const EVENT_FILE_OPERATION = 'qwen-code.file_operation';
 export const EVENT_MODEL_SLASH_COMMAND = 'qwen-code.slash_command.model';
 export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
+export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 
 // Performance Events

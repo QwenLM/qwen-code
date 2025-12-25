@@ -225,16 +225,26 @@ export const useAuthCommand = (
     const defaultAuthType = process.env['QWEN_DEFAULT_AUTH_TYPE'];
     if (
       defaultAuthType &&
-      ![AuthType.QWEN_OAUTH, AuthType.USE_OPENAI].includes(
-        defaultAuthType as AuthType,
-      )
+      ![
+        AuthType.QWEN_OAUTH,
+        AuthType.USE_OPENAI,
+        AuthType.USE_ANTHROPIC,
+        AuthType.USE_GEMINI,
+        AuthType.USE_VERTEX_AI,
+      ].includes(defaultAuthType as AuthType)
     ) {
       onAuthError(
         t(
           'Invalid QWEN_DEFAULT_AUTH_TYPE value: "{{value}}". Valid values are: {{validValues}}',
           {
             value: defaultAuthType,
-            validValues: [AuthType.QWEN_OAUTH, AuthType.USE_OPENAI].join(', '),
+            validValues: [
+              AuthType.QWEN_OAUTH,
+              AuthType.USE_OPENAI,
+              AuthType.USE_ANTHROPIC,
+              AuthType.USE_GEMINI,
+              AuthType.USE_VERTEX_AI,
+            ].join(', '),
           },
         ),
       );

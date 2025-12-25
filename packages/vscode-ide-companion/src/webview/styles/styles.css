@@ -1,0 +1,58 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Import component styles */
+@import './timeline.css';
+@import '../components/messages/MarkdownRenderer/MarkdownRenderer.css';
+
+/* ===========================
+   CSS Variables
+   =========================== */
+:root {
+  /* Colors */
+  --app-primary-foreground: var(--vscode-foreground);
+  --app-secondary-foreground: var(--vscode-descriptionForeground);
+  --app-primary-border-color: var(--vscode-panel-border);
+  --app-input-placeholder-foreground: var(--vscode-input-placeholderForeground);
+
+  /* Buttons */
+  --app-ghost-button-hover-background: var(--vscode-toolbar-hoverBackground);
+
+  /* Border Radius */
+  --corner-radius-small: 6px;
+
+  /* Header */
+  --app-header-background: var(--vscode-sideBar-background);
+
+  /* List Styles */
+  --app-list-padding: 0px;
+  --app-list-item-padding: 4px 8px;
+  --app-list-border-color: transparent;
+  --app-list-border-radius: 4px;
+  --app-list-hover-background: var(--vscode-list-hoverBackground);
+  --app-list-active-background: var(--vscode-list-activeSelectionBackground);
+  --app-list-active-foreground: var(--vscode-list-activeSelectionForeground);
+  --app-list-gap: 2px;
+
+  /* Menu Styles */
+  --app-menu-background: var(--vscode-menu-background);
+  --app-menu-border: var(--vscode-menu-border);
+  --app-menu-foreground: var(--vscode-menu-foreground);
+  --app-menu-selection-background: var(--vscode-menu-selectionBackground);
+  --app-menu-selection-foreground: var(--vscode-menu-selectionForeground);
+
+  /* Tool Call Styles */
+  --app-tool-background: var(--vscode-editor-background);
+  --app-code-background: var(--vscode-textCodeBlock-background);
+
+  /* Warning/Error Styles */
+  --app-warning-background: var(
+    --vscode-editorWarning-background,
+    rgba(255, 204, 0, 0.1)
+  );
+  --app-warning-border: var(--vscode-editorWarning-foreground, #ffcc00);
+  --app-warning-foreground: var(--vscode-editorWarning-foreground, #ffcc00);
+}

@@ -27,13 +27,14 @@ vi.mock('node:fs/promises', () => ({
   writeFile: vi.fn(() => Promise.resolve(undefined)),
   unlink: vi.fn(() => Promise.resolve(undefined)),
   chmod: vi.fn(() => Promise.resolve(undefined)),
+  mkdir: vi.fn(() => Promise.resolve(undefined)),
 }));
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof os>();
   return {
     ...actual,
-    tmpdir: vi.fn(() => '/tmp'),
+    homedir: vi.fn(() => '/home/test'),
   };
 });
 
@@ -128,30 +129,24 @@ describe('IDEServer', () => {
     );
 
     const port = getPortFromMock(replaceMock);
-    const expectedPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${port}.json`,
-    );
-    const expectedPpidPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${process.ppid}.json`,
+    const expectedLockFile = path.join(
+      '/home/test',
+      '.qwen',
+      'ide',
+      `${port}.lock`,
     );
     const expectedContent = JSON.stringify({
       port: parseInt(port, 10),
       workspacePath: expectedWorkspacePaths,
       ppid: process.ppid,
       authToken: 'test-auth-token',
+      ideName: 'VS Code',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedLockFile,
       expectedContent,
     );
-    expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPpidPortFile,
-      expectedContent,
-    );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPpidPortFile, 0o600);
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
   it('should set a single folder path', async () => {
@@ -166,30 +161,24 @@ describe('IDEServer', () => {
     );
 
     const port = getPortFromMock(replaceMock);
-    const expectedPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${port}.json`,
-    );
-    const expectedPpidPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${process.ppid}.json`,
+    const expectedLockFile = path.join(
+      '/home/test',
+      '.qwen',
+      'ide',
+      `${port}.lock`,
     );
     const expectedContent = JSON.stringify({
       port: parseInt(port, 10),
       workspacePath: '/foo/bar',
       ppid: process.ppid,
       authToken: 'test-auth-token',
+      ideName: 'VS Code',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedLockFile,
       expectedContent,
     );
-    expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPpidPortFile,
-      expectedContent,
-    );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPpidPortFile, 0o600);
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
   it('should set an empty string if no folders are open', async () => {
@@ -204,30 +193,24 @@ describe('IDEServer', () => {
     );
 
     const port = getPortFromMock(replaceMock);
-    const expectedPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${port}.json`,
-    );
-    const expectedPpidPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${process.ppid}.json`,
+    const expectedLockFile = path.join(
+      '/home/test',
+      '.qwen',
+      'ide',
+      `${port}.lock`,
     );
     const expectedContent = JSON.stringify({
       port: parseInt(port, 10),
       workspacePath: '',
       ppid: process.ppid,
       authToken: 'test-auth-token',
+      ideName: 'VS Code',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedLockFile,
       expectedContent,
     );
-    expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPpidPortFile,
-      expectedContent,
-    );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPpidPortFile, 0o600);
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
   it('should update the path when workspace folders change', async () => {
@@ -256,30 +239,24 @@ describe('IDEServer', () => {
     );
 
     const port = getPortFromMock(replaceMock);
-    const expectedPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${port}.json`,
-    );
-    const expectedPpidPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${process.ppid}.json`,
+    const expectedLockFile = path.join(
+      '/home/test',
+      '.qwen',
+      'ide',
+      `${port}.lock`,
     );
     const expectedContent = JSON.stringify({
       port: parseInt(port, 10),
       workspacePath: expectedWorkspacePaths,
       ppid: process.ppid,
       authToken: 'test-auth-token',
+      ideName: 'VS Code',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedLockFile,
       expectedContent,
     );
-    expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPpidPortFile,
-      expectedContent,
-    );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPpidPortFile, 0o600);
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
 
     // Simulate removing a folder
     vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/baz/qux' } }];
@@ -294,36 +271,26 @@ describe('IDEServer', () => {
       workspacePath: '/baz/qux',
       ppid: process.ppid,
       authToken: 'test-auth-token',
+      ideName: 'VS Code',
     });
     expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPortFile,
+      expectedLockFile,
       expectedContent2,
     );
-    expect(fs.writeFile).toHaveBeenCalledWith(
-      expectedPpidPortFile,
-      expectedContent2,
-    );
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
-    expect(fs.chmod).toHaveBeenCalledWith(expectedPpidPortFile, 0o600);
+    expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
   });
 
-  it('should clear env vars and delete port file on stop', async () => {
+  it('should clear env vars and delete lock file on stop', async () => {
     await ideServer.start(mockContext);
     const replaceMock = mockContext.environmentVariableCollection.replace;
     const port = getPortFromMock(replaceMock);
-    const portFile = path.join('/tmp', `qwen-code-ide-server-${port}.json`);
-    const ppidPortFile = path.join(
-      '/tmp',
-      `qwen-code-ide-server-${process.ppid}.json`,
-    );
-    expect(fs.writeFile).toHaveBeenCalledWith(portFile, expect.any(String));
-    expect(fs.writeFile).toHaveBeenCalledWith(ppidPortFile, expect.any(String));
+    const lockFile = path.join('/home/test', '.qwen', 'ide', `${port}.lock`);
+    expect(fs.writeFile).toHaveBeenCalledWith(lockFile, expect.any(String));
 
     await ideServer.stop();
 
     expect(mockContext.environmentVariableCollection.clear).toHaveBeenCalled();
-    expect(fs.unlink).toHaveBeenCalledWith(portFile);
-    expect(fs.unlink).toHaveBeenCalledWith(ppidPortFile);
+    expect(fs.unlink).toHaveBeenCalledWith(lockFile);
   });
 
   it.skipIf(process.platform !== 'win32')(
@@ -344,30 +311,24 @@ describe('IDEServer', () => {
       );
 
       const port = getPortFromMock(replaceMock);
-      const expectedPortFile = path.join(
-        '/tmp',
-        `qwen-code-ide-server-${port}.json`,
-      );
-      const expectedPpidPortFile = path.join(
-        '/tmp',
-        `qwen-code-ide-server-${process.ppid}.json`,
+      const expectedLockFile = path.join(
+        '/home/test',
+        '.qwen',
+        'ide',
+        `${port}.lock`,
       );
       const expectedContent = JSON.stringify({
         port: parseInt(port, 10),
         workspacePath: expectedWorkspacePaths,
         ppid: process.ppid,
         authToken: 'test-auth-token',
+        ideName: 'VS Code',
       });
       expect(fs.writeFile).toHaveBeenCalledWith(
-        expectedPortFile,
+        expectedLockFile,
         expectedContent,
       );
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        expectedPpidPortFile,
-        expectedContent,
-      );
-      expect(fs.chmod).toHaveBeenCalledWith(expectedPortFile, 0o600);
-      expect(fs.chmod).toHaveBeenCalledWith(expectedPpidPortFile, 0o600);
+      expect(fs.chmod).toHaveBeenCalledWith(expectedLockFile, 0o600);
     },
   );
 
@@ -379,7 +340,7 @@ describe('IDEServer', () => {
       port = (ideServer as unknown as { port: number }).port;
     });
 
-    it('should allow request without auth token for backwards compatibility', async () => {
+    it('should reject request without auth token', async () => {
       const response = await fetch(`http://localhost:${port}/mcp`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -390,7 +351,9 @@ describe('IDEServer', () => {
           id: 1,
         }),
       });
-      expect(response.status).not.toBe(401);
+      expect(response.status).toBe(401);
+      const body = await response.text();
+      expect(body).toBe('Unauthorized');
     });
 
     it('should allow request with valid auth token', async () => {
@@ -550,6 +513,7 @@ describe('IDEServer HTTP endpoints', () => {
         headers: {
           Host: `localhost:${port}`,
           'Content-Type': 'application/json',
+          Authorization: 'Bearer test-auth-token',
         },
       },
       JSON.stringify({ jsonrpc: '2.0', method: 'initialize' }),

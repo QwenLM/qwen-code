@@ -27,7 +27,11 @@ import {
   toFriendlyError,
 } from '../utils/errors.js';
 import type { GeminiChat } from './geminiChat.js';
-import { getThoughtText, type ThoughtSummary } from '../utils/thoughtUtils.js';
+import {
+  getThoughtText,
+  parseThought,
+  type ThoughtSummary,
+} from '../utils/thoughtUtils.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -266,13 +270,12 @@ export class Turn {
           this.currentResponseId = resp.responseId;
         }
 
-        const thoughtPart = getThoughtText(resp);
-        if (thoughtPart) {
+        const thoughtText = getThoughtText(resp);
+        if (thoughtText) {
           yield {
             type: GeminiEventType.Thought,
-            value: { subject: '', description: thoughtPart },
+            value: parseThought(thoughtText),
           };
-          continue;
         }
 
         const text = getResponseText(resp);

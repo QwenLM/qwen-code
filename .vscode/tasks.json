@@ -20,6 +20,22 @@
       "problemMatcher": [],
       "label": "npm: build: vscode-ide-companion",
       "detail": "npm run build -w packages/vscode-ide-companion"
+    },
+    {
+      "label": "copy: bundled-cli (dev)",
+      "type": "shell",
+      "command": "node",
+      "args": ["packages/vscode-ide-companion/scripts/copy-bundled-cli.js"],
+      "problemMatcher": []
+    },
+    {
+      "label": "launch: vscode-ide-companion (copy+build)",
+      "dependsOrder": "sequence",
+      "dependsOn": [
+        "copy: bundled-cli (dev)",
+        "npm: build: vscode-ide-companion"
+      ],
+      "problemMatcher": []
     }
   ]
 }

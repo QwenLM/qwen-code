@@ -240,7 +240,7 @@ describe('CoreToolScheduler', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -318,7 +318,7 @@ describe('CoreToolScheduler', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -497,7 +497,7 @@ describe('CoreToolScheduler', () => {
         getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
         getContentGeneratorConfig: () => ({
           model: 'test-model',
-          authType: 'oauth-personal',
+          authType: 'gemini-api-key',
         }),
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
@@ -584,7 +584,7 @@ describe('CoreToolScheduler', () => {
         getExcludeTools: () => ['write_file', 'edit'], // Different excluded tools
         getContentGeneratorConfig: () => ({
           model: 'test-model',
-          authType: 'oauth-personal',
+          authType: 'gemini-api-key',
         }),
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
@@ -674,7 +674,7 @@ describe('CoreToolScheduler with payload', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -1001,7 +1001,7 @@ describe('CoreToolScheduler edit cancellation', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -1108,7 +1108,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -1258,7 +1258,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getToolRegistry: () => mockToolRegistry,
       getShellExecutionConfig: () => ({
@@ -1350,7 +1350,7 @@ describe('CoreToolScheduler request queueing', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -1482,7 +1482,7 @@ describe('CoreToolScheduler request queueing', () => {
       getToolRegistry: () => toolRegistry,
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 80,
@@ -1586,7 +1586,7 @@ describe('CoreToolScheduler request queueing', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -1854,7 +1854,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,
@@ -1975,7 +1975,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getAllowedTools: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,

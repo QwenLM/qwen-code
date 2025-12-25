@@ -81,8 +81,9 @@ function getCurrentLlmOutputLanguage(): string | null {
   if (fs.existsSync(filePath)) {
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      // Extract language name from the first line (e.g., "# Chinese Response Rules" -> "Chinese")
-      const match = content.match(/^#\s+(.+?)\s+Response Rules/i);
+      // Extract language name from the first line
+      // Template format: "# CRITICAL: Chinese Output Language Rule - HIGHEST PRIORITY"
+      const match = content.match(/^#.*?(\w+)\s+Output Language Rule/i);
       if (match) {
         return match[1];
       }
@@ -127,16 +128,17 @@ async function setUiLanguage(
   context.ui.reloadCommands();
 
   // Map language codes to friendly display names
-  const langDisplayNames: Record<SupportedLanguage, string> = {
+  const langDisplayNames: Partial<Record<SupportedLanguage, string>> = {
     zh: '中文（zh-CN）',
     en: 'English（en-US）',
+    ru: 'Русский (ru-RU)',
   };
 
   return {
     type: 'message',
     messageType: 'info',
     content: t('UI language changed to {{lang}}', {
-      lang: langDisplayNames[lang],
+      lang: langDisplayNames[lang] || lang,
     }),
   };
 }
@@ -216,7 +218,7 @@ export const languageCommand: SlashCommand = {
           : t('LLM output language not set'),
         '',
         t('Available subcommands:'),
-        `  /language ui [zh-CN|en-US] - ${t('Set UI language')}`,
+        `  /language ui [zh-CN|en-US|ru-RU] - ${t('Set UI language')}`,
         `  /language output <language> - ${t('Set LLM output language')}`,
       ].join('\n');
 
@@ -232,7 +234,7 @@ export const languageCommand: SlashCommand = {
     const subcommand = parts[0].toLowerCase();
 
     if (subcommand === 'ui') {
-      // Handle /language ui [zh-CN|en-US]
+      // Handle /language ui [zh-CN|en-US|ru-RU]
       if (parts.length === 1) {
         // Show UI language subcommand help
         return {
@@ -241,11 +243,12 @@ export const languageCommand: SlashCommand = {
           content: [
             t('Set UI language'),
             '',
-            t('Usage: /language ui [zh-CN|en-US]'),
+            t('Usage: /language ui [zh-CN|en-US|ru-RU]'),
             '',
             t('Available options:'),
             t('  - zh-CN: Simplified Chinese'),
             t('  - en-US: English'),
+            t('  - ru-RU: Russian'),
             '',
             t(
               'To request additional UI language packs, please open an issue on GitHub.',
@@ -266,11 +269,18 @@ export const languageCommand: SlashCommand = {
         langArg === 'zh-cn'
       ) {
         targetLang = 'zh';
+      } else if (
+        langArg === 'ru' ||
+        langArg === 'ru-RU' ||
+        langArg === 'russian' ||
+        langArg === 'русский'
+      ) {
+        targetLang = 'ru';
       } else {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('Invalid language. Available: en-US, zh-CN'),
+          content: t('Invalid language. Available: en-US, zh-CN, ru-RU'),
         };
       }
 
@@ -307,13 +317,20 @@ export const languageCommand: SlashCommand = {
         langArg === 'zh-cn'
       ) {
         targetLang = 'zh';
+      } else if (
+        langArg === 'ru' ||
+        langArg === 'ru-RU' ||
+        langArg === 'russian' ||
+        langArg === 'русский'
+      ) {
+        targetLang = 'ru';
       } else {
         return {
           type: 'message',
           messageType: 'error',
           content: [
             t('Invalid command. Available subcommands:'),
-            '  - /language ui [zh-CN|en-US] - ' + t('Set UI language'),
+            '  - /language ui [zh-CN|en-US|ru-RU] - ' + t('Set UI language'),
             '  - /language output <language> - ' + t('Set LLM output language'),
           ].join('\n'),
         };
@@ -421,6 +438,29 @@ export const languageCommand: SlashCommand = {
               };
             }
             return setUiLanguage(context, 'en');
+          },
+        },
+        {
+          name: 'ru-RU',
+          altNames: ['ru', 'russian', 'русский'],
+          get description() {
+            return t('Set UI language to Russian (ru-RU)');
+          },
+          kind: CommandKind.BUILT_IN,
+          action: async (
+            context: CommandContext,
+            args: string,
+          ): Promise<MessageActionReturn> => {
+            if (args.trim().length > 0) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: t(
+                  'Language subcommands do not accept additional arguments.',
+                ),
+              };
+            }
+            return setUiLanguage(context, 'ru');
           },
         },
       ],

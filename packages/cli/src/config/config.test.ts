@@ -206,6 +206,18 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('should allow -r flag as alias for --resume', async () => {
+    process.argv = ['node', 'script.js', '-r', 'session-123'];
+    const argv = await parseArguments({} as Settings);
+    expect(argv.resume).toBe('session-123');
+  });
+
+  it('should allow -c flag as alias for --continue', async () => {
+    process.argv = ['node', 'script.js', '-c'];
+    const argv = await parseArguments({} as Settings);
+    expect(argv.continue).toBe(true);
+  });
+
   it('should convert positional query argument to prompt by default', async () => {
     process.argv = ['node', 'script.js', 'Hi Gemini'];
     const argv = await parseArguments({} as Settings);
@@ -2102,7 +2114,14 @@ describe('loadCliConfig model selection', () => {
   });
 
   it('always prefers model from argvs', async () => {
-    process.argv = ['node', 'script.js', '--model', 'qwen3-coder-plus'];
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'qwen3-coder-plus',
+    ];
     const argv = await parseArguments({} as Settings);
     const config = await loadCliConfig(
       {
@@ -2122,7 +2141,14 @@ describe('loadCliConfig model selection', () => {
   });
 
   it('selects the model from argvs if provided', async () => {
-    process.argv = ['node', 'script.js', '--model', 'qwen3-coder-plus'];
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'qwen3-coder-plus',
+    ];
     const argv = await parseArguments({} as Settings);
     const config = await loadCliConfig(
       {

@@ -204,7 +204,11 @@ function convertToHistoryItems(
         const parts = record.message?.parts as Part[] | undefined;
 
         // Extract thought content
-        const thoughtText = extractThoughtTextFromParts(parts);
+        const thoughtText = !config
+          .getContentGenerator()
+          .useSummarizedThinking()
+          ? extractThoughtTextFromParts(parts)
+          : '';
 
         // Extract text content (non-function-call, non-thought)
         const text = extractTextFromParts(parts);

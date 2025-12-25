@@ -50,6 +50,15 @@ describe('SubagentStatistics', () => {
       expect(summary.outputTokens).toBe(600);
       expect(summary.totalTokens).toBe(1800);
     });
+
+    it('should track thought and cached tokens', () => {
+      stats.recordTokens(100, 50, 10, 5);
+
+      const summary = stats.getSummary();
+      expect(summary.thoughtTokens).toBe(10);
+      expect(summary.cachedTokens).toBe(5);
+      expect(summary.totalTokens).toBe(165); // 100 + 50 + 10 + 5
+    });
   });
 
   describe('tool usage statistics', () => {
@@ -93,14 +102,14 @@ describe('SubagentStatistics', () => {
       stats.start(baseTime);
       stats.setRounds(2);
       stats.recordToolCall('file_read', true, 100);
-      stats.recordTokens(1000, 500);
+      stats.recordTokens(1000, 500, 20, 10);
 
       const result = stats.formatCompact('Test task', baseTime + 5000);
 
       expect(result).toContain('📋 Task Completed: Test task');
       expect(result).toContain('🔧 Tool Usage: 1 calls, 100.0% success');
       expect(result).toContain('⏱️ Duration: 5.0s | 🔁 Rounds: 2');
-      expect(result).toContain('🔢 Tokens: 1,500 (in 1000, out 500)');
+      expect(result).toContain('🔢 Tokens: 1,530 (in 1000, out 500)');
     });
 
     it('should handle zero tool calls', () => {

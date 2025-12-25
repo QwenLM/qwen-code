@@ -15,11 +15,7 @@ import {
 } from 'vitest';
 
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
-import {
-  isThinkingDefault,
-  isThinkingSupported,
-  GeminiClient,
-} from './client.js';
+import { GeminiClient } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
   AuthType,
@@ -244,40 +240,6 @@ describe('findCompressSplitPoint', () => {
       { role: 'user', parts: [{ text: 'Message 2' }] },
     ];
     expect(findCompressSplitPoint(historyWithEmptyParts, 0.5)).toBe(2);
-  });
-});
-
-describe('isThinkingSupported', () => {
-  it('should return true for gemini-2.5', () => {
-    expect(isThinkingSupported('gemini-2.5')).toBe(true);
-  });
-
-  it('should return true for gemini-2.5-pro', () => {
-    expect(isThinkingSupported('gemini-2.5-pro')).toBe(true);
-  });
-
-  it('should return false for other models', () => {
-    expect(isThinkingSupported('gemini-1.5-flash')).toBe(false);
-    expect(isThinkingSupported('some-other-model')).toBe(false);
-  });
-});
-
-describe('isThinkingDefault', () => {
-  it('should return false for gemini-2.5-flash-lite', () => {
-    expect(isThinkingDefault('gemini-2.5-flash-lite')).toBe(false);
-  });
-
-  it('should return true for gemini-2.5', () => {
-    expect(isThinkingDefault('gemini-2.5')).toBe(true);
-  });
-
-  it('should return true for gemini-2.5-pro', () => {
-    expect(isThinkingDefault('gemini-2.5-pro')).toBe(true);
-  });
-
-  it('should return false for other models', () => {
-    expect(isThinkingDefault('gemini-1.5-flash')).toBe(false);
-    expect(isThinkingDefault('some-other-model')).toBe(false);
   });
 });
 
@@ -2304,16 +2266,15 @@ ${JSON.stringify(
       );
 
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
-        {
+        expect.objectContaining({
           model: DEFAULT_GEMINI_FLASH_MODEL,
-          config: {
+          config: expect.objectContaining({
             abortSignal,
             systemInstruction: getCoreSystemPrompt(''),
             temperature: 0.5,
-            topP: 1,
-          },
+          }),
           contents,
-        },
+        }),
         'test-session-id',
       );
     });

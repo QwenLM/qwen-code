@@ -15,6 +15,7 @@ export const OAUTH_FILE = 'oauth_creds.json';
 const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
+const IDE_DIR_NAME = 'ide';
 
 export class Storage {
   private readonly targetDir: string;
@@ -57,6 +58,10 @@ export class Storage {
 
   static getGlobalTempDir(): string {
     return path.join(Storage.getGlobalQwenDir(), TMP_DIR_NAME);
+  }
+
+  static getGlobalIdeDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), IDE_DIR_NAME);
   }
 
   static getGlobalBinDir(): string {
@@ -119,6 +124,10 @@ export class Storage {
 
   getExtensionsConfigPath(): string {
     return path.join(this.getExtensionsDir(), 'qwen-extension.json');
+  }
+
+  getUserSkillsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'skills');
   }
 
   getHistoryFilePath(): string {

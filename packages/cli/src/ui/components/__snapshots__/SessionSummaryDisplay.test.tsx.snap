@@ -6,7 +6,7 @@ exports[`<SessionSummaryDisplay /> > renders the summary display with a title 1`
 │  Agent powering down. Goodbye!                                                                   │
 │                                                                                                  │
 │  Interaction Summary                                                                             │
-│  Session ID:                                                                                     │
+│  Session ID:                 test-session-id-12345                                               │
 │  Tool Calls:                 0 ( ✓ 0 x 0 )                                                       │
 │  Success Rate:               0.0%                                                                │
 │  Code Changes:               +42 -15                                                             │
@@ -26,5 +26,7 @@ exports[`<SessionSummaryDisplay /> > renders the summary display with a title 1`
 │                                                                                                  │
 │  » Tip: For a full token breakdown, run \`/stats model\`.                                          │
 │                                                                                                  │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+To continue this session, run qwen --resume test-session-id-12345"
 `;

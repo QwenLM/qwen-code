@@ -16,6 +16,7 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  AuthType,
 } from '../core/contentGenerator.js';
 import type { FallbackModelHandler } from '../fallback/types.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
@@ -26,7 +27,6 @@ import type { AnyToolInvocation } from '../tools/tools.js';
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { GeminiClient } from '../core/client.js';
 import {
-  AuthType,
   createContentGenerator,
   createContentGeneratorConfig,
 } from '../core/contentGenerator.js';
@@ -54,6 +54,7 @@ import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
 import { SmartEditTool } from '../tools/smart-edit.js';
+import { SkillTool } from '../tools/skill.js';
 import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
@@ -65,6 +66,7 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
+import { SkillManager } from '../skills/skill-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import {
@@ -94,7 +96,6 @@ import {
 } from './constants.js';
 import { DEFAULT_QWEN_EMBEDDING_MODEL, DEFAULT_QWEN_MODEL } from './models.js';
 import { Storage } from './storage.js';
-import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   SessionService,
@@ -287,7 +288,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
-  gitCoAuthor?: GitCoAuthorSettings;
+  gitCoAuthor?: boolean;
   usageStatisticsEnabled?: boolean;
   fileFiltering?: {
     respectGitIgnore?: boolean;
@@ -305,6 +306,7 @@ export interface ConfigParameters {
   extensionContextFilePaths?: string[];
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
+  experimentalSkills?: boolean;
   experimentalZedIntegration?: boolean;
   listExtensions?: boolean;
   extensions?: GeminiCLIExtension[];
@@ -318,6 +320,7 @@ export interface ConfigParameters {
   generationConfig?: Partial<ContentGeneratorConfig>;
   cliVersion?: string;
   loadMemoryFromIncludeDirectories?: boolean;
+  chatRecording?: boolean;
   // Web search providers
   webSearch?: {
     provider: Array<{
@@ -349,6 +352,7 @@ export interface ConfigParameters {
   skipStartupContext?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
+  channel?: string;
 }
 
 function normalizeConfigOutputFormat(
@@ -387,6 +391,7 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private skillManager!: SkillManager;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGenerator!: ContentGenerator;
@@ -456,6 +461,8 @@ export class Config {
     | undefined;
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly experimentalSkills: boolean = false;
+  private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly webSearch?: {
     provider: Array<{
@@ -485,6 +492,7 @@ export class Config {
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
+  private readonly channel: string | undefined;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -530,9 +538,9 @@ export class Config {
       useCollector: params.telemetry?.useCollector,
     };
     this.gitCoAuthor = {
-      enabled: params.gitCoAuthor?.enabled ?? true,
-      name: params.gitCoAuthor?.name ?? 'Qwen-Coder',
-      email: params.gitCoAuthor?.email ?? 'qwen-coder@alibabacloud.com',
+      enabled: params.gitCoAuthor ?? true,
+      name: 'Qwen-Coder',
+      email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
 
@@ -553,6 +561,7 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.experimentalSkills = params.experimentalSkills ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this._extensions = params.extensions ?? [];
     this._blockedMcpServers = params.blockedMcpServers ?? [];
@@ -564,11 +573,13 @@ export class Config {
     this._generationConfig = {
       model: params.model,
       ...(params.generationConfig || {}),
-      baseUrl: params.generationConfig?.baseUrl || DEFAULT_DASHSCOPE_BASE_URL,
+      baseUrl: params.generationConfig?.baseUrl,
     };
     this.contentGeneratorConfig = this
       ._generationConfig as ContentGeneratorConfig;
     this.cliVersion = params.cliVersion;
+
+    this.chatRecordingEnabled = params.chatRecording ?? true;
 
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
@@ -598,6 +609,7 @@ export class Config {
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
     this.useSmartEdit = params.useSmartEdit ?? false;
     this.extensionManagement = params.extensionManagement ?? true;
+    this.channel = params.channel;
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -615,7 +627,9 @@ export class Config {
       setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
     }
     this.geminiClient = new GeminiClient(this);
-    this.chatRecordingService = new ChatRecordingService(this);
+    this.chatRecordingService = this.chatRecordingEnabled
+      ? new ChatRecordingService(this)
+      : undefined;
   }
 
   /**
@@ -635,6 +649,7 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.subagentManager = new SubagentManager(this);
+    this.skillManager = new SkillManager(this);
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
@@ -675,16 +690,6 @@ export class Config {
   }
 
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    // Vertex and Genai have incompatible encryption and sending history with
-    // throughtSignature from Genai to Vertex will fail, we need to strip them
-    if (
-      this.contentGeneratorConfig?.authType === AuthType.USE_GEMINI &&
-      authMethod === AuthType.LOGIN_WITH_GOOGLE
-    ) {
-      // Restore the conversation history to the new client
-      this.geminiClient.stripThoughtsFromHistory();
-    }
-
     const newContentGeneratorConfig = createContentGeneratorConfig(
       this,
       authMethod,
@@ -732,10 +737,15 @@ export class Config {
   /**
    * Starts a new session and resets session-scoped services.
    */
-  startNewSession(sessionId?: string): string {
+  startNewSession(
+    sessionId?: string,
+    sessionData?: ResumedSessionData,
+  ): string {
     this.sessionId = sessionId ?? randomUUID();
-    this.sessionData = undefined;
-    this.chatRecordingService = new ChatRecordingService(this);
+    this.sessionData = sessionData;
+    this.chatRecordingService = this.chatRecordingEnabled
+      ? new ChatRecordingService(this)
+      : undefined;
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
@@ -1062,6 +1072,10 @@ export class Config {
     return this.experimentalZedIntegration;
   }
 
+  getExperimentalSkills(): boolean {
+    return this.experimentalSkills;
+  }
+
   getListExtensions(): boolean {
     return this.listExtensions;
   }
@@ -1142,6 +1156,10 @@ export class Config {
 
   getCliVersion(): string | undefined {
     return this.cliVersion;
+  }
+
+  getChannel(): string | undefined {
+    return this.channel;
   }
 
   /**
@@ -1260,7 +1278,10 @@ export class Config {
   /**
    * Returns the chat recording service.
    */
-  getChatRecordingService(): ChatRecordingService {
+  getChatRecordingService(): ChatRecordingService | undefined {
+    if (!this.chatRecordingEnabled) {
+      return undefined;
+    }
     if (!this.chatRecordingService) {
       this.chatRecordingService = new ChatRecordingService(this);
     }
@@ -1283,6 +1304,10 @@ export class Config {
 
   getSubagentManager(): SubagentManager {
     return this.subagentManager;
+  }
+
+  getSkillManager(): SkillManager {
+    return this.skillManager;
   }
 
   async createToolRegistry(
@@ -1327,6 +1352,9 @@ export class Config {
     };
 
     registerCoreTool(TaskTool, this);
+    if (this.getExperimentalSkills()) {
+      registerCoreTool(SkillTool, this);
+    }
     registerCoreTool(LSTool, this);
     registerCoreTool(ReadFileTool, this);
 

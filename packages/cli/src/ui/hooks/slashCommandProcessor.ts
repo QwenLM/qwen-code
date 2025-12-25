@@ -56,6 +56,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'clear',
   'reset',
   'new',
+  'resume',
 ]);
 
 interface SlashCommandProcessorActions {
@@ -66,9 +67,9 @@ interface SlashCommandProcessorActions {
   openModelDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
+  openResumeDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
-  toggleCorgiMode: () => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
   openSubagentCreateDialog: () => void;
@@ -206,7 +207,6 @@ export const useSlashCommandProcessor = (
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
-        toggleCorgiMode: actions.toggleCorgiMode,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -418,6 +418,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
+                      return { type: 'handled' };
+                    case 'resume':
+                      actions.openResumeDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };

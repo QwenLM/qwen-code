@@ -217,9 +217,9 @@ describe('mcp-client', () => {
           false,
         );
 
-        expect(transport).toEqual(
-          new StreamableHTTPClientTransport(new URL('http://test-server'), {}),
-        );
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._url).toEqual(new URL('http://test-server'));
       });
 
       it('with headers', async () => {
@@ -232,13 +232,13 @@ describe('mcp-client', () => {
           false,
         );
 
-        expect(transport).toEqual(
-          new StreamableHTTPClientTransport(new URL('http://test-server'), {
-            requestInit: {
-              headers: { Authorization: 'derp' },
-            },
-          }),
-        );
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._url).toEqual(new URL('http://test-server'));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._requestInit?.headers).toEqual({
+          Authorization: 'derp',
+        });
       });
     });
 
@@ -251,9 +251,9 @@ describe('mcp-client', () => {
           },
           false,
         );
-        expect(transport).toEqual(
-          new SSEClientTransport(new URL('http://test-server'), {}),
-        );
+        expect(transport).toBeInstanceOf(SSEClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._url).toEqual(new URL('http://test-server'));
       });
 
       it('with headers', async () => {
@@ -266,13 +266,13 @@ describe('mcp-client', () => {
           false,
         );
 
-        expect(transport).toEqual(
-          new SSEClientTransport(new URL('http://test-server'), {
-            requestInit: {
-              headers: { Authorization: 'derp' },
-            },
-          }),
-        );
+        expect(transport).toBeInstanceOf(SSEClientTransport);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._url).toEqual(new URL('http://test-server'));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        expect((transport as any)._requestInit?.headers).toEqual({
+          Authorization: 'derp',
+        });
       });
     });
 

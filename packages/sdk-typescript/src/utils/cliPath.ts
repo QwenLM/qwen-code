@@ -2,24 +2,16 @@
  * CLI path auto-detection and subprocess spawning utilities
  *
  * Supports multiple execution modes:
- * 1. Native binary: 'qwen' (production)
- * 2. Node.js bundle: 'node /path/to/cli.js' (production validation)
+ * 1. Bundled CLI: Node.js bundle included in the SDK package (default)
+ * 2. Node.js bundle: 'node /path/to/cli.js' (custom path)
  * 3. Bun bundle: 'bun /path/to/cli.js' (alternative runtime)
  * 4. TypeScript source: 'tsx /path/to/index.ts' (development)
- *
- * Auto-detection locations for native binary:
- * 1. QWEN_CODE_CLI_PATH environment variable
- * 2. ~/.volta/bin/qwen
- * 3. ~/.npm-global/bin/qwen
- * 4. /usr/local/bin/qwen
- * 5. ~/.local/bin/qwen
- * 6. ~/node_modules/.bin/qwen
- * 7. ~/.yarn/bin/qwen
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Executable types supported by the SDK
@@ -40,49 +32,38 @@ export type SpawnInfo = {
   originalInput: string;
 };
 
-export function findNativeCliPath(): string {
-  const homeDir = process.env['HOME'] || process.env['USERPROFILE'] || '';
+function getBundledCliPath(): string | null {
+  try {
+    const currentFile =
+      typeof __filename !== 'undefined'
+        ? __filename
+        : fileURLToPath(import.meta.url);
 
-  const candidates: Array<string | undefined> = [
-    // 1. Environment variable (highest priority)
-    process.env['QWEN_CODE_CLI_PATH'],
+    const currentDir = path.dirname(currentFile);
 
-    // 2. Volta bin
-    path.join(homeDir, '.volta', 'bin', 'qwen'),
+    const bundledCliPath = path.join(currentDir, 'cli', 'cli.js');
 
-    // 3. Global npm installations
-    path.join(homeDir, '.npm-global', 'bin', 'qwen'),
-
-    // 4. Common Unix binary locations
-    '/usr/local/bin/qwen',
-
-    // 5. User local bin
-    path.join(homeDir, '.local', 'bin', 'qwen'),
-
-    // 6. Node modules bin in home directory
-    path.join(homeDir, 'node_modules', '.bin', 'qwen'),
-
-    // 7. Yarn global bin
-    path.join(homeDir, '.yarn', 'bin', 'qwen'),
-  ];
-
-  // Find first existing candidate
-  for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate)) {
-      return path.resolve(candidate);
+    if (fs.existsSync(bundledCliPath)) {
+      return bundledCliPath;
     }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function findNativeCliPath(): string {
+  const bundledCli = getBundledCliPath();
+  if (bundledCli) {
+    return bundledCli;
   }
 
-  // Not found - throw helpful error
   throw new Error(
-    'qwen CLI not found. Please:\n' +
-      '  1. Install qwen globally: npm install -g qwen\n' +
-      '  2. Or provide explicit executable: query({ pathToQwenExecutable: "/path/to/qwen" })\n' +
-      '  3. Or set environment variable: QWEN_CODE_CLI_PATH="/path/to/qwen"\n' +
-      '\n' +
-      'For development/testing, you can also use:\n' +
+    'Bundled qwen CLI not found. The CLI should be included in the SDK package.\n' +
+      'If you need to use a custom CLI, provide explicit executable:\n' +
+      '  • query({ pathToQwenExecutable: "/path/to/cli.js" })\n' +
       '  • TypeScript source: query({ pathToQwenExecutable: "/path/to/index.ts" })\n' +
-      '  • Node.js bundle: query({ pathToQwenExecutable: "/path/to/cli.js" })\n' +
       '  • Force specific runtime: query({ pathToQwenExecutable: "bun:/path/to/cli.js" })',
   );
 }
@@ -169,48 +150,49 @@ export function parseExecutableSpec(executableSpec?: string): {
   }
 
   // Check for runtime prefix (e.g., 'bun:/path/to/cli.js')
+  // Use whitelist mechanism: only treat as runtime spec if prefix matches supported runtimes
+  const supportedRuntimes = ['node', 'bun', 'tsx', 'deno'];
   const runtimeMatch = executableSpec.match(/^([^:]+):(.+)$/);
+
   if (runtimeMatch) {
     const [, runtime, filePath] = runtimeMatch;
-    if (!runtime || !filePath) {
-      throw new Error(`Invalid runtime specification: '${executableSpec}'`);
+
+    // Only process as runtime specification if it matches a supported runtime
+    if (runtime && supportedRuntimes.includes(runtime)) {
+      if (!filePath) {
+        throw new Error(`Invalid runtime specification: '${executableSpec}'`);
+      }
+
+      if (!validateRuntimeAvailability(runtime)) {
+        throw new Error(
+          `Runtime '${runtime}' is not available on this system. Please install it first.`,
+        );
+      }
+
+      const resolvedPath = path.resolve(filePath);
+
+      if (!fs.existsSync(resolvedPath)) {
+        throw new Error(
+          `Executable file not found at '${resolvedPath}' for runtime '${runtime}'. ` +
+            'Please check the file path and ensure the file exists.',
+        );
+      }
+
+      if (!validateFileExtensionForRuntime(resolvedPath, runtime)) {
+        const ext = path.extname(resolvedPath);
+        throw new Error(
+          `File extension '${ext}' is not compatible with runtime '${runtime}'. ` +
+            `Expected extensions for ${runtime}: ${getExpectedExtensions(runtime).join(', ')}`,
+        );
+      }
+
+      return {
+        runtime,
+        executablePath: resolvedPath,
+        isExplicitRuntime: true,
+      };
     }
-
-    const supportedRuntimes = ['node', 'bun', 'tsx', 'deno'];
-    if (!supportedRuntimes.includes(runtime)) {
-      throw new Error(
-        `Unsupported runtime '${runtime}'. Supported runtimes: ${supportedRuntimes.join(', ')}`,
-      );
-    }
-
-    if (!validateRuntimeAvailability(runtime)) {
-      throw new Error(
-        `Runtime '${runtime}' is not available on this system. Please install it first.`,
-      );
-    }
-
-    const resolvedPath = path.resolve(filePath);
-
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(
-        `Executable file not found at '${resolvedPath}' for runtime '${runtime}'. ` +
-          'Please check the file path and ensure the file exists.',
-      );
-    }
-
-    if (!validateFileExtensionForRuntime(resolvedPath, runtime)) {
-      const ext = path.extname(resolvedPath);
-      throw new Error(
-        `File extension '${ext}' is not compatible with runtime '${runtime}'. ` +
-          `Expected extensions for ${runtime}: ${getExpectedExtensions(runtime).join(', ')}`,
-      );
-    }
-
-    return {
-      runtime,
-      executablePath: resolvedPath,
-      isExplicitRuntime: true,
-    };
+    // If not a supported runtime, fall through to treat as file path (e.g., Windows paths like 'D:\path\to\cli.js')
   }
 
   // Check if it's a command name (no path separators) or a file path
