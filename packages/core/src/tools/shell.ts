@@ -30,7 +30,6 @@ import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
-  ShellExecutionResult,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
@@ -159,12 +158,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // On Windows, we rely on the race logic below to handle background tasks.
       // We just ensure the command string is clean.
       if (isWindows && shouldRunInBackground) {
-        let cmd = finalCommand.trim();
-        // Remove trailing & (common Linux habit, invalid on Windows at end of line)
-        while (cmd.endsWith('&')) {
-          cmd = cmd.slice(0, -1).trim();
-        }
-        finalCommand = cmd;
+        finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
@@ -234,59 +228,48 @@ export class ShellToolInvocation extends BaseToolInvocation<
         setPidCallback(pid);
       }
 
-      let result: ShellExecutionResult;
-      if (shouldRunInBackground && isWindows) {
-        // For Windows background tasks, we wait a short time to catch immediate errors.
-        // If it's still running, we return early.
-        const startupDelay = 1000;
-        const raceResult = await Promise.race([
-          resultPromise,
-          new Promise<null>((resolve) =>
-            setTimeout(() => resolve(null), startupDelay),
-          ),
-        ]);
+      if (shouldRunInBackground) {
+        // Check for obvious startup errors from captured output
+        const outputStr =
+          typeof cumulativeOutput === 'string'
+            ? cumulativeOutput
+            : JSON.stringify(cumulativeOutput);
 
-        if (raceResult === null) {
-          // Timeout reached, process is still running.
-          // throw new Error(`DEBUG: raceResult is null. Output: ${JSON.stringify(cumulativeOutput)}`);
+        const errorPatterns = [
+          'is not recognized as an internal or external command',
+          'The system cannot find the path specified',
+          'Access is denied',
+          'command not found',
+          'No such file or directory',
+          'Permission denied',
+        ];
 
-          // Check for common Windows error messages in the output
-          const outputStr =
-            typeof cumulativeOutput === 'string'
-              ? cumulativeOutput
-              : JSON.stringify(cumulativeOutput);
-          console.log('DEBUG: outputStr:', outputStr);
-          const errorPatterns = [
-            'is not recognized as an internal or external command',
-            'The system cannot find the path specified',
-            'Access is denied',
-          ];
+        const hasEarlyError = errorPatterns.some((pat) =>
+          outputStr.includes(pat),
+        );
 
-          if (errorPatterns.some((pattern) => outputStr.includes(pattern))) {
-            return {
-              llmContent: `Command failed to start: ${outputStr}`,
-              returnDisplay: `Command failed to start: ${outputStr}`,
-              error: {
-                type: ToolErrorType.EXECUTION_FAILED,
-                message: `Command failed to start: ${outputStr}`,
-              },
-            };
-          }
-
-          const pidMsg = pid ? ` PID: ${pid}` : '';
-          const winHint = isWindows
-            ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
-            : '';
+        if (hasEarlyError) {
           return {
-            llmContent: `Background command started.${pidMsg}${winHint}`,
-            returnDisplay: `Background command started.${pidMsg}${winHint}`,
+            llmContent: `Command failed to start: ${outputStr}`,
+            returnDisplay: `Command failed to start: ${outputStr}`,
+            error: {
+              type: ToolErrorType.EXECUTION_FAILED,
+              message: `Command failed to start: ${outputStr}`,
+            },
           };
-        } else {
-          result = raceResult;
         }
-      } else {
-        result = await resultPromise;
+
+        const pidMsg = pid ? ` PID: ${pid}` : '';
+        const winHint = isWindows
+          ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
+          : '';
+        return {
+          llmContent: `Background command started.${pidMsg}${winHint}`,
+          returnDisplay: `Background command started.${pidMsg}${winHint}`,
+        };
       }
+
+      const result = await resultPromise;
 
       const backgroundPIDs: number[] = [];
       if (os.platform() !== 'win32') {
