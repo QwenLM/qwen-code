@@ -40,7 +40,7 @@ export async function relaunchAppInChildProcess(
       execName.startsWith('node') || execName.startsWith('bun');
 
     let nodeArgs: string[];
-    const newEnv = { ...process.env, GEMINI_CLI_NO_RELAUNCH: 'true' };
+    const newEnv = { ...process.env, QWEN_CODE_NO_RELAUNCH: 'true' };
 
     if (isInterpreter) {
       // process.argv is [node, script, ...args]
@@ -62,14 +62,6 @@ export async function relaunchAppInChildProcess(
       // Note: We ignore additionalNodeArgs (e.g. V8 flags) as they are likely incompatible or unsupported
       nodeArgs = [...process.argv.slice(2), ...additionalScriptArgs];
     }
-    const nodeArgs = [
-      ...process.execArgv,
-      ...additionalNodeArgs,
-      script,
-      ...additionalScriptArgs,
-      ...scriptArgs,
-    ];
-    const newEnv = { ...process.env, QWEN_CODE_NO_RELAUNCH: 'true' };
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();
