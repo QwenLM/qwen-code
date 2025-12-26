@@ -93,9 +93,11 @@ export class GeminiClient {
    */
   private hasFailedCompressionAttempt = false;
 
-  constructor(private readonly config: Config) {
+  constructor(
+    private readonly config: Config,
+    private readonly vectorStore: VectorStoreService = new VectorStoreService(config),
+  ) {
     this.loopDetector = new LoopDetectionService(config);
-    this.vectorStore = new VectorStoreService(this.config);
   }
 
   async initialize() {
@@ -494,7 +496,7 @@ export class GeminiClient {
 
     // Retrieve relevant context from RAG
     let ragContextPart: string | undefined;
-    if (this.vectorStore && !options?.isContinuation) {
+    if (this.vectorStore && typeof this.vectorStore.search === 'function' && !options?.isContinuation) {
       const queryText = (Array.isArray(request) ? request : [request])
         .filter((p) => typeof p === 'string' || (typeof p === 'object' && p !== null && 'text' in p))
         .map((p) => (typeof p === 'string' ? p : (p as any).text))
