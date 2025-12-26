@@ -13,6 +13,7 @@ npm run install:all
 ```
 
 这个命令会：
+
 1. ✅ 引导你安装 Chrome 扩展
 2. ✅ 自动配置 Native Host
 3. ✅ 保存扩展 ID 供后续使用
@@ -23,6 +24,7 @@ npm run install:all
 ### 场景 1：从 Chrome Web Store 安装（未来）
 
 当扩展发布到 Chrome Web Store 后：
+
 1. 从商店安装扩展
 2. 运行 `npm run install:host`（会自动检测已安装的扩展）
 3. 完成！
@@ -68,6 +70,7 @@ Native Host 是一个本地程序，允许 Chrome 扩展与本地应用（如 Qw
 ### 安装位置
 
 Native Host 配置文件位置：
+
 - **macOS**: `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/`
 - **Linux**: `~/.config/google-chrome/NativeMessagingHosts/`
 
@@ -80,6 +83,7 @@ A: 是的，这是 Chrome 的安全要求。但我们的智能安装器让这个
 ### Q: 如何找到扩展 ID？
 
 A:
+
 1. 打开 `chrome://extensions/`
 2. 找到 "Qwen CLI Bridge"
 3. ID 显示在扩展卡片上（类似 `abcdefghijklmnop...`）
@@ -94,13 +98,13 @@ A: 运行 `npm run dev`，如果能看到插件图标并能点击连接，说明
 
 ## 📋 命令参考
 
-| 命令 | 说明 |
-|------|------|
-| `npm run install:all` | 完整安装向导 |
-| `npm run install:extension` | 仅安装扩展 |
-| `npm run install:host` | 仅配置 Native Host |
-| `npm run dev` | 启动调试环境 |
-| `npm run clean` | 清理所有配置和日志 |
+| 命令                        | 说明               |
+| --------------------------- | ------------------ |
+| `npm run install:all`       | 完整安装向导       |
+| `npm run install:extension` | 仅安装扩展         |
+| `npm run install:host`      | 仅配置 Native Host |
+| `npm run dev`               | 启动调试环境       |
+| `npm run clean`             | 清理所有配置和日志 |
 
 ## 🔄 更新和重装
 
@@ -127,6 +131,7 @@ cd native-host
 ```
 
 这个脚本会引导你：
+
 1. 选择特定扩展ID或通用配置模式
 2. 更新Native Host配置文件
 3. 验证配置是否正确
