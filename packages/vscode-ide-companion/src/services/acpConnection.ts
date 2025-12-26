@@ -95,7 +95,7 @@ export class AcpConnection {
     const spawnCommand: string = process.execPath;
     const spawnArgs: string[] = [
       cliEntryPath,
-      '--experimental-acp',
+      '--acp',
       '--channel=VSCode',
       ...extraArgs,
     ];

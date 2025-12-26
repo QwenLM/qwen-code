@@ -32,7 +32,7 @@
 "Qwen Code": {
   "type": "custom",
   "command": "qwen",
-  "args": ["--experimental-acp"],
+  "args": ["--acp"],
   "env": {}
 }
 ```
