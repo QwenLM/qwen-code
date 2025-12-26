@@ -11,9 +11,21 @@ import type {
   PermissionOption,
   ToolCall as PermissionToolCall,
 } from '../components/PermissionDrawer/PermissionRequest.js';
-import type { ToolCallUpdate } from '../../types/chatTypes.js';
-import type { ApprovalModeValue } from '../../types/acpTypes.js';
+import type {
+  ToolCallUpdate,
+  UsageStatsPayload,
+} from '../../types/chatTypes.js';
+import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
+import type { ModelInfo } from '../../types/acpTypes.js';
+
+const FORCE_CLEAR_STREAM_END_REASONS = new Set([
+  'user_cancelled',
+  'cancelled',
+  'timeout',
+  'error',
+  'session_expired',
+]);
 
 interface UseWebViewMessagesProps {
   // Session management
@@ -109,6 +121,12 @@ interface UseWebViewMessagesProps {
   setInputText: (text: string) => void;
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
+  // Authentication state setter
+  setIsAuthenticated?: (authenticated: boolean | null) => void;
+  // Usage stats setter
+  setUsageStats?: (stats: UsageStatsPayload | undefined) => void;
+  // Model info setter
+  setModelInfo?: (info: ModelInfo | null) => void;
 }
 
 /**
@@ -126,12 +144,16 @@ export const useWebViewMessages = ({
   inputFieldRef,
   setInputText,
   setEditMode,
+  setIsAuthenticated,
+  setUsageStats,
+  setModelInfo,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
   // Track active long-running tool calls (execute/bash/command) so we can
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
+  const modelInfoRef = useRef<ModelInfo | null>(null);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -141,6 +163,9 @@ export const useWebViewMessages = ({
     clearToolCalls,
     setPlanEntries,
     handlePermissionRequest,
+    setIsAuthenticated,
+    setUsageStats,
+    setModelInfo,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -185,6 +210,9 @@ export const useWebViewMessages = ({
       clearToolCalls,
       setPlanEntries,
       handlePermissionRequest,
+      setIsAuthenticated,
+      setUsageStats,
+      setModelInfo,
     };
   });
 
@@ -216,6 +244,43 @@ export const useWebViewMessages = ({
           }
           break;
         }
+
+        case 'usageStats': {
+          const stats = message.data as UsageStatsPayload | undefined;
+          handlers.setUsageStats?.(stats);
+          break;
+        }
+
+        case 'modelInfo': {
+          const info = message.data as Partial<ModelInfo> | undefined;
+          if (
+            info &&
+            typeof info.name === 'string' &&
+            info.name.trim().length > 0
+          ) {
+            const modelId =
+              typeof info.modelId === 'string' && info.modelId.trim().length > 0
+                ? info.modelId.trim()
+                : info.name.trim();
+            const normalized: ModelInfo = {
+              modelId,
+              name: info.name.trim(),
+              ...(typeof info.description !== 'undefined'
+                ? { description: info.description ?? null }
+                : {}),
+              ...(typeof info._meta !== 'undefined'
+                ? { _meta: info._meta }
+                : {}),
+            };
+            modelInfoRef.current = normalized;
+            handlers.setModelInfo?.(normalized);
+          } else {
+            modelInfoRef.current = null;
+            handlers.setModelInfo?.(null);
+          }
+          break;
+        }
+
         case 'loginSuccess': {
           // Clear loading state and show a short assistant notice
           handlers.messageHandling.clearWaitingForResponse();
@@ -224,12 +289,16 @@ export const useWebViewMessages = ({
             content: 'Successfully logged in. You can continue chatting.',
             timestamp: Date.now(),
           });
+          // Set authentication state to true
+          handlers.setIsAuthenticated?.(true);
           break;
         }
 
         case 'agentConnected': {
           // Agent connected successfully; clear any pending spinner
           handlers.messageHandling.clearWaitingForResponse();
+          // Set authentication state to true
+          handlers.setIsAuthenticated?.(true);
           break;
         }
 
@@ -245,6 +314,8 @@ export const useWebViewMessages = ({
             content: `Failed to connect to Qwen agent: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
             timestamp: Date.now(),
           });
+          // Set authentication state to false
+          handlers.setIsAuthenticated?.(false);
           break;
         }
 
@@ -259,6 +330,20 @@ export const useWebViewMessages = ({
             content: errorMsg,
             timestamp: Date.now(),
           });
+          // Set authentication state to false
+          handlers.setIsAuthenticated?.(false);
+          break;
+        }
+
+        case 'authState': {
+          const state = (
+            message?.data as { authenticated?: boolean | null } | undefined
+          )?.authenticated;
+          if (typeof state === 'boolean') {
+            handlers.setIsAuthenticated?.(state);
+          } else {
+            handlers.setIsAuthenticated?.(null);
+          }
           break;
         }
 
@@ -324,30 +409,42 @@ export const useWebViewMessages = ({
         }
 
         case 'streamEnd': {
-          // Always end local streaming state and collapse any thoughts
+          // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
 
-          // If the stream ended due to explicit user cancel, proactively
-          // clear the waiting indicator and reset any tracked exec calls.
-          // This avoids the UI being stuck with the Stop button visible
-          // after rejecting a permission request.
+          // If stream ended due to explicit user cancellation, proactively clear
+          // waiting indicator and reset tracked execution calls.
+          // This avoids UI getting stuck with Stop button visible after
+          // rejecting a permission request.
           try {
             const reason = (
               (message.data as { reason?: string } | undefined)?.reason || ''
             ).toLowerCase();
-            if (reason === 'user_cancelled') {
+
+            /**
+             * Handle different types of stream end reasons that require a full reset:
+             * - 'user_cancelled' / 'cancelled': user explicitly cancelled
+             * - 'timeout' / 'error' / 'session_expired': request failed unexpectedly
+             * For these cases, immediately clear all active states.
+             */
+            if (FORCE_CLEAR_STREAM_END_REASONS.has(reason)) {
+              // Clear active execution tool call tracking, reset state
               activeExecToolCallsRef.current.clear();
+              // Clear waiting response state to ensure UI returns to normal
               handlers.messageHandling.clearWaitingForResponse();
               break;
             }
           } catch (_error) {
-            // best-effort
+            // Best-effort handling, errors don't affect main flow
           }
 
-          // Otherwise, clear the generic waiting indicator only if there are
-          // no active long-running tool calls. If there are still active
-          // execute/bash/command calls, keep the hint visible.
+          /**
+           * For other types of stream end (non-user cancellation):
+           * Only clear generic waiting indicator when there are no active
+           * long-running tool calls. If there are still active execute/bash/command
+           * calls, keep the hint visible.
+           */
           if (activeExecToolCallsRef.current.size === 0) {
             handlers.messageHandling.clearWaitingForResponse();
           }
@@ -355,6 +452,9 @@ export const useWebViewMessages = ({
         }
 
         case 'error':
+          handlers.messageHandling.endStreaming();
+          handlers.messageHandling.clearThinking();
+          activeExecToolCallsRef.current.clear();
           handlers.messageHandling.clearWaitingForResponse();
           break;
 
@@ -548,15 +648,21 @@ export const useWebViewMessages = ({
           // While long-running tools (e.g., execute/bash/command) are in progress,
           // surface a lightweight loading indicator and expose the Stop button.
           try {
+            const id = (toolCallData.toolCallId || '').toString();
             const kind = (toolCallData.kind || '').toString().toLowerCase();
-            const isExec =
+            const isExecKind =
               kind === 'execute' || kind === 'bash' || kind === 'command';
+            // CLI sometimes omits kind in tool_call_update payloads; fall back to
+            // whether we've already tracked this ID as an exec tool.
+            const wasTrackedExec = activeExecToolCallsRef.current.has(id);
+            const isExec = isExecKind || wasTrackedExec;
 
-            if (isExec) {
-              const id = (toolCallData.toolCallId || '').toString();
+            if (!isExec || !id) {
+              break;
+            }
 
-              // Maintain the active set by status
-              if (status === 'pending' || status === 'in_progress') {
+            if (status === 'pending' || status === 'in_progress') {
+              if (isExecKind) {
                 activeExecToolCallsRef.current.add(id);
 
                 // Build a helpful hint from rawInput
@@ -570,14 +676,14 @@ export const useWebViewMessages = ({
                 }
                 const hint = cmd ? `Running: ${cmd}` : 'Running command...';
                 handlers.messageHandling.setWaitingForResponse(hint);
-              } else if (status === 'completed' || status === 'failed') {
-                activeExecToolCallsRef.current.delete(id);
               }
+            } else if (status === 'completed' || status === 'failed') {
+              activeExecToolCallsRef.current.delete(id);
+            }
 
-              // If no active exec tool remains, clear the waiting message.
-              if (activeExecToolCallsRef.current.size === 0) {
-                handlers.messageHandling.clearWaitingForResponse();
-              }
+            // If no active exec tool remains, clear the waiting message.
+            if (activeExecToolCallsRef.current.size === 0) {
+              handlers.messageHandling.clearWaitingForResponse();
             }
           } catch (_error) {
             // Best-effort UI hint; ignore errors

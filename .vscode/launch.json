@@ -27,7 +27,7 @@
       "outFiles": [
         "${workspaceFolder}/packages/vscode-ide-companion/dist/**/*.js"
       ],
-      "preLaunchTask": "npm: build: vscode-ide-companion"
+      "preLaunchTask": "launch: vscode-ide-companion (copy+build)"
     },
     {
       "name": "Attach",

@@ -89,6 +89,24 @@ export class AgentSideConnection implements Client {
   }
 
   /**
+   * Streams authentication updates (e.g. Qwen OAuth authUri) to the client.
+   */
+  async authenticateUpdate(params: schema.AuthenticateUpdate): Promise<void> {
+    return await this.#connection.sendNotification(
+      schema.CLIENT_METHODS.authenticate_update,
+      params,
+    );
+  }
+
+  /**
+   * Sends a custom notification to the client.
+   * Used for extension-specific notifications that are not part of the core ACP protocol.
+   */
+  async sendCustomNotification<T>(method: string, params: T): Promise<void> {
+    return await this.#connection.sendNotification(method, params);
+  }
+
+  /**
    * Request permission before running a tool
    *
    * The agent specifies a series of permission options with different granularity,
@@ -241,9 +259,11 @@ class Connection {
         ).toResult();
       }
 
+      let errorName;
       let details;
 
       if (error instanceof Error) {
+        errorName = error.name;
         details = error.message;
       } else if (
         typeof error === 'object' &&
@@ -252,6 +272,10 @@ class Connection {
         typeof error.message === 'string'
       ) {
         details = error.message;
+      }
+
+      if (errorName === 'TokenManagerError') {
+        return RequestError.authRequired(details).toResult();
       }
 
       return RequestError.internalError(details).toResult();
@@ -357,6 +381,8 @@ export interface Client {
     params: schema.RequestPermissionRequest,
   ): Promise<schema.RequestPermissionResponse>;
   sessionUpdate(params: schema.SessionNotification): Promise<void>;
+  authenticateUpdate(params: schema.AuthenticateUpdate): Promise<void>;
+  sendCustomNotification<T>(method: string, params: T): Promise<void>;
   writeTextFile(
     params: schema.WriteTextFileRequest,
   ): Promise<schema.WriteTextFileResponse>;

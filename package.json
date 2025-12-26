@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -13,14 +13,11 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.5.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.6.0"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
-    "auth:npm": "npx google-artifactregistry-auth",
-    "auth:docker": "gcloud auth configure-docker us-west1-docker.pkg.dev",
-    "auth": "npm run auth:npm && npm run auth:docker",
     "generate": "node scripts/generate-git-commit-info.js",
     "build": "node scripts/build.js",
     "build-and-start": "npm run build && npm run start",
@@ -95,7 +92,6 @@
     "eslint-plugin-react-hooks": "^5.2.0",
     "glob": "^10.5.0",
     "globals": "^16.0.0",
-    "google-artifactregistry-auth": "^3.4.0",
     "husky": "^9.1.7",
     "json": "^11.0.0",
     "lint-staged": "^16.1.6",

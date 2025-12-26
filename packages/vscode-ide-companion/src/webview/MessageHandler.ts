@@ -73,11 +73,4 @@ export class MessageHandler {
   appendStreamContent(chunk: string): void {
     this.router.appendStreamContent(chunk);
   }
-
-  /**
-   * Check if saving checkpoint
-   */
-  getIsSavingCheckpoint(): boolean {
-    return this.router.getIsSavingCheckpoint();
-  }
 }

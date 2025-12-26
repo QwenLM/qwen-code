@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
@@ -38,7 +39,8 @@ export class DashScopeOpenAICompatibleProvider
     return (
       authType === AuthType.QWEN_OAUTH ||
       baseUrl === 'https://dashscope.aliyuncs.com/compatible-mode/v1' ||
-      baseUrl === 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1'
+      baseUrl === 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' ||
+      !baseUrl
     );
   }
 
@@ -138,6 +140,12 @@ export class DashScopeOpenAICompatibleProvider
         promptId: userPromptId,
         ...(channel ? { channel } : {}),
       },
+    };
+  }
+
+  getDefaultGenerationConfig(): GenerateContentConfig {
+    return {
+      temperature: 0.3,
     };
   }
 

@@ -411,7 +411,7 @@ describe('useQwenAuth', () => {
     expect(geminiResult.current.qwenAuthState.authStatus).toBe('idle');
 
     const { result: oauthResult } = renderHook(() =>
-      useQwenAuth(AuthType.LOGIN_WITH_GOOGLE, true),
+      useQwenAuth(AuthType.USE_OPENAI, true),
     );
     expect(oauthResult.current.qwenAuthState.authStatus).toBe('idle');
   });

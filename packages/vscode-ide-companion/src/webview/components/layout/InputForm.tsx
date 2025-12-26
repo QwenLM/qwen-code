@@ -11,7 +11,7 @@ import {
   PlanModeIcon,
   CodeBracketsIcon,
   HideContextIcon,
-  ThinkingIcon,
+  // ThinkingIcon,  // Temporarily disabled
   SlashCommandIcon,
   LinkIcon,
   ArrowUpIcon,
@@ -20,7 +20,8 @@ import {
 import { CompletionMenu } from '../layout/CompletionMenu.js';
 import type { CompletionItem } from '../../../types/completionItemTypes.js';
 import { getApprovalModeInfoFromString } from '../../../types/acpTypes.js';
-import type { ApprovalModeValue } from '../../../types/acpTypes.js';
+import type { ApprovalModeValue } from '../../../types/approvalModeValueTypes.js';
+import { ContextIndicator } from './ContextIndicator.js';
 
 interface InputFormProps {
   inputText: string;
@@ -36,6 +37,11 @@ interface InputFormProps {
   activeSelection: { startLine: number; endLine: number } | null;
   // Whether to auto-load the active editor selection/path into context
   skipAutoActiveContext: boolean;
+  contextUsage: {
+    percentLeft: number;
+    usedTokens: number;
+    tokenLimit: number;
+  } | null;
   onInputChange: (text: string) => void;
   onCompositionStart: () => void;
   onCompositionEnd: () => void;
@@ -92,10 +98,11 @@ export const InputForm: React.FC<InputFormProps> = ({
   isWaitingForResponse,
   isComposing,
   editMode,
-  thinkingEnabled,
+  // thinkingEnabled,  // Temporarily disabled
   activeFileName,
   activeSelection,
   skipAutoActiveContext,
+  contextUsage,
   onInputChange,
   onCompositionStart,
   onCompositionEnd,
@@ -103,7 +110,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   onSubmit,
   onCancel,
   onToggleEditMode,
-  onToggleThinking,
+  // onToggleThinking,  // Temporarily disabled
   onToggleSkipAutoActiveContext,
   onShowCommandMenu,
   onAttachContext,
@@ -113,6 +120,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   onCompletionClose,
 }) => {
   const editModeInfo = getEditModeInfo(editMode);
+  const composerDisabled = isStreaming || isWaitingForResponse;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // ESC should cancel the current interaction (stop generation)
@@ -143,10 +151,7 @@ export const InputForm: React.FC<InputFormProps> = ({
       : '';
 
   return (
-    <div
-      className="p-1 px-4 pb-4"
-      style={{ backgroundColor: 'var(--app-primary-background)' }}
-    >
+    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)]">
       <div className="block">
         <form className="composer-form" onSubmit={onSubmit}>
           {/* Inner background layer */}
@@ -179,10 +184,16 @@ export const InputForm: React.FC<InputFormProps> = ({
               data-placeholder="Ask Qwen Code …"
               // Use a data flag so CSS can show placeholder even if the browser
               // inserts an invisible <br> into contentEditable (so :empty no longer matches)
-              data-empty={inputText.trim().length === 0 ? 'true' : 'false'}
+              data-empty={
+                inputText.replace(/\u200B/g, '').trim().length === 0
+                  ? 'true'
+                  : 'false'
+              }
               onInput={(e) => {
                 const target = e.target as HTMLDivElement;
-                onInputChange(target.textContent || '');
+                // Filter out zero-width space that we use to maintain height
+                const text = target.textContent?.replace(/\u200B/g, '') || '';
+                onInputChange(text);
               }}
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}
@@ -236,15 +247,19 @@ export const InputForm: React.FC<InputFormProps> = ({
             {/* Spacer */}
             <div className="flex-1 min-w-0" />
 
+            {/* Context usage indicator */}
+            <ContextIndicator contextUsage={contextUsage} />
+
+            {/* @yiliang114. closed temporarily */}
             {/* Thinking button */}
-            <button
+            {/* <button
               type="button"
               className={`btn-icon-compact ${thinkingEnabled ? 'btn-icon-compact--active' : ''}`}
               title={thinkingEnabled ? 'Thinking on' : 'Thinking off'}
               onClick={onToggleThinking}
             >
               <ThinkingIcon enabled={thinkingEnabled} />
-            </button>
+            </button> */}
 
             {/* Command button */}
             <button
@@ -280,7 +295,7 @@ export const InputForm: React.FC<InputFormProps> = ({
               <button
                 type="submit"
                 className="btn-send-compact [&>svg]:w-5 [&>svg]:h-5"
-                disabled={!inputText.trim()}
+                disabled={composerDisabled || !inputText.trim()}
               >
                 <ArrowUpIcon />
               </button>

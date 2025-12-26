@@ -131,12 +131,55 @@ export function useCompletionTrigger(
     [getCompletionItems, LOADING_ITEM, TIMEOUT_ITEM],
   );
 
+  // Helper function to compare completion items arrays
+  const areItemsEqual = (
+    items1: CompletionItem[],
+    items2: CompletionItem[],
+  ): boolean => {
+    if (items1.length !== items2.length) {
+      return false;
+    }
+
+    // Compare each item by stable fields (ignore non-deterministic props like icons)
+    for (let i = 0; i < items1.length; i++) {
+      const a = items1[i];
+      const b = items2[i];
+      if (a.id !== b.id) {
+        return false;
+      }
+      if (a.label !== b.label) {
+        return false;
+      }
+      if ((a.description ?? '') !== (b.description ?? '')) {
+        return false;
+      }
+      if (a.type !== b.type) {
+        return false;
+      }
+      if ((a.value ?? '') !== (b.value ?? '')) {
+        return false;
+      }
+      if ((a.path ?? '') !== (b.path ?? '')) {
+        return false;
+      }
+    }
+
+    return true;
+  };
+
   const refreshCompletion = useCallback(async () => {
     if (!state.isOpen || !state.triggerChar) {
       return;
     }
     const items = await getCompletionItems(state.triggerChar, state.query);
-    setState((prev) => ({ ...prev, items }));
+
+    // Only update state if items have actually changed
+    setState((prev) => {
+      if (areItemsEqual(prev.items, items)) {
+        return prev;
+      }
+      return { ...prev, items };
+    });
   }, [state.isOpen, state.triggerChar, state.query, getCompletionItems]);
 
   useEffect(() => {

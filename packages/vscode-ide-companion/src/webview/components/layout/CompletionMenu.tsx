@@ -92,9 +92,8 @@ export const CompletionMenu: React.FC<CompletionMenuProps> = ({
       ref={containerRef}
       role="menu"
       className={[
-        // Semantic class name for readability (no CSS attached)
         'completion-menu',
-        // Positioning and container styling (Tailwind)
+        // Positioning and container styling
         'absolute bottom-full left-0 right-0 mb-2 flex flex-col overflow-hidden',
         'rounded-large border bg-[var(--app-menu-background)]',
         'border-[var(--app-input-border)] max-h-[50vh] z-[1000]',

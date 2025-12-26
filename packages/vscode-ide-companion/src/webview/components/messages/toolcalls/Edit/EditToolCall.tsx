@@ -11,7 +11,7 @@ import type { BaseToolCallProps } from '../shared/types.js';
 import {
   groupContent,
   mapToolStatusToContainerStatus,
-} from '../shared/utils.js';
+} from '../../../../utils/utils.js';
 import { FileLink } from '../../../layout/FileLink.js';
 import type { ToolCallContainerProps } from '../shared/LayoutComponents.js';
 

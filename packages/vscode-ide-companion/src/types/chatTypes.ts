@@ -3,7 +3,8 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { AcpPermissionRequest, ApprovalModeValue } from './acpTypes.js';
+import type { AcpPermissionRequest, ModelInfo } from './acpTypes.js';
+import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -27,6 +28,18 @@ export interface ToolCallUpdateData {
   locations?: Array<{ path: string; line?: number | null }>;
 }
 
+export interface UsageStatsPayload {
+  usage?: {
+    promptTokens?: number | null;
+    completionTokens?: number | null;
+    thoughtsTokens?: number | null;
+    totalTokens?: number | null;
+    cachedTokens?: number | null;
+  } | null;
+  durationMs?: number | null;
+  tokenLimit?: number | null;
+}
+
 export interface QwenAgentCallbacks {
   onMessage?: (message: ChatMessage) => void;
   onStreamChunk?: (chunk: string) => void;
@@ -34,7 +47,7 @@ export interface QwenAgentCallbacks {
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
   onPermissionRequest?: (request: AcpPermissionRequest) => Promise<string>;
-  onEndTurn?: () => void;
+  onEndTurn?: (reason?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
     availableModes?: Array<{
@@ -44,6 +57,8 @@ export interface QwenAgentCallbacks {
     }>;
   }) => void;
   onModeChanged?: (modeId: ApprovalModeValue) => void;
+  onUsageUpdate?: (stats: UsageStatsPayload) => void;
+  onModelInfo?: (info: ModelInfo) => void;
 }
 
 export interface ToolCallUpdate {

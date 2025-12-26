@@ -272,8 +272,6 @@ export class Query implements AsyncIterable<SDKMessage> {
       // Get only successfully connected SDK servers for CLI
       const sdkMcpServersForCli = this.getSdkMcpServersForCli();
       const mcpServersForCli = this.getMcpServersForCli();
-      logger.debug('SDK MCP servers for CLI:', sdkMcpServersForCli);
-      logger.debug('External MCP servers for CLI:', mcpServersForCli);
 
       await this.sendControlRequest(ControlRequestType.INITIALIZE, {
         hooks: null,
@@ -627,6 +625,11 @@ export class Query implements AsyncIterable<SDKMessage> {
   ): Promise<Record<string, unknown> | null> {
     if (this.closed) {
       return Promise.reject(new Error('Query is closed'));
+    }
+
+    if (subtype !== ControlRequestType.INITIALIZE) {
+      // Ensure all other control requests get processed after initialization
+      await this.initialized;
     }
 
     const requestId = randomUUID();

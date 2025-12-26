@@ -22,6 +22,14 @@ import type {
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
+  /**
+   * Execution mode for the current invocation.
+   *
+   * - interactive: React/Ink UI mode
+   * - non_interactive: non-interactive CLI mode (text/json)
+   * - acp: ACP/Zed integration mode
+   */
+  executionMode?: 'interactive' | 'non_interactive' | 'acp';
   // Invocation properties for when commands are called.
   invocation?: {
     /** The raw, untrimmed input string from the user. */
@@ -64,8 +72,6 @@ export interface CommandContext {
      * @param history The array of history items to load.
      */
     loadHistory: UseHistoryManagerReturn['loadHistory'];
-    /** Toggles a special display mode. */
-    toggleCorgiMode: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
     reloadCommands: () => void;
@@ -111,6 +117,19 @@ export interface MessageActionReturn {
 }
 
 /**
+ * The return type for a command action that streams multiple messages.
+ * Used for long-running operations that need to send progress updates.
+ */
+export interface StreamMessagesActionReturn {
+  type: 'stream_messages';
+  messages: AsyncGenerator<
+    { messageType: 'info' | 'error'; content: string },
+    void,
+    unknown
+  >;
+}
+
+/**
  * The return type for a command action that needs to open a dialog.
  */
 export interface OpenDialogActionReturn {
@@ -126,7 +145,8 @@ export interface OpenDialogActionReturn {
     | 'subagent_create'
     | 'subagent_list'
     | 'permissions'
-    | 'approval-mode';
+    | 'approval-mode'
+    | 'resume';
 }
 
 /**
@@ -175,6 +195,7 @@ export interface ConfirmActionReturn {
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
+  | StreamMessagesActionReturn
   | QuitActionReturn
   | OpenDialogActionReturn
   | LoadHistoryActionReturn

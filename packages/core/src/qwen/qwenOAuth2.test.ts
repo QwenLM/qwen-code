@@ -761,17 +761,12 @@ describe('getQwenOAuthClient', () => {
   });
 
   it('should load cached credentials if available', async () => {
-    const fs = await import('node:fs');
     const mockCredentials = {
       access_token: 'cached-token',
       refresh_token: 'cached-refresh',
       token_type: 'Bearer',
       expiry_date: Date.now() + 3600000,
     };
-
-    vi.mocked(fs.promises.readFile).mockResolvedValue(
-      JSON.stringify(mockCredentials),
-    );
 
     // Mock SharedTokenManager to use cached credentials
     const mockTokenManager = {
@@ -792,18 +787,6 @@ describe('getQwenOAuthClient', () => {
   });
 
   it('should handle cached credentials refresh failure', async () => {
-    const fs = await import('node:fs');
-    const mockCredentials = {
-      access_token: 'cached-token',
-      refresh_token: 'expired-refresh',
-      token_type: 'Bearer',
-      expiry_date: Date.now() + 3600000, // Valid expiry time so loadCachedQwenCredentials returns true
-    };
-
-    vi.mocked(fs.promises.readFile).mockResolvedValue(
-      JSON.stringify(mockCredentials),
-    );
-
     // Mock SharedTokenManager to fail with a specific error
     const mockTokenManager = {
       getValidCredentials: vi
@@ -830,6 +813,35 @@ describe('getQwenOAuthClient', () => {
         module.getQwenOAuthClient(mockConfig),
       ),
     ).rejects.toThrow('Device authorization flow failed');
+
+    SharedTokenManager.getInstance = originalGetInstance;
+  });
+
+  it('should not start device flow when requireCachedCredentials is true', async () => {
+    // Make SharedTokenManager fail so we hit the fallback path
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
+    };
+
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    // If requireCachedCredentials is honored, device-flow network requests should not start
+    vi.mocked(global.fetch).mockResolvedValue({ ok: true } as Response);
+
+    await expect(
+      import('./qwenOAuth2.js').then((module) =>
+        module.getQwenOAuthClient(mockConfig, {
+          requireCachedCredentials: true,
+        }),
+      ),
+    ).rejects.toThrow(
+      'No cached Qwen-OAuth credentials found. Please re-authenticate.',
+    );
+
+    expect(global.fetch).not.toHaveBeenCalled();
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1572,178 +1584,6 @@ describe('Credential Caching Functions', () => {
       // This test verifies that refreshAccessToken works correctly
       const updatedCredentials = client.getCredentials();
       expect(updatedCredentials.access_token).toBe('new-token');
-    });
-  });
-
-  describe('loadCachedQwenCredentials', () => {
-    it('should load and validate cached credentials successfully', async () => {
-      const { promises: fs } = await import('node:fs');
-      const mockCredentials = {
-        access_token: 'cached-token',
-        refresh_token: 'cached-refresh',
-        token_type: 'Bearer',
-        expiry_date: Date.now() + 3600000,
-      };
-
-      vi.mocked(fs.readFile).mockResolvedValue(JSON.stringify(mockCredentials));
-
-      // Test through getQwenOAuthClient which calls loadCachedQwenCredentials
-      const mockConfig = {
-        isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
-      } as unknown as Config;
-
-      // Make SharedTokenManager fail to test the fallback
-      const mockTokenManager = {
-        getValidCredentials: vi
-          .fn()
-          .mockRejectedValue(new Error('No cached creds')),
-      };
-
-      const originalGetInstance = SharedTokenManager.getInstance;
-      SharedTokenManager.getInstance = vi
-        .fn()
-        .mockReturnValue(mockTokenManager);
-
-      // Mock successful auth flow after cache load fails
-      const mockAuthResponse = {
-        ok: true,
-        json: async () => ({
-          device_code: 'test-device-code',
-          user_code: 'TEST123',
-          verification_uri: 'https://chat.qwen.ai/device',
-          verification_uri_complete: 'https://chat.qwen.ai/device?code=TEST123',
-          expires_in: 1800,
-        }),
-      };
-
-      const mockTokenResponse = {
-        ok: true,
-        json: async () => ({
-          access_token: 'new-access-token',
-          refresh_token: 'new-refresh-token',
-          token_type: 'Bearer',
-          expires_in: 3600,
-          scope: 'openid profile email model.completion',
-        }),
-      };
-
-      global.fetch = vi
-        .fn()
-        .mockResolvedValueOnce(mockAuthResponse as Response)
-        .mockResolvedValue(mockTokenResponse as Response);
-
-      try {
-        await import('./qwenOAuth2.js').then((module) =>
-          module.getQwenOAuthClient(mockConfig),
-        );
-      } catch {
-        // Expected to fail in test environment
-      }
-
-      expect(fs.readFile).toHaveBeenCalled();
-      SharedTokenManager.getInstance = originalGetInstance;
-    });
-
-    it('should handle invalid cached credentials gracefully', async () => {
-      const { promises: fs } = await import('node:fs');
-
-      // Mock file read to return invalid JSON
-      vi.mocked(fs.readFile).mockResolvedValue('invalid-json');
-
-      const mockConfig = {
-        isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
-      } as unknown as Config;
-
-      const mockTokenManager = {
-        getValidCredentials: vi
-          .fn()
-          .mockRejectedValue(new Error('No cached creds')),
-      };
-
-      const originalGetInstance = SharedTokenManager.getInstance;
-      SharedTokenManager.getInstance = vi
-        .fn()
-        .mockReturnValue(mockTokenManager);
-
-      // Mock auth flow
-      const mockAuthResponse = {
-        ok: true,
-        json: async () => ({
-          device_code: 'test-device-code',
-          user_code: 'TEST123',
-          verification_uri: 'https://chat.qwen.ai/device',
-          verification_uri_complete: 'https://chat.qwen.ai/device?code=TEST123',
-          expires_in: 1800,
-        }),
-      };
-
-      const mockTokenResponse = {
-        ok: true,
-        json: async () => ({
-          access_token: 'new-token',
-          refresh_token: 'new-refresh',
-          token_type: 'Bearer',
-          expires_in: 3600,
-        }),
-      };
-
-      global.fetch = vi
-        .fn()
-        .mockResolvedValueOnce(mockAuthResponse as Response)
-        .mockResolvedValue(mockTokenResponse as Response);
-
-      try {
-        await import('./qwenOAuth2.js').then((module) =>
-          module.getQwenOAuthClient(mockConfig),
-        );
-      } catch {
-        // Expected to fail in test environment
-      }
-
-      SharedTokenManager.getInstance = originalGetInstance;
-    });
-
-    it('should handle file access errors', async () => {
-      const { promises: fs } = await import('node:fs');
-
-      vi.mocked(fs.readFile).mockRejectedValue(new Error('File not found'));
-
-      const mockConfig = {
-        isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
-      } as unknown as Config;
-
-      const mockTokenManager = {
-        getValidCredentials: vi
-          .fn()
-          .mockRejectedValue(new Error('No cached creds')),
-      };
-
-      const originalGetInstance = SharedTokenManager.getInstance;
-      SharedTokenManager.getInstance = vi
-        .fn()
-        .mockReturnValue(mockTokenManager);
-
-      // Mock device flow to fail quickly
-      const mockAuthResponse = {
-        ok: true,
-        json: async () => ({
-          error: 'invalid_request',
-          error_description: 'Invalid request parameters',
-        }),
-      };
-
-      global.fetch = vi.fn().mockResolvedValue(mockAuthResponse as Response);
-
-      // Should proceed to device flow when cache loading fails
-      try {
-        await import('./qwenOAuth2.js').then((module) =>
-          module.getQwenOAuthClient(mockConfig),
-        );
-      } catch {
-        // Expected to fail in test environment
-      }
-
-      SharedTokenManager.getInstance = originalGetInstance;
     });
   });
 });

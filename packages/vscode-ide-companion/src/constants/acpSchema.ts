@@ -19,6 +19,7 @@ export const AGENT_METHODS = {
 export const CLIENT_METHODS = {
   fs_read_text_file: 'fs/read_text_file',
   fs_write_text_file: 'fs/write_text_file',
+  authenticate_update: 'authenticate/update',
   session_request_permission: 'session/request_permission',
   session_update: 'session/update',
 } as const;

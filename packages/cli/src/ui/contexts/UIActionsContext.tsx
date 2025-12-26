@@ -55,7 +55,6 @@ export interface UIActions {
   handleClearScreen: () => void;
   onWorkspaceMigrationDialogOpen: () => void;
   onWorkspaceMigrationDialogClose: () => void;
-  handleProQuotaChoice: (choice: 'auth' | 'continue') => void;
   // Vision switch dialog
   handleVisionSwitchSelect: (outcome: VisionSwitchOutcome) => void;
   // Welcome back dialog
@@ -64,6 +63,10 @@ export interface UIActions {
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Resume session dialog
+  openResumeDialog: () => void;
+  closeResumeDialog: () => void;
+  handleResume: (sessionId: string) => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

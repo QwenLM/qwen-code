@@ -75,7 +75,11 @@ export const AssistantMessage: React.FC<AssistantMessageProps> = ({
             whiteSpace: 'normal',
           }}
         >
-          <MessageContent content={content} onFileClick={onFileClick} />
+          <MessageContent
+            content={content}
+            onFileClick={onFileClick}
+            enableFileLinks={false}
+          />
         </div>
       </span>
     </div>

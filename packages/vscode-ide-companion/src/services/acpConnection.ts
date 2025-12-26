@@ -10,8 +10,9 @@ import type {
   AcpPermissionRequest,
   AcpResponse,
   AcpSessionUpdate,
-  ApprovalModeValue,
+  AuthenticateUpdateNotification,
 } from '../types/acpTypes.js';
+import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
 import { spawn } from 'child_process';
 import type {
@@ -20,7 +21,7 @@ import type {
 } from '../types/connectionTypes.js';
 import { AcpMessageHandler } from './acpMessageHandler.js';
 import { AcpSessionManager } from './acpSessionManager.js';
-import { determineNodePathForCli } from '../cli/cliPathDetector.js';
+import * as fs from 'node:fs';
 
 /**
  * ACP Connection Handler for VSCode Extension
@@ -42,6 +43,8 @@ export class AcpConnection {
   onPermissionRequest: (data: AcpPermissionRequest) => Promise<{
     optionId: string;
   }> = () => Promise.resolve({ optionId: 'allow' });
+  onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
+    () => {};
   onEndTurn: () => void = () => {};
   // Called after successful initialize() with the initialize result
   onInitialized: (init: unknown) => void = () => {};
@@ -54,12 +57,12 @@ export class AcpConnection {
   /**
    * Connect to Qwen ACP
    *
-   * @param cliPath - CLI path
+   * @param cliEntryPath - Path to the bundled CLI entrypoint (cli.js)
    * @param workingDir - Working directory
    * @param extraArgs - Extra command line arguments
    */
   async connect(
-    cliPath: string,
+    cliEntryPath: string,
     workingDir: string = process.cwd(),
     extraArgs: string[] = [],
   ): Promise<void> {
@@ -69,7 +72,6 @@ export class AcpConnection {
 
     this.workingDir = workingDir;
 
-    const isWindows = process.platform === 'win32';
     const env = { ...process.env };
 
     // If proxy is configured in extraArgs, also set it as environment variable
@@ -88,48 +90,20 @@ export class AcpConnection {
       env['https_proxy'] = proxyUrl;
     }
 
-    let spawnCommand: string;
-    let spawnArgs: string[];
+    // Always run the bundled CLI using the VS Code extension host's Node runtime.
+    // This avoids PATH/NVM/global install problems and ensures deterministic behavior.
+    const spawnCommand: string = process.execPath;
+    const spawnArgs: string[] = [
+      cliEntryPath,
+      '--experimental-acp',
+      '--channel=VSCode',
+      ...extraArgs,
+    ];
 
-    if (cliPath.startsWith('npx ')) {
-      const parts = cliPath.split(' ');
-      spawnCommand = isWindows ? 'npx.cmd' : 'npx';
-      spawnArgs = [
-        ...parts.slice(1),
-        '--experimental-acp',
-        '--channel=VSCode',
-        ...extraArgs,
-      ];
-    } else {
-      // For qwen CLI, ensure we use the correct Node.js version
-      // Handle various Node.js version managers (nvm, n, manual installations)
-      if (cliPath.includes('/qwen') && !isWindows) {
-        // Try to determine the correct node executable for this qwen installation
-        const nodePathResult = determineNodePathForCli(cliPath);
-        if (nodePathResult.path) {
-          spawnCommand = nodePathResult.path;
-          spawnArgs = [
-            cliPath,
-            '--experimental-acp',
-            '--channel=VSCode',
-            ...extraArgs,
-          ];
-        } else {
-          // Fallback to direct execution
-          spawnCommand = cliPath;
-          spawnArgs = ['--experimental-acp', '--channel=VSCode', ...extraArgs];
-
-          // Log any error for debugging
-          if (nodePathResult.error) {
-            console.warn(
-              `[ACP] Node.js path detection warning: ${nodePathResult.error}`,
-            );
-          }
-        }
-      } else {
-        spawnCommand = cliPath;
-        spawnArgs = ['--experimental-acp', '--channel=VSCode', ...extraArgs];
-      }
+    if (!fs.existsSync(cliEntryPath)) {
+      throw new Error(
+        `Bundled Qwen CLI entry not found at ${cliEntryPath}. The extension may not have been packaged correctly.`,
+      );
     }
 
     console.log('[ACP] Spawning command:', spawnCommand, spawnArgs.join(' '));
@@ -138,7 +112,8 @@ export class AcpConnection {
       cwd: workingDir,
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
-      shell: isWindows,
+      // We spawn node directly; no shell needed (and shell quoting can break paths).
+      shell: false,
     };
 
     this.child = spawn(spawnCommand, spawnArgs, options);
@@ -171,6 +146,8 @@ export class AcpConnection {
       console.error(
         `[ACP qwen] Process exited with code: ${code}, signal: ${signal}`,
       );
+      // Clear pending requests when process exits
+      this.pendingRequests.clear();
     });
 
     // Wait for process to start
@@ -235,6 +212,7 @@ export class AcpConnection {
     const callbacks: AcpConnectionCallbacks = {
       onSessionUpdate: this.onSessionUpdate,
       onPermissionRequest: this.onPermissionRequest,
+      onAuthenticateUpdate: this.onAuthenticateUpdate,
       onEndTurn: this.onEndTurn,
     };
 

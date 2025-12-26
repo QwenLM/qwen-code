@@ -43,7 +43,7 @@
 
   /* Composer: form wrapper */
   .composer-form {
-    @apply relative flex flex-col max-w-[680px] mx-auto rounded-large border shadow-sm transition-colors duration-200;
+    @apply relative flex flex-col max-w-[680px] mx-auto rounded-large border shadow-sm transition-colors duration-200 z-[1];
     background: var(--app-input-secondary-background);
     border-color: var(--app-input-border);
     color: var(--app-input-foreground);
@@ -111,7 +111,7 @@
   }
   .btn-text-compact > svg {
     height: 1em;
-    width: 1em; 
+    width: 1em;
     flex-shrink: 0;
   }
   .btn-text-compact > span {
@@ -149,6 +149,28 @@
   .btn-icon-compact--active > svg {
     stroke: var(--app-qwen-ivory);
     fill: var(--app-qwen-ivory);
+  }
+
+  .context-indicator {
+    @apply inline-flex items-center gap-1 px-1 py-0.5 rounded-small text-[0.8em] select-none;
+    color: var(--app-secondary-foreground);
+  }
+  .context-indicator svg {
+    width: 20px;
+    height: 20px;
+  }
+  .context-indicator__track,
+  .context-indicator__progress {
+    fill: none;
+    stroke-width: 2.5;
+  }
+  .context-indicator__track {
+    stroke: var(--app-secondary-foreground);
+    opacity: 0.35;
+  }
+  .context-indicator__progress {
+    stroke: var(--app-secondary-foreground);
+    stroke-linecap: round;
   }
 
   .composer-overlay {

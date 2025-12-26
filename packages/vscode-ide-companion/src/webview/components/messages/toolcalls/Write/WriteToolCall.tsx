@@ -12,7 +12,7 @@ import { ToolCallContainer } from '../shared/LayoutComponents.js';
 import {
   groupContent,
   mapToolStatusToContainerStatus,
-} from '../shared/utils.js';
+} from '../../../../utils/utils.js';
 import { FileLink } from '../../../layout/FileLink.js';
 
 /**

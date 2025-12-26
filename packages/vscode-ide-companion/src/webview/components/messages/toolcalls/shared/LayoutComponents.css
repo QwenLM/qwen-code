@@ -172,7 +172,8 @@
 
 /* Loading animation for toolcall header */
 @keyframes toolcallHeaderPulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {

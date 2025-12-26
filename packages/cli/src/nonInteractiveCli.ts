@@ -43,6 +43,55 @@ import {
 } from './utils/nonInteractiveHelpers.js';
 
 /**
+ * Emits a final message for slash command results.
+ * Note: systemMessage should already be emitted before calling this function.
+ */
+async function emitNonInteractiveFinalMessage(params: {
+  message: string;
+  isError: boolean;
+  adapter?: JsonOutputAdapterInterface;
+  config: Config;
+  startTimeMs: number;
+}): Promise<void> {
+  const { message, isError, adapter, config } = params;
+
+  if (!adapter) {
+    // Text output mode: write directly to stdout/stderr
+    const target = isError ? process.stderr : process.stdout;
+    target.write(`${message}\n`);
+    return;
+  }
+
+  // JSON output mode: emit assistant message and result
+  // (systemMessage should already be emitted by caller)
+  adapter.startAssistantMessage();
+  adapter.processEvent({
+    type: GeminiEventType.Content,
+    value: message,
+  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  adapter.finalizeAssistantMessage();
+
+  const metrics = uiTelemetryService.getMetrics();
+  const usage = computeUsageFromMetrics(metrics);
+  const outputFormat = config.getOutputFormat();
+  const stats =
+    outputFormat === OutputFormat.JSON
+      ? uiTelemetryService.getMetrics()
+      : undefined;
+
+  adapter.emitResult({
+    isError,
+    durationMs: Date.now() - params.startTimeMs,
+    apiDurationMs: 0,
+    numTurns: 0,
+    errorMessage: isError ? message : undefined,
+    usage,
+    stats,
+    summary: message,
+  });
+}
+
+/**
  * Provides optional overrides for `runNonInteractive` execution.
  *
  * @param abortController - Optional abort controller for cancellation.
@@ -115,6 +164,16 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      // Emit systemMessage first (always the first message in JSON mode)
+      if (adapter) {
+        const systemMessage = await buildSystemMessage(
+          config,
+          sessionId,
+          permissionMode,
+        );
+        adapter.emitMessage(systemMessage);
+      }
+
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
@@ -128,10 +187,45 @@ export async function runNonInteractive(
             config,
             settings,
           );
-          if (slashCommandResult) {
-            // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
-            initialPartList = slashCommandResult as PartListUnion;
-            slashHandled = true;
+          switch (slashCommandResult.type) {
+            case 'submit_prompt':
+              // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
+              initialPartList = slashCommandResult.content;
+              slashHandled = true;
+              break;
+            case 'message': {
+              // systemMessage already emitted above
+              await emitNonInteractiveFinalMessage({
+                message: slashCommandResult.content,
+                isError: slashCommandResult.messageType === 'error',
+                adapter,
+                config,
+                startTimeMs: startTime,
+              });
+              return;
+            }
+            case 'stream_messages':
+              throw new FatalInputError(
+                'Stream messages mode is not supported in non-interactive CLI',
+              );
+            case 'unsupported': {
+              await emitNonInteractiveFinalMessage({
+                message: slashCommandResult.reason,
+                isError: true,
+                adapter,
+                config,
+                startTimeMs: startTime,
+              });
+              return;
+            }
+            case 'no_command':
+              break;
+            default: {
+              const _exhaustive: never = slashCommandResult;
+              throw new FatalInputError(
+                `Unhandled slash command result type: ${(_exhaustive as { type: string }).type}`,
+              );
+            }
           }
         }
 
@@ -162,15 +256,6 @@ export async function runNonInteractive(
 
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
-
-      if (adapter) {
-        const systemMessage = await buildSystemMessage(
-          config,
-          sessionId,
-          permissionMode,
-        );
-        adapter.emitMessage(systemMessage);
-      }
 
       let isFirstTurn = true;
       while (true) {
@@ -221,8 +306,6 @@ export async function runNonInteractive(
               const errorText = parseAndFormatApiError(
                 event.value.error,
                 config.getContentGeneratorConfig()?.authType,
-                undefined,
-                config.getModel(),
               );
               process.stderr.write(`${errorText}\n`);
             }

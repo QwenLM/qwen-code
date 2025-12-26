@@ -13,7 +13,7 @@ import {
   safeTitle,
   groupContent,
   mapToolStatusToContainerStatus,
-} from '../shared/utils.js';
+} from '../../../../utils/utils.js';
 
 /**
  * Specialized component for Search tool calls
@@ -195,7 +195,7 @@ export const SearchToolCall: React.FC<BaseToolCallProps> = ({
         isLast={isLast}
       >
         <div className="flex flex-col">
-          {textOutputs.map((text, index) => (
+          {textOutputs.map((text: string, index: number) => (
             <div
               key={index}
               className="inline-flex text-[var(--app-secondary-foreground)] text-[0.85em] opacity-70 mt-[2px] mb-[2px] flex-row items-start w-full gap-1"

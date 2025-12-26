@@ -130,7 +130,7 @@ export const directoryCommand: SlashCommand = {
             {
               type: MessageType.INFO,
               text: t(
-                'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}',
+                'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
                 {
                   directories: added.join('\n- '),
                 },

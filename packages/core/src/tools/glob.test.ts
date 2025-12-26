@@ -198,6 +198,52 @@ describe('GlobTool', () => {
       );
     });
 
+    it('should find files even if workspace path casing differs from glob results (Windows/macOS)', async () => {
+      // Only relevant for Windows and macOS
+      if (process.platform !== 'win32' && process.platform !== 'darwin') {
+        return;
+      }
+
+      let mismatchedRootDir = tempRootDir;
+
+      if (process.platform === 'win32') {
+        // 1. Create a path with mismatched casing for the workspace root
+        // e.g., if tempRootDir is "C:\Users\...", make it "c:\Users\..."
+        const drive = path.parse(tempRootDir).root;
+        if (!drive || !drive.match(/^[A-Z]:\\/)) {
+          // Skip if we can't determine/manipulate the drive letter easily
+          return;
+        }
+
+        const lowerDrive = drive.toLowerCase();
+        mismatchedRootDir = lowerDrive + tempRootDir.substring(drive.length);
+      } else {
+        // macOS: change the casing of the path
+        if (tempRootDir === tempRootDir.toLowerCase()) {
+          mismatchedRootDir = tempRootDir.toUpperCase();
+        } else {
+          mismatchedRootDir = tempRootDir.toLowerCase();
+        }
+      }
+
+      // 2. Create a new GlobTool instance with this mismatched root
+      const mismatchedConfig = {
+        ...mockConfig,
+        getTargetDir: () => mismatchedRootDir,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(mismatchedRootDir),
+      } as unknown as Config;
+
+      const mismatchedGlobTool = new GlobTool(mismatchedConfig);
+
+      // 3. Execute search
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = mismatchedGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('Found 2 file(s)');
+    });
+
     it('should return error if path is outside workspace', async () => {
       // Bypassing validation to test execute method directly
       vi.spyOn(globTool, 'validateToolParams').mockReturnValue(null);

@@ -514,26 +514,14 @@ export async function getQwenOAuthClient(
       }
     }
 
-    // If shared manager fails, check if we have cached credentials for device flow
-    if (await loadCachedQwenCredentials(client)) {
-      // We have cached credentials but they might be expired
-      // Try device flow instead of forcing refresh
-      const result = await authWithQwenDeviceFlow(client, config);
-      if (!result.success) {
-        // Use detailed error message if available, otherwise use default
-        const errorMessage =
-          result.message || 'Qwen OAuth authentication failed';
-        throw new Error(errorMessage);
-      }
-      return client;
-    }
-
     if (options?.requireCachedCredentials) {
       throw new Error(
         'No cached Qwen-OAuth credentials found. Please re-authenticate.',
       );
     }
 
+    // If we couldn't obtain valid credentials via SharedTokenManager, fall back to
+    // interactive device authorization (unless explicitly forbidden above).
     const result = await authWithQwenDeviceFlow(client, config);
     if (!result.success) {
       // Only emit timeout event if the failure reason is actually timeout
@@ -688,6 +676,19 @@ async function authWithQwenDeviceFlow(
 
           // Cache the new tokens
           await cacheQwenCredentials(credentials);
+
+          // IMPORTANT:
+          // SharedTokenManager maintains an in-memory cache and throttles file checks.
+          // If we only write the creds file here, a subsequent `getQwenOAuthClient()`
+          // call in the same process (within the throttle window) may not re-read the
+          // updated file and could incorrectly re-trigger device auth.
+          // Clearing the cache forces the next call to reload from disk.
+          try {
+            SharedTokenManager.getInstance().clearCache();
+          } catch {
+            // In unit tests we sometimes mock SharedTokenManager.getInstance() with a
+            // minimal stub; cache invalidation is best-effort and should not break auth.
+          }
 
           // Emit auth progress success event
           qwenOAuth2Events.emit(
@@ -847,27 +848,6 @@ async function authWithQwenDeviceFlow(
   }
 }
 
-async function loadCachedQwenCredentials(
-  client: QwenOAuth2Client,
-): Promise<boolean> {
-  try {
-    const keyFile = getQwenCachedCredentialPath();
-    const creds = await fs.readFile(keyFile, 'utf-8');
-    const credentials = JSON.parse(creds) as QwenCredentials;
-    client.setCredentials(credentials);
-
-    // Verify that the credentials are still valid
-    const { token } = await client.getAccessToken();
-    if (!token) {
-      return false;
-    }
-
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
 async function cacheQwenCredentials(credentials: QwenCredentials) {
   const filePath = getQwenCachedCredentialPath();
   try {
@@ -913,9 +893,19 @@ export async function clearQwenCredentials(): Promise<void> {
     }
     // Log other errors but don't throw - clearing credentials should be non-critical
     console.warn('Warning: Failed to clear cached Qwen credentials:', error);
+  } finally {
+    // Also clear SharedTokenManager in-memory cache to prevent stale credentials
+    // from being reused within the same process after the file is removed.
+    try {
+      SharedTokenManager.getInstance().clearCache();
+    } catch {
+      // Best-effort; don't fail credential clearing if SharedTokenManager is mocked.
+    }
   }
 }
 
 function getQwenCachedCredentialPath(): string {
   return path.join(os.homedir(), QWEN_DIR, QWEN_CREDENTIAL_FILENAME);
 }
+
+export const clearCachedCredentialFile = clearQwenCredentials;

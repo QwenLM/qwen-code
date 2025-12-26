@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export const JSONRPC_VERSION = '2.0' as const;
 export const authMethod = 'qwen-oauth';
@@ -47,6 +48,35 @@ export interface ContentBlock {
   uri?: string;
 }
 
+export interface UsageMetadata {
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  thoughtsTokens?: number | null;
+  totalTokens?: number | null;
+  cachedTokens?: number | null;
+}
+
+export interface SessionUpdateMeta {
+  usage?: UsageMetadata | null;
+  durationMs?: number | null;
+}
+
+export type AcpMeta = Record<string, unknown>;
+export type ModelId = string;
+
+export interface ModelInfo {
+  _meta?: AcpMeta | null;
+  description?: string | null;
+  modelId: ModelId;
+  name: string;
+}
+
+export interface SessionModelState {
+  _meta?: AcpMeta | null;
+  availableModels: ModelInfo[];
+  currentModelId: ModelId;
+}
+
 export interface UserMessageChunkUpdate extends BaseSessionUpdate {
   update: {
     sessionUpdate: 'user_message_chunk';
@@ -58,6 +88,7 @@ export interface AgentMessageChunkUpdate extends BaseSessionUpdate {
   update: {
     sessionUpdate: 'agent_message_chunk';
     content: ContentBlock;
+    _meta?: SessionUpdateMeta;
   };
 }
 
@@ -65,6 +96,7 @@ export interface AgentThoughtChunkUpdate extends BaseSessionUpdate {
   update: {
     sessionUpdate: 'agent_thought_chunk';
     content: ContentBlock;
+    _meta?: SessionUpdateMeta;
   };
 }
 
@@ -138,8 +170,6 @@ export interface PlanUpdate extends BaseSessionUpdate {
   };
 }
 
-export type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
-
 export {
   ApprovalMode,
   APPROVAL_MODE_MAP,
@@ -164,6 +194,13 @@ export interface CurrentModeUpdate extends BaseSessionUpdate {
   update: {
     sessionUpdate: 'current_mode_update';
     modeId: ApprovalModeValue;
+  };
+}
+
+// Authenticate update (sent by agent during authentication process)
+export interface AuthenticateUpdateNotification {
+  _meta: {
+    authUri: string;
   };
 }
 

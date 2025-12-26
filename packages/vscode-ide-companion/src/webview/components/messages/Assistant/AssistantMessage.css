@@ -48,5 +48,5 @@
 }
 
 .assistant-message-container.assistant-message-loading::after {
-  display: none
+  display: none;
 }

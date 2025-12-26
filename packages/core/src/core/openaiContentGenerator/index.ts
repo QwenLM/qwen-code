@@ -91,11 +91,4 @@ export function determineProvider(
   return new DefaultOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
 }
 
-// Services
-export {
-  type TelemetryService,
-  type RequestContext,
-  DefaultTelemetryService,
-} from './telemetryService.js';
-
 export { type ErrorHandler, EnhancedErrorHandler } from './errorHandler.js';

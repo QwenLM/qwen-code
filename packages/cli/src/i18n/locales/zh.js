@@ -249,6 +249,8 @@ export default {
   ', Tab to change focus': '，Tab 切换焦点',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必须重启 Qwen Code。按 r 退出并立即应用更改。',
+  'The command "/{{command}}" is not supported in non-interactive mode.':
+    '不支持在非交互模式下使用命令 "/{{command}}"。',
   // ============================================================================
   // Settings Labels
   // ============================================================================
@@ -300,6 +302,7 @@ export default {
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
   'Vision Model Preview': '视觉模型预览',
+  'Tool Schema Compliance': '工具 Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   Text: '文本',
@@ -559,6 +562,12 @@ export default {
   'No conversation found to summarize.': '未找到要总结的对话',
   'Failed to generate project context summary: {{error}}':
     '生成项目上下文摘要失败：{{error}}',
+  'Saved project summary to {{filePathForDisplay}}.':
+    '项目摘要已保存到 {{filePathForDisplay}}',
+  'Saving project summary...': '正在保存项目摘要...',
+  'Generating project summary...': '正在生成项目摘要...',
+  'Failed to generate summary - no text content received from LLM response':
+    '生成摘要失败 - 未从 LLM 响应中接收到文本内容',
 
   // ============================================================================
   // Commands - Model
@@ -601,8 +610,8 @@ export default {
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
     '/directory add 命令在限制性沙箱配置文件中不受支持。请改为在启动会话时使用 --include-directories。',
   "Error adding '{{path}}': {{error}}": "添加 '{{path}}' 时出错：{{error}}",
-  'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}':
-    '如果存在，已成功从以下目录添加 GEMINI.md 文件：\n- {{directories}}',
+  'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
+    '如果存在，已成功从以下目录添加 QWEN.md 文件：\n- {{directories}}',
   'Error refreshing memory: {{error}}': '刷新内存时出错：{{error}}',
   'Successfully added directories:\n- {{directories}}':
     '成功添加目录：\n- {{directories}}',
@@ -820,6 +829,7 @@ export default {
   // Exit Screen / Stats
   // ============================================================================
   'Agent powering down. Goodbye!': 'Qwen Code 正在关闭，再见！',
+  'To continue this session, run': '要继续此会话，请运行',
   'Interaction Summary': '交互摘要',
   'Session ID:': '会话 ID：',
   'Tool Calls:': '工具调用：',

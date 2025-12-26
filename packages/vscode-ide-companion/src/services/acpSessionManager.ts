@@ -14,8 +14,8 @@ import type {
   AcpRequest,
   AcpNotification,
   AcpResponse,
-  ApprovalModeValue,
 } from '../types/acpTypes.js';
+import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { AGENT_METHODS } from '../constants/acpSchema.js';
 import type { PendingRequest } from '../types/connectionTypes.js';
 import type { ChildProcess } from 'child_process';
@@ -54,21 +54,31 @@ export class AcpSessionManager {
     };
 
     return new Promise((resolve, reject) => {
-      const timeoutDuration =
-        method === AGENT_METHODS.session_prompt ? 120000 : 60000;
+      // No timeout for session_prompt as LLM tasks can take 5-10 minutes or longer
+      // The request should always terminate with a stop_reason
+      let timeoutId: NodeJS.Timeout | undefined;
+      let timeoutDuration: number | undefined;
 
-      const timeoutId = setTimeout(() => {
-        pendingRequests.delete(id);
-        reject(new Error(`Request ${method} timed out`));
-      }, timeoutDuration);
+      if (method !== AGENT_METHODS.session_prompt) {
+        // Set timeout for other methods
+        timeoutDuration = method === AGENT_METHODS.initialize ? 120000 : 60000;
+        timeoutId = setTimeout(() => {
+          pendingRequests.delete(id);
+          reject(new Error(`Request ${method} timed out`));
+        }, timeoutDuration);
+      }
 
       const pendingRequest: PendingRequest<T> = {
         resolve: (value: T) => {
-          clearTimeout(timeoutId);
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
           resolve(value);
         },
         reject: (error: Error) => {
-          clearTimeout(timeoutId);
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
           reject(error);
         },
         timeoutId,
@@ -163,7 +173,7 @@ export class AcpSessionManager {
       pendingRequests,
       nextRequestId,
     );
-    console.log('[ACP] Authenticate successful');
+    console.log('[ACP] Authenticate successful', response);
     return response;
   }
 

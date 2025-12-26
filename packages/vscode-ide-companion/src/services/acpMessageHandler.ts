@@ -17,6 +17,7 @@ import type {
   AcpResponse,
   AcpSessionUpdate,
   AcpPermissionRequest,
+  AuthenticateUpdateNotification,
 } from '../types/acpTypes.js';
 import { CLIENT_METHODS } from '../constants/acpSchema.js';
 import type {
@@ -110,13 +111,20 @@ export class AcpMessageHandler {
         // JSON.stringify(message.result).substring(0, 200),
         message.result,
       );
-      if (
-        message.result &&
-        typeof message.result === 'object' &&
-        'stopReason' in message.result &&
-        message.result.stopReason === 'end_turn'
-      ) {
-        callbacks.onEndTurn();
+
+      if (message.result && typeof message.result === 'object') {
+        const stopReasonValue =
+          (message.result as { stopReason?: unknown }).stopReason ??
+          (message.result as { stop_reason?: unknown }).stop_reason;
+        if (typeof stopReasonValue === 'string') {
+          callbacks.onEndTurn(stopReasonValue);
+        } else if (
+          'stopReason' in message.result ||
+          'stop_reason' in message.result
+        ) {
+          // stop_reason present but not a string (e.g., null) -> still emit
+          callbacks.onEndTurn();
+        }
       }
       resolve(message.result);
     } else if ('error' in message) {
@@ -160,6 +168,15 @@ export class AcpMessageHandler {
           JSON.stringify(params).substring(0, 300),
         );
         callbacks.onSessionUpdate(params as AcpSessionUpdate);
+        break;
+      case CLIENT_METHODS.authenticate_update:
+        console.log(
+          '[ACP] >>> Processing authenticate_update:',
+          JSON.stringify(params).substring(0, 300),
+        );
+        callbacks.onAuthenticateUpdate(
+          params as AuthenticateUpdateNotification,
+        );
         break;
       case CLIENT_METHODS.session_request_permission:
         result = await this.handlePermissionRequest(

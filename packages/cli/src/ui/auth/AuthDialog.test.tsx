@@ -168,7 +168,7 @@ describe('AuthDialog', () => {
 
     it('should not show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to something else', () => {
       process.env['GEMINI_API_KEY'] = 'foobar';
-      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.LOGIN_WITH_GOOGLE;
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.USE_OPENAI;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
@@ -212,7 +212,7 @@ describe('AuthDialog', () => {
 
     it('should show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to use api key', () => {
       process.env['GEMINI_API_KEY'] = 'foobar';
-      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.USE_GEMINI;
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.USE_OPENAI;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
@@ -504,12 +504,12 @@ describe('AuthDialog', () => {
       },
       {
         settings: {
-          security: { auth: { selectedType: AuthType.LOGIN_WITH_GOOGLE } },
+          security: { auth: { selectedType: AuthType.USE_OPENAI } },
           ui: { customThemes: {} },
           mcpServers: {},
         },
         originalSettings: {
-          security: { auth: { selectedType: AuthType.LOGIN_WITH_GOOGLE } },
+          security: { auth: { selectedType: AuthType.USE_OPENAI } },
           ui: { customThemes: {} },
           mcpServers: {},
         },

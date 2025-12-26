@@ -13,6 +13,7 @@ import type {
 import { GoogleAuth } from 'google-auth-library';
 import type { MCPServerConfig } from '../config/config.js';
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
+import { MCP_SA_IMPERSONATION_CLIENT_NAME } from './constants.js';
 
 const fiveMinBufferMs = 5 * 60 * 1000;
 
@@ -32,7 +33,7 @@ export class ServiceAccountImpersonationProvider
   // Properties required by OAuthClientProvider, with no-op values
   readonly redirectUrl = '';
   readonly clientMetadata: OAuthClientMetadata = {
-    client_name: 'Gemini CLI (Service Account Impersonation)',
+    client_name: MCP_SA_IMPERSONATION_CLIENT_NAME,
     redirect_uris: [],
     grant_types: [],
     response_types: [],

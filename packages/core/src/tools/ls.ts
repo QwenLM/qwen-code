@@ -9,6 +9,7 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
+import { isSubpath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
@@ -311,8 +312,14 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
       return `Path must be absolute: ${params.path}`;
     }
 
+    const userSkillsBase = this.config.storage.getUserSkillsDir();
+    const isUnderUserSkills = isSubpath(userSkillsBase, params.path);
+
     const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(params.path)) {
+    if (
+      !workspaceContext.isPathWithinWorkspace(params.path) &&
+      !isUnderUserSkills
+    ) {
       const directories = workspaceContext.getDirectories();
       return `Path must be within one of the workspace directories: ${directories.join(
         ', ',

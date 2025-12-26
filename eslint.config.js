@@ -263,4 +263,25 @@ export default tseslint.config(
       ],
     },
   },
+  // Settings for docs-site directory
+  {
+    files: ['docs-site/**/*.{js,jsx}'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.node,
+      },
+      parserOptions: {
+        ecmaFeatures: {
+          jsx: true,
+        },
+      },
+    },
+    rules: {
+      // Allow relaxed rules for documentation site
+      '@typescript-eslint/no-unused-vars': 'off',
+      'react/prop-types': 'off',
+      'react/react-in-jsx-scope': 'off',
+    },
+  },
 );

@@ -9,7 +9,7 @@
 import type React from 'react';
 import type { BaseToolCallProps } from '../shared/types.js';
 import type { ToolCallContainerProps } from '../shared/LayoutComponents.js';
-import { groupContent, safeTitle } from '../shared/utils.js';
+import { groupContent, safeTitle } from '../../../../utils/utils.js';
 import { CheckboxDisplay } from './CheckboxDisplay.js';
 import type { PlanEntry } from '../../../../../types/chatTypes.js';
 

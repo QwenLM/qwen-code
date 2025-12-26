@@ -14,7 +14,7 @@ import {
   ToolCallRow,
   LocationsList,
 } from './shared/LayoutComponents.js';
-import { safeTitle, groupContent } from './shared/utils.js';
+import { safeTitle, groupContent } from '../../../utils/utils.js';
 
 /**
  * Generic tool call component that can display any tool call type

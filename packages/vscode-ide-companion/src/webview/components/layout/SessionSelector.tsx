@@ -5,8 +5,10 @@
  */
 
 import React from 'react';
-import { groupSessionsByDate } from '../../utils/sessionGrouping.js';
-import { getTimeAgo } from '../../utils/timeUtils.js';
+import {
+  getTimeAgo,
+  groupSessionsByDate,
+} from '../../utils/sessionGrouping.js';
 import { SearchIcon } from '../icons/index.js';
 
 interface SessionSelectorProps {

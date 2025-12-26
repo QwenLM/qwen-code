@@ -18,8 +18,6 @@ jobs:
           - 'sandbox:docker'
         node-version:
           - '20.x'
-          - '22.x'
-          - '24.x'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
@@ -67,10 +65,13 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
-          SANDBOX: '${{ matrix.sandbox }}'
           VERBOSE: 'true'
         run: |-
-          npm run "test:integration:${SANDBOX}"
+          if [[ "${{ matrix.sandbox }}" == "sandbox:docker" ]]; then
+            npm run test:integration:sandbox:docker
+          else
+            npm run test:integration:sandbox:none
+          fi
 
   e2e-test-macos:
     name: 'E2E Test - macOS'

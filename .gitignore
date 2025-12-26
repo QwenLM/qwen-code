@@ -57,3 +57,8 @@ gha-creds-*.json
 
 # Log files
 patch_output.log
+
+# docs build
+docs-site/.next
+# content is a symlink to ../docs
+docs-site/content

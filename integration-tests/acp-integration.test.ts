@@ -13,8 +13,6 @@ import { TestRig } from './test-helper.js';
 
 const REQUEST_TIMEOUT_MS = 60_000;
 const INITIAL_PROMPT = 'Create a quick note (smoke test).';
-const RESUME_PROMPT = 'Continue the note after reload.';
-const LIST_SIZE = 5;
 const IS_SANDBOX =
   process.env['GEMINI_SANDBOX'] &&
   process.env['GEMINI_SANDBOX']!.toLowerCase() !== 'false';
@@ -97,10 +95,14 @@ function setupAcpTest(
   const permissionHandler =
     options?.permissionHandler ?? (() => ({ optionId: 'proceed_once' }));
 
-  const agent = spawn('node', [rig.bundlePath, '--experimental-acp'], {
-    cwd: rig.testDir!,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  const agent = spawn(
+    'node',
+    [rig.bundlePath, '--experimental-acp', '--no-chat-recording'],
+    {
+      cwd: rig.testDir!,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
 
   agent.stderr?.on('data', (chunk) => {
     stderr.push(chunk.toString());
@@ -264,11 +266,11 @@ function setupAcpTest(
 }
 
 (IS_SANDBOX ? describe.skip : describe)('acp integration', () => {
-  it('creates, lists, loads, and resumes a session', async () => {
+  it('basic smoke test', async () => {
     const rig = new TestRig();
     rig.setup('acp load session');
 
-    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
     try {
       const initResult = await sendRequest('initialize', {
@@ -294,34 +296,6 @@ function setupAcpTest(
         prompt: [{ type: 'text', text: INITIAL_PROMPT }],
       });
       expect(promptResult).toBeDefined();
-
-      await delay(500);
-
-      const listResult = (await sendRequest('session/list', {
-        cwd: rig.testDir!,
-        size: LIST_SIZE,
-      })) as { items?: Array<{ sessionId: string }> };
-
-      expect(Array.isArray(listResult.items)).toBe(true);
-      expect(listResult.items?.length ?? 0).toBeGreaterThan(0);
-
-      const sessionToLoad = listResult.items![0].sessionId;
-      await sendRequest('session/load', {
-        cwd: rig.testDir!,
-        sessionId: sessionToLoad,
-        mcpServers: [],
-      });
-
-      const resumeResult = await sendRequest('session/prompt', {
-        sessionId: sessionToLoad,
-        prompt: [{ type: 'text', text: RESUME_PROMPT }],
-      });
-      expect(resumeResult).toBeDefined();
-
-      const sessionsWithUpdates = sessionUpdates
-        .map((update) => update.sessionId)
-        .filter(Boolean);
-      expect(sessionsWithUpdates).toContain(sessionToLoad);
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));

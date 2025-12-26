@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 
 /**
  * Session message handler
@@ -14,7 +15,6 @@ import type { ChatMessage } from '../../services/qwenAgentManager.js';
  */
 export class SessionMessageHandler extends BaseMessageHandler {
   private currentStreamContent = '';
-  private isSavingCheckpoint = false;
   private loginHandler: (() => Promise<void>) | null = null;
   private isTitleSet = false; // Flag to track if title has been set
 
@@ -29,6 +29,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
       'cancelStreaming',
       // UI action: open a new chat tab (new WebviewPanel)
       'openNewChatTab',
+      // Settings-related messages
+      'setApprovalMode',
     ].includes(messageType);
   }
 
@@ -112,6 +114,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
         await this.handleCancelStreaming();
         break;
 
+      case 'setApprovalMode':
+        await this.handleSetApprovalMode(
+          message.data as {
+            modeId?: ApprovalModeValue;
+          },
+        );
+        break;
+
       default:
         console.warn(
           '[SessionMessageHandler] Unknown message type:',
@@ -143,10 +153,21 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Check if saving checkpoint
+   * Notify the webview that streaming has finished.
    */
-  getIsSavingCheckpoint(): boolean {
-    return this.isSavingCheckpoint;
+  private sendStreamEnd(reason?: string): void {
+    const data: { timestamp: number; reason?: string } = {
+      timestamp: Date.now(),
+    };
+
+    if (reason) {
+      data.reason = reason;
+    }
+
+    this.sendToWebView({
+      type: 'streamEnd',
+      data,
+    });
   }
 
   /**
@@ -370,45 +391,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
       }
 
-      this.sendToWebView({
-        type: 'streamEnd',
-        data: { timestamp: Date.now() },
-      });
-
-      // Auto-save checkpoint
-      if (this.currentConversationId) {
-        try {
-          const conversation = await this.conversationStore.getConversation(
-            this.currentConversationId,
-          );
-
-          const messages = conversation?.messages || [];
-
-          this.isSavingCheckpoint = true;
-
-          const result = await this.agentManager.saveCheckpoint(
-            messages,
-            this.currentConversationId,
-          );
-
-          setTimeout(() => {
-            this.isSavingCheckpoint = false;
-          }, 2000);
-
-          if (result.success) {
-            console.log(
-              '[SessionMessageHandler] Checkpoint saved:',
-              result.tag,
-            );
-          }
-        } catch (error) {
-          console.error(
-            '[SessionMessageHandler] Checkpoint save failed:',
-            error,
-          );
-          this.isSavingCheckpoint = false;
-        }
-      }
+      this.sendStreamEnd();
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
 
@@ -430,10 +413,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       if (isAbortLike) {
         // Do not show VS Code error popup for intentional cancellations.
         // Ensure the webview knows the stream ended due to user action.
-        this.sendToWebView({
-          type: 'streamEnd',
-          data: { timestamp: Date.now(), reason: 'user_cancelled' },
-        });
+        this.sendStreamEnd('user_cancelled');
         return;
       }
       // Check for session not found error and handle it appropriately
@@ -455,12 +435,39 @@ export class SessionMessageHandler extends BaseMessageHandler {
           type: 'sessionExpired',
           data: { message: 'Session expired. Please login again.' },
         });
+        this.sendStreamEnd('session_expired');
       } else {
-        vscode.window.showErrorMessage(`Error sending message: ${error}`);
-        this.sendToWebView({
-          type: 'error',
-          data: { message: errorMsg },
-        });
+        const isTimeoutError =
+          lower.includes('timeout') || lower.includes('timed out');
+        if (isTimeoutError) {
+          // Note: session_prompt no longer has a timeout, so this should rarely occur
+          // This path may still be hit for other methods (initialize, etc.) or network-level timeouts
+          console.warn(
+            '[SessionMessageHandler] Request timed out; suppressing popup',
+          );
+
+          const timeoutMessage: ChatMessage = {
+            role: 'assistant',
+            content:
+              'Request timed out. This may be due to a network issue. Please try again.',
+            timestamp: Date.now(),
+          };
+
+          // Send a timeout message to the WebView
+          this.sendToWebView({
+            type: 'message',
+            data: timeoutMessage,
+          });
+          this.sendStreamEnd('timeout');
+        } else {
+          // Handling of Non-Timeout Errors
+          vscode.window.showErrorMessage(`Error sending message: ${error}`);
+          this.sendToWebView({
+            type: 'error',
+            data: { message: errorMsg },
+          });
+          this.sendStreamEnd('error');
+        }
       }
     }
   }
@@ -479,23 +486,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
         if (!proceeded) {
           return;
-        }
-      }
-
-      // Save current session before creating new one
-      if (this.currentConversationId && this.agentManager.isConnected) {
-        try {
-          const conversation = await this.conversationStore.getConversation(
-            this.currentConversationId,
-          );
-          const messages = conversation?.messages || [];
-
-          await this.agentManager.saveCheckpoint(
-            messages,
-            this.currentConversationId,
-          );
-        } catch (error) {
-          console.warn('[SessionMessageHandler] Failed to auto-save:', error);
         }
       }
 
@@ -575,27 +565,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
         } else if (choice !== 'login') {
           // User dismissed; do nothing
           return;
-        }
-      }
-
-      // Save current session before switching
-      if (
-        this.currentConversationId &&
-        this.currentConversationId !== sessionId &&
-        this.agentManager.isConnected
-      ) {
-        try {
-          const conversation = await this.conversationStore.getConversation(
-            this.currentConversationId,
-          );
-          const messages = conversation?.messages || [];
-
-          await this.agentManager.saveCheckpoint(
-            messages,
-            this.currentConversationId,
-          );
-        } catch (error) {
-          console.warn('[SessionMessageHandler] Failed to auto-save:', error);
         }
       }
 
@@ -841,11 +810,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
         throw new Error('No active conversation to save');
       }
 
-      const conversation = await this.conversationStore.getConversation(
-        this.currentConversationId,
-      );
-      const messages = conversation?.messages || [];
-
       // Try ACP save first
       try {
         const response = await this.agentManager.saveSessionViaAcp(
@@ -880,17 +844,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
           });
           return;
         }
-
-        // Fallback to direct save
-        const response = await this.agentManager.saveSessionDirect(
-          messages,
-          tag,
-        );
-
-        this.sendToWebView({
-          type: 'saveSessionResponse',
-          data: response,
-        });
       }
 
       await this.handleGetQwenSessions();
@@ -1025,20 +978,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
           });
           return;
         }
-
-        // Fallback to direct load
-        const messages = await this.agentManager.loadSessionDirect(sessionId);
-
-        if (messages) {
-          this.currentConversationId = sessionId;
-
-          this.sendToWebView({
-            type: 'qwenSessionSwitched',
-            data: { sessionId, messages },
-          });
-        } else {
-          throw new Error('Failed to load session');
-        }
       }
 
       await this.handleGetQwenSessions();
@@ -1071,6 +1010,25 @@ export class SessionMessageHandler extends BaseMessageHandler {
           data: { message: `Failed to resume session: ${error}` },
         });
       }
+    }
+  }
+
+  /**
+   * Set approval mode via agent (ACP session/set_mode)
+   */
+  private async handleSetApprovalMode(data?: {
+    modeId?: ApprovalModeValue;
+  }): Promise<void> {
+    try {
+      const modeId = data?.modeId || 'default';
+      await this.agentManager.setApprovalModeFromUi(modeId);
+      // No explicit response needed; WebView listens for modeChanged
+    } catch (error) {
+      console.error('[SessionMessageHandler] Failed to set mode:', error);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to set mode: ${error}` },
+      });
     }
   }
 }

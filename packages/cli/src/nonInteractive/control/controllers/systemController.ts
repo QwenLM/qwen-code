@@ -20,8 +20,7 @@ import type {
   CLIControlSetModelRequest,
   CLIMcpServerConfig,
 } from '../../types.js';
-import { CommandService } from '../../../services/CommandService.js';
-import { BuiltinCommandLoader } from '../../../services/BuiltinCommandLoader.js';
+import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
 import {
   MCPServerConfig,
   AuthProviderType,
@@ -407,7 +406,7 @@ export class SystemController extends BaseController {
   }
 
   /**
-   * Load slash command names using CommandService
+   * Load slash command names using getAvailableCommands
    *
    * @param signal - AbortSignal to respect for cancellation
    * @returns Promise resolving to array of slash command names
@@ -418,21 +417,14 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const service = await CommandService.create(
-        [new BuiltinCommandLoader(this.context.config)],
-        signal,
-      );
+      const commands = await getAvailableCommands(this.context.config, signal);
 
       if (signal.aborted) {
         return [];
       }
 
-      const names = new Set<string>();
-      const commands = service.getCommands();
-      for (const command of commands) {
-        names.add(command.name);
-      }
-      return Array.from(names).sort();
+      // Extract command names and sort
+      return commands.map((cmd) => cmd.name).sort();
     } catch (error) {
       // Check if the error is due to abort
       if (signal.aborted) {

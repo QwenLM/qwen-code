@@ -610,8 +610,6 @@ export abstract class BaseJsonOutputAdapter {
         const errorText = parseAndFormatApiError(
           event.value.error,
           this.config.getContentGeneratorConfig()?.authType,
-          undefined,
-          this.config.getModel(),
         );
         this.appendText(state, errorText, null);
         break;

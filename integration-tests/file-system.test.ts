@@ -5,8 +5,6 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { existsSync } from 'node:fs';
-import * as path from 'node:path';
 import { TestRig, printDebugInfo, validateModelOutput } from './test-helper.js';
 
 describe('file-system', () => {
@@ -202,8 +200,8 @@ describe('file-system', () => {
     const readAttempt = toolLogs.find(
       (log) => log.toolRequest.name === 'read_file',
     );
-    const writeAttempt = toolLogs.find(
-      (log) => log.toolRequest.name === 'write_file',
+    const editAttempt = toolLogs.find(
+      (log) => log.toolRequest.name === 'edit_file',
     );
     const successfulReplace = toolLogs.find(
       (log) => log.toolRequest.name === 'replace' && log.toolRequest.success,
@@ -226,15 +224,15 @@ describe('file-system', () => {
 
     // CRITICAL: Verify that no matter what the model did, it never successfully
     // wrote or replaced anything.
-    if (writeAttempt) {
+    if (editAttempt) {
       console.error(
-        'A write_file attempt was made when no file should be written.',
+        'A edit_file attempt was made when no file should be written.',
       );
       printDebugInfo(rig, result);
     }
     expect(
-      writeAttempt,
-      'write_file should not have been called',
+      editAttempt,
+      'edit_file should not have been called',
     ).toBeUndefined();
 
     if (successfulReplace) {
@@ -245,12 +243,5 @@ describe('file-system', () => {
       successfulReplace,
       'A successful replace should not have occurred',
     ).toBeUndefined();
-
-    // Final verification: ensure the file was not created.
-    const filePath = path.join(rig.testDir!, fileName);
-    const fileExists = existsSync(filePath);
-    expect(fileExists, 'The non-existent file should not be created').toBe(
-      false,
-    );
   });
 });

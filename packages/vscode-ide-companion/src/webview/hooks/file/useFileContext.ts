@@ -34,6 +34,9 @@ export const useFileContext = (vscode: VSCodeAPI) => {
   // Whether workspace files have been requested
   const hasRequestedFilesRef = useRef(false);
 
+  // Last non-empty query to decide when to refetch full list
+  const lastQueryRef = useRef<string | undefined>(undefined);
+
   // Search debounce timer
   const searchTimerRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -42,12 +45,10 @@ export const useFileContext = (vscode: VSCodeAPI) => {
    */
   const requestWorkspaceFiles = useCallback(
     (query?: string) => {
-      if (!hasRequestedFilesRef.current && !query) {
-        hasRequestedFilesRef.current = true;
-      }
+      const normalizedQuery = query?.trim();
 
       // If there's a query, clear previous timer and set up debounce
-      if (query && query.length >= 1) {
+      if (normalizedQuery && normalizedQuery.length >= 1) {
         if (searchTimerRef.current) {
           clearTimeout(searchTimerRef.current);
         }
@@ -55,14 +56,23 @@ export const useFileContext = (vscode: VSCodeAPI) => {
         searchTimerRef.current = setTimeout(() => {
           vscode.postMessage({
             type: 'getWorkspaceFiles',
-            data: { query },
+            data: { query: normalizedQuery },
           });
         }, 300);
+        lastQueryRef.current = normalizedQuery;
       } else {
-        vscode.postMessage({
-          type: 'getWorkspaceFiles',
-          data: query ? { query } : {},
-        });
+        // For empty query, request once initially and whenever we are returning from a search
+        const shouldRequestFullList =
+          !hasRequestedFilesRef.current || lastQueryRef.current !== undefined;
+
+        if (shouldRequestFullList) {
+          lastQueryRef.current = undefined;
+          hasRequestedFilesRef.current = true;
+          vscode.postMessage({
+            type: 'getWorkspaceFiles',
+            data: {},
+          });
+        }
       }
     },
     [vscode],

@@ -14,6 +14,7 @@ interface UseMessageSubmitProps {
   setInputText: (text: string) => void;
   inputFieldRef: React.RefObject<HTMLDivElement>;
   isStreaming: boolean;
+  isWaitingForResponse: boolean;
   // When true, do NOT auto-attach the active editor file/selection to context
   skipAutoActiveContext?: boolean;
 
@@ -40,6 +41,7 @@ export const useMessageSubmit = ({
   setInputText,
   inputFieldRef,
   isStreaming,
+  isWaitingForResponse,
   skipAutoActiveContext = false,
   fileContext,
   messageHandling,
@@ -48,7 +50,7 @@ export const useMessageSubmit = ({
     (e: React.FormEvent) => {
       e.preventDefault();
 
-      if (!inputText.trim() || isStreaming) {
+      if (!inputText.trim() || isStreaming || isWaitingForResponse) {
         return;
       }
 
@@ -56,7 +58,10 @@ export const useMessageSubmit = ({
       if (inputText.trim() === '/login') {
         setInputText('');
         if (inputFieldRef.current) {
-          inputFieldRef.current.textContent = '';
+          // Use a zero-width space to maintain the height of the contentEditable element
+          inputFieldRef.current.textContent = '\u200B';
+          // Set the data-empty attribute to show the placeholder
+          inputFieldRef.current.setAttribute('data-empty', 'true');
         }
         vscode.postMessage({
           type: 'login',
@@ -142,7 +147,10 @@ export const useMessageSubmit = ({
 
       setInputText('');
       if (inputFieldRef.current) {
-        inputFieldRef.current.textContent = '';
+        // Use a zero-width space to maintain the height of the contentEditable element
+        inputFieldRef.current.textContent = '\u200B';
+        // Set the data-empty attribute to show the placeholder
+        inputFieldRef.current.setAttribute('data-empty', 'true');
       }
       fileContext.clearFileReferences();
     },
@@ -154,6 +162,7 @@ export const useMessageSubmit = ({
       vscode,
       fileContext,
       skipAutoActiveContext,
+      isWaitingForResponse,
       messageHandling,
     ],
   );

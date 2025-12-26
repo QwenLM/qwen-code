@@ -26,5 +26,37 @@ export function validateAuthMethod(authMethod: string): string | null {
     return null;
   }
 
+  if (authMethod === AuthType.USE_ANTHROPIC) {
+    const hasApiKey = process.env['ANTHROPIC_API_KEY'];
+    if (!hasApiKey) {
+      return 'ANTHROPIC_API_KEY environment variable not found.';
+    }
+
+    const hasBaseUrl = process.env['ANTHROPIC_BASE_URL'];
+    if (!hasBaseUrl) {
+      return 'ANTHROPIC_BASE_URL environment variable not found.';
+    }
+
+    return null;
+  }
+
+  if (authMethod === AuthType.USE_GEMINI) {
+    const hasApiKey = process.env['GEMINI_API_KEY'];
+    if (!hasApiKey) {
+      return 'GEMINI_API_KEY environment variable not found. Please set it in your .env file or environment variables.';
+    }
+    return null;
+  }
+
+  if (authMethod === AuthType.USE_VERTEX_AI) {
+    const hasApiKey = process.env['GOOGLE_API_KEY'];
+    if (!hasApiKey) {
+      return 'GOOGLE_API_KEY environment variable not found. Please set it in your .env file or environment variables.';
+    }
+
+    process.env['GOOGLE_GENAI_USE_VERTEXAI'] = 'true';
+    return null;
+  }
+
   return 'Invalid auth method selected.';
 }
