@@ -95,11 +95,11 @@ export class GeminiClient {
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
+    this.vectorStore = new VectorStoreService(this.config);
   }
 
   async initialize() {
     this.lastPromptId = this.config.getSessionId();
-    this.vectorStore = new VectorStoreService(this.config);
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();

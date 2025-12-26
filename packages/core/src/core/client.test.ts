@@ -69,18 +69,14 @@ vi.mock('node:fs', () => {
 // --- Mocks ---
 const mockTurnRunFn = vi.fn();
 
-const { mockVectorStore } = vi.hoisted(() => ({
-  mockVectorStore: {
-    search: vi.fn().mockResolvedValue([]),
-    addText: vi.fn().mockResolvedValue(undefined),
-  },
+vi.mock('../services/memory/vectorStoreService.js', () => ({
+  VectorStoreService: vi.fn().mockImplementation(() => {
+    return {
+      search: vi.fn().mockResolvedValue([]),
+      addText: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
 }));
-
-vi.mock('../services/memory/vectorStoreService.js', () => {
-  return {
-    VectorStoreService: vi.fn().mockImplementation(() => mockVectorStore),
-  };
-});
 
 vi.mock('./turn', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./turn.js')>();
