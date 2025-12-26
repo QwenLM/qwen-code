@@ -44,6 +44,7 @@ import { doesToolInvocationMatch } from '../utils/tool-utils.js';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+import { VectorStoreService } from '../services/memory/vectorStoreService.js';
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -327,6 +328,7 @@ interface CoreToolSchedulerOptions {
    * Optional recording service. If provided, tool results will be recorded.
    */
   chatRecordingService?: ChatRecordingService;
+  vectorStore?: VectorStoreService;
 }
 
 export class CoreToolScheduler {
@@ -339,6 +341,7 @@ export class CoreToolScheduler {
   private config: Config;
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
+  private vectorStore?: VectorStoreService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
   private requestQueue: Array<{
@@ -357,6 +360,7 @@ export class CoreToolScheduler {
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
+    this.vectorStore = options.vectorStore;
   }
 
   private setStatusInternal(
@@ -1260,6 +1264,22 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       });
+
+      // Index large successful outputs in the vector store for RAG
+      if (this.vectorStore && call.status === 'success' && call.response.resultDisplay) {
+        const textToSearch = typeof call.response.resultDisplay === 'string' 
+          ? call.response.resultDisplay 
+          : JSON.stringify(call.response.resultDisplay);
+        
+        if (textToSearch.length > 1000) {
+          void this.vectorStore.addText(textToSearch, {
+            type: 'tool_output',
+            tool: call.request.name,
+            callId: call.request.callId,
+            path: (call.request.args as any)?.['path'] ?? (call.request.args as any)?.['file_path'] ?? 'unknown'
+          });
+        }
+      }
     }
   }
 

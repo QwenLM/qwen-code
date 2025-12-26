@@ -73,6 +73,7 @@ import { type File, type IdeContext } from '../ide/types.js';
 
 // Fallback handling
 import { handleFallback } from '../fallback/handler.js';
+import { VectorStoreService } from '../services/memory/vectorStoreService.js';
 
 const MAX_TURNS = 100;
 
@@ -84,6 +85,7 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
+  private vectorStore?: VectorStoreService;
 
   /**
    * At any point in this conversation, was compression triggered without
@@ -97,6 +99,7 @@ export class GeminiClient {
 
   async initialize() {
     this.lastPromptId = this.config.getSessionId();
+    this.vectorStore = new VectorStoreService(this.config);
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -400,12 +403,12 @@ export class GeminiClient {
       this.sessionTurnCount > this.config.getMaxSessionTurns()
     ) {
       yield { type: GeminiEventType.MaxSessionTurns };
-      return new Turn(this.getChat(), prompt_id);
+      return new Turn(this.getChat(), prompt_id, this.vectorStore);
     }
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
-      return new Turn(this.getChat(), prompt_id);
+      return new Turn(this.getChat(), prompt_id, this.vectorStore);
     }
 
     const compressed = await this.tryCompressChat(prompt_id, false);
@@ -458,7 +461,7 @@ export class GeminiClient {
               'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           },
         };
-        return new Turn(this.getChat(), prompt_id);
+        return new Turn(this.getChat(), prompt_id, this.vectorStore);
       }
     }
 
@@ -489,7 +492,25 @@ export class GeminiClient {
       this.forceFullIdeContext = false;
     }
 
-    const turn = new Turn(this.getChat(), prompt_id);
+    // Retrieve relevant context from RAG
+    let ragContextPart: string | undefined;
+    if (this.vectorStore && !options?.isContinuation) {
+      const queryText = (Array.isArray(request) ? request : [request])
+        .filter((p) => typeof p === 'string' || (typeof p === 'object' && p !== null && 'text' in p))
+        .map((p) => (typeof p === 'string' ? p : (p as any).text))
+        .join(' ');
+
+      if (queryText.trim().length > 0) {
+        const snippets = await this.vectorStore.search(queryText);
+        if (snippets.length > 0) {
+          ragContextPart = `Here is relevant context retrieved from your long-term memory:\n\n${snippets
+            .map((s) => `[File: ${s.metadata['path'] ?? 'unknown'}]\n${s.text}`)
+            .join('\n\n---\n\n')}`;
+        }
+      }
+    }
+
+    const turn = new Turn(this.getChat(), prompt_id, this.vectorStore);
 
     if (!this.config.getSkipLoopDetection()) {
       const loopDetected = await this.loopDetector.turnStarted(signal);
@@ -503,6 +524,10 @@ export class GeminiClient {
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (!options?.isContinuation) {
       const systemReminders = [];
+
+      if (ragContextPart) {
+        systemReminders.push({ text: ragContextPart });
+      }
 
       // add subagent system reminder if there are subagents
       const hasTaskTool = this.config.getToolRegistry().getTool(TaskTool.Name);

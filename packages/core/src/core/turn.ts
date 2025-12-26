@@ -32,6 +32,7 @@ import {
   parseThought,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
+import { VectorStoreService } from '../services/memory/vectorStoreService.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -226,6 +227,7 @@ export class Turn {
   constructor(
     private readonly chat: GeminiChat,
     private readonly prompt_id: string,
+    private readonly vectorStore?: VectorStoreService,
   ) {}
   // The run method yields simpler events suitable for server logic
   async *run(
