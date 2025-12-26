@@ -150,48 +150,49 @@ export function parseExecutableSpec(executableSpec?: string): {
   }
 
   // Check for runtime prefix (e.g., 'bun:/path/to/cli.js')
+  // Use whitelist mechanism: only treat as runtime spec if prefix matches supported runtimes
+  const supportedRuntimes = ['node', 'bun', 'tsx', 'deno'];
   const runtimeMatch = executableSpec.match(/^([^:]+):(.+)$/);
+
   if (runtimeMatch) {
     const [, runtime, filePath] = runtimeMatch;
-    if (!runtime || !filePath) {
-      throw new Error(`Invalid runtime specification: '${executableSpec}'`);
+
+    // Only process as runtime specification if it matches a supported runtime
+    if (runtime && supportedRuntimes.includes(runtime)) {
+      if (!filePath) {
+        throw new Error(`Invalid runtime specification: '${executableSpec}'`);
+      }
+
+      if (!validateRuntimeAvailability(runtime)) {
+        throw new Error(
+          `Runtime '${runtime}' is not available on this system. Please install it first.`,
+        );
+      }
+
+      const resolvedPath = path.resolve(filePath);
+
+      if (!fs.existsSync(resolvedPath)) {
+        throw new Error(
+          `Executable file not found at '${resolvedPath}' for runtime '${runtime}'. ` +
+            'Please check the file path and ensure the file exists.',
+        );
+      }
+
+      if (!validateFileExtensionForRuntime(resolvedPath, runtime)) {
+        const ext = path.extname(resolvedPath);
+        throw new Error(
+          `File extension '${ext}' is not compatible with runtime '${runtime}'. ` +
+            `Expected extensions for ${runtime}: ${getExpectedExtensions(runtime).join(', ')}`,
+        );
+      }
+
+      return {
+        runtime,
+        executablePath: resolvedPath,
+        isExplicitRuntime: true,
+      };
     }
-
-    const supportedRuntimes = ['node', 'bun', 'tsx', 'deno'];
-    if (!supportedRuntimes.includes(runtime)) {
-      throw new Error(
-        `Unsupported runtime '${runtime}'. Supported runtimes: ${supportedRuntimes.join(', ')}`,
-      );
-    }
-
-    if (!validateRuntimeAvailability(runtime)) {
-      throw new Error(
-        `Runtime '${runtime}' is not available on this system. Please install it first.`,
-      );
-    }
-
-    const resolvedPath = path.resolve(filePath);
-
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(
-        `Executable file not found at '${resolvedPath}' for runtime '${runtime}'. ` +
-          'Please check the file path and ensure the file exists.',
-      );
-    }
-
-    if (!validateFileExtensionForRuntime(resolvedPath, runtime)) {
-      const ext = path.extname(resolvedPath);
-      throw new Error(
-        `File extension '${ext}' is not compatible with runtime '${runtime}'. ` +
-          `Expected extensions for ${runtime}: ${getExpectedExtensions(runtime).join(', ')}`,
-      );
-    }
-
-    return {
-      runtime,
-      executablePath: resolvedPath,
-      isExplicitRuntime: true,
-    };
+    // If not a supported runtime, fall through to treat as file path (e.g., Windows paths like 'D:\path\to\cli.js')
   }
 
   // Check if it's a command name (no path separators) or a file path

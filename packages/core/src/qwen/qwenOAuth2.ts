@@ -907,3 +907,5 @@ export async function clearQwenCredentials(): Promise<void> {
 function getQwenCachedCredentialPath(): string {
   return path.join(os.homedir(), QWEN_DIR, QWEN_CREDENTIAL_FILENAME);
 }
+
+export const clearCachedCredentialFile = clearQwenCredentials;

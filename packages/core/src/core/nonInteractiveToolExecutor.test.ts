@@ -47,7 +47,7 @@ describe('executeToolCall', () => {
       getDebugMode: () => false,
       getContentGeneratorConfig: () => ({
         model: 'test-model',
-        authType: 'oauth-personal',
+        authType: 'gemini-api-key',
       }),
       getShellExecutionConfig: () => ({
         terminalWidth: 90,

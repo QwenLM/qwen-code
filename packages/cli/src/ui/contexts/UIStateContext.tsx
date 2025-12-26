@@ -22,20 +22,12 @@ import type {
   AuthType,
   IdeContext,
   ApprovalMode,
-  UserTierId,
   IdeInfo,
-  FallbackIntent,
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
-
-export interface ProQuotaDialogRequest {
-  failedModel: string;
-  fallbackModel: string;
-  resolve: (intent: FallbackIntent) => void;
-}
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
@@ -99,8 +91,6 @@ export interface UIState {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   workspaceExtensions: any[]; // Extension[]
   // Quota-related state
-  userTier: UserTierId | undefined;
-  proQuotaRequest: ProQuotaDialogRequest | null;
   currentModel: string;
   contextFileNames: string[];
   errorCount: number;

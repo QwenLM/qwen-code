@@ -125,10 +125,41 @@ describe('CLI Path Utilities', () => {
         });
       });
 
-      it('should throw for invalid runtime prefix format', () => {
+      it('should treat non-whitelisted runtime prefixes as command names', () => {
+        // With whitelist approach, 'invalid:format' is not recognized as a runtime spec
+        // so it's treated as a command name, which fails validation due to the colon
         expect(() => parseExecutableSpec('invalid:format')).toThrow(
-          'Unsupported runtime',
+          'Invalid command name',
         );
+      });
+
+      it('should treat Windows drive letters as file paths, not runtime specs', () => {
+        mockFs.existsSync.mockReturnValue(true);
+
+        // Test various Windows drive letters
+        const windowsPaths = [
+          'C:\\path\\to\\cli.js',
+          'D:\\path\\to\\cli.js',
+          'E:\\Users\\dev\\qwen\\cli.js',
+        ];
+
+        for (const winPath of windowsPaths) {
+          const result = parseExecutableSpec(winPath);
+
+          expect(result.isExplicitRuntime).toBe(false);
+          expect(result.runtime).toBeUndefined();
+          expect(result.executablePath).toBe(path.resolve(winPath));
+        }
+      });
+
+      it('should handle Windows paths with forward slashes', () => {
+        mockFs.existsSync.mockReturnValue(true);
+
+        const result = parseExecutableSpec('C:/path/to/cli.js');
+
+        expect(result.isExplicitRuntime).toBe(false);
+        expect(result.runtime).toBeUndefined();
+        expect(result.executablePath).toBe(path.resolve('C:/path/to/cli.js'));
       });
 
       it('should throw when runtime-prefixed file does not exist', () => {
@@ -453,6 +484,41 @@ describe('CLI Path Utilities', () => {
         originalInput: `bun:${bundlePath}`,
       });
     });
+
+    it('should handle Windows paths with drive letters', () => {
+      const windowsPath = 'D:\\path\\to\\cli.js';
+      const result = prepareSpawnInfo(windowsPath);
+
+      expect(result).toEqual({
+        command: process.execPath,
+        args: [path.resolve(windowsPath)],
+        type: 'node',
+        originalInput: windowsPath,
+      });
+    });
+
+    it('should handle Windows paths with TypeScript files', () => {
+      const windowsPath = 'C:\\Users\\dev\\qwen\\index.ts';
+      const result = prepareSpawnInfo(windowsPath);
+
+      expect(result).toEqual({
+        command: 'tsx',
+        args: [path.resolve(windowsPath)],
+        type: 'tsx',
+        originalInput: windowsPath,
+      });
+    });
+
+    it('should not confuse Windows drive letters with runtime prefixes', () => {
+      // Ensure 'D:' is not treated as a runtime specification
+      const windowsPath = 'D:\\workspace\\project\\cli.js';
+      const result = prepareSpawnInfo(windowsPath);
+
+      // Should use node runtime based on .js extension, not treat 'D' as runtime
+      expect(result.type).toBe('node');
+      expect(result.command).toBe(process.execPath);
+      expect(result.args).toEqual([path.resolve(windowsPath)]);
+    });
   });
 
   describe('error cases', () => {
@@ -472,21 +538,39 @@ describe('CLI Path Utilities', () => {
       );
     });
 
-    it('should provide helpful error for invalid runtime specification', () => {
+    it('should treat non-whitelisted runtime prefixes as command names', () => {
+      // With whitelist approach, 'invalid:spec' is not recognized as a runtime spec
+      // so it's treated as a command name, which fails validation due to the colon
       expect(() => prepareSpawnInfo('invalid:spec')).toThrow(
-        'Unsupported runtime',
+        'Invalid command name',
+      );
+    });
+
+    it('should handle Windows paths correctly even when file is missing', () => {
+      mockFs.existsSync.mockReturnValue(false);
+
+      expect(() => prepareSpawnInfo('D:\\missing\\cli.js')).toThrow(
+        'Executable file not found at',
+      );
+      // Should not throw 'Invalid command name' error (which would happen if 'D:' was treated as invalid command)
+      expect(() => prepareSpawnInfo('D:\\missing\\cli.js')).not.toThrow(
+        'Invalid command name',
       );
     });
   });
 
   describe('comprehensive validation', () => {
     describe('runtime validation', () => {
-      it('should reject unsupported runtimes', () => {
-        expect(() =>
-          parseExecutableSpec('unsupported:/path/to/file.js'),
-        ).toThrow(
-          "Unsupported runtime 'unsupported'. Supported runtimes: node, bun, tsx, deno",
-        );
+      it('should treat unsupported runtime prefixes as file paths', () => {
+        mockFs.existsSync.mockReturnValue(true);
+
+        // With whitelist approach, 'unsupported:' is not recognized as a runtime spec
+        // so 'unsupported:/path/to/file.js' is treated as a file path
+        const result = parseExecutableSpec('unsupported:/path/to/file.js');
+
+        // Should be treated as a file path, not a runtime specification
+        expect(result.isExplicitRuntime).toBe(false);
+        expect(result.runtime).toBeUndefined();
       });
 
       it('should validate runtime availability for explicit runtime specs', () => {

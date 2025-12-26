@@ -17,7 +17,6 @@ import { AuthDialog } from '../auth/AuthDialog.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
-import { ProQuotaDialog } from './ProQuotaDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
@@ -84,15 +83,6 @@ export const DialogManager = ({
         workspaceExtensions={uiState.workspaceExtensions}
         onOpen={uiActions.onWorkspaceMigrationDialogOpen}
         onClose={uiActions.onWorkspaceMigrationDialogClose}
-      />
-    );
-  }
-  if (uiState.proQuotaRequest) {
-    return (
-      <ProQuotaDialog
-        failedModel={uiState.proQuotaRequest.failedModel}
-        fallbackModel={uiState.proQuotaRequest.fallbackModel}
-        onChoice={uiActions.handleProQuotaChoice}
       />
     );
   }

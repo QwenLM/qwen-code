@@ -19,6 +19,9 @@ describe('validateNonInterActiveAuth', () => {
   let originalEnvVertexAi: string | undefined;
   let originalEnvGcp: string | undefined;
   let originalEnvOpenAiApiKey: string | undefined;
+  let originalEnvQwenOauth: string | undefined;
+  let originalEnvGoogleApiKey: string | undefined;
+  let originalEnvAnthropicApiKey: string | undefined;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
   let processExitSpy: ReturnType<typeof vi.spyOn<[code?: number], never>>;
   let refreshAuthMock: ReturnType<typeof vi.fn>;
@@ -29,10 +32,16 @@ describe('validateNonInterActiveAuth', () => {
     originalEnvVertexAi = process.env['GOOGLE_GENAI_USE_VERTEXAI'];
     originalEnvGcp = process.env['GOOGLE_GENAI_USE_GCA'];
     originalEnvOpenAiApiKey = process.env['OPENAI_API_KEY'];
+    originalEnvQwenOauth = process.env['QWEN_OAUTH'];
+    originalEnvGoogleApiKey = process.env['GOOGLE_API_KEY'];
+    originalEnvAnthropicApiKey = process.env['ANTHROPIC_API_KEY'];
     delete process.env['GEMINI_API_KEY'];
     delete process.env['GOOGLE_GENAI_USE_VERTEXAI'];
     delete process.env['GOOGLE_GENAI_USE_GCA'];
     delete process.env['OPENAI_API_KEY'];
+    delete process.env['QWEN_OAUTH'];
+    delete process.env['GOOGLE_API_KEY'];
+    delete process.env['ANTHROPIC_API_KEY'];
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     processExitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit(${code}) called`);
@@ -79,6 +88,21 @@ describe('validateNonInterActiveAuth', () => {
       process.env['OPENAI_API_KEY'] = originalEnvOpenAiApiKey;
     } else {
       delete process.env['OPENAI_API_KEY'];
+    }
+    if (originalEnvQwenOauth !== undefined) {
+      process.env['QWEN_OAUTH'] = originalEnvQwenOauth;
+    } else {
+      delete process.env['QWEN_OAUTH'];
+    }
+    if (originalEnvGoogleApiKey !== undefined) {
+      process.env['GOOGLE_API_KEY'] = originalEnvGoogleApiKey;
+    } else {
+      delete process.env['GOOGLE_API_KEY'];
+    }
+    if (originalEnvAnthropicApiKey !== undefined) {
+      process.env['ANTHROPIC_API_KEY'] = originalEnvAnthropicApiKey;
+    } else {
+      delete process.env['ANTHROPIC_API_KEY'];
     }
     vi.restoreAllMocks();
   });

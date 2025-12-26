@@ -64,11 +64,6 @@ export interface GenerateJsonOptions {
  * A client dedicated to stateless, utility-focused LLM calls.
  */
 export class BaseLlmClient {
-  // Default configuration for utility tasks
-  private readonly defaultUtilityConfig: GenerateContentConfig = {
-    topP: 0.8,
-  };
-
   constructor(
     private readonly contentGenerator: ContentGenerator,
     private readonly config: Config,
@@ -89,7 +84,6 @@ export class BaseLlmClient {
 
     const requestConfig: GenerateContentConfig = {
       abortSignal,
-      ...this.defaultUtilityConfig,
       ...options.config,
       ...(systemInstruction && { systemInstruction }),
     };

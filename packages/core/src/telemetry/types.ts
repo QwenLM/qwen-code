@@ -18,6 +18,9 @@ import {
 import type { FileOperation } from './metrics.js';
 export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
+import { ToolNames } from '../tools/tool-names.js';
+import type { SkillTool } from '../tools/skill.js';
+import type { TaskTool } from '../tools/task.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -47,6 +50,8 @@ export class StartSessionEvent implements BaseTelemetryEvent {
   mcp_tools_count?: number;
   mcp_tools?: string;
   output_format: OutputFormat;
+  skills?: string;
+  subagents?: string;
 
   constructor(config: Config) {
     const generatorConfig = config.getContentGeneratorConfig();
@@ -79,6 +84,7 @@ export class StartSessionEvent implements BaseTelemetryEvent {
       config.getFileFilteringRespectGitIgnore();
     this.mcp_servers_count = mcpServers ? Object.keys(mcpServers).length : 0;
     this.output_format = config.getOutputFormat();
+
     if (toolRegistry) {
       const mcpTools = toolRegistry
         .getAllTools()
@@ -87,6 +93,22 @@ export class StartSessionEvent implements BaseTelemetryEvent {
       this.mcp_tools = mcpTools
         .map((tool) => (tool as DiscoveredMCPTool).name)
         .join(',');
+
+      const skillTool = toolRegistry.getTool(ToolNames.SKILL) as
+        | SkillTool
+        | undefined;
+      const skillNames = skillTool?.getAvailableSkillNames?.();
+      if (skillNames && skillNames.length > 0) {
+        this.skills = skillNames.join(',');
+      }
+
+      const taskTool = toolRegistry.getTool(ToolNames.TASK) as
+        | TaskTool
+        | undefined;
+      const subagentNames = taskTool?.getAvailableSubagentNames?.();
+      if (subagentNames && subagentNames.length > 0) {
+        this.subagents = subagentNames.join(',');
+      }
     }
   }
 }
@@ -721,6 +743,20 @@ export class AuthEvent implements BaseTelemetryEvent {
   }
 }
 
+export class SkillLaunchEvent implements BaseTelemetryEvent {
+  'event.name': 'skill_launch';
+  'event.timestamp': string;
+  skill_name: string;
+  success: boolean;
+
+  constructor(skill_name: string, success: boolean) {
+    this['event.name'] = 'skill_launch';
+    this['event.timestamp'] = new Date().toISOString();
+    this.skill_name = skill_name;
+    this.success = success;
+  }
+}
+
 export type TelemetryEvent =
   | StartSessionEvent
   | EndSessionEvent
@@ -749,7 +785,8 @@ export type TelemetryEvent =
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
   | ModelSlashCommandEvent
-  | AuthEvent;
+  | AuthEvent
+  | SkillLaunchEvent;
 
 export class ExtensionDisableEvent implements BaseTelemetryEvent {
   'event.name': 'extension_disable';

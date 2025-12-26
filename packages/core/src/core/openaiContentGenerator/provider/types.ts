@@ -1,3 +1,4 @@
+import type { GenerateContentConfig } from '@google/genai';
 import type OpenAI from 'openai';
 
 // Extended types to support cache_control for DashScope
@@ -22,6 +23,7 @@ export interface OpenAICompatibleProvider {
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams;
+  getDefaultGenerationConfig(): GenerateContentConfig;
 }
 
 export type DashScopeRequestMetadata = {

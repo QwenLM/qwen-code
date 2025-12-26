@@ -13,14 +13,12 @@ import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import { OpenAIContentConverter } from './converter.js';
-import type { TelemetryService, RequestContext } from './telemetryService.js';
-import type { ErrorHandler } from './errorHandler.js';
+import type { ErrorHandler, RequestContext } from './errorHandler.js';
 
 export interface PipelineConfig {
   cliConfig: Config;
   provider: OpenAICompatibleProvider;
   contentGeneratorConfig: ContentGeneratorConfig;
-  telemetryService: TelemetryService;
   errorHandler: ErrorHandler;
 }
 
@@ -46,7 +44,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       false,
-      async (openaiRequest, context) => {
+      async (openaiRequest) => {
         const openaiResponse = (await this.client.chat.completions.create(
           openaiRequest,
           {
@@ -56,14 +54,6 @@ export class ContentGenerationPipeline {
 
         const geminiResponse =
           this.converter.convertOpenAIResponseToGemini(openaiResponse);
-
-        // Log success
-        await this.config.telemetryService.logSuccess(
-          context,
-          geminiResponse,
-          openaiRequest,
-          openaiResponse,
-        );
 
         return geminiResponse;
       },
@@ -88,12 +78,7 @@ export class ContentGenerationPipeline {
         )) as AsyncIterable<OpenAI.Chat.ChatCompletionChunk>;
 
         // Stage 2: Process stream with conversion and logging
-        return this.processStreamWithLogging(
-          stream,
-          context,
-          openaiRequest,
-          request,
-        );
+        return this.processStreamWithLogging(stream, context, request);
       },
     );
   }
@@ -110,11 +95,9 @@ export class ContentGenerationPipeline {
   private async *processStreamWithLogging(
     stream: AsyncIterable<OpenAI.Chat.ChatCompletionChunk>,
     context: RequestContext,
-    openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
     request: GenerateContentParameters,
   ): AsyncGenerator<GenerateContentResponse> {
     const collectedGeminiResponses: GenerateContentResponse[] = [];
-    const collectedOpenAIChunks: OpenAI.Chat.ChatCompletionChunk[] = [];
 
     // Reset streaming tool calls to prevent data pollution from previous streams
     this.converter.resetStreamingToolCalls();
@@ -125,9 +108,6 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
-        // Always collect OpenAI chunks for logging, regardless of Gemini conversion result
-        collectedOpenAIChunks.push(chunk);
-
         const response = this.converter.convertOpenAIChunkToGemini(chunk);
 
         // Stage 2b: Filter empty responses to avoid downstream issues
@@ -164,15 +144,8 @@ export class ContentGenerationPipeline {
         yield pendingFinishResponse;
       }
 
-      // Stage 2e: Stream completed successfully - perform logging with original OpenAI chunks
+      // Stage 2e: Stream completed successfully
       context.duration = Date.now() - context.startTime;
-
-      await this.config.telemetryService.logStreamingSuccess(
-        context,
-        collectedGeminiResponses,
-        openaiRequest,
-        collectedOpenAIChunks,
-      );
     } catch (error) {
       // Clear streaming tool calls on error to prevent data pollution
       this.converter.resetStreamingToolCalls();
@@ -258,7 +231,7 @@ export class ContentGenerationPipeline {
     const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
       model: this.contentGeneratorConfig.model,
       messages,
-      ...this.buildSamplingParameters(request),
+      ...this.buildGenerateContentConfig(request),
     };
 
     // Add streaming options if present
@@ -280,19 +253,25 @@ export class ContentGenerationPipeline {
     return this.config.provider.buildRequest(baseRequest, userPromptId);
   }
 
-  private buildSamplingParameters(
+  private buildGenerateContentConfig(
     request: GenerateContentParameters,
   ): Record<string, unknown> {
+    const defaultSamplingParams =
+      this.config.provider.getDefaultGenerationConfig();
     const configSamplingParams = this.contentGeneratorConfig.samplingParams;
 
     // Helper function to get parameter value with priority: config > request > default
     const getParameterValue = <T>(
       configKey: keyof NonNullable<typeof configSamplingParams>,
-      requestKey: keyof NonNullable<typeof request.config>,
-      defaultValue?: T,
+      requestKey?: keyof NonNullable<typeof request.config>,
     ): T | undefined => {
       const configValue = configSamplingParams?.[configKey] as T | undefined;
-      const requestValue = request.config?.[requestKey] as T | undefined;
+      const requestValue = requestKey
+        ? (request.config?.[requestKey] as T | undefined)
+        : undefined;
+      const defaultValue = requestKey
+        ? (defaultSamplingParams[requestKey] as T)
+        : undefined;
 
       if (configValue !== undefined) return configValue;
       if (requestValue !== undefined) return requestValue;
@@ -304,17 +283,13 @@ export class ContentGenerationPipeline {
       key: string,
       configKey: keyof NonNullable<typeof configSamplingParams>,
       requestKey?: keyof NonNullable<typeof request.config>,
-      defaultValue?: T,
-    ): Record<string, T> | Record<string, never> => {
-      const value = requestKey
-        ? getParameterValue(configKey, requestKey, defaultValue)
-        : ((configSamplingParams?.[configKey] as T | undefined) ??
-          defaultValue);
+    ): Record<string, T | undefined> => {
+      const value = getParameterValue<T>(configKey, requestKey);
 
       return value !== undefined ? { [key]: value } : {};
     };
 
-    const params = {
+    const params: Record<string, unknown> = {
       // Parameters with request fallback but no defaults
       ...addParameterIfDefined('temperature', 'temperature', 'temperature'),
       ...addParameterIfDefined('top_p', 'top_p', 'topP'),
@@ -323,13 +298,34 @@ export class ContentGenerationPipeline {
       ...addParameterIfDefined('max_tokens', 'max_tokens', 'maxOutputTokens'),
 
       // Config-only parameters (no request fallback)
-      ...addParameterIfDefined('top_k', 'top_k'),
+      ...addParameterIfDefined('top_k', 'top_k', 'topK'),
       ...addParameterIfDefined('repetition_penalty', 'repetition_penalty'),
-      ...addParameterIfDefined('presence_penalty', 'presence_penalty'),
-      ...addParameterIfDefined('frequency_penalty', 'frequency_penalty'),
+      ...addParameterIfDefined(
+        'presence_penalty',
+        'presence_penalty',
+        'presencePenalty',
+      ),
+      ...addParameterIfDefined(
+        'frequency_penalty',
+        'frequency_penalty',
+        'frequencyPenalty',
+      ),
+      ...this.buildReasoningConfig(),
     };
 
     return params;
+  }
+
+  private buildReasoningConfig(): Record<string, unknown> {
+    const reasoning = this.contentGeneratorConfig.reasoning;
+
+    if (reasoning === false) {
+      return {};
+    }
+
+    return {
+      reasoning_effort: reasoning?.effort ?? 'medium',
+    };
   }
 
   /**
@@ -359,13 +355,7 @@ export class ContentGenerationPipeline {
       return result;
     } catch (error) {
       // Use shared error handling logic
-      return await this.handleError(
-        error,
-        context,
-        request,
-        userPromptId,
-        isStreaming,
-      );
+      return await this.handleError(error, context, request);
     }
   }
 
@@ -377,37 +367,8 @@ export class ContentGenerationPipeline {
     error: unknown,
     context: RequestContext,
     request: GenerateContentParameters,
-    userPromptId?: string,
-    isStreaming?: boolean,
   ): Promise<never> {
     context.duration = Date.now() - context.startTime;
-
-    // Build request for logging (may fail, but we still want to log the error)
-    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams;
-    try {
-      if (userPromptId !== undefined && isStreaming !== undefined) {
-        openaiRequest = await this.buildRequest(
-          request,
-          userPromptId,
-          isStreaming,
-        );
-      } else {
-        // For processStreamWithLogging, we don't have userPromptId/isStreaming,
-        // so create a minimal request
-        openaiRequest = {
-          model: this.contentGeneratorConfig.model,
-          messages: [],
-        };
-      }
-    } catch (_buildError) {
-      // If we can't build the request, create a minimal one for logging
-      openaiRequest = {
-        model: this.contentGeneratorConfig.model,
-        messages: [],
-      };
-    }
-
-    await this.config.telemetryService.logError(context, error, openaiRequest);
     this.config.errorHandler.handle(error, context, request);
   }
 

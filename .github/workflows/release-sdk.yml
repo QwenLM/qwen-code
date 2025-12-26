@@ -33,6 +33,10 @@ on:
         type: 'boolean'
         default: false
 
+concurrency:
+  group: '${{ github.workflow }}'
+  cancel-in-progress: false
+
 jobs:
   release-sdk:
     runs-on: 'ubuntu-latest'
@@ -46,6 +50,7 @@ jobs:
       packages: 'write'
       id-token: 'write'
       issues: 'write'
+      pull-requests: 'write'
     outputs:
       RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
 
@@ -163,11 +168,11 @@ jobs:
           echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Update package version'
-        working-directory: 'packages/sdk-typescript'
         env:
           RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
         run: |-
-          npm version "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
+          # Use npm workspaces so the root lockfile is updated consistently.
+          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
 
       - name: 'Commit and Conditionally Push package version'
         env:
@@ -175,7 +180,7 @@ jobs:
           IS_DRY_RUN: '${{ steps.vars.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
-          git add packages/sdk-typescript/package.json
+          git add packages/sdk-typescript/package.json package-lock.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
@@ -221,6 +226,49 @@ jobs:
             --title "SDK TypeScript Release ${RELEASE_TAG}" \
             --notes-start-tag "sdk-typescript-${PREVIOUS_RELEASE_TAG}" \
             --generate-notes
+
+      - name: 'Create PR to merge release branch into main'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+        id: 'pr'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+
+          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
+          if [[ -z "${pr_url}" ]]; then
+            pr_url="$(gh pr create \
+              --base main \
+              --head "${RELEASE_BRANCH}" \
+              --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
+              --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
+          fi
+
+          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Wait for CI checks to complete'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+        run: |-
+          set -euo pipefail
+          echo "Waiting for CI checks to complete..."
+          gh pr checks "${PR_URL}" --watch --interval 30
+
+      - name: 'Enable auto-merge for release PR'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+        run: |-
+          set -euo pipefail
+          gh pr merge "${PR_URL}" --merge --auto
 
       - name: 'Create Issue on Failure'
         if: |-

@@ -112,6 +112,7 @@ export interface CliArgs {
   allowedMcpServerNames: string[] | undefined;
   allowedTools: string[] | undefined;
   experimentalAcp: boolean | undefined;
+  experimentalSkills: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -307,6 +308,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
         })
+        .option('experimental-skills', {
+          type: 'boolean',
+          description: 'Enable experimental Skills feature',
+          default: false,
+        })
         .option('channel', {
           type: 'string',
           choices: ['VSCode', 'ACP', 'SDK', 'CI'],
@@ -460,7 +466,13 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('auth-type', {
           type: 'string',
-          choices: [AuthType.USE_OPENAI, AuthType.QWEN_OAUTH],
+          choices: [
+            AuthType.USE_OPENAI,
+            AuthType.USE_ANTHROPIC,
+            AuthType.QWEN_OAUTH,
+            AuthType.USE_GEMINI,
+            AuthType.USE_VERTEX_AI,
+          ],
           description: 'Authentication type',
         })
         .deprecateOption(
@@ -865,11 +877,30 @@ export async function loadCliConfig(
     );
   }
 
+  const selectedAuthType =
+    (argv.authType as AuthType | undefined) ||
+    settings.security?.auth?.selectedType;
+
+  const apiKey =
+    (selectedAuthType === AuthType.USE_OPENAI
+      ? argv.openaiApiKey ||
+        process.env['OPENAI_API_KEY'] ||
+        settings.security?.auth?.apiKey
+      : '') || '';
+  const baseUrl =
+    (selectedAuthType === AuthType.USE_OPENAI
+      ? argv.openaiBaseUrl ||
+        process.env['OPENAI_BASE_URL'] ||
+        settings.security?.auth?.baseUrl
+      : '') || '';
   const resolvedModel =
     argv.model ||
-    process.env['OPENAI_MODEL'] ||
-    process.env['QWEN_MODEL'] ||
-    settings.model?.name;
+    (selectedAuthType === AuthType.USE_OPENAI
+      ? process.env['OPENAI_MODEL'] ||
+        process.env['QWEN_MODEL'] ||
+        settings.model?.name
+      : '') ||
+    '';
 
   const sandboxConfig = await loadSandboxConfig(settings, argv);
   const screenReader =
@@ -951,27 +982,20 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.experimentalAcp || false,
+    experimentalSkills: argv.experimentalSkills || false,
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
     blockedMcpServers,
     noBrowser: !!process.env['NO_BROWSER'],
-    authType:
-      (argv.authType as AuthType | undefined) ||
-      settings.security?.auth?.selectedType,
+    authType: selectedAuthType,
     inputFormat,
     outputFormat,
     includePartialMessages,
     generationConfig: {
       ...(settings.model?.generationConfig || {}),
       model: resolvedModel,
-      apiKey:
-        argv.openaiApiKey ||
-        process.env['OPENAI_API_KEY'] ||
-        settings.security?.auth?.apiKey,
-      baseUrl:
-        argv.openaiBaseUrl ||
-        process.env['OPENAI_BASE_URL'] ||
-        settings.security?.auth?.baseUrl,
+      apiKey,
+      baseUrl,
       enableOpenAILogging:
         (typeof argv.openaiLogging === 'undefined'
           ? settings.model?.enableOpenAILogging

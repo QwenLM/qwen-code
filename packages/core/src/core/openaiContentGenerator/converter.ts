@@ -236,8 +236,9 @@ export class OpenAIContentConverter {
    */
   convertGeminiRequestToOpenAI(
     request: GenerateContentParameters,
+    options: { cleanOrphanToolCalls: boolean } = { cleanOrphanToolCalls: true },
   ): OpenAI.Chat.ChatCompletionMessageParam[] {
-    const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+    let messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
     // Handle system instruction from config
     this.addSystemInstructionMessage(request, messages);
@@ -246,11 +247,89 @@ export class OpenAIContentConverter {
     this.processContents(request.contents, messages);
 
     // Clean up orphaned tool calls and merge consecutive assistant messages
-    const cleanedMessages = this.cleanOrphanedToolCalls(messages);
-    const mergedMessages =
-      this.mergeConsecutiveAssistantMessages(cleanedMessages);
+    if (options.cleanOrphanToolCalls) {
+      messages = this.cleanOrphanedToolCalls(messages);
+    }
+    messages = this.mergeConsecutiveAssistantMessages(messages);
 
-    return mergedMessages;
+    return messages;
+  }
+
+  /**
+   * Convert Gemini response to OpenAI completion format (for logging).
+   */
+  convertGeminiResponseToOpenAI(
+    response: GenerateContentResponse,
+  ): OpenAI.Chat.ChatCompletion {
+    const candidate = response.candidates?.[0];
+    const parts = (candidate?.content?.parts || []) as Part[];
+    const parsedParts = this.parseParts(parts);
+
+    const message: ExtendedCompletionMessage = {
+      role: 'assistant',
+      content: parsedParts.contentParts.join('') || null,
+      refusal: null,
+    };
+
+    const reasoningContent = parsedParts.thoughtParts.join('');
+    if (reasoningContent) {
+      message.reasoning_content = reasoningContent;
+    }
+
+    if (parsedParts.functionCalls.length > 0) {
+      message.tool_calls = parsedParts.functionCalls.map((call, index) => ({
+        id: call.id || `call_${index}`,
+        type: 'function' as const,
+        function: {
+          name: call.name || '',
+          arguments: JSON.stringify(call.args || {}),
+        },
+      }));
+    }
+
+    const finishReason = this.mapGeminiFinishReasonToOpenAI(
+      candidate?.finishReason,
+    );
+
+    const usageMetadata = response.usageMetadata;
+    const usage: OpenAI.CompletionUsage = {
+      prompt_tokens: usageMetadata?.promptTokenCount || 0,
+      completion_tokens: usageMetadata?.candidatesTokenCount || 0,
+      total_tokens: usageMetadata?.totalTokenCount || 0,
+    };
+
+    if (usageMetadata?.cachedContentTokenCount !== undefined) {
+      (
+        usage as OpenAI.CompletionUsage & {
+          prompt_tokens_details?: { cached_tokens?: number };
+        }
+      ).prompt_tokens_details = {
+        cached_tokens: usageMetadata.cachedContentTokenCount,
+      };
+    }
+
+    const createdMs = response.createTime
+      ? Number(response.createTime)
+      : Date.now();
+    const createdSeconds = Number.isFinite(createdMs)
+      ? Math.floor(createdMs / 1000)
+      : Math.floor(Date.now() / 1000);
+
+    return {
+      id: response.responseId || `gemini-${Date.now()}`,
+      object: 'chat.completion',
+      created: createdSeconds,
+      model: response.modelVersion || this.model,
+      choices: [
+        {
+          index: 0,
+          message,
+          finish_reason: finishReason,
+          logprobs: null,
+        },
+      ],
+      usage,
+    };
   }
 
   /**
@@ -837,84 +916,6 @@ export class OpenAIContentConverter {
   }
 
   /**
-   * Convert Gemini response format to OpenAI chat completion format for logging
-   */
-  convertGeminiResponseToOpenAI(
-    response: GenerateContentResponse,
-  ): OpenAI.Chat.ChatCompletion {
-    const candidate = response.candidates?.[0];
-    const content = candidate?.content;
-
-    let messageContent: string | null = null;
-    const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
-
-    if (content?.parts) {
-      const textParts: string[] = [];
-
-      for (const part of content.parts) {
-        if ('text' in part && part.text) {
-          textParts.push(part.text);
-        } else if ('functionCall' in part && part.functionCall) {
-          toolCalls.push({
-            id: part.functionCall.id || `call_${toolCalls.length}`,
-            type: 'function' as const,
-            function: {
-              name: part.functionCall.name || '',
-              arguments: JSON.stringify(part.functionCall.args || {}),
-            },
-          });
-        }
-      }
-
-      messageContent = textParts.join('').trimEnd();
-    }
-
-    const choice: OpenAI.Chat.ChatCompletion.Choice = {
-      index: 0,
-      message: {
-        role: 'assistant',
-        content: messageContent,
-        refusal: null,
-      },
-      finish_reason: this.mapGeminiFinishReasonToOpenAI(
-        candidate?.finishReason,
-      ) as OpenAI.Chat.ChatCompletion.Choice['finish_reason'],
-      logprobs: null,
-    };
-
-    if (toolCalls.length > 0) {
-      choice.message.tool_calls = toolCalls;
-    }
-
-    const openaiResponse: OpenAI.Chat.ChatCompletion = {
-      id: response.responseId || `chatcmpl-${Date.now()}`,
-      object: 'chat.completion',
-      created: response.createTime
-        ? Number(response.createTime)
-        : Math.floor(Date.now() / 1000),
-      model: this.model,
-      choices: [choice],
-    };
-
-    // Add usage metadata if available
-    if (response.usageMetadata) {
-      openaiResponse.usage = {
-        prompt_tokens: response.usageMetadata.promptTokenCount || 0,
-        completion_tokens: response.usageMetadata.candidatesTokenCount || 0,
-        total_tokens: response.usageMetadata.totalTokenCount || 0,
-      };
-
-      if (response.usageMetadata.cachedContentTokenCount) {
-        openaiResponse.usage.prompt_tokens_details = {
-          cached_tokens: response.usageMetadata.cachedContentTokenCount,
-        };
-      }
-    }
-
-    return openaiResponse;
-  }
-
-  /**
    * Map OpenAI finish reasons to Gemini finish reasons
    */
   private mapOpenAIFinishReasonToGemini(
@@ -931,29 +932,24 @@ export class OpenAIContentConverter {
     return mapping[openaiReason] || FinishReason.FINISH_REASON_UNSPECIFIED;
   }
 
-  /**
-   * Map Gemini finish reasons to OpenAI finish reasons
-   */
-  private mapGeminiFinishReasonToOpenAI(geminiReason?: unknown): string {
-    if (!geminiReason) return 'stop';
+  private mapGeminiFinishReasonToOpenAI(
+    geminiReason?: FinishReason,
+  ): 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call' {
+    if (!geminiReason) {
+      return 'stop';
+    }
 
     switch (geminiReason) {
-      case 'STOP':
-      case 1: // FinishReason.STOP
+      case FinishReason.STOP:
         return 'stop';
-      case 'MAX_TOKENS':
-      case 2: // FinishReason.MAX_TOKENS
+      case FinishReason.MAX_TOKENS:
         return 'length';
-      case 'SAFETY':
-      case 3: // FinishReason.SAFETY
+      case FinishReason.SAFETY:
         return 'content_filter';
-      case 'RECITATION':
-      case 4: // FinishReason.RECITATION
-        return 'content_filter';
-      case 'OTHER':
-      case 5: // FinishReason.OTHER
-        return 'stop';
       default:
+        if (geminiReason === ('RECITATION' as FinishReason)) {
+          return 'content_filter';
+        }
         return 'stop';
     }
   }

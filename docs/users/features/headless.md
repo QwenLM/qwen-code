@@ -189,19 +189,20 @@ qwen -p "Write code" --output-format stream-json --include-partial-messages | jq
 
 Key command-line options for headless usage:
 
-| Option                       | Description                                         | Example                                                                  |
-| ---------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------ |
-| `--prompt`, `-p`             | Run in headless mode                                | `qwen -p "query"`                                                        |
-| `--output-format`, `-o`      | Specify output format (text, json, stream-json)     | `qwen -p "query" --output-format json`                                   |
-| `--input-format`             | Specify input format (text, stream-json)            | `qwen --input-format text --output-format stream-json`                   |
-| `--include-partial-messages` | Include partial messages in stream-json output      | `qwen -p "query" --output-format stream-json --include-partial-messages` |
-| `--debug`, `-d`              | Enable debug mode                                   | `qwen -p "query" --debug`                                                |
-| `--all-files`, `-a`          | Include all files in context                        | `qwen -p "query" --all-files`                                            |
-| `--include-directories`      | Include additional directories                      | `qwen -p "query" --include-directories src,docs`                         |
-| `--yolo`, `-y`               | Auto-approve all actions                            | `qwen -p "query" --yolo`                                                 |
-| `--approval-mode`            | Set approval mode                                   | `qwen -p "query" --approval-mode auto_edit`                              |
-| `--continue`                 | Resume the most recent session for this project     | `qwen --continue -p "Pick up where we left off"`                         |
-| `--resume [sessionId]`       | Resume a specific session (or choose interactively) | `qwen --resume 123e... -p "Finish the refactor"`                         |
+| Option                       | Description                                             | Example                                                                  |
+| ---------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `--prompt`, `-p`             | Run in headless mode                                    | `qwen -p "query"`                                                        |
+| `--output-format`, `-o`      | Specify output format (text, json, stream-json)         | `qwen -p "query" --output-format json`                                   |
+| `--input-format`             | Specify input format (text, stream-json)                | `qwen --input-format text --output-format stream-json`                   |
+| `--include-partial-messages` | Include partial messages in stream-json output          | `qwen -p "query" --output-format stream-json --include-partial-messages` |
+| `--debug`, `-d`              | Enable debug mode                                       | `qwen -p "query" --debug`                                                |
+| `--all-files`, `-a`          | Include all files in context                            | `qwen -p "query" --all-files`                                            |
+| `--include-directories`      | Include additional directories                          | `qwen -p "query" --include-directories src,docs`                         |
+| `--yolo`, `-y`               | Auto-approve all actions                                | `qwen -p "query" --yolo`                                                 |
+| `--approval-mode`            | Set approval mode                                       | `qwen -p "query" --approval-mode auto_edit`                              |
+| `--continue`                 | Resume the most recent session for this project         | `qwen --continue -p "Pick up where we left off"`                         |
+| `--resume [sessionId]`       | Resume a specific session (or choose interactively)     | `qwen --resume 123e... -p "Finish the refactor"`                         |
+| `--experimental-skills`      | Enable experimental Skills (registers the `skill` tool) | `qwen --experimental-skills -p "What Skills are available?"`             |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
 

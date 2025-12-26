@@ -38,6 +38,7 @@ import type {
   ModelSlashCommandEvent,
   ExtensionDisableEvent,
   AuthEvent,
+  SkillLaunchEvent,
   RipgrepFallbackEvent,
   EndSessionEvent,
 } from '../types.js';
@@ -391,6 +392,8 @@ export class QwenLogger {
         telemetry_enabled: event.telemetry_enabled,
         telemetry_log_user_prompts_enabled:
           event.telemetry_log_user_prompts_enabled,
+        skills: event.skills,
+        subagents: event.subagents,
       },
     });
 
@@ -820,6 +823,18 @@ export class QwenLogger {
         prompt_id: event.prompt_id,
         finish_reason: event.finish_reason,
         result: event.result,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logSkillLaunchEvent(event: SkillLaunchEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'skill_launch', {
+      properties: {
+        skill_name: event.skill_name,
+        success: event.success ? 1 : 0,
       },
     });
 

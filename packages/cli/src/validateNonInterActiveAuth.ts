@@ -21,6 +21,16 @@ function getAuthTypeFromEnv(): AuthType | undefined {
     return AuthType.QWEN_OAUTH;
   }
 
+  if (process.env['GEMINI_API_KEY']) {
+    return AuthType.USE_GEMINI;
+  }
+  if (process.env['GOOGLE_API_KEY']) {
+    return AuthType.USE_VERTEX_AI;
+  }
+  if (process.env['ANTHROPIC_API_KEY']) {
+    return AuthType.USE_ANTHROPIC;
+  }
+
   return undefined;
 }
 

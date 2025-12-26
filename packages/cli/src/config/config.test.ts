@@ -2114,7 +2114,14 @@ describe('loadCliConfig model selection', () => {
   });
 
   it('always prefers model from argvs', async () => {
-    process.argv = ['node', 'script.js', '--model', 'qwen3-coder-plus'];
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'qwen3-coder-plus',
+    ];
     const argv = await parseArguments({} as Settings);
     const config = await loadCliConfig(
       {
@@ -2134,7 +2141,14 @@ describe('loadCliConfig model selection', () => {
   });
 
   it('selects the model from argvs if provided', async () => {
-    process.argv = ['node', 'script.js', '--model', 'qwen3-coder-plus'];
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'qwen3-coder-plus',
+    ];
     const argv = await parseArguments({} as Settings);
     const config = await loadCliConfig(
       {

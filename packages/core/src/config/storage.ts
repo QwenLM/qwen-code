@@ -126,6 +126,10 @@ export class Storage {
     return path.join(this.getExtensionsDir(), 'qwen-extension.json');
   }
 
+  getUserSkillsDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), 'skills');
+  }
+
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
   }

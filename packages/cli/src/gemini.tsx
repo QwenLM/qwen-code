@@ -4,13 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
-import {
-  AuthType,
-  getOauthClient,
-  InputFormat,
-  logUserPrompt,
-} from '@qwen-code/qwen-code-core';
+import type { Config, AuthType } from '@qwen-code/qwen-code-core';
+import { InputFormat, logUserPrompt } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
@@ -397,15 +392,6 @@ export async function main() {
     let initializationResult: InitializationResult | undefined;
     if (inputFormat !== InputFormat.STREAM_JSON) {
       initializationResult = await initializeApp(config, settings);
-    }
-
-    if (
-      settings.merged.security?.auth?.selectedType ===
-        AuthType.LOGIN_WITH_GOOGLE &&
-      config.isBrowserLaunchSuppressed()
-    ) {
-      // Do oauth before app renders to make copying the link possible.
-      await getOauthClient(settings.merged.security.auth.selectedType, config);
     }
 
     if (config.getExperimentalZedIntegration()) {

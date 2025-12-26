@@ -20,11 +20,26 @@ async function getProcessInfo(pid: number): Promise<{
   command: string;
 }> {
   // Only used for Unix systems (macOS and Linux)
-  const { stdout } = await execAsync(`ps -p ${pid} -o ppid=,comm=`);
-  const [ppidStr, ...commandParts] = stdout.trim().split(/\s+/);
-  const parentPid = parseInt(ppidStr, 10);
-  const command = commandParts.join(' ');
-  return { parentPid, name: path.basename(command), command };
+  try {
+    const command = `ps -o ppid=,command= -p ${pid}`;
+    const { stdout } = await execAsync(command);
+    const trimmedStdout = stdout.trim();
+    if (!trimmedStdout) {
+      return { parentPid: 0, name: '', command: '' };
+    }
+    const parts = trimmedStdout.split(/\s+/);
+    const ppidString = parts[0];
+    const parentPid = parseInt(ppidString, 10);
+    const fullCommand = trimmedStdout.substring(ppidString.length).trim();
+    const processName = path.basename(fullCommand.split(' ')[0]);
+    return {
+      parentPid: isNaN(parentPid) ? 1 : parentPid,
+      name: processName,
+      command: fullCommand,
+    };
+  } catch (_e) {
+    return { parentPid: 0, name: '', command: '' };
+  }
 }
 /**
  * Finds the IDE process info on Unix-like systems.
