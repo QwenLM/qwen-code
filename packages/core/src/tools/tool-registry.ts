@@ -483,4 +483,17 @@ export class ToolRegistry {
   getTool(name: string): AnyDeclarativeTool | undefined {
     return this.tools.get(name);
   }
+
+  /**
+   * Stops all MCP clients and cleans up resources.
+   * This method is idempotent and safe to call multiple times.
+   */
+  async stop(): Promise<void> {
+    try {
+      await this.mcpClientManager.stop();
+    } catch (error) {
+      // Log but don't throw - cleanup should be best-effort
+      console.error('Error stopping MCP clients:', error);
+    }
+  }
 }
