@@ -30,6 +30,7 @@ import { summarizeToolOutput } from '../utils/summarizer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
+  ShellExecutionResult,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
@@ -143,9 +144,27 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
 
-      // If explicitly marked as background and doesn't already end with &, add it
-      if (shouldRunInBackground && !finalCommand.trim().endsWith('&')) {
+      // On non-Windows, use & to run in background.
+      // On Windows, we don't use start /B because it creates a detached process that
+      // doesn't die when the parent dies. Instead, we rely on the race logic below
+      // to return early while keeping the process attached (detached: false).
+      if (
+        !isWindows &&
+        shouldRunInBackground &&
+        !finalCommand.trim().endsWith('&')
+      ) {
         finalCommand = finalCommand.trim() + ' &';
+      }
+
+      // On Windows, we rely on the race logic below to handle background tasks.
+      // We just ensure the command string is clean.
+      if (isWindows && shouldRunInBackground) {
+        let cmd = finalCommand.trim();
+        // Remove trailing & (common Linux habit, invalid on Windows at end of line)
+        while (cmd.endsWith('&')) {
+          cmd = cmd.slice(0, -1).trim();
+        }
+        finalCommand = cmd;
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
@@ -169,10 +188,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           commandToExecute,
           cwd,
           (event: ShellOutputEvent) => {
-            if (!updateOutput) {
-              return;
-            }
-
             let shouldUpdate = false;
 
             switch (event.type) {
@@ -201,7 +216,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               }
             }
 
-            if (shouldUpdate) {
+            if (shouldUpdate && updateOutput) {
               updateOutput(
                 typeof cumulativeOutput === 'string'
                   ? cumulativeOutput
@@ -219,7 +234,59 @@ export class ShellToolInvocation extends BaseToolInvocation<
         setPidCallback(pid);
       }
 
-      const result = await resultPromise;
+      let result: ShellExecutionResult;
+      if (shouldRunInBackground && isWindows) {
+        // For Windows background tasks, we wait a short time to catch immediate errors.
+        // If it's still running, we return early.
+        const startupDelay = 1000;
+        const raceResult = await Promise.race([
+          resultPromise,
+          new Promise<null>((resolve) =>
+            setTimeout(() => resolve(null), startupDelay),
+          ),
+        ]);
+
+        if (raceResult === null) {
+          // Timeout reached, process is still running.
+          // throw new Error(`DEBUG: raceResult is null. Output: ${JSON.stringify(cumulativeOutput)}`);
+
+          // Check for common Windows error messages in the output
+          const outputStr =
+            typeof cumulativeOutput === 'string'
+              ? cumulativeOutput
+              : JSON.stringify(cumulativeOutput);
+          console.log('DEBUG: outputStr:', outputStr);
+          const errorPatterns = [
+            'is not recognized as an internal or external command',
+            'The system cannot find the path specified',
+            'Access is denied',
+          ];
+
+          if (errorPatterns.some((pattern) => outputStr.includes(pattern))) {
+            return {
+              llmContent: `Command failed to start: ${outputStr}`,
+              returnDisplay: `Command failed to start: ${outputStr}`,
+              error: {
+                type: ToolErrorType.EXECUTION_FAILED,
+                message: `Command failed to start: ${outputStr}`,
+              },
+            };
+          }
+
+          const pidMsg = pid ? ` PID: ${pid}` : '';
+          const winHint = isWindows
+            ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
+            : '';
+          return {
+            llmContent: `Background command started.${pidMsg}${winHint}`,
+            returnDisplay: `Background command started.${pidMsg}${winHint}`,
+          };
+        } else {
+          result = raceResult;
+        }
+      } else {
+        result = await resultPromise;
+      }
 
       const backgroundPIDs: number[] = [];
       if (os.platform() !== 'win32') {
