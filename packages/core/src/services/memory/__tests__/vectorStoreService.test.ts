@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { VectorStoreService } from '../vectorStoreService.js';
 import type { Config } from '../../../config/config.js';
 import { BaseLlmClient } from '../../../core/baseLlmClient.js';
@@ -14,7 +14,7 @@ vi.mock('../../../core/baseLlmClient.js');
 describe('VectorStoreService', () => {
   let service: VectorStoreService;
   let mockConfig: Config;
-  let mockLlmClient: any;
+  let mockLlmClient: { generateEmbedding: Mock };
 
   beforeEach(() => {
     mockConfig = {
@@ -25,6 +25,7 @@ describe('VectorStoreService', () => {
     mockLlmClient = {
       generateEmbedding: vi.fn(),
     };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (BaseLlmClient as any).mockImplementation(() => mockLlmClient);
 
     service = new VectorStoreService(mockConfig);

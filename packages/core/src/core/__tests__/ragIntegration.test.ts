@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { GeminiClient } from '../client.js';
 import { VectorStoreService } from '../../services/memory/vectorStoreService.js';
 import { type Config } from '../../config/config.js';
@@ -14,8 +14,8 @@ vi.mock('../../services/memory/vectorStoreService.js');
 
 describe('RAG Integration', () => {
   let client: GeminiClient;
-  let mockConfig: any;
-  let mockVectorStore: any;
+  let mockConfig: Config;
+  let mockVectorStore: { addText: Mock; search: Mock };
   let mockContentGenerator: any;
 
   beforeEach(async () => {
@@ -25,6 +25,7 @@ describe('RAG Integration', () => {
       addText: vi.fn().mockResolvedValue(undefined),
       search: vi.fn().mockResolvedValue([]),
     };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (VectorStoreService as any).mockImplementation(() => mockVectorStore);
 
     mockContentGenerator = {
@@ -77,6 +78,7 @@ describe('RAG Integration', () => {
       getMaxSessionTurns: () => 100,
       getAllowedTools: () => [],
       getShellExecutionConfig: () => ({}),
+      getGeminiClient: () => null,
     } as unknown as Config;
 
     client = new GeminiClient(mockConfig);
@@ -96,13 +98,16 @@ describe('RAG Integration', () => {
     expect(mockVectorStore.search).toHaveBeenCalledWith(mockQuery);
 
     // Verify that generateContentStream was called with the injected context
-    const lastCall = mockContentGenerator.generateContentStream.mock.calls[0][0];
+    const lastCall = (mockContentGenerator.generateContentStream as Mock).mock.calls[0][0];
     const systemInstructions = lastCall.contents;
     
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const ragPart = systemInstructions.find((c: any) => 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       c.parts?.some((p: any) => p.text?.includes('relevant context retrieved from your long-term memory'))
     );
     expect(ragPart).toBeDefined();
-    expect(ragPart.parts[0].text).toContain('The parser uses a recursive descent approach.');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((ragPart as any).parts[0].text).toContain('The parser uses a recursive descent approach.');
   });
 });

@@ -35,6 +35,7 @@ export async function executeToolCall(
     new CoreToolScheduler({
       config,
       chatRecordingService: config.getChatRecordingService(),
+      vectorStore: config.getGeminiClient()?.vectorStore,
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
         if (options.onAllToolCallsComplete) {

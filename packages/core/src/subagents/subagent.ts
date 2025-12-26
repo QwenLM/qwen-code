@@ -593,7 +593,8 @@ export class SubAgentScope {
     let resolveBatch: (() => void) | null = null;
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
-      outputUpdateHandler: undefined,
+      chatRecordingService: this.runtimeContext.getChatRecordingService(),
+      vectorStore: this.runtimeContext.getGeminiClient()?.vectorStore,
       onAllToolCallsComplete: async (completedCalls) => {
         for (const call of completedCalls) {
           const toolName = call.request.name;

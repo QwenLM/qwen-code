@@ -1276,7 +1276,7 @@ export class CoreToolScheduler {
             type: 'tool_output',
             tool: call.request.name,
             callId: call.request.callId,
-            path: (call.request.args as any)?.['path'] ?? (call.request.args as any)?.['file_path'] ?? 'unknown'
+            path: (call.request.args as Record<string, unknown>)?.['path'] ?? (call.request.args as Record<string, unknown>)?.['file_path'] ?? 'unknown'
           });
         }
       }

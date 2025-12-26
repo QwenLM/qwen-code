@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   PartListUnion,
   Tool,
+  Part,
 } from '@google/genai';
 
 // Config
@@ -85,7 +86,6 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
-  private vectorStore?: VectorStoreService;
 
   /**
    * At any point in this conversation, was compression triggered without
@@ -95,9 +95,13 @@ export class GeminiClient {
 
   constructor(
     private readonly config: Config,
-    private readonly vectorStore: VectorStoreService = new VectorStoreService(config),
+    private readonly _vectorStore: VectorStoreService = new VectorStoreService(config),
   ) {
     this.loopDetector = new LoopDetectionService(config);
+  }
+
+  get vectorStore(): VectorStoreService {
+    return this._vectorStore;
   }
 
   async initialize() {
@@ -405,12 +409,12 @@ export class GeminiClient {
       this.sessionTurnCount > this.config.getMaxSessionTurns()
     ) {
       yield { type: GeminiEventType.MaxSessionTurns };
-      return new Turn(this.getChat(), prompt_id, this.vectorStore);
+      return new Turn(this.getChat(), prompt_id);
     }
     // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
-      return new Turn(this.getChat(), prompt_id, this.vectorStore);
+      return new Turn(this.getChat(), prompt_id);
     }
 
     const compressed = await this.tryCompressChat(prompt_id, false);
@@ -463,7 +467,7 @@ export class GeminiClient {
               'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           },
         };
-        return new Turn(this.getChat(), prompt_id, this.vectorStore);
+        return new Turn(this.getChat(), prompt_id);
       }
     }
 
@@ -499,7 +503,7 @@ export class GeminiClient {
     if (this.vectorStore && typeof this.vectorStore.search === 'function' && !options?.isContinuation) {
       const queryText = (Array.isArray(request) ? request : [request])
         .filter((p) => typeof p === 'string' || (typeof p === 'object' && p !== null && 'text' in p))
-        .map((p) => (typeof p === 'string' ? p : (p as any).text))
+        .map((p) => (typeof p === 'string' ? p : (p as Part).text))
         .join(' ');
 
       if (queryText.trim().length > 0) {
@@ -512,7 +516,7 @@ export class GeminiClient {
       }
     }
 
-    const turn = new Turn(this.getChat(), prompt_id, this.vectorStore);
+    const turn = new Turn(this.getChat(), prompt_id);
 
     if (!this.config.getSkipLoopDetection()) {
       const loopDetected = await this.loopDetector.turnStarted(signal);

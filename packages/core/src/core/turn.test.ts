@@ -56,7 +56,6 @@ describe('Turn', () => {
     turn = new Turn(
       mockChatInstance as unknown as GeminiChat,
       'prompt-id-1',
-      undefined, // vectorStore
     );
     mockGetHistory.mockReturnValue([]);
     mockSendMessageStream.mockResolvedValue((async function* () {})());
