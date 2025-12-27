@@ -639,4 +639,40 @@ describe('startInteractiveUI', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
   });
+
+  it('should not call checkForUpdates when disableUpdateNag is true', async () => {
+    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+
+    const settingsWithNagDisabled = {
+      merged: {
+        general: {
+          disableUpdateNag: true,
+        },
+        ui: {
+          hideWindowTitle: false,
+        },
+      },
+    } as LoadedSettings;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      settingsWithNagDisabled,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    // Wait for any async operations
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // checkForUpdates should NOT be called when disableUpdateNag is true
+    expect(checkForUpdates).not.toHaveBeenCalled();
+  });
 });
