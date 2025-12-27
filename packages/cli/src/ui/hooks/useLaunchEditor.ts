@@ -7,15 +7,58 @@
 import { useCallback } from 'react';
 import { useStdin } from 'ink';
 import type { EditorType } from '@qwen-code/qwen-code-core';
-import { spawnSync } from 'child_process';
+import { editorCommands } from '@qwen-code/qwen-code-core';
+import { spawnSync, execSync } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
+
+/**
+ * Cache for command existence checks to avoid repeated execSync calls.
+ */
+const commandExistsCache = new Map<string, boolean>();
+
+/**
+ * Check if a command exists in the system.
+ * Results are cached to improve performance in test environments.
+ */
+function commandExists(cmd: string): boolean {
+  if (commandExistsCache.has(cmd)) {
+    return commandExistsCache.get(cmd)!;
+  }
+
+  try {
+    execSync(
+      process.platform === 'win32' ? `where.exe ${cmd}` : `command -v ${cmd}`,
+      { stdio: 'ignore' },
+    );
+    commandExistsCache.set(cmd, true);
+    return true;
+  } catch {
+    commandExistsCache.set(cmd, false);
+    return false;
+  }
+}
+
+/**
+ * Get the actual executable command for an editor type.
+ */
+function getExecutableCommand(editorType: EditorType): string {
+  const commandConfig = editorCommands[editorType];
+  const commands =
+    process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
+
+  // Try to find the first available command
+  const availableCommand = commands.find((cmd) => commandExists(cmd));
+
+  // Return the first available command, or fall back to the last one in the list
+  return availableCommand || commands[commands.length - 1];
+}
 
 /**
  * Determines the editor command to use based on user preferences and platform.
  */
 function getEditorCommand(preferredEditor?: EditorType): string {
   if (preferredEditor) {
-    return preferredEditor;
+    return getExecutableCommand(preferredEditor);
   }
 
   // Platform-specific defaults with UI preference for macOS
@@ -63,8 +106,14 @@ export function useLaunchEditor() {
       try {
         setRawMode?.(false);
 
+        // On Windows, .cmd and .bat files need shell: true
+        const needsShell =
+          process.platform === 'win32' &&
+          (editorCommand.endsWith('.cmd') || editorCommand.endsWith('.bat'));
+
         const { status, error } = spawnSync(editorCommand, editorArgs, {
           stdio: 'inherit',
+          shell: needsShell,
         });
 
         if (error) throw error;
