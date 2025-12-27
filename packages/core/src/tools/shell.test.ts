@@ -169,6 +169,44 @@ describe('ShellTool', () => {
       });
       expect(invocation.getDescription()).not.toContain('[background]');
     });
+
+    describe('is_background parameter coercion', () => {
+      it('should accept string "true" as boolean true', () => {
+        const invocation = shellTool.build({
+          command: 'npm run dev',
+          is_background: 'true' as unknown as boolean,
+        });
+        expect(invocation).toBeDefined();
+        expect(invocation.getDescription()).toContain('[background]');
+      });
+
+      it('should accept string "false" as boolean false', () => {
+        const invocation = shellTool.build({
+          command: 'npm run build',
+          is_background: 'false' as unknown as boolean,
+        });
+        expect(invocation).toBeDefined();
+        expect(invocation.getDescription()).not.toContain('[background]');
+      });
+
+      it('should accept string "True" as boolean true', () => {
+        const invocation = shellTool.build({
+          command: 'npm run dev',
+          is_background: 'True' as unknown as boolean,
+        });
+        expect(invocation).toBeDefined();
+        expect(invocation.getDescription()).toContain('[background]');
+      });
+
+      it('should accept string "False" as boolean false', () => {
+        const invocation = shellTool.build({
+          command: 'npm run build',
+          is_background: 'False' as unknown as boolean,
+        });
+        expect(invocation).toBeDefined();
+        expect(invocation.getDescription()).not.toContain('[background]');
+      });
+    });
   });
 
   describe('execute', () => {
