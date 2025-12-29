@@ -124,7 +124,33 @@ Settings are organized into categories. All settings should be placed within the
         "temperature": 0.2,
         "top_p": 0.8,
         "max_tokens": 1024
+      },
+      "reasoning": {
+        "effort": "medium"
       }
+    }
+  }
+}
+```
+
+**Reasoning Configuration:**
+
+The `reasoning` field controls reasoning behavior for models that support it:
+
+- Set to `false` to disable reasoning entirely
+- Set to an object with `effort` field to enable reasoning with a specific effort level:
+  - `"low"`: Minimal reasoning effort
+  - `"medium"`: Balanced reasoning effort (default)
+  - `"high"`: Maximum reasoning effort
+- Optionally include `budget_tokens` to limit reasoning token usage
+
+Example to disable reasoning:
+
+```json
+{
+  "model": {
+    "generationConfig": {
+      "reasoning": false
     }
   }
 }
