@@ -231,6 +231,14 @@ function setNestedProperty(
   current[lastKey] = value;
 }
 
+// Dynamically determine the top-level keys from the V2 settings structure.
+const KNOWN_V2_CONTAINERS = new Set([
+  ...Object.values(MIGRATION_MAP).map((path) => path.split('.')[0]),
+  ...Object.values(INVERTED_BOOLEAN_MIGRATIONS).map(
+    (path) => path.split('.')[0],
+  ),
+]);
+
 export function needsMigration(settings: Record<string, unknown>): boolean {
   // Check version field first - if present and matches current version, no migration needed
   if (SETTINGS_VERSION_KEY in settings) {
@@ -412,9 +420,26 @@ const REVERSE_MIGRATION_MAP: Record<string, string> = Object.fromEntries(
   Object.entries(MIGRATION_MAP).map(([key, value]) => [value, key]),
 );
 
-// Dynamically determine the top-level keys from the V2 settings structure.
-const KNOWN_V2_CONTAINERS = new Set(
-  Object.values(MIGRATION_MAP).map((path) => path.split('.')[0]),
+// Reverse map for old V2 paths (before rename) to V1 keys.
+// Used when migrating settings that still have old V2 naming (e.g., general.disableAutoUpdate).
+const OLD_V2_TO_V1_MAP: Record<string, string> = {};
+for (const [oldV2Path, newV3Path] of Object.entries(INVERTED_V2_PATHS)) {
+  // Find the V1 key that maps to this V3 path
+  for (const [v1Key, v3Path] of Object.entries(INVERTED_BOOLEAN_MIGRATIONS)) {
+    if (v3Path === newV3Path) {
+      OLD_V2_TO_V1_MAP[oldV2Path] = v1Key;
+      break;
+    }
+  }
+}
+
+// Reverse map for new V3 paths to V1 keys (with boolean inversion).
+// Used when migrating settings that have new V3 naming (e.g., general.enableAutoUpdate).
+const V3_TO_V1_INVERTED_MAP: Record<string, string> = Object.fromEntries(
+  Object.entries(INVERTED_BOOLEAN_MIGRATIONS).map(([v1Key, v3Path]) => [
+    v3Path,
+    v1Key,
+  ]),
 );
 
 function getSettingsFileKeyWarnings(
@@ -453,7 +478,7 @@ function getSettingsFileKeyWarnings(
 
     ignoredLegacyKeys.add(oldKey);
     warnings.push(
-      `⚠️  Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
+      `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
     );
   }
 
@@ -471,7 +496,7 @@ function getSettingsFileKeyWarnings(
     }
 
     warnings.push(
-      `⚠️  Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
+      `Warning: Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
     );
   }
 
@@ -490,7 +515,8 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   for (const scope of [SettingScope.User, SettingScope.Workspace]) {
     const settingsFile = loadedSettings.forScope(scope);
     if (settingsFile.rawJson === undefined) {
-      continue; // File not present / not loaded.
+      continue;
+      // File not present / not loaded.
     }
     const settingsObject = settingsFile.originalSettings as unknown as Record<
       string,
@@ -519,6 +545,26 @@ export function migrateSettingsToV1(
     if (value !== undefined) {
       v1Settings[oldKey] = value;
       v2Keys.delete(newPath.split('.')[0]);
+    }
+  }
+
+  // Handle old V2 inverted paths (no value inversion needed)
+  // e.g., general.disableAutoUpdate -> disableAutoUpdate
+  for (const [oldV2Path, v1Key] of Object.entries(OLD_V2_TO_V1_MAP)) {
+    const value = getNestedProperty(v2Settings, oldV2Path);
+    if (value !== undefined) {
+      v1Settings[v1Key] = value;
+      v2Keys.delete(oldV2Path.split('.')[0]);
+    }
+  }
+
+  // Handle new V3 inverted paths (WITH value inversion)
+  // e.g., general.enableAutoUpdate -> disableAutoUpdate (inverted)
+  for (const [v3Path, v1Key] of Object.entries(V3_TO_V1_INVERTED_MAP)) {
+    const value = getNestedProperty(v2Settings, v3Path);
+    if (value !== undefined && typeof value === 'boolean') {
+      v1Settings[v1Key] = !value;
+      v2Keys.delete(v3Path.split('.')[0]);
     }
   }
 
