@@ -143,9 +143,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
 
-      // If explicitly marked as background and doesn't already end with &, add it
-      if (shouldRunInBackground && !finalCommand.trim().endsWith('&')) {
+      // On non-Windows, use & to run in background.
+      // On Windows, we don't use start /B because it creates a detached process that
+      // doesn't die when the parent dies. Instead, we rely on the race logic below
+      // to return early while keeping the process attached (detached: false).
+      if (
+        !isWindows &&
+        shouldRunInBackground &&
+        !finalCommand.trim().endsWith('&')
+      ) {
         finalCommand = finalCommand.trim() + ' &';
+      }
+
+      // On Windows, we rely on the race logic below to handle background tasks.
+      // We just ensure the command string is clean.
+      if (isWindows && shouldRunInBackground) {
+        finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
@@ -169,10 +182,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           commandToExecute,
           cwd,
           (event: ShellOutputEvent) => {
-            if (!updateOutput) {
-              return;
-            }
-
             let shouldUpdate = false;
 
             switch (event.type) {
@@ -201,7 +210,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               }
             }
 
-            if (shouldUpdate) {
+            if (shouldUpdate && updateOutput) {
               updateOutput(
                 typeof cumulativeOutput === 'string'
                   ? cumulativeOutput
@@ -217,6 +226,47 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (pid && setPidCallback) {
         setPidCallback(pid);
+      }
+
+      if (shouldRunInBackground) {
+        // Check for obvious startup errors from captured output
+        const outputStr =
+          typeof cumulativeOutput === 'string'
+            ? cumulativeOutput
+            : JSON.stringify(cumulativeOutput);
+
+        const errorPatterns = [
+          'is not recognized as an internal or external command',
+          'The system cannot find the path specified',
+          'Access is denied',
+          'command not found',
+          'No such file or directory',
+          'Permission denied',
+        ];
+
+        const hasEarlyError = errorPatterns.some((pat) =>
+          outputStr.includes(pat),
+        );
+
+        if (hasEarlyError) {
+          return {
+            llmContent: `Command failed to start: ${outputStr}`,
+            returnDisplay: `Command failed to start: ${outputStr}`,
+            error: {
+              type: ToolErrorType.EXECUTION_FAILED,
+              message: `Command failed to start: ${outputStr}`,
+            },
+          };
+        }
+
+        const pidMsg = pid ? ` PID: ${pid}` : '';
+        const winHint = isWindows
+          ? ' (Note: Use taskkill /F /T /PID <pid> to stop)'
+          : '';
+        return {
+          llmContent: `Background command started.${pidMsg}${winHint}`,
+          returnDisplay: `Background command started.${pidMsg}${winHint}`,
+        };
       }
 
       const result = await resultPromise;

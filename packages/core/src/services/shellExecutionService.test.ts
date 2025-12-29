@@ -589,7 +589,7 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.error).toBeNull();
       expect(result.aborted).toBe(false);
       expect(result.output).toBe('file1.txt\na warning');
-      expect(handle.pid).toBe(undefined);
+      expect(handle.pid).toBe(12345);
 
       expect(onOutputEventMock).toHaveBeenCalledWith({
         type: 'data',
@@ -829,7 +829,7 @@ describe('ShellExecutionService child_process fallback', () => {
         [],
         expect.objectContaining({
           shell: true,
-          detached: false,
+          detached: true,
         }),
       );
     });
