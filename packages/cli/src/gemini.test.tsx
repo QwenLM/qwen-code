@@ -640,13 +640,13 @@ describe('startInteractiveUI', () => {
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
   });
 
-  it('should not call checkForUpdates when disableUpdateNag is true', async () => {
+  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
     const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
 
-    const settingsWithNagDisabled = {
+    const settingsWithAutoUpdateDisabled = {
       merged: {
         general: {
-          disableUpdateNag: true,
+          enableAutoUpdate: false,
         },
         ui: {
           hideWindowTitle: false,
@@ -663,7 +663,7 @@ describe('startInteractiveUI', () => {
 
     await startInteractiveUI(
       mockConfig,
-      settingsWithNagDisabled,
+      settingsWithAutoUpdateDisabled,
       mockStartupWarnings,
       mockWorkspaceRoot,
       mockInitializationResult,
@@ -672,7 +672,7 @@ describe('startInteractiveUI', () => {
     // Wait for any async operations
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    // checkForUpdates should NOT be called when disableUpdateNag is true
+    // checkForUpdates should NOT be called when enableAutoUpdate is false
     expect(checkForUpdates).not.toHaveBeenCalled();
   });
 });
