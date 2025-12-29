@@ -137,6 +137,12 @@ const INVERTED_BOOLEAN_MIGRATIONS: Record<string, string> = {
   disableCacheControl: 'model.generationConfig.enableCacheControl',
 };
 
+// Consolidated settings: multiple old V1 keys that map to a single new key.
+// Policy: if ANY of the old disable* settings is true, the new enable* should be false.
+const CONSOLIDATED_SETTINGS: Record<string, string[]> = {
+  'general.enableAutoUpdate': ['disableAutoUpdate', 'disableUpdateNag'],
+};
+
 // V2 nested paths that need inversion when migrating to V3
 const INVERTED_V2_PATHS: Record<string, string> = {
   'general.disableAutoUpdate': 'general.enableAutoUpdate',
@@ -147,6 +153,15 @@ const INVERTED_V2_PATHS: Record<string, string> = {
     'context.fileFiltering.enableFuzzySearch',
   'model.generationConfig.disableCacheControl':
     'model.generationConfig.enableCacheControl',
+};
+
+// Consolidated V2 paths: multiple old paths that map to a single new path.
+// Policy: if ANY of the old disable* settings is true, the new enable* should be false.
+const CONSOLIDATED_V2_PATHS: Record<string, string[]> = {
+  'general.enableAutoUpdate': [
+    'general.disableAutoUpdate',
+    'general.disableUpdateNag',
+  ],
 };
 
 export function getSystemSettingsPath(): string {
@@ -302,8 +317,34 @@ function migrateSettingsToV2(
     }
   }
 
-  // Handle V1 settings that need boolean inversion (disable* -> enable*)
+  // Handle consolidated settings first (multiple old keys -> single new key)
+  // Policy: if ANY of the old disable* settings is true, the new enable* should be false
+  for (const [newPath, oldKeys] of Object.entries(CONSOLIDATED_SETTINGS)) {
+    let hasAnyDisable = false;
+    let hasAnyValue = false;
+    for (const oldKey of oldKeys) {
+      if (flatKeys.has(oldKey)) {
+        hasAnyValue = true;
+        const oldValue = flatSettings[oldKey];
+        if (typeof oldValue === 'boolean' && oldValue === true) {
+          hasAnyDisable = true;
+        }
+        flatKeys.delete(oldKey);
+      }
+    }
+    if (hasAnyValue) {
+      // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
+      setNestedProperty(v2Settings, newPath, !hasAnyDisable);
+    }
+  }
+
+  // Handle remaining V1 settings that need boolean inversion (disable* -> enable*)
+  // Skip keys that were already handled by consolidated settings
+  const consolidatedKeys = new Set(Object.values(CONSOLIDATED_SETTINGS).flat());
   for (const [oldKey, newPath] of Object.entries(INVERTED_BOOLEAN_MIGRATIONS)) {
+    if (consolidatedKeys.has(oldKey)) {
+      continue;
+    }
     if (flatKeys.has(oldKey)) {
       const oldValue = flatSettings[oldKey];
       if (typeof oldValue === 'boolean') {
@@ -362,8 +403,36 @@ function migrateV2ToV3(
 
   let changed = false;
   const result = structuredClone(settings);
+  const processedPaths = new Set<string>();
 
+  // Handle consolidated V2 paths first (multiple old paths -> single new path)
+  // Policy: if ANY of the old disable* settings is true, the new enable* should be false
+  for (const [newPath, oldPaths] of Object.entries(CONSOLIDATED_V2_PATHS)) {
+    let hasAnyDisable = false;
+    let hasAnyValue = false;
+    for (const oldPath of oldPaths) {
+      const oldValue = getNestedProperty(result, oldPath);
+      if (typeof oldValue === 'boolean') {
+        hasAnyValue = true;
+        if (oldValue === true) {
+          hasAnyDisable = true;
+        }
+        deleteNestedProperty(result, oldPath);
+        processedPaths.add(oldPath);
+        changed = true;
+      }
+    }
+    if (hasAnyValue) {
+      // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
+      setNestedProperty(result, newPath, !hasAnyDisable);
+    }
+  }
+
+  // Handle remaining V2 paths that need inversion
   for (const [oldPath, newPath] of Object.entries(INVERTED_V2_PATHS)) {
+    if (processedPaths.has(oldPath)) {
+      continue;
+    }
     const oldValue = getNestedProperty(result, oldPath);
     if (typeof oldValue === 'boolean') {
       // Remove old property
