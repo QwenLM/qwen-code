@@ -816,9 +816,18 @@ export abstract class BaseJsonOutputAdapter {
     parentToolUseId?: string | null,
   ): void {
     const actualParentToolUseId = parentToolUseId ?? null;
-    const fragment = [subject?.trim(), description?.trim()]
-      .filter((value) => value && value.length > 0)
-      .join(': ');
+
+    // Build fragment without trimming to preserve whitespace in streaming content
+    // Only filter out null/undefined/empty values
+    const parts: string[] = [];
+    if (subject && subject.length > 0) {
+      parts.push(subject);
+    }
+    if (description && description.length > 0) {
+      parts.push(description);
+    }
+
+    const fragment = parts.join(': ');
     if (!fragment) {
       return;
     }

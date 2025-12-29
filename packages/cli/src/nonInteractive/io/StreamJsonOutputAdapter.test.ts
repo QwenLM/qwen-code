@@ -323,6 +323,68 @@ describe('StreamJsonOutputAdapter', () => {
       });
     });
 
+    it('should preserve whitespace in thinking content (issue #1356)', () => {
+      adapter.processEvent({
+        type: GeminiEventType.Thought,
+        value: {
+          subject: '',
+          description: 'The user just said "Hello"',
+        },
+      });
+
+      const message = adapter.finalizeAssistantMessage();
+      expect(message.message.content).toHaveLength(1);
+      const block = message.message.content[0] as {
+        type: string;
+        thinking: string;
+      };
+      expect(block.type).toBe('thinking');
+      expect(block.thinking).toBe('The user just said "Hello"');
+      // Verify spaces are preserved
+      expect(block.thinking).toContain('user just');
+      expect(block.thinking).not.toContain('userjust');
+    });
+
+    it('should preserve whitespace when streaming multiple thinking fragments (issue #1356)', () => {
+      // Simulate streaming thinking content in multiple events
+      adapter.processEvent({
+        type: GeminiEventType.Thought,
+        value: {
+          subject: '',
+          description: 'The user just',
+        },
+      });
+      adapter.processEvent({
+        type: GeminiEventType.Thought,
+        value: {
+          subject: '',
+          description: ' said "Hello"',
+        },
+      });
+      adapter.processEvent({
+        type: GeminiEventType.Thought,
+        value: {
+          subject: '',
+          description: '. This is a simple greeting',
+        },
+      });
+
+      const message = adapter.finalizeAssistantMessage();
+      expect(message.message.content).toHaveLength(1);
+      const block = message.message.content[0] as {
+        type: string;
+        thinking: string;
+      };
+      expect(block.thinking).toBe(
+        'The user just said "Hello". This is a simple greeting',
+      );
+      // Verify specific spaces are preserved
+      expect(block.thinking).toContain('user just ');
+      expect(block.thinking).toContain(' said');
+      expect(block.thinking).not.toContain('userjust');
+      expect(block.thinking).not.toContain('justsaid');
+    });
+
     it('should append tool use from ToolCallRequest events', () => {
       adapter.processEvent({
         type: GeminiEventType.ToolCallRequest,

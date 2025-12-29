@@ -630,6 +630,67 @@ describe('BaseJsonOutputAdapter', () => {
 
       expect(state.blocks).toHaveLength(0);
     });
+
+    it('should preserve whitespace in thinking content', () => {
+      const state = adapter.exposeCreateMessageState();
+      adapter.startAssistantMessage();
+
+      adapter.exposeAppendThinking(
+        state,
+        '',
+        'The user just said "Hello"',
+        null,
+      );
+
+      expect(state.blocks).toHaveLength(1);
+      expect(state.blocks[0]).toMatchObject({
+        type: 'thinking',
+        thinking: 'The user just said "Hello"',
+      });
+      // Verify spaces are preserved
+      const block = state.blocks[0] as { thinking: string };
+      expect(block.thinking).toContain('user just');
+      expect(block.thinking).not.toContain('userjust');
+    });
+
+    it('should preserve whitespace when appending multiple thinking fragments', () => {
+      const state = adapter.exposeCreateMessageState();
+      adapter.startAssistantMessage();
+
+      // Simulate streaming thinking content in fragments
+      adapter.exposeAppendThinking(state, '', 'The user just', null);
+      adapter.exposeAppendThinking(state, '', ' said "Hello"', null);
+      adapter.exposeAppendThinking(
+        state,
+        '',
+        '. This is a simple greeting',
+        null,
+      );
+
+      expect(state.blocks).toHaveLength(1);
+      const block = state.blocks[0] as { thinking: string };
+      // Verify the complete text with all spaces preserved
+      expect(block.thinking).toBe(
+        'The user just said "Hello". This is a simple greeting',
+      );
+      // Verify specific space preservation
+      expect(block.thinking).toContain('user just ');
+      expect(block.thinking).toContain(' said');
+      expect(block.thinking).toContain('". This');
+      expect(block.thinking).not.toContain('userjust');
+      expect(block.thinking).not.toContain('justsaid');
+    });
+
+    it('should preserve leading and trailing whitespace in description', () => {
+      const state = adapter.exposeCreateMessageState();
+      adapter.startAssistantMessage();
+
+      adapter.exposeAppendThinking(state, '', '  content with spaces  ', null);
+
+      expect(state.blocks).toHaveLength(1);
+      const block = state.blocks[0] as { thinking: string };
+      expect(block.thinking).toBe('  content with spaces  ');
+    });
   });
 
   describe('appendToolUse', () => {
