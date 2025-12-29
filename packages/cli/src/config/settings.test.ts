@@ -646,6 +646,75 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
     });
 
+    it('should consolidate disableAutoUpdate and disableUpdateNag - both false means enableAutoUpdate is true', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V1 settings with both disable* settings as false
+      const legacySettingsContent = {
+        disableAutoUpdate: false,
+        disableUpdateNag: false,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Both are false, so enableAutoUpdate should be true
+      expect(settings.merged.general?.enableAutoUpdate).toBe(true);
+    });
+
+    it('should consolidate disableAutoUpdate and disableUpdateNag - any true means enableAutoUpdate is false', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V1 settings with disableAutoUpdate=false but disableUpdateNag=true
+      const legacySettingsContent = {
+        disableAutoUpdate: false,
+        disableUpdateNag: true,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // disableUpdateNag is true, so enableAutoUpdate should be false
+      expect(settings.merged.general?.enableAutoUpdate).toBe(false);
+    });
+
+    it('should consolidate disableAutoUpdate and disableUpdateNag - disableAutoUpdate=true takes precedence', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V1 settings with disableAutoUpdate=true
+      const legacySettingsContent = {
+        disableAutoUpdate: true,
+        disableUpdateNag: false,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // disableAutoUpdate is true, so enableAutoUpdate should be false
+      expect(settings.merged.general?.enableAutoUpdate).toBe(false);
+    });
+
     it('should correctly merge and migrate legacy array properties from multiple scopes', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const legacyUserSettings = {

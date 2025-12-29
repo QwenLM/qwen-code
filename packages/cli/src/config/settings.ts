@@ -282,7 +282,12 @@ export function needsMigration(settings: Record<string, unknown>): boolean {
     return true;
   });
 
-  return hasV1Keys;
+  // Also check for old inverted boolean keys (disable* -> enable*)
+  const hasInvertedBooleanKeys = Object.keys(INVERTED_BOOLEAN_MIGRATIONS).some(
+    (v1Key) => v1Key in settings,
+  );
+
+  return hasV1Keys || hasInvertedBooleanKeys;
 }
 
 function migrateSettingsToV2(
