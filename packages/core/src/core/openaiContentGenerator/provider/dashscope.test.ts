@@ -55,7 +55,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
-        disableCacheControl: false,
+        enableCacheControl: true,
       }),
     } as unknown as Config;
 
@@ -484,7 +484,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         >
       ).mockReturnValue({
         model: 'qwen-max',
-        disableCacheControl: true,
+        enableCacheControl: false,
       });
 
       const result = provider.buildRequest(baseRequest, 'test-prompt-id');

@@ -57,7 +57,7 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 const MIGRATE_V2_OVERWRITE = true;
 
 // Settings version to track migration state
-export const SETTINGS_VERSION = 2;
+export const SETTINGS_VERSION = 3;
 export const SETTINGS_VERSION_KEY = '$version';
 
 const MIGRATION_MAP: Record<string, string> = {
@@ -74,8 +74,6 @@ const MIGRATION_MAP: Record<string, string> = {
   customThemes: 'ui.customThemes',
   customWittyPhrases: 'ui.customWittyPhrases',
   debugKeystrokeLogging: 'general.debugKeystrokeLogging',
-  disableAutoUpdate: 'general.disableAutoUpdate',
-  disableUpdateNag: 'general.disableUpdateNag',
   dnsResolutionOrder: 'advanced.dnsResolutionOrder',
   enforcedAuthType: 'security.auth.enforcedType',
   excludeTools: 'tools.exclude',
@@ -129,6 +127,28 @@ const MIGRATION_MAP: Record<string, string> = {
   visionModelPreview: 'experimental.visionModelPreview',
 };
 
+// Settings that need boolean inversion during migration (V1 -> V3)
+// Old negative naming -> new positive naming with inverted value
+const INVERTED_BOOLEAN_MIGRATIONS: Record<string, string> = {
+  disableAutoUpdate: 'general.enableAutoUpdate',
+  disableUpdateNag: 'general.enableAutoUpdate',
+  disableLoadingPhrases: 'ui.accessibility.enableLoadingPhrases',
+  disableFuzzySearch: 'context.fileFiltering.enableFuzzySearch',
+  disableCacheControl: 'model.generationConfig.enableCacheControl',
+};
+
+// V2 nested paths that need inversion when migrating to V3
+const INVERTED_V2_PATHS: Record<string, string> = {
+  'general.disableAutoUpdate': 'general.enableAutoUpdate',
+  'general.disableUpdateNag': 'general.enableAutoUpdate',
+  'ui.accessibility.disableLoadingPhrases':
+    'ui.accessibility.enableLoadingPhrases',
+  'context.fileFiltering.disableFuzzySearch':
+    'context.fileFiltering.enableFuzzySearch',
+  'model.generationConfig.disableCacheControl':
+    'model.generationConfig.enableCacheControl',
+};
+
 export function getSystemSettingsPath(): string {
   if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
     return process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
@@ -170,7 +190,7 @@ export interface SummarizeToolOutputSettings {
 }
 
 export interface AccessibilitySettings {
-  disableLoadingPhrases?: boolean;
+  enableLoadingPhrases?: boolean;
   screenReader?: boolean;
 }
 
@@ -274,6 +294,17 @@ function migrateSettingsToV2(
     }
   }
 
+  // Handle V1 settings that need boolean inversion (disable* -> enable*)
+  for (const [oldKey, newPath] of Object.entries(INVERTED_BOOLEAN_MIGRATIONS)) {
+    if (flatKeys.has(oldKey)) {
+      const oldValue = flatSettings[oldKey];
+      if (typeof oldValue === 'boolean') {
+        setNestedProperty(v2Settings, newPath, !oldValue);
+      }
+      flatKeys.delete(oldKey);
+    }
+  }
+
   // Preserve mcpServers at the top level
   if (flatSettings['mcpServers']) {
     v2Settings['mcpServers'] = flatSettings['mcpServers'];
@@ -310,6 +341,56 @@ function migrateSettingsToV2(
   v2Settings[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
 
   return v2Settings;
+}
+
+// Migrate V2 settings to V3 (invert disable* -> enable* booleans)
+function migrateV2ToV3(
+  settings: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const version = settings[SETTINGS_VERSION_KEY];
+  if (typeof version === 'number' && version >= 3) {
+    return null;
+  }
+
+  let changed = false;
+  const result = structuredClone(settings);
+
+  for (const [oldPath, newPath] of Object.entries(INVERTED_V2_PATHS)) {
+    const oldValue = getNestedProperty(result, oldPath);
+    if (typeof oldValue === 'boolean') {
+      // Remove old property
+      deleteNestedProperty(result, oldPath);
+      // Set new property with inverted value
+      setNestedProperty(result, newPath, !oldValue);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    result[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
+    return result;
+  }
+
+  return null;
+}
+
+function deleteNestedProperty(
+  obj: Record<string, unknown>,
+  path: string,
+): void {
+  const keys = path.split('.');
+  const lastKey = keys.pop();
+  if (!lastKey) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of keys) {
+    const next = current[key];
+    if (typeof next !== 'object' || next === null) {
+      return;
+    }
+    current = next as Record<string, unknown>;
+  }
+  delete current[lastKey];
 }
 
 function getNestedProperty(
@@ -777,6 +858,33 @@ export function loadSettings(
             }
           }
         }
+
+        // V2 to V3 migration (invert disable* -> enable* booleans)
+        const v3Migrated = migrateV2ToV3(settingsObject);
+        if (v3Migrated) {
+          if (MIGRATE_V2_OVERWRITE) {
+            try {
+              // Only backup if not already backed up by V1->V2 migration
+              const backupPath = `${filePath}.orig`;
+              if (!fs.existsSync(backupPath)) {
+                fs.renameSync(filePath, backupPath);
+              }
+              fs.writeFileSync(
+                filePath,
+                JSON.stringify(v3Migrated, null, 2),
+                'utf-8',
+              );
+            } catch (e) {
+              console.error(
+                `Error migrating settings file to V3: ${getErrorMessage(e)}`,
+              );
+            }
+          } else {
+            migratedInMemorScopes.add(scope);
+          }
+          settingsObject = v3Migrated;
+        }
+
         return { settings: settingsObject as Settings, rawJson: content };
       }
     } catch (error: unknown) {
