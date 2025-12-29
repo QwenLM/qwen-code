@@ -242,6 +242,41 @@ function getRetryAfterDelayMs(error: unknown): number {
 }
 
 /**
+ * Extracts the Cerebras rate limit delay from an error object's headers.
+ * @param error The error object.
+ * @returns The delay in milliseconds, or 0 if not found or invalid.
+ */
+function getCerebrasRateLimitDelayMs(error: unknown): number {
+  if (typeof error === 'object' && error !== null) {
+    // Check for error.response.headers (common in axios errors)
+    if (
+      'response' in error &&
+      typeof (error as { response?: unknown }).response === 'object' &&
+      (error as { response?: unknown }).response !== null
+    ) {
+      const response = (error as { response: { headers?: unknown } }).response;
+      if (
+        'headers' in response &&
+        typeof response.headers === 'object' &&
+        response.headers !== null
+      ) {
+        const headers = response.headers as {
+          'x-ratelimit-reset-tokens-minute'?: unknown;
+        };
+        const resetTokensHeader = headers['x-ratelimit-reset-tokens-minute'];
+        if (typeof resetTokensHeader === 'string') {
+          const resetTokensSeconds = parseFloat(resetTokensHeader);
+          if (!isNaN(resetTokensSeconds)) {
+            return Math.ceil(resetTokensSeconds * 1000);
+          }
+        }
+      }
+    }
+  }
+  return 0;
+}
+
+/**
  * Determines the delay duration based on the error, prioritizing Retry-After header.
  * @param error The error object.
  * @returns An object containing the delay duration in milliseconds and the error status.
@@ -254,7 +289,18 @@ function getDelayDurationAndStatus(error: unknown): {
   let delayDurationMs = 0;
 
   if (errorStatus === 429) {
-    delayDurationMs = getRetryAfterDelayMs(error);
+    // Check if this is a Cerebras API request
+    const isOpenAiCerebras =
+      typeof process !== 'undefined' &&
+      process.env &&
+      process.env.OPENAI_BASE_URL &&
+      process.env.OPENAI_BASE_URL.includes('cerebras.ai');
+
+    if (isOpenAiCerebras) {
+      delayDurationMs = getCerebrasRateLimitDelayMs(error);
+    } else {
+      delayDurationMs = getRetryAfterDelayMs(error);
+    }
   }
   return { delayDurationMs, errorStatus };
 }
