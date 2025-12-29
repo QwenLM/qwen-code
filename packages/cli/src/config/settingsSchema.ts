@@ -675,6 +675,45 @@ const SETTINGS_SCHEMA = {
               { value: 'openapi_30', label: 'OpenAPI 3.0 Strict' },
             ],
           },
+          samplingParams: {
+            type: 'object',
+            label: 'Sampling Parameters',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as
+              | {
+                  top_p?: number;
+                  top_k?: number;
+                  repetition_penalty?: number;
+                  presence_penalty?: number;
+                  frequency_penalty?: number;
+                  temperature?: number;
+                  max_tokens?: number;
+                }
+              | undefined,
+            description: 'Sampling parameters for content generation.',
+            parentKey: 'generationConfig',
+            childKey: 'samplingParams',
+            showInDialog: false,
+          },
+          reasoning: {
+            type: 'object',
+            label: 'Reasoning Configuration',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as
+              | false
+              | {
+                  effort?: 'low' | 'medium' | 'high';
+                  budget_tokens?: number;
+                }
+              | undefined,
+            description:
+              'Reasoning configuration for models that support reasoning. Set to false to disable reasoning, or provide an object with effort level and optional token budget.',
+            parentKey: 'generationConfig',
+            childKey: 'reasoning',
+            showInDialog: false,
+          },
         },
       },
     },
