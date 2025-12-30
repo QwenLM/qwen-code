@@ -38,6 +38,11 @@ on:
         type: 'boolean'
         default: false
 
+concurrency:
+  # Serialize all release workflows (CLI + SDK) to avoid racing on `main` pushes.
+  group: 'release-main'
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: 'ubuntu-latest'
@@ -150,8 +155,19 @@ jobs:
         env:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
+          set -euo pipefail
           BRANCH_NAME="release/${RELEASE_TAG}"
-          git switch -c "${BRANCH_NAME}"
+
+          # Make reruns idempotent: reuse an existing remote branch if it already exists.
+          if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
+            git switch "${BRANCH_NAME}"
+          elif git ls-remote --exit-code --heads origin "${BRANCH_NAME}" >/dev/null 2>&1; then
+            git fetch origin "${BRANCH_NAME}:${BRANCH_NAME}"
+            git switch "${BRANCH_NAME}"
+          else
+            git switch -c "${BRANCH_NAME}"
+          fi
+
           echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Update package versions'
@@ -191,16 +207,47 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           scope: '@qwen-code'
 
+      - name: 'Check if @qwen-code/qwen-code version is already published (rerun safety)'
+        id: 'npm_check'
+        env:
+          RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
+        run: |-
+          set -euo pipefail
+          if npm view "@qwen-code/qwen-code@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+            echo "@qwen-code/qwen-code@${RELEASE_VERSION} already exists on npm."
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'true' || steps.npm_check.outputs.already_published != 'true' }}
         run: |-
           npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
-      - name: 'Create GitHub Release and Tag'
+      - name: 'Check if GitHub Release already exists (rerun safety)'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' }}
+        id: 'gh_release_check'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "already_exists=true" >> "${GITHUB_OUTPUT}"
+            echo "GitHub Release ${RELEASE_TAG} already exists."
+          else
+            echo "already_exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Create GitHub Release and Tag'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.gh_release_check.outputs.already_exists != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
@@ -214,12 +261,33 @@ jobs:
             --notes-start-tag "$PREVIOUS_RELEASE_TAG" \
             --generate-notes
 
+      - name: 'Merge release changes back to main'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+        run: |-
+          # Checkout main branch
+          git fetch origin main
+          git checkout main
+          git pull origin main
+
+          # Only fast-forward merge back to main.
+          # Purpose: avoid creating silent merge commits in an automated workflow (no PR review),
+          # and fail loudly when history has diverged so a human can resolve it.
+          git merge "${RELEASE_BRANCH}" --ff-only
+
+          # Push changes
+          git push origin main
+
       - name: 'Create Issue on Failure'
         if: |-
           ${{ failure() }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }} || "N/A"'
+          RELEASE_TAG: "${{ steps.version.outputs.RELEASE_TAG || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           gh issue create \
