@@ -1037,7 +1037,6 @@ export default {
     'Applying percussive maintenance...',
     'Searching for the correct USB orientation...',
     'Ensuring the magic smoke stays inside the wires...',
-    'Rewriting in Rust for no particular reason...',
     'Trying to exit Vim...',
     'Spinning up the hamster wheel...',
     "That's not a bug, it's an undocumented feature...",

@@ -202,6 +202,7 @@ const SETTINGS_SCHEMA = {
           { value: 'en', label: 'English' },
           { value: 'zh', label: '中文 (Chinese)' },
           { value: 'ru', label: 'Русский (Russian)' },
+          { value: 'de', label: 'Deutsch (German)' },
         ],
       },
       terminalBell: {
