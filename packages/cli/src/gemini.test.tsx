@@ -639,4 +639,40 @@ describe('startInteractiveUI', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
   });
+
+  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
+    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+
+    const settingsWithAutoUpdateDisabled = {
+      merged: {
+        general: {
+          enableAutoUpdate: false,
+        },
+        ui: {
+          hideWindowTitle: false,
+        },
+      },
+    } as LoadedSettings;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      settingsWithAutoUpdateDisabled,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    // Wait for any async operations
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // checkForUpdates should NOT be called when enableAutoUpdate is false
+    expect(checkForUpdates).not.toHaveBeenCalled();
+  });
 });

@@ -183,16 +183,20 @@ export async function startInteractiveUI(
     },
   );
 
-  checkForUpdates()
-    .then((info) => {
-      handleAutoUpdate(info, settings, config.getProjectRoot());
-    })
-    .catch((err) => {
-      // Silently ignore update check errors.
-      if (config.getDebugMode()) {
-        console.error('Update check failed:', err);
-      }
-    });
+  // Check for updates only if enableAutoUpdate is not explicitly disabled.
+  // Using !== false ensures updates are enabled by default when undefined.
+  if (settings.merged.general?.enableAutoUpdate !== false) {
+    checkForUpdates()
+      .then((info) => {
+        handleAutoUpdate(info, settings, config.getProjectRoot());
+      })
+      .catch((err) => {
+        // Silently ignore update check errors.
+        if (config.getDebugMode()) {
+          console.error('Update check failed:', err);
+        }
+      });
+  }
 
   registerCleanup(() => instance.unmount());
 }

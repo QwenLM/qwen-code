@@ -281,7 +281,7 @@ describe('SettingsDialog', () => {
         stdin.write(TerminalKeys.DOWN_ARROW as string); // Down arrow
       });
 
-      expect(lastFrame()).toContain('● Disable Auto Update');
+      expect(lastFrame()).toContain('● Enable Auto Update');
 
       // The active index should have changed (tested indirectly through behavior)
       unmount();
@@ -372,7 +372,7 @@ describe('SettingsDialog', () => {
         stdin.write(TerminalKeys.DOWN_ARROW as string);
       });
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Disable Auto Update');
+        expect(lastFrame()).toContain('● Enable Auto Update');
       });
 
       // Toggle the setting
@@ -392,10 +392,10 @@ describe('SettingsDialog', () => {
       });
 
       expect(vi.mocked(saveModifiedSettings)).toHaveBeenCalledWith(
-        new Set<string>(['general.disableAutoUpdate']),
+        new Set<string>(['general.enableAutoUpdate']),
         {
           general: {
-            disableAutoUpdate: true,
+            enableAutoUpdate: false,
           },
         },
         expect.any(LoadedSettings),
@@ -1269,7 +1269,7 @@ describe('SettingsDialog', () => {
       const settings = createMockSettings({
         general: {
           vimMode: true,
-          disableAutoUpdate: true,
+          enableAutoUpdate: false,
           debugKeystrokeLogging: true,
         },
         ui: {
@@ -1321,7 +1321,7 @@ describe('SettingsDialog', () => {
       const settings = createMockSettings({
         general: {
           vimMode: false,
-          disableAutoUpdate: true,
+          enableAutoUpdate: false,
         },
         ui: {
           showMemoryUsage: true,
@@ -1373,7 +1373,7 @@ describe('SettingsDialog', () => {
           // systemSettings
           general: {
             vimMode: true,
-            disableAutoUpdate: false,
+            enableAutoUpdate: true,
           },
           ui: {
             showMemoryUsage: true,
@@ -1514,7 +1514,7 @@ describe('SettingsDialog', () => {
       const settings = createMockSettings({
         general: {
           vimMode: false,
-          disableAutoUpdate: false,
+          enableAutoUpdate: true,
           debugKeystrokeLogging: false,
         },
         ui: {
