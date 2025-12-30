@@ -8,7 +8,7 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │ ▲                                                                                                │
 │ ● Vim Mode                                             false                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│   Enable Auto Update                                   true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -42,7 +42,7 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │ ▲                                                                                                │
 │ ● Vim Mode                                             false                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│   Enable Auto Update                                   true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -76,7 +76,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │ ▲                                                                                                │
 │ ● Vim Mode                                             true*                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│   Enable Auto Update                                   true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -110,7 +110,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │ ▲                                                                                                │
 │ ● Vim Mode                                             false*                                    │
 │                                                                                                  │
-│   Disable Auto Update                                  false*                                    │
+│   Enable Auto Update                                   true*                                     │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false*                                    │
 │                                                                                                  │
@@ -144,7 +144,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ ▲                                                                                                │
 │ ● Vim Mode (Modified in System)                        false                                     │
 │                                                                                                  │
-│   Disable Auto Update (Modified in System)             false                                     │
+│   Enable Auto Update (Modified in System)              true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -178,7 +178,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ ▲                                                                                                │
 │ ● Vim Mode (Modified in Workspace)                     false                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│   Enable Auto Update                                   true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging (Modified in Workspace)      false                                     │
 │                                                                                                  │
@@ -212,7 +212,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │ ▲                                                                                                │
 │ ● Vim Mode                                             false                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│   Enable Auto Update                                   true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -246,7 +246,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │ ▲                                                                                                │
 │ ● Vim Mode                                             false*                                    │
 │                                                                                                  │
-│   Disable Auto Update                                  true*                                     │
+│   Enable Auto Update                                   false*                                    │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -280,7 +280,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │ ▲                                                                                                │
 │ ● Vim Mode                                             false                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  false                                     │
+│   Enable Auto Update                                   true                                      │
 │                                                                                                  │
 │   Debug Keystroke Logging                              false                                     │
 │                                                                                                  │
@@ -314,7 +314,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │ ▲                                                                                                │
 │ ● Vim Mode                                             true*                                     │
 │                                                                                                  │
-│   Disable Auto Update                                  true*                                     │
+│   Enable Auto Update                                   false*                                    │
 │                                                                                                  │
 │   Debug Keystroke Logging                              true*                                     │
 │                                                                                                  │
