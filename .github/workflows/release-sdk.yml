@@ -34,7 +34,8 @@ on:
         default: false
 
 concurrency:
-  group: '${{ github.workflow }}'
+  # Serialize all release workflows (CLI + SDK) to avoid racing on `main` pushes.
+  group: 'release-main'
   cancel-in-progress: false
 
 jobs:
@@ -50,7 +51,6 @@ jobs:
       packages: 'write'
       id-token: 'write'
       issues: 'write'
-      pull-requests: 'write'
     outputs:
       RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
 
@@ -128,12 +128,13 @@ jobs:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
 
-      - name: 'Set SDK package version (local only)'
+      - name: 'Set SDK package version'
         env:
           RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
         run: |-
           # Ensure the package version matches the computed release version.
           # This is required for nightly/preview because npm does not allow re-publishing the same version.
+          # Using --no-git-tag-version because we create tags via GitHub Release, not npm.
           npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
 
       - name: 'Build CLI Bundle'
@@ -168,37 +169,40 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: 'Build SDK'
-        working-directory: 'packages/sdk-typescript'
-        run: |-
-          npm run build
-
-      - name: 'Publish @qwen-code/sdk'
-        working-directory: 'packages/sdk-typescript'
-        run: |-
-          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
-
-      - name: 'Create and switch to a release branch'
+      - name: 'Create and switch to a release branch (stable only)'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         id: 'release_branch'
         env:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
+          set -euo pipefail
           BRANCH_NAME="release/sdk-typescript/${RELEASE_TAG}"
-          git switch -c "${BRANCH_NAME}"
+
+          # Make reruns idempotent: reuse an existing remote branch if it already exists.
+          if git show-ref --verify --quiet "refs/heads/${BRANCH_NAME}"; then
+            git switch "${BRANCH_NAME}"
+          elif git ls-remote --exit-code --heads origin "${BRANCH_NAME}" >/dev/null 2>&1; then
+            git fetch origin "${BRANCH_NAME}:${BRANCH_NAME}"
+            git switch "${BRANCH_NAME}"
+          else
+            git switch -c "${BRANCH_NAME}"
+          fi
+
           echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Commit and Push package version (stable only)'
+      - name: 'Build SDK'
+        working-directory: 'packages/sdk-typescript'
+        run: |-
+          npm run build
+
+      - name: 'Commit and Push package version to release branch (stable only)'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
-          # Only persist version bumps after a successful publish.
           git add packages/sdk-typescript/package.json package-lock.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
@@ -208,9 +212,47 @@ jobs:
           echo "Pushing release branch to remote..."
           git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
 
-      - name: 'Create GitHub Release and Tag'
+      - name: 'Check if @qwen-code/sdk version is already published (rerun safety)'
+        id: 'npm_check'
+        env:
+          RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
+        run: |-
+          set -euo pipefail
+          if npm view "@qwen-code/sdk@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "already_published=true" >> "${GITHUB_OUTPUT}"
+            echo "@qwen-code/sdk@${RELEASE_VERSION} already exists on npm."
+          else
+            echo "already_published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Publish @qwen-code/sdk'
+        working-directory: 'packages/sdk-typescript'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'true' || steps.npm_check.outputs.already_published != 'true' }}
+        run: |-
+          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
+      - name: 'Check if GitHub Release already exists (rerun safety)'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' }}
+        id: 'gh_release_check'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+          if gh release view "sdk-typescript-${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "already_exists=true" >> "${GITHUB_OUTPUT}"
+            echo "GitHub Release sdk-typescript-${RELEASE_TAG} already exists."
+          else
+            echo "already_exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Create GitHub Release and Tag'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.gh_release_check.outputs.already_exists != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
@@ -236,48 +278,26 @@ jobs:
             --generate-notes \
             ${PRERELEASE_FLAG}
 
-      - name: 'Create PR to merge release branch into main'
+      - name: 'Merge release changes back to main'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
-        id: 'pr'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
         run: |-
-          set -euo pipefail
+          # Checkout main branch
+          git fetch origin main
+          git checkout main
+          git pull origin main
 
-          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
-          if [[ -z "${pr_url}" ]]; then
-            pr_url="$(gh pr create \
-              --base main \
-              --head "${RELEASE_BRANCH}" \
-              --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
-              --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
-          fi
+          # Only fast-forward merge back to main.
+          # Purpose: avoid creating silent merge commits in an automated workflow (no PR review),
+          # and fail loudly when history has diverged so a human can resolve it.
+          git merge "${RELEASE_BRANCH}" --ff-only
 
-          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: 'Wait for CI checks to complete'
-        if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-        run: |-
-          set -euo pipefail
-          echo "Waiting for CI checks to complete..."
-          gh pr checks "${PR_URL}" --watch --interval 30
-
-      - name: 'Enable auto-merge for release PR'
-        if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-        run: |-
-          set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto
+          # Push changes
+          git push origin main
 
       - name: 'Create Issue on Failure'
         if: |-
