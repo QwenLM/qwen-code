@@ -178,13 +178,15 @@ describe('getInstallationInfo', () => {
       throw new Error('Command failed');
     });
 
-    const info = getInstallationInfo(projectRoot, false);
+    // isAutoUpdateEnabled = true -> "Attempting to automatically update"
+    const info = getInstallationInfo(projectRoot, true);
     expect(info.packageManager).toBe(PackageManager.PNPM);
     expect(info.isGlobal).toBe(true);
     expect(info.updateCommand).toBe('pnpm add -g @qwen-code/qwen-code@latest');
     expect(info.updateMessage).toContain('Attempting to automatically update');
 
-    const infoDisabled = getInstallationInfo(projectRoot, true);
+    // isAutoUpdateEnabled = false -> "Please run..."
+    const infoDisabled = getInstallationInfo(projectRoot, false);
     expect(infoDisabled.updateMessage).toContain('Please run pnpm add');
   });
 
@@ -196,7 +198,8 @@ describe('getInstallationInfo', () => {
       throw new Error('Command failed');
     });
 
-    const info = getInstallationInfo(projectRoot, false);
+    // isAutoUpdateEnabled = true -> "Attempting to automatically update"
+    const info = getInstallationInfo(projectRoot, true);
     expect(info.packageManager).toBe(PackageManager.YARN);
     expect(info.isGlobal).toBe(true);
     expect(info.updateCommand).toBe(
@@ -204,7 +207,8 @@ describe('getInstallationInfo', () => {
     );
     expect(info.updateMessage).toContain('Attempting to automatically update');
 
-    const infoDisabled = getInstallationInfo(projectRoot, true);
+    // isAutoUpdateEnabled = false -> "Please run..."
+    const infoDisabled = getInstallationInfo(projectRoot, false);
     expect(infoDisabled.updateMessage).toContain('Please run yarn global add');
   });
 
@@ -216,13 +220,15 @@ describe('getInstallationInfo', () => {
       throw new Error('Command failed');
     });
 
-    const info = getInstallationInfo(projectRoot, false);
+    // isAutoUpdateEnabled = true -> "Attempting to automatically update"
+    const info = getInstallationInfo(projectRoot, true);
     expect(info.packageManager).toBe(PackageManager.BUN);
     expect(info.isGlobal).toBe(true);
     expect(info.updateCommand).toBe('bun add -g @qwen-code/qwen-code@latest');
     expect(info.updateMessage).toContain('Attempting to automatically update');
 
-    const infoDisabled = getInstallationInfo(projectRoot, true);
+    // isAutoUpdateEnabled = false -> "Please run..."
+    const infoDisabled = getInstallationInfo(projectRoot, false);
     expect(infoDisabled.updateMessage).toContain('Please run bun add');
   });
 
@@ -301,7 +307,8 @@ describe('getInstallationInfo', () => {
       throw new Error('Command failed');
     });
 
-    const info = getInstallationInfo(projectRoot, false);
+    // isAutoUpdateEnabled = true -> "Attempting to automatically update"
+    const info = getInstallationInfo(projectRoot, true);
     expect(info.packageManager).toBe(PackageManager.NPM);
     expect(info.isGlobal).toBe(true);
     expect(info.updateCommand).toBe(
@@ -309,7 +316,8 @@ describe('getInstallationInfo', () => {
     );
     expect(info.updateMessage).toContain('Attempting to automatically update');
 
-    const infoDisabled = getInstallationInfo(projectRoot, true);
+    // isAutoUpdateEnabled = false -> "Please run..."
+    const infoDisabled = getInstallationInfo(projectRoot, false);
     expect(infoDisabled.updateMessage).toContain('Please run npm install');
   });
 });
