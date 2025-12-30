@@ -715,6 +715,36 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.general?.enableAutoUpdate).toBe(false);
     });
 
+    it('should bump version to 3 even when V2 settings already have V3-compatible content', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V2 settings that already have V3-compatible keys (no migration needed)
+      const v2SettingsWithV3Content = {
+        $version: 2,
+        general: {
+          enableAutoUpdate: true,
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(v2SettingsWithV3Content);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Version should be bumped to 3 even though no keys needed migration
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH,
+      );
+      expect(writeCall).toBeDefined();
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent.$version).toBe(SETTINGS_VERSION);
+    });
+
     it('should correctly merge and migrate legacy array properties from multiple scopes', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const legacyUserSettings = {

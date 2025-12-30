@@ -453,6 +453,12 @@ function migrateV2ToV3(
     return result;
   }
 
+  // Even if no changes, bump version to 3 to skip future migration checks
+  if (typeof version === 'number' && version < SETTINGS_VERSION) {
+    result[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
+    return result;
+  }
+
   return null;
 }
 
