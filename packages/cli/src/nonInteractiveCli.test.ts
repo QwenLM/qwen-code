@@ -771,6 +771,52 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('should handle API errors in text mode and exit with error code', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
+    setupMetricsMock();
+
+    // Simulate an API error event (like 401 unauthorized)
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '401 Incorrect API key provided',
+          status: 401,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    let thrownError: Error | null = null;
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-api-error',
+      );
+      // Should not reach here
+      expect.fail('Expected error to be thrown');
+    } catch (error) {
+      thrownError = error as Error;
+    }
+
+    // Should throw with the API error message
+    expect(thrownError).toBeTruthy();
+    expect(thrownError?.message).toContain('401');
+    expect(thrownError?.message).toContain('Incorrect API key provided');
+
+    // Verify error was written to stderr
+    expect(processStderrSpy).toHaveBeenCalled();
+    const stderrCalls = processStderrSpy.mock.calls;
+    const errorOutput = stderrCalls.map((call) => call[0]).join('');
+    expect(errorOutput).toContain('401');
+    expect(errorOutput).toContain('Incorrect API key provided');
+  });
+
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();
