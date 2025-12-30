@@ -111,6 +111,7 @@ export interface CliArgs {
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
   allowedTools: string[] | undefined;
+  acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalSkills: boolean | undefined;
   extensions: string[] | undefined;
@@ -304,9 +305,15 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description: 'Enables checkpointing of file edits',
           default: false,
         })
-        .option('experimental-acp', {
+        .option('acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
+        })
+        .option('experimental-acp', {
+          type: 'boolean',
+          description:
+            'Starts the agent in ACP mode (deprecated, use --acp instead)',
+          hidden: true,
         })
         .option('experimental-skills', {
           type: 'boolean',
@@ -589,8 +596,19 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
   // The import format is now only controlled by settings.memoryImportFormat
   // We no longer accept it as a CLI argument
 
-  // Apply ACP fallback: if experimental-acp is present but no explicit --channel, treat as ACP
-  if (result['experimentalAcp'] && !result['channel']) {
+  // Handle deprecated --experimental-acp flag
+  if (result['experimentalAcp']) {
+    console.warn(
+      '\x1b[33m⚠ Warning: --experimental-acp is deprecated and will be removed in a future release. Please use --acp instead.\x1b[0m',
+    );
+    // Map experimental-acp to acp if acp is not explicitly set
+    if (!result['acp']) {
+      (result as Record<string, unknown>)['acp'] = true;
+    }
+  }
+
+  // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
+  if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
     (result as Record<string, unknown>)['channel'] = 'ACP';
   }
 
@@ -981,7 +999,7 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
-    experimentalZedIntegration: argv.experimentalAcp || false,
+    experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     experimentalSkills: argv.experimentalSkills || false,
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
