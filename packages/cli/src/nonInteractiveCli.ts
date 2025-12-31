@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallRequestInfo,
+  ToolResultDisplay,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -333,7 +337,7 @@ export async function runNonInteractive(
                 ? options.controlService.permission.getToolCallUpdateCallback()
                 : undefined;
 
-            // Only pass outputUpdateHandler for Task tool
+            // Create output handler for Task tool (for subagent execution)
             const isTaskTool = finalRequestInfo.name === 'task';
             const taskToolProgress = isTaskTool
               ? createTaskToolProgressHandler(
@@ -343,20 +347,41 @@ export async function runNonInteractive(
                 )
               : undefined;
             const taskToolProgressHandler = taskToolProgress?.handler;
+
+            // Create output handler for non-Task tools in text mode (for console output)
+            const nonTaskOutputHandler =
+              !isTaskTool && !adapter
+                ? (callId: string, outputChunk: ToolResultDisplay) => {
+                    // Print tool output to console in text mode
+                    if (typeof outputChunk === 'string') {
+                      process.stdout.write(outputChunk);
+                    } else if (
+                      outputChunk &&
+                      typeof outputChunk === 'object' &&
+                      'ansiOutput' in outputChunk
+                    ) {
+                      // Handle ANSI output - just print as string for now
+                      process.stdout.write(String(outputChunk.ansiOutput));
+                    }
+                  }
+                : undefined;
+
+            // Combine output handlers
+            const outputUpdateHandler =
+              taskToolProgressHandler || nonTaskOutputHandler;
+
             const toolResponse = await executeToolCall(
               config,
               finalRequestInfo,
               abortController.signal,
-              isTaskTool && taskToolProgressHandler
+              outputUpdateHandler || toolCallUpdateCallback
                 ? {
-                    outputUpdateHandler: taskToolProgressHandler,
-                    onToolCallsUpdate: toolCallUpdateCallback,
-                  }
-                : toolCallUpdateCallback
-                  ? {
+                    ...(outputUpdateHandler && { outputUpdateHandler }),
+                    ...(toolCallUpdateCallback && {
                       onToolCallsUpdate: toolCallUpdateCallback,
-                    }
-                  : undefined,
+                    }),
+                  }
+                : undefined,
             );
 
             // Note: In JSON mode, subagent messages are automatically added to the main

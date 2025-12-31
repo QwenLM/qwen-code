@@ -298,7 +298,9 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
-      undefined,
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
     );
     // Verify first call has isContinuation: false
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
@@ -1776,5 +1778,85 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       { isContinuation: false },
     );
+  });
+
+  it('should print tool output to console in text mode (non-Task tools)', async () => {
+    // Test that tool output is printed to stdout in text mode
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'run_in_terminal',
+        args: { command: 'npm outdated' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-tool-output',
+      },
+    };
+
+    // Mock tool execution with outputUpdateHandler being called
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        // Simulate tool calling outputUpdateHandler with output chunks
+        if (options?.outputUpdateHandler) {
+          options.outputUpdateHandler('tool-1', 'Package outdated\n');
+          options.outputUpdateHandler('tool-1', 'npm@1.0.0 -> npm@2.0.0\n');
+        }
+        return {
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-1',
+                name: 'run_in_terminal',
+                response: {
+                  output: 'Package outdated\nnpm@1.0.0 -> npm@2.0.0',
+                },
+              },
+            },
+          ],
+        };
+      },
+    );
+
+    const firstCallEvents: ServerGeminiStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+      },
+    ];
+
+    const secondCallEvents: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Dependencies checked' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
+      },
+    ];
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Check dependencies',
+      'prompt-id-tool-output',
+    );
+
+    // Verify that executeToolCall was called with outputUpdateHandler
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ name: 'run_in_terminal' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
+    );
+
+    // Verify tool output was written to stdout
+    expect(processStdoutSpy).toHaveBeenCalledWith('Package outdated\n');
+    expect(processStdoutSpy).toHaveBeenCalledWith('npm@1.0.0 -> npm@2.0.0\n');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Dependencies checked');
   });
 });
