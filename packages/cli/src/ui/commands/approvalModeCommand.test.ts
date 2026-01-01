@@ -30,7 +30,9 @@ describe('approvalModeCommand', () => {
           setApprovalMode: mockSetApprovalMode,
         },
         settings: {
-          merged: { tools: { approvalMode: 'default' } },
+          // Use empty merged so ?? fallback triggers, allowing us to verify
+          // the exact mode passed to setApprovalMode
+          merged: {},
           setValue: mockSetValue,
           forScope: () => ({}),
         } as unknown as LoadedSettings,
@@ -81,7 +83,7 @@ describe('approvalModeCommand', () => {
         'tools.approvalMode',
         'plan',
       );
-      expect(mockSetApprovalMode).toHaveBeenCalled();
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('plan');
     });
 
     it('should set approval mode to "yolo" when argument is "yolo"', async () => {
@@ -98,6 +100,7 @@ describe('approvalModeCommand', () => {
         'tools.approvalMode',
         'yolo',
       );
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
     });
 
     it('should set approval mode to "auto-edit" when argument is "auto-edit"', async () => {
@@ -114,6 +117,7 @@ describe('approvalModeCommand', () => {
         'tools.approvalMode',
         'auto-edit',
       );
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('auto-edit');
     });
 
     it('should set approval mode to "default" when argument is "default"', async () => {
@@ -130,6 +134,7 @@ describe('approvalModeCommand', () => {
         'tools.approvalMode',
         'default',
       );
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('default');
     });
 
     it('should be case-insensitive for mode argument', async () => {
@@ -145,6 +150,7 @@ describe('approvalModeCommand', () => {
         'tools.approvalMode',
         'yolo',
       );
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
     });
 
     it('should handle argument with leading/trailing whitespace', async () => {
@@ -160,6 +166,7 @@ describe('approvalModeCommand', () => {
         'tools.approvalMode',
         'plan',
       );
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('plan');
     });
   });
 
