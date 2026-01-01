@@ -89,6 +89,10 @@ export default {
   'No tools available': 'Нет доступных инструментов',
   'View or change the approval mode for tool usage':
     'Просмотр или изменение режима подтверждения для использования инструментов',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    'Недопустимый режим подтверждения "{{arg}}". Допустимые режимы: {{modes}}',
+  'Approval mode set to "{{mode}}"':
+    'Режим подтверждения установлен на "{{mode}}"',
   'View or change the language setting':
     'Просмотр или изменение настроек языка',
   'change the theme': 'Изменение темы',
