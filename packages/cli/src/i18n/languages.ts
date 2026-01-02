@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type SupportedLanguage = 'en' | 'zh' | 'ru' | 'de' | string;
+export type SupportedLanguage = 'en' | 'zh' | 'ru' | 'de' | 'ja' | string;
 
 export interface LanguageDefinition {
   /** The internal locale code used by the i18n system (e.g., 'en', 'zh'). */
@@ -35,6 +35,11 @@ export const SUPPORTED_LANGUAGES: readonly LanguageDefinition[] = [
     code: 'de',
     id: 'de-DE',
     fullName: 'German',
+  },
+  {
+    code: 'ja',
+    id: 'ja-JP',
+    fullName: 'Japanese',
   },
 ];
 

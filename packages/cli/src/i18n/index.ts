@@ -59,12 +59,14 @@ export function detectSystemLanguage(): SupportedLanguage {
   if (envLang?.startsWith('en')) return 'en';
   if (envLang?.startsWith('ru')) return 'ru';
   if (envLang?.startsWith('de')) return 'de';
+  if (envLang?.startsWith('ja')) return 'ja';
 
   try {
     const locale = Intl.DateTimeFormat().resolvedOptions().locale;
     if (locale.startsWith('zh')) return 'zh';
     if (locale.startsWith('ru')) return 'ru';
     if (locale.startsWith('de')) return 'de';
+    if (locale.startsWith('ja')) return 'ja';
   } catch {
     // Fallback to default
   }

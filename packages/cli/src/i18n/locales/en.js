@@ -388,7 +388,7 @@ export default {
   // Commands - Language
   // ============================================================================
   'Invalid language. Available: en-US, zh-CN':
-    'Invalid language. Available: en-US, zh-CN',
+    'Invalid language. Available: en-US, zh-CN, ru-RU, de-DE, ja-JP',
   'Language subcommands do not accept additional arguments.':
     'Language subcommands do not accept additional arguments.',
   'Current UI language: {{lang}}': 'Current UI language: {{lang}}',
@@ -397,7 +397,7 @@ export default {
   'LLM output language not set': 'LLM output language not set',
   'Set UI language': 'Set UI language',
   'Set LLM output language': 'Set LLM output language',
-  'Usage: /language ui [zh-CN|en-US]': 'Usage: /language ui [zh-CN|en-US]',
+  'Usage: /language ui [zh-CN|en-US]': 'Usage: /language ui [zh-CN|en-US|ru-RU|de-DE|ja-JP]',
   'Usage: /language output <language>': 'Usage: /language output <language>',
   'Example: /language output 中文': 'Example: /language output 中文',
   'Example: /language output English': 'Example: /language output English',
@@ -417,9 +417,15 @@ export default {
   'Available options:': 'Available options:',
   '  - zh-CN: Simplified Chinese': '  - zh-CN: Simplified Chinese',
   '  - en-US: English': '  - en-US: English',
+  '  - ru-RU: Russian': '  - ru-RU: Russian',
+  '  - de-DE: German': '  - de-DE: German',
+  '  - ja-JP: Japanese': '  - ja-JP: Japanese',
   'Set UI language to Simplified Chinese (zh-CN)':
     'Set UI language to Simplified Chinese (zh-CN)',
   'Set UI language to English (en-US)': 'Set UI language to English (en-US)',
+  'Set UI language to Russian (ru-RU)': 'Set UI language to Russian (ru-RU)',
+  'Set UI language to German (de-DE)': 'Set UI language to German (de-DE)',
+  'Set UI language to Japanese (ja-JP)': 'Set UI language to Japanese (ja-JP)',
 
   // ============================================================================
   // Commands - Approval Mode

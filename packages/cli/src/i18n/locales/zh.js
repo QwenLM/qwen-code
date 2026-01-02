@@ -373,7 +373,7 @@ export default {
   // Commands - Language
   // ============================================================================
   'Invalid language. Available: en-US, zh-CN':
-    '无效的语言。可用选项：en-US, zh-CN',
+    '无效的语言。可用选项：en-US, zh-CN, ru-RU, de-DE, ja-JP',
   'Language subcommands do not accept additional arguments.':
     '语言子命令不接受额外参数',
   'Current UI language: {{lang}}': '当前 UI 语言：{{lang}}',
