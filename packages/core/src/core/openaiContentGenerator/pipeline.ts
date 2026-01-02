@@ -242,6 +242,30 @@ export class ContentGenerationPipeline {
       baseRequest.stream_options = { include_usage: true };
     }
 
+    // Add thinking options if present
+    if (
+      request.config?.thinkingConfig &&
+      request.config.thinkingConfig.includeThoughts
+    ) {
+      (
+        baseRequest as OpenAI.Chat.ChatCompletionCreateParams & {
+          extra_body?: Record<string, unknown>;
+        }
+      ).extra_body = { enable_thinking: true };
+      (
+        baseRequest as OpenAI.Chat.ChatCompletionCreateParams & {
+          enable_thinking?: boolean;
+        }
+      ).enable_thinking = true;
+      if (request.config.thinkingConfig.thinkingBudget) {
+        (
+          baseRequest as OpenAI.Chat.ChatCompletionCreateParams & {
+            thinking_budget?: number;
+          }
+        ).thinking_budget = request.config.thinkingConfig.thinkingBudget;
+      }
+    }
+
     // Add tools if present
     if (request.config?.tools) {
       baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(

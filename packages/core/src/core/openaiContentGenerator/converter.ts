@@ -696,6 +696,17 @@ export class OpenAIContentConverter {
       parts.push({ text: choice.message.content });
     }
 
+    // Handle reasoning content
+    const message = choice.message as typeof choice.message & {
+      reasoning_content?: string;
+    };
+    if (message.reasoning_content) {
+      parts.push({
+        text: message.reasoning_content,
+        thought: true,
+      } as unknown as Part);
+    }
+
     // Handle tool calls
     if (choice.message.tool_calls) {
       for (const toolCall of choice.message.tool_calls) {
@@ -752,6 +763,8 @@ export class OpenAIContentConverter {
         usage.prompt_tokens_details?.cached_tokens ??
         extendedUsage.cached_tokens ??
         0;
+      const reasoningTokens =
+        usage.completion_tokens_details?.reasoning_tokens || 0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations
@@ -769,6 +782,7 @@ export class OpenAIContentConverter {
         candidatesTokenCount: finalCompletionTokens,
         totalTokenCount: totalTokens,
         cachedContentTokenCount: cachedTokens,
+        thoughtsTokenCount: reasoningTokens,
       };
     }
 
@@ -798,6 +812,17 @@ export class OpenAIContentConverter {
         if (typeof choice.delta.content === 'string') {
           parts.push({ text: choice.delta.content });
         }
+      }
+
+      // Handle reasoning content
+      const delta = choice.delta as typeof choice.delta & {
+        reasoning_content?: string;
+      };
+      if (delta.reasoning_content) {
+        parts.push({
+          text: delta.reasoning_content,
+          thought: true,
+        });
       }
 
       // Handle tool calls using the streaming parser
