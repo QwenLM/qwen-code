@@ -49,6 +49,9 @@ import {
   DEFAULT_TOKEN_LIMIT,
   tokenLimit,
 } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
+import type { ImageAttachment } from './utils/imageUtils.js';
+import { formatFileSize, MAX_TOTAL_IMAGE_SIZE } from './utils/imageUtils.js';
+import { usePasteHandler } from './hooks/usePasteHandler.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -66,6 +69,7 @@ export const App: React.FC = () => {
 
   // UI state
   const [inputText, setInputText] = useState('');
+  const [attachedImages, setAttachedImages] = useState<ImageAttachment[]>([]);
   const [permissionRequest, setPermissionRequest] = useState<{
     options: PermissionOption[];
     toolCall: PermissionToolCall;
@@ -281,10 +285,54 @@ export const App: React.FC = () => {
     completion.query,
   ]);
 
+  // Image handling
+  const handleAddImages = useCallback((newImages: ImageAttachment[]) => {
+    setAttachedImages((prev) => {
+      const currentTotal = prev.reduce((sum, img) => sum + img.size, 0);
+      let runningTotal = currentTotal;
+      const accepted: ImageAttachment[] = [];
+
+      for (const img of newImages) {
+        if (runningTotal + img.size > MAX_TOTAL_IMAGE_SIZE) {
+          console.warn(
+            `Skipping image "${img.name}" – total attachment size would exceed ${formatFileSize(MAX_TOTAL_IMAGE_SIZE)}.`,
+          );
+          continue;
+        }
+        accepted.push(img);
+        runningTotal += img.size;
+      }
+
+      if (accepted.length === 0) {
+        return prev;
+      }
+      return [...prev, ...accepted];
+    });
+  }, []);
+
+  const handleRemoveImage = useCallback((imageId: string) => {
+    setAttachedImages((prev) => prev.filter((img) => img.id !== imageId));
+  }, []);
+
+  const clearImages = useCallback(() => {
+    setAttachedImages([]);
+  }, []);
+
+  // Initialize paste handler
+  const { handlePaste } = usePasteHandler({
+    onImagesAdded: handleAddImages,
+    onError: (error) => {
+      console.error('Paste error:', error);
+      // You can show a toast/notification here if needed
+    },
+  });
+
   // Message submission
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
     setInputText,
+    attachedImages,
+    clearImages,
     messageHandling,
     fileContext,
     skipAutoActiveContext,
@@ -809,6 +857,7 @@ export const App: React.FC = () => {
                   timestamp={msg.timestamp || 0}
                   onFileClick={handleFileClick}
                   fileContext={msg.fileContext}
+                  attachments={msg.attachments}
                 />
               );
             }
@@ -943,6 +992,7 @@ export const App: React.FC = () => {
           activeSelection={fileContext.activeSelection}
           skipAutoActiveContext={skipAutoActiveContext}
           contextUsage={contextUsage}
+          attachedImages={attachedImages}
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
@@ -955,6 +1005,8 @@ export const App: React.FC = () => {
           onToggleSkipAutoActiveContext={() =>
             setSkipAutoActiveContext((v) => !v)
           }
+          onPaste={handlePaste}
+          onRemoveImage={handleRemoveImage}
           onShowCommandMenu={async () => {
             if (inputFieldRef.current) {
               inputFieldRef.current.focus();

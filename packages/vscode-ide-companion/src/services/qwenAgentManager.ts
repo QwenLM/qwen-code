@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { AcpConnection } from './acpConnection.js';
+import type { PromptContent } from './acpSessionManager.js';
 import type {
   AcpSessionUpdate,
   AcpPermissionRequest,
@@ -237,7 +238,7 @@ export class QwenAgentManager {
    *
    * @param message - Message content
    */
-  async sendMessage(message: string): Promise<void> {
+  async sendMessage(message: string | PromptContent[]): Promise<void> {
     await this.connection.sendPrompt(message);
   }
 

@@ -22,6 +22,13 @@ import type { ChildProcess } from 'child_process';
 import { isWindows } from '../utils/platform.js';
 
 /**
+ * Prompt content types for multimodal messages
+ */
+export type PromptContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string };
+
+/**
  * ACP Session Manager Class
  * Provides session initialization, authentication, creation, loading, and switching functionality
  */
@@ -104,6 +111,29 @@ export class AcpSessionManager {
     if (child?.stdin) {
       const jsonString = JSON.stringify(message);
       const lineEnding = isWindows ? '\r\n' : '\n';
+
+      // Debug logging for session_prompt messages
+      if ('method' in message && message.method === 'session/prompt') {
+        console.log('[ACP] Sending session/prompt message');
+        const params = (message as AcpRequest).params as {
+          prompt: PromptContent[];
+        };
+        if (params?.prompt) {
+          console.log('[ACP] Prompt array length:', params.prompt.length);
+          params.prompt.forEach((item: PromptContent, index: number) => {
+            if (item.type === 'image') {
+              console.log(
+                `[ACP] Item ${index} is image: mimeType=${item.mimeType}, data length=${item.data?.length || 0}`,
+              );
+            } else if (item.type === 'text') {
+              console.log(
+                `[ACP] Item ${index} is text: "${item.text?.substring(0, 50)}..."`,
+              );
+            }
+          });
+        }
+      }
+
       child.stdin.write(jsonString + lineEnding);
     }
   }
@@ -213,9 +243,9 @@ export class AcpSessionManager {
   }
 
   /**
-   * Send prompt message
+   * Send prompt message with support for multimodal content (text and images)
    *
-   * @param prompt - Prompt content
+   * @param prompt - Either a plain text string or array of content items
    * @param child - Child process instance
    * @param pendingRequests - Pending requests map
    * @param nextRequestId - Request ID counter
@@ -223,7 +253,7 @@ export class AcpSessionManager {
    * @throws Error when there is no active session
    */
   async sendPrompt(
-    prompt: string,
+    prompt: string | PromptContent[],
     child: ChildProcess | null,
     pendingRequests: Map<number, PendingRequest<unknown>>,
     nextRequestId: { value: number },
@@ -232,11 +262,35 @@ export class AcpSessionManager {
       throw new Error('No active ACP session');
     }
 
+    // Convert string to array format for backward compatibility
+    const promptContent: PromptContent[] =
+      typeof prompt === 'string' ? [{ type: 'text', text: prompt }] : prompt;
+
+    // Debug log to see what we're sending
+    console.log(
+      '[ACP] Sending prompt with content:',
+      JSON.stringify(promptContent, null, 2),
+    );
+    console.log(
+      '[ACP] Content types:',
+      promptContent.map((c) => c.type),
+    );
+    if (promptContent.some((c) => c.type === 'image')) {
+      console.log('[ACP] Message includes images');
+      promptContent.forEach((content, index) => {
+        if (content.type === 'image') {
+          console.log(
+            `[ACP] Image ${index}: mimeType=${content.mimeType}, data length=${content.data.length}`,
+          );
+        }
+      });
+    }
+
     return await this.sendRequest(
       AGENT_METHODS.session_prompt,
       {
         sessionId: this.sessionId,
-        prompt: [{ type: 'text', text: prompt }],
+        prompt: promptContent,
       },
       child,
       pendingRequests,
