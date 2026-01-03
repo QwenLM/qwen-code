@@ -22,6 +22,8 @@ import type { CompletionItem } from '../../../types/completionItemTypes.js';
 import { getApprovalModeInfoFromString } from '../../../types/acpTypes.js';
 import type { ApprovalModeValue } from '../../../types/approvalModeValueTypes.js';
 import { ContextIndicator } from './ContextIndicator.js';
+import { ImagePreview } from '../ImagePreview.js';
+import type { ImageAttachment } from '../../utils/imageUtils.js';
 
 interface InputFormProps {
   inputText: string;
@@ -42,6 +44,7 @@ interface InputFormProps {
     usedTokens: number;
     tokenLimit: number;
   } | null;
+  attachedImages?: ImageAttachment[];
   onInputChange: (text: string) => void;
   onCompositionStart: () => void;
   onCompositionEnd: () => void;
@@ -54,6 +57,8 @@ interface InputFormProps {
   onToggleSkipAutoActiveContext: () => void;
   onShowCommandMenu: () => void;
   onAttachContext: () => void;
+  onPaste?: (e: React.ClipboardEvent) => void;
+  onRemoveImage?: (id: string) => void;
   completionIsOpen: boolean;
   completionItems?: CompletionItem[];
   onCompletionSelect?: (item: CompletionItem) => void;
@@ -103,6 +108,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   activeSelection,
   skipAutoActiveContext,
   contextUsage,
+  attachedImages = [],
   onInputChange,
   onCompositionStart,
   onCompositionEnd,
@@ -114,6 +120,8 @@ export const InputForm: React.FC<InputFormProps> = ({
   onToggleSkipAutoActiveContext,
   onShowCommandMenu,
   onAttachContext,
+  onPaste,
+  onRemoveImage,
   completionIsOpen,
   completionItems,
   onCompletionSelect,
@@ -160,7 +168,7 @@ export const InputForm: React.FC<InputFormProps> = ({
           {/* Banner area */}
           <div className="input-banner" />
 
-          <div className="relative flex z-[1]">
+          <div className="relative flex flex-col z-[1]">
             {completionIsOpen &&
               completionItems &&
               completionItems.length > 0 &&
@@ -198,8 +206,14 @@ export const InputForm: React.FC<InputFormProps> = ({
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}
               onKeyDown={handleKeyDown}
+              onPaste={onPaste}
               suppressContentEditableWarning
             />
+
+            {/* Image Preview area - shown at the bottom inside the input box */}
+            {attachedImages.length > 0 && onRemoveImage && (
+              <ImagePreview images={attachedImages} onRemove={onRemoveImage} />
+            )}
           </div>
 
           <div className="composer-actions">

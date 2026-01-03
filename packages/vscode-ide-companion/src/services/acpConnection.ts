@@ -20,7 +20,7 @@ import type {
   AcpConnectionCallbacks,
 } from '../types/connectionTypes.js';
 import { AcpMessageHandler } from './acpMessageHandler.js';
-import { AcpSessionManager } from './acpSessionManager.js';
+import { AcpSessionManager, type PromptContent } from './acpSessionManager.js';
 import * as fs from 'node:fs';
 
 /**
@@ -283,12 +283,12 @@ export class AcpConnection {
   }
 
   /**
-   * Send prompt message
+   * Send prompt message with support for multimodal content
    *
-   * @param prompt - Prompt content
+   * @param prompt - Either a plain text string or array of content items
    * @returns Response
    */
-  async sendPrompt(prompt: string): Promise<AcpResponse> {
+  async sendPrompt(prompt: string | PromptContent[]): Promise<AcpResponse> {
     return this.sessionManager.sendPrompt(
       prompt,
       this.child,

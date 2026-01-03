@@ -8,6 +8,9 @@ import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
+import type { PromptContent } from '../../services/acpSessionManager.js';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Session message handler
@@ -64,6 +67,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
                 startLine?: number;
                 endLine?: number;
               }
+            | undefined,
+          data?.attachments as
+            | Array<{
+                id: string;
+                name: string;
+                type: string;
+                size: number;
+                data: string;
+                timestamp: number;
+              }>
             | undefined,
         );
         break;
@@ -128,6 +141,64 @@ export class SessionMessageHandler extends BaseMessageHandler {
           message.type,
         );
         break;
+    }
+  }
+
+  /**
+   * Save base64 image to a temporary file
+   * @param base64Data The base64 encoded image data (with or without data URL prefix)
+   * @param fileName Original filename
+   * @returns The path to the saved file or null if failed
+   */
+  private async saveImageToFile(
+    base64Data: string,
+    fileName: string,
+  ): Promise<string | null> {
+    try {
+      // Get workspace folder
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (!workspaceFolder) {
+        console.error('[SessionMessageHandler] No workspace folder found');
+        return null;
+      }
+
+      // Create temp directory for images (same as CLI)
+      const tempDir = path.join(
+        workspaceFolder.uri.fsPath,
+        '.gemini-clipboard',
+      );
+      if (!fs.existsSync(tempDir)) {
+        fs.mkdirSync(tempDir, { recursive: true });
+      }
+
+      // Generate unique filename (same pattern as CLI)
+      const timestamp = Date.now();
+      const ext = path.extname(fileName) || '.png';
+      const tempFileName = `clipboard-${timestamp}${ext}`;
+      const tempFilePath = path.join(tempDir, tempFileName);
+
+      // Extract base64 data if it's a data URL
+      let pureBase64 = base64Data;
+      const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
+      if (dataUrlMatch) {
+        pureBase64 = dataUrlMatch[1];
+      }
+
+      // Write file
+      const buffer = Buffer.from(pureBase64, 'base64');
+      fs.writeFileSync(tempFilePath, buffer);
+
+      console.log('[SessionMessageHandler] Saved image to:', tempFilePath);
+
+      // Return relative path from workspace root
+      const relativePath = path.relative(
+        workspaceFolder.uri.fsPath,
+        tempFilePath,
+      );
+      return relativePath;
+    } catch (error) {
+      console.error('[SessionMessageHandler] Failed to save image:', error);
+      return null;
     }
   }
 
@@ -232,8 +303,23 @@ export class SessionMessageHandler extends BaseMessageHandler {
       startLine?: number;
       endLine?: number;
     },
+    attachments?: Array<{
+      id: string;
+      name: string;
+      type: string;
+      size: number;
+      data: string;
+      timestamp: number;
+    }>,
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
+    if (attachments && attachments.length > 0) {
+      console.log(
+        '[SessionMessageHandler] Message includes',
+        attachments.length,
+        'image attachments',
+      );
+    }
 
     // Format message with file context if present
     let formattedText = text;
@@ -249,6 +335,82 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       formattedText = `${contextParts}\n\n${text}`;
     }
+
+    // Build prompt content
+    let promptContent: PromptContent[] = [];
+
+    // Add text content (with context if present)
+    if (formattedText) {
+      promptContent.push({
+        type: 'text',
+        text: formattedText,
+      });
+    }
+
+    // Add image attachments - save to files and reference them
+    if (attachments && attachments.length > 0) {
+      console.log(
+        '[SessionMessageHandler] Processing attachments - saving to files',
+      );
+
+      // Save images as files and add references to the text
+      const imageReferences: string[] = [];
+
+      for (const attachment of attachments) {
+        console.log('[SessionMessageHandler] Processing attachment:', {
+          id: attachment.id,
+          name: attachment.name,
+          type: attachment.type,
+          dataLength: attachment.data.length,
+        });
+
+        // Save image to file
+        const imagePath = await this.saveImageToFile(
+          attachment.data,
+          attachment.name,
+        );
+        if (imagePath) {
+          // Add file reference to the message (like CLI does with @path)
+          imageReferences.push(`@${imagePath}`);
+          console.log(
+            '[SessionMessageHandler] Added image reference:',
+            `@${imagePath}`,
+          );
+        } else {
+          console.warn(
+            '[SessionMessageHandler] Failed to save image:',
+            attachment.name,
+          );
+        }
+      }
+
+      // Add image references to the text
+      if (imageReferences.length > 0) {
+        const imageText = imageReferences.join(' ');
+        // Update the formatted text with image references
+        const updatedText = formattedText
+          ? `${formattedText}\n\n${imageText}`
+          : imageText;
+
+        // Replace the prompt content with updated text
+        promptContent = [
+          {
+            type: 'text',
+            text: updatedText,
+          },
+        ];
+
+        console.log(
+          '[SessionMessageHandler] Updated text with image references:',
+          updatedText,
+        );
+      }
+    }
+
+    console.log('[SessionMessageHandler] Final promptContent:', {
+      count: promptContent.length,
+      types: promptContent.map((c) => c.type),
+    });
 
     // Ensure we have an active conversation
     if (!this.currentConversationId) {
@@ -320,15 +482,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
       timestamp: Date.now(),
     };
 
+    // Store the original message with just text
     await this.conversationStore.addMessage(
       this.currentConversationId,
       userMessage,
     );
 
-    // Send to WebView
+    // Send to WebView with file context and attachments
     this.sendToWebView({
       type: 'message',
-      data: { ...userMessage, fileContext },
+      data: { ...userMessage, fileContext, attachments },
     });
 
     // Check if agent is connected
@@ -376,7 +539,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
         data: { timestamp: Date.now() },
       });
 
-      await this.agentManager.sendMessage(formattedText);
+      // Send multimodal content instead of plain text
+      await this.agentManager.sendMessage(promptContent);
 
       // Save assistant message
       if (this.currentStreamContent && this.currentConversationId) {

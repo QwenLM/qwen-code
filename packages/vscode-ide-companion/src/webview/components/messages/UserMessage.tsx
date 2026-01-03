@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { MessageContent } from './MessageContent.js';
+import type { ImageAttachment } from '../../utils/imageUtils.js';
 
 interface FileContext {
   fileName: string;
@@ -19,6 +20,7 @@ interface UserMessageProps {
   timestamp: number;
   onFileClick?: (path: string) => void;
   fileContext?: FileContext;
+  attachments?: ImageAttachment[];
 }
 
 export const UserMessage: React.FC<UserMessageProps> = ({
@@ -26,6 +28,7 @@ export const UserMessage: React.FC<UserMessageProps> = ({
   timestamp: _timestamp,
   onFileClick,
   fileContext,
+  attachments,
 }) => {
   // Generate display text for file context
   const getFileContextDisplay = () => {
@@ -65,6 +68,24 @@ export const UserMessage: React.FC<UserMessageProps> = ({
           enableFileLinks={false}
         />
       </div>
+
+      {/* Display attached images */}
+      {attachments && attachments.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {attachments.map((attachment) => (
+            <div key={attachment.id} className="relative">
+              <img
+                src={attachment.data}
+                alt={attachment.name}
+                className="max-w-[200px] max-h-[200px] rounded-md border border-gray-300 dark:border-gray-600"
+                style={{
+                  objectFit: 'contain',
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* File context indicator */}
       {fileContextDisplay && (

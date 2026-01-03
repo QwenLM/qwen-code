@@ -358,6 +358,20 @@ export const useWebViewMessages = ({
             role?: 'user' | 'assistant' | 'thinking';
             content?: string;
             timestamp?: number;
+            fileContext?: {
+              fileName: string;
+              filePath: string;
+              startLine?: number;
+              endLine?: number;
+            };
+            attachments?: Array<{
+              id: string;
+              name: string;
+              type: string;
+              size: number;
+              data: string;
+              timestamp: number;
+            }>;
           };
           handlers.messageHandling.addMessage(
             msg as unknown as Parameters<
