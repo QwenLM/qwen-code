@@ -111,6 +111,7 @@ export interface CliArgs {
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
   allowedTools: string[] | undefined;
+  allowedShellCommands: string[] | undefined;
   experimentalAcp: boolean | undefined;
   experimentalSkills: boolean | undefined;
   extensions: string[] | undefined;
@@ -335,6 +336,17 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           coerce: (tools: string[]) =>
             // Handle comma-separated values
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
+        })
+        .option('allowed-shell-commands', {
+          type: 'array',
+          string: true,
+          description:
+            'Shell command prefixes that are pre-approved for slash-command shell snippets (comma-separated or multiple --allowed-shell-commands).',
+          coerce: (commands: string[]) =>
+            commands
+              .flatMap((command) => command.split(','))
+              .map((command) => command.trim())
+              .filter(Boolean),
         })
         .option('extensions', {
           alias: 'e',
@@ -948,6 +960,10 @@ export async function loadCliConfig(
     fullContext: argv.allFiles || false,
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
+    allowedShellCommands:
+      argv.allowedShellCommands !== undefined
+        ? argv.allowedShellCommands
+        : settings.tools?.shell?.allowedCommands,
     excludeTools,
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
     toolCallCommand: settings.tools?.callCommand,

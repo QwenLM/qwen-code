@@ -36,6 +36,7 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getAllowedShellCommands: vi.fn().mockReturnValue([]),
       storage: {},
     } as unknown as Config;
 
@@ -237,6 +238,70 @@ describe('handleSlashCommand', () => {
     if (result.type === 'message') {
       expect(result.content).toBe('Command executed successfully.');
       expect(result.messageType).toBe('info');
+    }
+  });
+
+  it('should pre-approve shell command prefixes from config', async () => {
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockImplementation(async (context) => {
+        expect(Array.from(context.session.sessionShellAllowlist)).toEqual([
+          'git',
+          'ls',
+        ]);
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: 'ok',
+        };
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    (
+      mockConfig.getAllowedShellCommands as unknown as ReturnType<typeof vi.fn>
+    ).mockReturnValue(['git', 'ls']);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+      [],
+    );
+
+    expect(result.type).toBe('message');
+  });
+
+  it('should include guidance when shell confirmation is requested', async () => {
+    const mockFileCommand = {
+      name: 'custom',
+      description: 'Custom file command',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'confirm_shell_commands',
+        commandsToConfirm: ['git status'],
+        originalInvocation: { raw: '/custom' },
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockFileCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+      [],
+    );
+
+    expect(result.type).toBe('unsupported');
+    if (result.type === 'unsupported') {
+      expect(result.originalType).toBe('confirm_shell_commands');
+      expect(result.reason).toContain('--allowed-shell-commands');
+      expect(result.reason).toContain('tools.shell.allowedCommands');
+      expect(result.reason).toContain('--approval-mode=yolo');
     }
   });
 });

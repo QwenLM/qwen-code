@@ -153,7 +153,10 @@ function handleCommandResult(
       return {
         type: 'unsupported',
         reason:
-          'Shell command confirmation is not supported in non-interactive mode. Use YOLO mode or pre-approve commands.',
+          'Shell command confirmation is not supported in non-interactive mode. ' +
+          'Pre-approve command prefixes with --allowed-shell-commands ' +
+          '(or tools.shell.allowedCommands in settings), or run with ' +
+          '--approval-mode=yolo/--yolo.',
         originalType: 'confirm_shell_commands',
       };
 
@@ -315,7 +318,7 @@ export const handleSlashCommand = async (
     ui: createNonInteractiveUI(),
     session: {
       stats: sessionStats,
-      sessionShellAllowlist: new Set(),
+      sessionShellAllowlist: new Set(config.getAllowedShellCommands()),
     },
     invocation: {
       raw: trimmed,

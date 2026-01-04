@@ -120,6 +120,7 @@ describe('runNonInteractive', () => {
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getAllowedShellCommands: vi.fn().mockReturnValue([]),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getMaxSessionTurns: vi.fn().mockReturnValue(10),
@@ -879,7 +880,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message to stderr
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'Shell command confirmation is not supported in non-interactive mode. Use YOLO mode or pre-approve commands.\n',
+      'Shell command confirmation is not supported in non-interactive mode. Pre-approve command prefixes with --allowed-shell-commands (or tools.shell.allowedCommands in settings), or run with --approval-mode=yolo/--yolo.\n',
     );
   });
 

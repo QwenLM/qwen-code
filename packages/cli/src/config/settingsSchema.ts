@@ -814,6 +814,16 @@ const SETTINGS_SCHEMA = {
         description: 'Settings for shell execution.',
         showInDialog: false,
         properties: {
+          allowedCommands: {
+            type: 'array',
+            label: 'Allowed Shell Commands',
+            category: 'Tools',
+            requiresRestart: false,
+            default: [] as string[],
+            description:
+              'Shell command prefixes that are pre-approved for slash-command shell snippets (e.g., !{git diff}).',
+            showInDialog: false,
+          },
           enableInteractiveShell: {
             type: 'boolean',
             label: 'Enable Interactive Shell',

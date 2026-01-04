@@ -115,8 +115,23 @@ export const useSlashCommandProcessor = (
   }>(null);
 
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
-    new Set<string>(),
+    () => new Set<string>(config?.getAllowedShellCommands() ?? []),
   );
+
+  useEffect(() => {
+    if (!config || !isConfigInitialized) {
+      return;
+    }
+
+    const allowedShellCommands = config.getAllowedShellCommands();
+    if (allowedShellCommands.length === 0) {
+      return;
+    }
+
+    setSessionShellAllowlist(
+      (prev) => new Set([...prev, ...allowedShellCommands]),
+    );
+  }, [config, isConfigInitialized]);
   const gitService = useMemo(() => {
     if (!config?.getProjectRoot()) {
       return;
