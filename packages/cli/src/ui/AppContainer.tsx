@@ -925,7 +925,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleIdePromptComplete = useCallback(
     (result: IdeIntegrationNudgeResult) => {
       if (result.userSelection === 'yes') {
-        handleSlashCommand('/ide install');
+        // Check whether the extension has been pre-installed
+        if (result.isExtensionPreInstalled) {
+          handleSlashCommand('/ide enable');
+        } else {
+          handleSlashCommand('/ide install');
+        }
         settings.setValue(SettingScope.User, 'ide.hasSeenNudge', true);
       } else if (result.userSelection === 'dismiss') {
         settings.setValue(SettingScope.User, 'ide.hasSeenNudge', true);
