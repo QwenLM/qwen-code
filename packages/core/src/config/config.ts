@@ -277,6 +277,7 @@ export interface ConfigParameters {
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
+  allowedShellCommands?: string[];
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -409,6 +410,7 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly allowedShellCommands: string[];
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -517,6 +519,9 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.allowedShellCommands = (params.allowedShellCommands ?? [])
+      .map((command) => command.trim())
+      .filter(Boolean);
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -867,6 +872,10 @@ export class Config {
 
   getAllowedTools(): string[] | undefined {
     return this.allowedTools;
+  }
+
+  getAllowedShellCommands(): string[] {
+    return this.allowedShellCommands;
   }
 
   getExcludeTools(): string[] | undefined {
