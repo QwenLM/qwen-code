@@ -20,6 +20,7 @@ vi.mock('../../i18n/index.js', () => ({
       en: 'English',
       ru: 'Russian',
       de: 'German',
+      ja: 'Japanese',
     };
     return map[locale] || 'English';
   }),
@@ -557,6 +558,7 @@ describe('languageCommand', () => {
       expect(nestedNames).toContain('en-US');
       expect(nestedNames).toContain('ru-RU');
       expect(nestedNames).toContain('de-DE');
+      expect(nestedNames).toContain('ja-JP');
     });
 
     it('should have action that sets language', async () => {
@@ -667,6 +669,24 @@ describe('languageCommand', () => {
       });
     });
 
+    const jaJPSubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'ja-JP',
+    );
+    it('ja-JP action should set Japanese', async () => {
+      if (!jaJPSubcommand?.action) {
+        throw new Error('ja-JP subcommand must have an action.');
+      }
+
+      const result = await jaJPSubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ja');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
     it('should reject extra arguments', async () => {
       if (!zhCNSubcommand?.action) {
         throw new Error('zh-CN subcommand must have an action.');
@@ -747,6 +767,19 @@ describe('languageCommand', () => {
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
         expect.stringContaining('German'),
+        'utf-8',
+      );
+    });
+
+    it('should detect Japanese locale and create Japanese rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('ja');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Japanese'),
         'utf-8',
       );
     });

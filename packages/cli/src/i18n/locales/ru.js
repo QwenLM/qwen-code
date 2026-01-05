@@ -392,7 +392,7 @@ export default {
   // Команды - Язык
   // ============================================================================
   'Invalid language. Available: en-US, zh-CN':
-    'Неверный язык. Доступны: en-US, zh-CN, ru-RU',
+    'Неверный язык. Доступны: en-US, zh-CN, ru-RU, de-DE, ja-JP',
   'Language subcommands do not accept additional arguments.':
     'Подкоманды языка не принимают дополнительных аргументов.',
   'Current UI language: {{lang}}': 'Текущий язык интерфейса: {{lang}}',
@@ -401,7 +401,7 @@ export default {
   'Set UI language': 'Установка языка интерфейса',
   'Set LLM output language': 'Установка языка вывода LLM',
   'Usage: /language ui [zh-CN|en-US]':
-    'Использование: /language ui [zh-CN|en-US|ru-RU]',
+    'Использование: /language ui [zh-CN|en-US|ru-RU|de-DE|ja-JP]',
   'Usage: /language output <language>':
     'Использование: /language output <language>',
   'Example: /language output 中文': 'Пример: /language output 中文',
@@ -422,10 +422,19 @@ export default {
   'Available options:': 'Доступные варианты:',
   '  - zh-CN: Simplified Chinese': ' - zh-CN: Упрощенный китайский',
   '  - en-US: English': ' - en-US: Английский',
+  '  - ru-RU: Russian': ' - ru-RU: Русский',
+  '  - de-DE: German': ' - de-DE: Немецкий',
+  '  - ja-JP: Japanese': ' - ja-JP: Японский',
   'Set UI language to Simplified Chinese (zh-CN)':
     'Установить язык интерфейса на упрощенный китайский (zh-CN)',
   'Set UI language to English (en-US)':
     'Установить язык интерфейса на английский (en-US)',
+  'Set UI language to Russian (ru-RU)':
+    'Установить язык интерфейса на русский (ru-RU)',
+  'Set UI language to German (de-DE)':
+    'Установить язык интерфейса на немецкий (de-DE)',
+  'Set UI language to Japanese (ja-JP)':
+    'Установить язык интерфейса на японский (ja-JP)',
 
   // ============================================================================
   // Команды - Режим подтверждения
