@@ -325,6 +325,15 @@ const SETTINGS_SCHEMA = {
           'Hide the context summary (QWEN.md, MCP servers) above the input.',
         showInDialog: true,
       },
+      useFullWidth: {
+        type: 'boolean',
+        label: 'Use Full Width',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description: 'Use full terminal width for the main display area.',
+        showInDialog: true,
+      },
       footer: {
         type: 'object',
         label: 'Footer',

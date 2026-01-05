@@ -45,7 +45,7 @@ interface SettingsDialogProps {
   config?: Config;
 }
 
-const maxItemsToShow = 8;
+const maxItemsToShow = 12;
 
 export function SettingsDialog({
   settings,

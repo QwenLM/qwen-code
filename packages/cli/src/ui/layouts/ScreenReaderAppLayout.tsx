@@ -18,7 +18,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
   const uiState = useUIState();
 
   return (
-    <Box flexDirection="column" width="90%" height="100%">
+    <Box flexDirection="column" width={uiState.mainAreaWidth} height="100%">
       <Notifications />
       <Footer />
       <Box flexGrow={1} overflow="hidden">
@@ -26,7 +26,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
       </Box>
       {uiState.dialogsVisible ? (
         <DialogManager
-          terminalWidth={uiState.terminalWidth}
+          terminalWidth={uiState.mainAreaWidth}
           addItem={uiState.historyManager.addItem}
         />
       ) : (

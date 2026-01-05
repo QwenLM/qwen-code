@@ -22,6 +22,14 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
 │                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
+│                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
@@ -55,6 +63,14 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
+│                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -90,6 +106,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
 │                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
+│                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
@@ -123,6 +147,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │   Hide Window Title                                    false*                                    │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
+│                                                                                                  │
+│   Hide Tips                                            false*                                    │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -158,6 +190,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
 │                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
+│                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
@@ -191,6 +231,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │   Hide Window Title                                    false                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
+│                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -226,6 +274,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
 │                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
+│                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
@@ -259,6 +315,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │   Hide Window Title                                    false*                                    │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
+│                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
@@ -294,6 +358,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
 │                                                                                                  │
+│   Hide Tips                                            false                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
+│                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │
 │                                                                                                  │
@@ -327,6 +399,14 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │   Hide Window Title                                    true*                                     │
 │                                                                                                  │
 │   Show Status in Title                                 false                                     │
+│                                                                                                  │
+│   Hide Tips                                            true*                                     │
+│                                                                                                  │
+│   Hide Banner                                          false                                     │
+│                                                                                                  │
+│   Hide Context Summary                                 false                                     │
+│                                                                                                  │
+│   Use Full Width                                       true                                      │
 │                                                                                                  │
 │ ▼                                                                                                │
 │                                                                                                  │

@@ -131,6 +131,15 @@ describe('SettingsUtils', () => {
               },
             },
           },
+          useFullWidth: {
+            type: 'boolean',
+            label: 'Use Full Width',
+            category: 'UI',
+            requiresRestart: false,
+            default: true,
+            description: 'Use full terminal width for the main display area.',
+            showInDialog: true,
+          },
         },
       },
       tools: {
@@ -1148,6 +1157,21 @@ describe('SettingsUtils', () => {
         );
         expect(result).toBe(false); // Default value
       });
+    });
+  });
+  TEST_ONLY.clearFlattenedSchema();
+  describe('useFullWidth setting', () => {
+    it('should include ui.useFullWidth in dialog settings', () => {
+      const dialogKeys = getDialogSettingKeys();
+      expect(dialogKeys).toContain('ui.useFullWidth');
+    });
+
+    it('should have correct properties for useFullWidth', () => {
+      const definition = getSettingDefinition('ui.useFullWidth');
+      expect(definition).toBeDefined();
+      expect(definition?.type).toBe('boolean');
+      expect(definition?.default).toBe(true);
+      expect(definition?.showInDialog).toBe(true);
     });
   });
 });
