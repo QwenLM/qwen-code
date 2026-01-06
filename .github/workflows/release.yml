@@ -261,26 +261,27 @@ jobs:
             --notes-start-tag "$PREVIOUS_RELEASE_TAG" \
             --generate-notes
 
-      - name: 'Merge release changes back to main'
+      - name: 'Create release PR for version bump'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
         run: |-
-          # Checkout main branch
-          git fetch origin main
-          git checkout main
-          git pull origin main
+          set -euo pipefail
 
-          # Only fast-forward merge back to main.
-          # Purpose: avoid creating silent merge commits in an automated workflow (no PR review),
-          # and fail loudly when history has diverged so a human can resolve it.
-          git merge "${RELEASE_BRANCH}" --ff-only
+          pr_exists=$(gh pr list --head "${RELEASE_BRANCH}" --state open --json number --jq 'length')
+          if [[ "${pr_exists}" != "0" ]]; then
+            echo "Open PR already exists for ${RELEASE_BRANCH}; skipping creation."
+            exit 0
+          fi
 
-          # Push changes
-          git push origin main
+          gh pr create \
+            --base main \
+            --head "${RELEASE_BRANCH}" \
+            --title "chore(release): ${RELEASE_TAG}" \
+            --body "Automated version bump for ${RELEASE_TAG}."
 
       - name: 'Create Issue on Failure'
         if: |-
