@@ -6,7 +6,11 @@
 
 import { vi, type Mock, type MockInstance } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { OutputFormat, FatalInputError } from '@qwen-code/qwen-code-core';
+import {
+  OutputFormat,
+  FatalInputError,
+  ToolErrorType,
+} from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   handleError,
@@ -65,6 +69,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 describe('errors', () => {
   let mockConfig: Config;
   let processExitSpy: MockInstance;
+  let processStderrWriteSpy: MockInstance;
   let consoleErrorSpy: MockInstance;
 
   beforeEach(() => {
@@ -73,6 +78,11 @@ describe('errors', () => {
 
     // Mock console.error
     consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // Mock process.stderr.write
+    processStderrWriteSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
 
     // Mock process.exit to throw instead of actually exiting
     processExitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
@@ -84,11 +94,13 @@ describe('errors', () => {
       getOutputFormat: vi.fn().mockReturnValue(OutputFormat.TEXT),
       getContentGeneratorConfig: vi.fn().mockReturnValue({ authType: 'test' }),
       getDebugMode: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(false),
     } as unknown as Config;
   });
 
   afterEach(() => {
     consoleErrorSpy.mockRestore();
+    processStderrWriteSpy.mockRestore();
     processExitSpy.mockRestore();
   });
 
@@ -429,6 +441,87 @@ describe('errors', () => {
           mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
         ).mockReturnValue(OutputFormat.STREAM_JSON);
         handleToolError(toolName, toolError, mockConfig);
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('permission denied warnings', () => {
+      it('should show warning when EXECUTION_DENIED in non-interactive text mode', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          toolError,
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+        );
+
+        expect(processStderrWriteSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Warning: Tool "test-tool" requires user approval',
+          ),
+        );
+        expect(processStderrWriteSpy).toHaveBeenCalledWith(
+          expect.stringContaining('use the -y flag (YOLO mode)'),
+        );
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not show warning when EXECUTION_DENIED in interactive mode', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(true);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          toolError,
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+        );
+
+        expect(processStderrWriteSpy).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not show warning when EXECUTION_DENIED in JSON mode', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.JSON);
+
+        handleToolError(
+          toolName,
+          toolError,
+          mockConfig,
+          ToolErrorType.EXECUTION_DENIED,
+        );
+
+        expect(processStderrWriteSpy).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not show warning for non-EXECUTION_DENIED errors', () => {
+        (mockConfig.getDebugMode as Mock).mockReturnValue(false);
+        (mockConfig.isInteractive as Mock).mockReturnValue(false);
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        handleToolError(
+          toolName,
+          toolError,
+          mockConfig,
+          ToolErrorType.FILE_NOT_FOUND,
+        );
+
+        expect(processStderrWriteSpy).not.toHaveBeenCalled();
         expect(processExitSpy).not.toHaveBeenCalled();
       });
     });

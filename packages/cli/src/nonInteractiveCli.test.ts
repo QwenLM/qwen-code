@@ -298,7 +298,9 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
-      undefined,
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
     );
     // Verify first call has isContinuation: false
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
@@ -769,6 +771,52 @@ describe('runNonInteractive', () => {
         2,
       ),
     );
+  });
+
+  it('should handle API errors in text mode and exit with error code', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.TEXT);
+    setupMetricsMock();
+
+    // Simulate an API error event (like 401 unauthorized)
+    const apiErrorEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.Error,
+      value: {
+        error: {
+          message: '401 Incorrect API key provided',
+          status: 401,
+        },
+      },
+    };
+
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    let thrownError: Error | null = null;
+    try {
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-api-error',
+      );
+      // Should not reach here
+      expect.fail('Expected error to be thrown');
+    } catch (error) {
+      thrownError = error as Error;
+    }
+
+    // Should throw with the API error message
+    expect(thrownError).toBeTruthy();
+    expect(thrownError?.message).toContain('401');
+    expect(thrownError?.message).toContain('Incorrect API key provided');
+
+    // Verify error was written to stderr
+    expect(processStderrSpy).toHaveBeenCalled();
+    const stderrCalls = processStderrSpy.mock.calls;
+    const errorOutput = stderrCalls.map((call) => call[0]).join('');
+    expect(errorOutput).toContain('401');
+    expect(errorOutput).toContain('Incorrect API key provided');
   });
 
   it('should handle FatalInputError with custom exit code in JSON format', async () => {
@@ -1776,5 +1824,85 @@ describe('runNonInteractive', () => {
       'prompt-blocks-content',
       { isContinuation: false },
     );
+  });
+
+  it('should print tool output to console in text mode (non-Task tools)', async () => {
+    // Test that tool output is printed to stdout in text mode
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'run_in_terminal',
+        args: { command: 'npm outdated' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-tool-output',
+      },
+    };
+
+    // Mock tool execution with outputUpdateHandler being called
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        // Simulate tool calling outputUpdateHandler with output chunks
+        if (options?.outputUpdateHandler) {
+          options.outputUpdateHandler('tool-1', 'Package outdated\n');
+          options.outputUpdateHandler('tool-1', 'npm@1.0.0 -> npm@2.0.0\n');
+        }
+        return {
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-1',
+                name: 'run_in_terminal',
+                response: {
+                  output: 'Package outdated\nnpm@1.0.0 -> npm@2.0.0',
+                },
+              },
+            },
+          ],
+        };
+      },
+    );
+
+    const firstCallEvents: ServerGeminiStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+      },
+    ];
+
+    const secondCallEvents: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Dependencies checked' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
+      },
+    ];
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Check dependencies',
+      'prompt-id-tool-output',
+    );
+
+    // Verify that executeToolCall was called with outputUpdateHandler
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledWith(
+      mockConfig,
+      expect.objectContaining({ name: 'run_in_terminal' }),
+      expect.any(AbortSignal),
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
+    );
+
+    // Verify tool output was written to stdout
+    expect(processStdoutSpy).toHaveBeenCalledWith('Package outdated\n');
+    expect(processStdoutSpy).toHaveBeenCalledWith('npm@1.0.0 -> npm@2.0.0\n');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Dependencies checked');
   });
 });

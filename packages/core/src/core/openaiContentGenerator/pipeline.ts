@@ -317,15 +317,22 @@ export class ContentGenerationPipeline {
   }
 
   private buildReasoningConfig(): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    // Reasoning configuration for OpenAI-compatible endpoints is highly fragmented.
+    // For example, across common providers and models:
+    //
+    //   - deepseek-reasoner   — thinking is enabled by default and cannot be disabled
+    //   - glm-4.7             — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
+    //   - kimi-k2-thinking    — thinking is enabled by default and cannot be disabled
+    //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - qwen3 series        — model-dependent; can be manually disabled via `extra_body.enable_thinking`
+    //
+    // Given this inconsistency, we choose not to set any reasoning config here and
+    // instead rely on each model’s default behavior.
 
-    if (reasoning === false) {
-      return {};
-    }
+    // We plan to introduce provider- and model-specific settings to enable more
+    // fine-grained control over reasoning configuration.
 
-    return {
-      reasoning_effort: reasoning?.effort ?? 'medium',
-    };
+    return {};
   }
 
   /**

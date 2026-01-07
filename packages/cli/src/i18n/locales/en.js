@@ -89,6 +89,9 @@ export default {
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
     'View or change the approval mode for tool usage',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    'Invalid approval mode "{{arg}}". Valid modes: {{modes}}',
+  'Approval mode set to "{{mode}}"': 'Approval mode set to "{{mode}}"',
   'View or change the language setting': 'View or change the language setting',
   'change the theme': 'change the theme',
   'Select Theme': 'Select Theme',
@@ -1037,7 +1040,6 @@ export default {
     'Applying percussive maintenance...',
     'Searching for the correct USB orientation...',
     'Ensuring the magic smoke stays inside the wires...',
-    'Rewriting in Rust for no particular reason...',
     'Trying to exit Vim...',
     'Spinning up the hamster wheel...',
     "That's not a bug, it's an undocumented feature...",

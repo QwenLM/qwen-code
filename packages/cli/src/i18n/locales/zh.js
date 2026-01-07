@@ -88,6 +88,9 @@ export default {
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
     '查看或更改工具使用的审批模式',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    '无效的审批模式 "{{arg}}"。有效模式：{{modes}}',
+  'Approval mode set to "{{mode}}"': '审批模式已设置为 "{{mode}}"',
   'View or change the language setting': '查看或更改语言设置',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
