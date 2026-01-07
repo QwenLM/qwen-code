@@ -10,7 +10,7 @@ RUN_SCRIPT="$PWD/native-host/run.sh"
 cat > "$CONFIG_FILE" <<EOF
 {
   "name": "com.qwen.cli.bridge",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$RUN_SCRIPT",
   "type": "stdio",
   "allowed_origins": [

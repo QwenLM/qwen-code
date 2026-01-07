@@ -19,7 +19,7 @@ const colors = {
   yellow: '\x1b[33m',
   blue: '\x1b[34m',
   red: '\x1b[31m',
-  cyan: '\x1b[36m'
+  cyan: '\x1b[36m',
 };
 
 function log(message, color = '') {
@@ -62,18 +62,18 @@ function getChromePath() {
   const chromePaths = {
     darwin: [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium'
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
     ],
     win32: [
       'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
       'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-      process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe'
+      process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
     ],
     linux: [
       '/usr/bin/google-chrome',
       '/usr/bin/chromium-browser',
-      '/usr/bin/chromium'
-    ]
+      '/usr/bin/chromium',
+    ],
   };
 
   const paths = chromePaths[platform] || [];
@@ -111,12 +111,20 @@ async function installNativeHost(extensionPath) {
 
   let manifestDir;
   if (platform === 'darwin') {
-    manifestDir = path.join(os.homedir(), 'Library/Application Support/Google/Chrome/NativeMessagingHosts');
+    manifestDir = path.join(
+      os.homedir(),
+      'Library/Application Support/Google/Chrome/NativeMessagingHosts',
+    );
   } else if (platform === 'linux') {
-    manifestDir = path.join(os.homedir(), '.config/google-chrome/NativeMessagingHosts');
+    manifestDir = path.join(
+      os.homedir(),
+      '.config/google-chrome/NativeMessagingHosts',
+    );
   } else if (platform === 'win32') {
     // Windows 需要写注册表
-    logWarning('Windows requires registry modification. Please run install.bat manually.');
+    logWarning(
+      'Windows requires registry modification. Please run install.bat manually.',
+    );
     return true;
   } else {
     logError('Unsupported platform');
@@ -131,13 +139,13 @@ async function installNativeHost(extensionPath) {
   // 创建 manifest 文件
   const manifest = {
     name: hostName,
-    description: 'Native messaging host for Qwen CLI Bridge',
+    description: 'Native messaging host for Qwen CLI Chrome Extension',
     path: scriptPath,
     type: 'stdio',
     allowed_origins: [
-      'chrome-extension://jniepomhbdkeifkadbfolbcihcmfpfjo/',  // 开发用 ID
-      'chrome-extension://*/'  // 允许任何扩展（仅开发环境）
-    ]
+      'chrome-extension://jniepomhbdkeifkadbfolbcihcmfpfjo/', // 开发用 ID
+      'chrome-extension://*/', // 允许任何扩展（仅开发环境）
+    ],
   };
 
   const manifestPath = path.join(manifestDir, `${hostName}.json`);
@@ -167,7 +175,9 @@ async function checkQwenCli() {
     });
   } else {
     logWarning('Qwen CLI is not installed');
-    logInfo('You can still use the extension, but some features will be limited');
+    logInfo(
+      'You can still use the extension, but some features will be limited',
+    );
     return false;
   }
 }
@@ -189,7 +199,7 @@ function startQwenServer(port = 8080) {
       // 启动服务器
       const qwenProcess = spawn('qwen', ['server', '--port', String(port)], {
         detached: false,
-        stdio: ['ignore', 'pipe', 'pipe']
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       qwenProcess.stdout.on('data', (data) => {
@@ -224,7 +234,7 @@ function startChrome(extensionPath, chromePath) {
 
   const args = [
     `--load-extension=${extensionPath}`,
-    '--auto-open-devtools-for-tabs',  // 自动打开 DevTools
+    '--auto-open-devtools-for-tabs', // 自动打开 DevTools
     '--disable-extensions-except=' + extensionPath,
     '--no-first-run',
     '--no-default-browser-check',
@@ -235,7 +245,7 @@ function startChrome(extensionPath, chromePath) {
     '--no-pings',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
-    '--disable-device-discovery-notifications'
+    '--disable-device-discovery-notifications',
   ];
 
   // 开发模式特定参数
@@ -249,7 +259,7 @@ function startChrome(extensionPath, chromePath) {
 
   const chromeProcess = spawn(chromePath, args, {
     detached: false,
-    stdio: 'inherit'
+    stdio: 'inherit',
   });
 
   chromeProcess.on('error', (error) => {
@@ -271,7 +281,7 @@ function createTestServer(port = 3000) {
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Qwen CLI Bridge Test Page</title>
+    <title>Qwen CLI Chrome Extension Test Page</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -319,11 +329,11 @@ function createTestServer(port = 3000) {
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Qwen CLI Bridge Test Page</h1>
+        <h1>🚀 Qwen CLI Chrome Extension Test Page</h1>
 
         <div class="test-content">
             <h2>Test Content</h2>
-            <p>This is a test page for the Qwen CLI Bridge Chrome Extension.</p>
+            <p>This is a test page for the Qwen CLI Chrome Extension.</p>
             <p>Click the extension icon in your toolbar to start testing!</p>
 
             <h3>Sample Data</h3>
@@ -411,13 +421,16 @@ function createTestServer(port = 3000) {
 // 主函数
 async function main() {
   console.clear();
-  log(`
+  log(
+    `
 ╔════════════════════════════════════════════════════════════════╗
 ║                                                                ║
-║     🚀 Qwen CLI Bridge - Development Environment Setup        ║
+║     🚀 Qwen CLI Chrome Extension - Development Environment Setup        ║
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
-`, colors.bright + colors.cyan);
+`,
+    colors.bright + colors.cyan,
+  );
 
   const extensionPath = path.join(__dirname, 'extension');
 
@@ -435,7 +448,9 @@ async function main() {
   // Step 2: 安装 Native Host
   const nativeHostInstalled = await installNativeHost(__dirname);
   if (!nativeHostInstalled && process.platform === 'win32') {
-    logWarning('Please run install.bat as Administrator to complete Native Host setup');
+    logWarning(
+      'Please run install.bat as Administrator to complete Native Host setup',
+    );
   }
 
   // Step 3: 检查 Qwen CLI
@@ -451,7 +466,7 @@ async function main() {
   const testServer = createTestServer(3000);
 
   // Step 6: 启动 Chrome
-  await new Promise(resolve => setTimeout(resolve, 1000)); // 等待服务器启动
+  await new Promise((resolve) => setTimeout(resolve, 1000)); // 等待服务器启动
   const chromeProcess = startChrome(extensionPath, chromePath);
 
   // 设置清理处理
@@ -480,7 +495,8 @@ async function main() {
   process.on('SIGTERM', cleanup);
 
   // 显示使用说明
-  log(`
+  log(
+    `
 ╔════════════════════════════════════════════════════════════════╗
 ║                         ✅ Setup Complete!                     ║
 ╠════════════════════════════════════════════════════════════════╣
@@ -498,7 +514,9 @@ async function main() {
 ║  🛑 Press Ctrl+C to stop all services                         ║
 ║                                                                ║
 ╚════════════════════════════════════════════════════════════════╝
-`, colors.bright + colors.green);
+`,
+    colors.bright + colors.green,
+  );
 
   // 保持进程运行
   await new Promise(() => {});

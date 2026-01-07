@@ -1,5 +1,5 @@
 /**
- * Popup Script for Qwen CLI Bridge
+ * Popup Script for Qwen CLI Chrome Extension
  * Handles UI interactions and communication with background script
  */
 

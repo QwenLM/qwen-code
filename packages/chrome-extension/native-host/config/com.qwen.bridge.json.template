@@ -1,6 +1,6 @@
 {
   "name": "com.qwen.bridge",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "__PATH__",
   "type": "stdio",
   "allowed_origins": [

@@ -1,7 +1,7 @@
 {
   "name": "qwen-cli-bridge-host",
   "version": "1.0.0",
-  "description": "Native messaging host for Qwen CLI Bridge Chrome extension",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "main": "host.js",
   "scripts": {
     "test": "node host.js --test"

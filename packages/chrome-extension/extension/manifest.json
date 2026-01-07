@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Qwen CLI Bridge",
+  "name": "Qwen CLI Chrome Extension",
   "version": "1.0.0",
   "description": "Bridge between Chrome browser and Qwen CLI for enhanced AI interactions",
 
@@ -17,10 +17,8 @@
     "sidePanel"
   ],
 
-  "host_permissions": [
-    "<all_urls>"
-  ],
-  
+  "host_permissions": ["<all_urls>"],
+
   "externally_connectable": {
     "ids": ["aohjeidlpcjalobgghfkkehjbdhacjlo"],
     "matches": ["https://*/*"]

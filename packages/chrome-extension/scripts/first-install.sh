@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Qwen CLI Bridge - 首次安装脚本
+# Qwen CLI Chrome Extension - 首次安装脚本
 
 # 颜色定义
 RED='\033[0;31m'
@@ -15,7 +15,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 clear
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
-echo -e "${CYAN}║        🎯 Qwen CLI Bridge - 首次安装向导                      ║${NC}"
+echo -e "${CYAN}║        🎯 Qwen CLI Chrome Extension - 首次安装向导                      ║${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -33,7 +33,7 @@ mkdir -p "$MANIFEST_DIR"
 cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/native-host/host.js",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://*/"]
@@ -79,7 +79,7 @@ else
     cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/native-host/host.js",
   "type": "stdio",
   "allowed_origins": [

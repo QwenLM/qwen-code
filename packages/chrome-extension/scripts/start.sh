@@ -37,7 +37,7 @@ NATIVE_HOST_DIR="$SCRIPT_DIR/native-host"
 # 清屏并显示标题
 clear
 echo "======================================"
-echo "  Qwen CLI Bridge - Quick Start"
+echo "  Qwen CLI Chrome Extension - Quick Start"
 echo "======================================"
 echo ""
 
@@ -75,7 +75,7 @@ mkdir -p "$MANIFEST_DIR"
 cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$NATIVE_HOST_DIR/host.js",
   "type": "stdio",
   "allowed_origins": [
@@ -133,7 +133,7 @@ html_content = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Qwen CLI Bridge Test</title>
+    <title>Qwen CLI Chrome Extension Test</title>
     <style>
         body {
             font-family: Arial;
@@ -164,7 +164,7 @@ html_content = """
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Qwen CLI Bridge Test Page</h1>
+        <h1>🚀 Qwen CLI Chrome Extension Test Page</h1>
         <p>Extension debugging environment is ready!</p>
 
         <h2>Quick Tests</h2>

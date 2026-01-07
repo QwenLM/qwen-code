@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Qwen CLI Bridge - 智能 Native Host 安装器
+# Qwen CLI Chrome Extension - 智能 Native Host 安装器
 # 自动检测 Chrome 插件并配置 Native Host
 
 set -e
@@ -18,7 +18,7 @@ HOST_NAME="com.qwen.cli.bridge"
 
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
-echo -e "${CYAN}║        🔧 Qwen CLI Bridge - Native Host 安装器                ║${NC}"
+echo -e "${CYAN}║        🔧 Qwen CLI Chrome Extension - Native Host 安装器                ║${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -50,7 +50,7 @@ fi
 echo -e "${GREEN}✓${NC} Node.js $(node --version)"
 
 # 尝试自动检测扩展 ID
-echo -e "\n${BLUE}查找已安装的 Qwen CLI Bridge 扩展...${NC}"
+echo -e "\n${BLUE}查找已安装的 Qwen CLI Chrome Extension 扩展...${NC}"
 
 EXTENSION_ID=""
 AUTO_DETECTED=false
@@ -64,7 +64,7 @@ if [[ -d "$EXTENSIONS_DIR" ]]; then
             for version_dir in "$ext_id"/*; do
                 if [[ -f "$version_dir/manifest.json" ]]; then
                     # 检查是否是我们的扩展
-                    if grep -q "Qwen CLI Bridge" "$version_dir/manifest.json" 2>/dev/null; then
+                    if grep -q "Qwen CLI Chrome Extension" "$version_dir/manifest.json" 2>/dev/null; then
                         EXTENSION_ID="$ext_id_name"
                         AUTO_DETECTED=true
                         echo -e "${GREEN}✓${NC} 自动检测到扩展 ID: ${CYAN}$EXTENSION_ID${NC}"
@@ -98,7 +98,7 @@ if [[ -z "$EXTENSION_ID" ]]; then
         1)
             echo ""
             echo -e "${YELLOW}请输入扩展 ID:${NC}"
-            echo -e "${CYAN}提示: 在 chrome://extensions 页面找到 Qwen CLI Bridge，ID 在扩展卡片上${NC}"
+            echo -e "${CYAN}提示: 在 chrome://extensions 页面找到 Qwen CLI Chrome Extension，ID 在扩展卡片上${NC}"
             read -p "> " EXTENSION_ID
             if [[ -n "$EXTENSION_ID" ]]; then
                 # 保存 ID 供以后使用
@@ -114,7 +114,7 @@ if [[ -z "$EXTENSION_ID" ]]; then
             echo -e "\n${CYAN}正在打开 Chrome 扩展页面...${NC}"
             open "chrome://extensions" 2>/dev/null || xdg-open "chrome://extensions" 2>/dev/null || echo "请手动打开 chrome://extensions"
             echo ""
-            echo -e "${YELLOW}找到 Qwen CLI Bridge 扩展后，输入其 ID:${NC}"
+            echo -e "${YELLOW}找到 Qwen CLI Chrome Extension 扩展后，输入其 ID:${NC}"
             read -p "> " EXTENSION_ID
             if [[ -n "$EXTENSION_ID" && "$EXTENSION_ID" != "*" ]]; then
                 echo "$EXTENSION_ID" > "$SCRIPT_DIR/../.extension-id"
@@ -139,7 +139,7 @@ if [[ "$EXTENSION_ID" == "*" ]]; then
     cat > "$MANIFEST_FILE" << EOF
 {
   "name": "$HOST_NAME",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/host.js",
   "type": "stdio",
   "allowed_origins": [
@@ -153,7 +153,7 @@ else
     cat > "$MANIFEST_FILE" << EOF
 {
   "name": "$HOST_NAME",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/host.js",
   "type": "stdio",
   "allowed_origins": [

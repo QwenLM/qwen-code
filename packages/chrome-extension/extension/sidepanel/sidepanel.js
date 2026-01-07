@@ -1,5 +1,5 @@
 /**
- * Side Panel Script for Qwen CLI Bridge
+ * Side Panel Script for Qwen CLI Chrome Extension
  * Handles UI interactions and communication with background script
  */
 

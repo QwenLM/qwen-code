@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM Qwen CLI Bridge - Native Host Installation Script for Windows
+REM Qwen CLI Chrome Extension - Native Host Installation Script for Windows
 REM This script installs the Native Messaging host for the Chrome extension
 
 echo ========================================
-echo Qwen CLI Bridge - Native Host Installer
+echo Qwen CLI Chrome Extension - Native Host Installer
 echo ========================================
 echo.
 
@@ -61,7 +61,7 @@ echo Creating manifest: %MANIFEST_FILE%
 (
 echo {
 echo   "name": "%HOST_NAME%",
-echo   "description": "Native messaging host for Qwen CLI Bridge Chrome extension",
+echo   "description": "Native messaging host for Qwen CLI Chrome Extension",
 echo   "path": "%HOST_SCRIPT:\=\\%",
 echo   "type": "stdio",
 echo   "allowed_origins": [

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Qwen CLI Bridge - Native Host Installation Script for macOS/Linux
+# Qwen CLI Chrome Extension - Native Host Installation Script for macOS/Linux
 # This script installs the Native Messaging host for the Chrome extension
 
 set -e
@@ -9,7 +9,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 HOST_NAME="com.qwen.cli.bridge"
 
 echo "========================================"
-echo "Qwen CLI Bridge - Native Host Installer"
+echo "Qwen CLI Chrome Extension - Native Host Installer"
 echo "========================================"
 echo ""
 
@@ -72,7 +72,7 @@ fi
 cat > "$MANIFEST_FILE" << EOF
 {
   "name": "$HOST_NAME",
-  "description": "Native messaging host for Qwen CLI Bridge Chrome extension",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$HOST_SCRIPT",
   "type": "stdio",
   "allowed_origins": [

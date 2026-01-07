@@ -1,5 +1,5 @@
 /**
- * Options page script for Qwen CLI Bridge
+ * Options page script for Qwen CLI Chrome Extension
  */
 
 // Load saved settings

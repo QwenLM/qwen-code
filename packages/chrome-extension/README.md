@@ -1,4 +1,4 @@
-# Qwen CLI Bridge - Chrome Extension
+# Qwen CLI Chrome Extension - Chrome Extension
 
 A Chrome extension that bridges your browser with Qwen CLI, enabling AI-powered analysis and interaction with web content.
 
@@ -94,7 +94,7 @@ qwen mcp add playwright-mcp
 
 ### Basic Usage
 
-1. Click the Qwen CLI Bridge extension icon in Chrome
+1. Click the Qwen CLI Chrome Extension extension icon in Chrome
 2. Click "Connect to Qwen CLI" to establish connection
 3. Click "Start Qwen CLI" to launch the CLI process
 4. Use the action buttons to:

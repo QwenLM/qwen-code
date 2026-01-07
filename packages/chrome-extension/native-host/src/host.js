@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Native Messaging Host for Qwen CLI Bridge
+ * Native Messaging Host for Qwen CLI Chrome Extension
  * This script acts as a bridge between the Chrome extension and Qwen CLI
  * Uses ACP (Agent Communication Protocol) for communication with Qwen CLI
  */
@@ -66,21 +66,24 @@ function readMessagesFromExtension() {
         if (buffer.length < 4) break;
         const rawLengthBytes = buffer.slice(0, 4);
         messageLength = buffer.readUInt32LE(0);
-        
+
         // Log raw bytes for debugging
         log(`Raw length bytes: ${rawLengthBytes.toString('hex')}`);
         log(`Parsed message length: ${messageLength}`);
-        
+
         // Validate message length to prevent buffer overflow and handle corrupted data
-        if (messageLength > 1024 * 1024) { // Max 1MB message
-          logError(`Invalid message length: ${messageLength}. Resetting connection.`);
+        if (messageLength > 1024 * 1024) {
+          // Max 1MB message
+          logError(
+            `Invalid message length: ${messageLength}. Resetting connection.`,
+          );
           messageLength = null;
           chunks = [];
           // Send error response to extension
           try {
             const errorMessage = {
               type: 'error',
-              error: 'Invalid message format'
+              error: 'Invalid message format',
             };
             const errorBuffer = Buffer.from(JSON.stringify(errorMessage));
             const length = Buffer.allocUnsafe(4);
@@ -92,7 +95,7 @@ function readMessagesFromExtension() {
           }
           break;
         }
-        
+
         chunks = [buffer.slice(4)];
         log(`Message length: ${messageLength}`);
         continue;

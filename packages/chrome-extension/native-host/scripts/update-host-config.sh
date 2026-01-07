@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Qwen CLI Bridge - Native Host Configuration Updater
+# Qwen CLI Chrome Extension - Native Host Configuration Updater
 # 用于在更换电脑或浏览器后更新Native Host配置
 
 set -e
@@ -9,7 +9,7 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 HOST_NAME="com.qwen.cli.bridge"
 
 echo "==============================================="
-echo "Qwen CLI Bridge - Native Host Configuration Updater"
+echo "Qwen CLI Chrome Extension - Native Host Configuration Updater"
 echo "==============================================="
 echo ""
 
@@ -67,7 +67,7 @@ MANIFEST_FILE="$MANIFEST_DIR/$HOST_NAME.json"
 if [[ "$CONFIG_OPTION" == "1" ]]; then
     echo ""
     echo "Please enter your Chrome extension ID:"
-    echo "Tip: Find it in chrome://extensions page for Qwen CLI Bridge"
+    echo "Tip: Find it in chrome://extensions page for Qwen CLI Chrome Extension"
     read -p "Extension ID: " EXTENSION_ID
 
     if [[ -z "$EXTENSION_ID" ]]; then
@@ -82,7 +82,7 @@ if [[ "$CONFIG_OPTION" == "1" ]]; then
     cat > "$MANIFEST_FILE" << EOF
 {
   "name": "$HOST_NAME",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/host.js",
   "type": "stdio",
   "allowed_origins": [
@@ -98,7 +98,7 @@ elif [[ "$CONFIG_OPTION" == "2" ]]; then
     cat > "$MANIFEST_FILE" << EOF
 {
   "name": "$HOST_NAME",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/host.js",
   "type": "stdio",
   "allowed_origins": [
@@ -137,7 +137,7 @@ echo ""
 echo "Next steps:"
 echo "1. Restart Chrome if it's running"
 echo "2. Navigate to chrome://extensions"
-echo "3. Reload the Qwen CLI Bridge extension"
+echo "3. Reload the Qwen CLI Chrome Extension extension"
 echo "4. Click the extension icon and connect to Qwen CLI"
 echo ""
 echo "Note: Run this script whenever you:"

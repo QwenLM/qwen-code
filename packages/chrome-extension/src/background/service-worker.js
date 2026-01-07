@@ -1201,7 +1201,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     }
   },
   { urls: ['<all_urls>'] },
-  ['requestHeaders']
+  ['requestHeaders'],
 );
 
 chrome.webRequest.onCompleted.addListener(
@@ -1235,7 +1235,7 @@ chrome.webRequest.onCompleted.addListener(
     }
   },
   { urls: ['<all_urls>'] },
-  ['responseHeaders']
+  ['responseHeaders'],
 );
 
 chrome.webRequest.onErrorOccurred.addListener(
@@ -1263,7 +1263,7 @@ chrome.webRequest.onErrorOccurred.addListener(
       networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
     }
   },
-  { urls: ['<all_urls>'] }
+  { urls: ['<all_urls>'] },
 );
 
 // Listen for network events via debugger API for additional details
@@ -1348,14 +1348,20 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 // Inject extension URI when side panel loads
-chrome.sidePanel?.setOptions?.({
-  path: 'sidepanel/sidepanel.html',
-  enabled: true,
-}, () => {
-  if (chrome.runtime.lastError) {
-    console.warn('Failed to set side panel options:', chrome.runtime.lastError);
-  }
-});
+chrome.sidePanel?.setOptions?.(
+  {
+    path: 'sidepanel/sidepanel.html',
+    enabled: true,
+  },
+  () => {
+    if (chrome.runtime.lastError) {
+      console.warn(
+        'Failed to set side panel options:',
+        chrome.runtime.lastError,
+      );
+    }
+  },
+);
 
 // Open side panel when extension icon is clicked
 chrome.action.onClicked.addListener((tab) => {
@@ -1407,18 +1413,20 @@ chrome.webNavigation?.onDOMContentLoaded?.addListener((details) => {
     try {
       // Inject script to set extension URI
       const extensionUri = chrome.runtime.getURL('');
-      chrome.scripting.executeScript({
-        target: { tabId: details.tabId },
-        func: (uri) => {
-          // Set the extension URI on the document body
-          document.body.setAttribute('data-extension-uri', uri);
-          // Also set it on window for backwards compatibility
-          window.__EXTENSION_URI__ = uri;
-        },
-        args: [extensionUri],
-      }).catch((e) => {
-        console.warn('Failed to inject extension URI script:', e);
-      });
+      chrome.scripting
+        .executeScript({
+          target: { tabId: details.tabId },
+          func: (uri) => {
+            // Set the extension URI on the document body
+            document.body.setAttribute('data-extension-uri', uri);
+            // Also set it on window for backwards compatibility
+            window.__EXTENSION_URI__ = uri;
+          },
+          args: [extensionUri],
+        })
+        .catch((e) => {
+          console.warn('Failed to inject extension URI script:', e);
+        });
     } catch (e) {
       console.warn('Error injecting extension URI:', e);
     }

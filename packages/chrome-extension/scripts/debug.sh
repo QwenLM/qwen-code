@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Qwen CLI Bridge - macOS 一键调试脚本
+# Qwen CLI Chrome Extension - macOS 一键调试脚本
 
 # 颜色定义
 RED='\033[0;31m'
@@ -31,7 +31,7 @@ fi
 clear
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
-echo -e "${CYAN}║     🚀 Qwen CLI Bridge - macOS 调试环境                      ║${NC}"
+echo -e "${CYAN}║     🚀 Qwen CLI Chrome Extension - macOS 调试环境                      ║${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
@@ -64,7 +64,7 @@ mkdir -p "$MANIFEST_DIR"
 cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
-  "description": "Native messaging host for Qwen CLI Bridge",
+  "description": "Native messaging host for Qwen CLI Chrome Extension",
   "path": "$SCRIPT_DIR/native-host/host.js",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://*/"]
@@ -96,7 +96,7 @@ cat > /tmp/qwen-test.html << 'HTML'
 <html>
 <head>
     <meta charset="UTF-8">
-    <title>Qwen CLI Bridge 测试页面</title>
+    <title>Qwen CLI Chrome Extension 测试页面</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -200,7 +200,7 @@ cat > /tmp/qwen-test.html << 'HTML'
 <body>
     <div class="container">
         <div class="header">
-            <h1>🚀 Qwen CLI Bridge</h1>
+            <h1>🚀 Qwen CLI Chrome Extension</h1>
             <div class="status">调试环境已就绪</div>
         </div>
 

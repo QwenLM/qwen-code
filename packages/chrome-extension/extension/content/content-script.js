@@ -1,5 +1,5 @@
 /**
- * Content Script for Qwen CLI Bridge
+ * Content Script for Qwen CLI Chrome Extension
  * Extracts data from web pages and communicates with background script
  */
 

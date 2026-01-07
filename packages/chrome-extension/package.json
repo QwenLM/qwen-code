@@ -26,17 +26,17 @@
     "README.md"
   ],
   "scripts": {
-    "dev": "./debug.sh",
-    "build:ui": "node esbuild.config.js",
-    "build:ui:watch": "node esbuild.config.js --watch",
+    "dev": "./scripts/debug.sh",
+    "build:ui": "node config/esbuild.config.js",
+    "build:ui:watch": "node config/esbuild.config.js --watch",
     "build": "npm run build:ui",
-    "install:extension": "./first-install.sh",
-    "install:host": "cd native-host && ./smart-install.sh",
-    "install:all": "./first-install.sh",
-    "update:host": "cd native-host && ./update-host-config.sh",
+    "install:extension": "./scripts/first-install.sh",
+    "install:host": "cd native-host && ./scripts/smart-install.sh",
+    "install:all": "./scripts/first-install.sh",
+    "update:host": "cd native-host && ./scripts/update-host-config.sh",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
     "package": "zip -r chrome-extension.zip extension/",
-    "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id",
+    "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id extension/sidepanel/sidepanel-app.js extension/sidepanel/sidepanel-app.js.map",
     "logs": "tail -f /tmp/qwen-bridge-host.log"
   },
   "engines": {

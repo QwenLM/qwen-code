@@ -38,7 +38,7 @@ const cssInjectPlugin = {
       // Process with PostCSS and Tailwind
       const result = await postcss([
         tailwindcss({
-          config: path.resolve(process.cwd(), 'tailwind.config.js'),
+          config: path.resolve(process.cwd(), 'config/tailwind.config.js'),
         }),
         autoprefixer,
       ]).process(cssContent, {
