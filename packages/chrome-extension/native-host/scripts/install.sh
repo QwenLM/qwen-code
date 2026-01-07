@@ -7,6 +7,7 @@ set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 HOST_NAME="com.qwen.cli.bridge"
+HOST_SCRIPT="$SCRIPT_DIR/../host.js"
 
 echo "========================================"
 echo "Qwen CLI Chrome Extension - Native Host Installer"
@@ -46,14 +47,11 @@ fi
 echo "Creating directory: $TARGET_DIR"
 mkdir -p "$TARGET_DIR"
 
-# Copy the host script
-HOST_SCRIPT="$SCRIPT_DIR/host.js"
+# Ensure host script exists and is executable
 if [ ! -f "$HOST_SCRIPT" ]; then
-    echo "Error: host.js not found in $SCRIPT_DIR"
+    echo "Error: host.js not found at $HOST_SCRIPT"
     exit 1
 fi
-
-# Make the host script executable
 chmod +x "$HOST_SCRIPT"
 
 # Create the manifest file with the correct path

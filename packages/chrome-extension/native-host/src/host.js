@@ -16,12 +16,29 @@ const http = require('http');
 // Logging
 // ============================================================================
 
-const LOG_FILE = path.join(os.tmpdir(), 'qwen-bridge-host.log');
+const LOG_FILE = path.join(
+  os.homedir(),
+  '.qwen',
+  'chrome-bridge',
+  'qwen-bridge-host.log',
+);
 
 function log(message, level = 'INFO') {
   const timestamp = new Date().toISOString();
   const logLine = `[${timestamp}] [${level}] ${message}\n`;
-  fs.appendFileSync(LOG_FILE, logLine);
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.appendFileSync(LOG_FILE, logLine);
+  } catch (err) {
+    // Fallback to tmp if home dir logging fails
+    try {
+      fs.appendFileSync(path.join(os.tmpdir(), 'qwen-bridge-host.log'), logLine);
+    } catch (_) {}
+  }
+  try {
+    // Also emit to stderr so it can be tailed via Chrome native messaging logging
+    process.stderr.write(logLine);
+  } catch (_) {}
 }
 
 function logError(message) {
@@ -56,6 +73,10 @@ function readMessagesFromExtension() {
 
   process.stdin.on('data', (chunk) => {
     log(`Received ${chunk.length} bytes from extension`);
+    // For very short chunks log raw hex to debug partial frames
+    if (chunk.length <= 8) {
+      logDebug(`Chunk hex: ${chunk.toString('hex')}`);
+    }
     chunks.push(chunk);
 
     while (true) {
@@ -214,20 +235,21 @@ class AcpConnection {
 
       // Resolve qwen CLI path more robustly
       const qwenPath = (() => {
-        try {
-          // Prefer local monorepo build: packages/cli/dist/index.js
-          const localCli = path.resolve(
-            __dirname,
-            '..',
-            '..',
-            'cli',
-            'dist',
-            'index.js',
-          );
-          if (fs.existsSync(localCli)) {
-            return localCli;
-          }
-        } catch {}
+        // Prefer local monorepo build: packages/cli/dist/index.js.
+        // Support being run from native-host/ or native-host/src/.
+        const candidateCliPaths = [
+          path.resolve(__dirname, '..', '..', 'cli', 'dist', 'index.js'),
+          path.resolve(__dirname, '..', '..', '..', 'cli', 'dist', 'index.js'),
+        ];
+
+        for (const candidate of candidateCliPaths) {
+          try {
+            if (fs.existsSync(candidate)) {
+              return candidate;
+            }
+          } catch {}
+        }
+
         try {
           // Prefer explicit env override
           if (
@@ -700,11 +722,14 @@ class AcpConnection {
         return null;
       }
 
-      // Get the path to browser-mcp-server.js
-      const browserMcpServerPath = path.join(
-        __dirname,
-        'browser-mcp-server.js',
-      );
+      // Get the path to browser-mcp-server.js (supports running from root or src)
+      const browserMcpServerPath = (() => {
+        const localPath = path.join(__dirname, 'browser-mcp-server.js');
+        if (fs.existsSync(localPath)) return localPath;
+        const srcPath = path.join(__dirname, 'src', 'browser-mcp-server.js');
+        if (fs.existsSync(srcPath)) return srcPath;
+        return localPath;
+      })();
 
       log(`Creating session with MCP server: ${browserMcpServerPath}`);
 
@@ -1202,13 +1227,19 @@ function cleanup() {
 }
 
 process.on('SIGINT', () => {
+  log('Received SIGINT');
   cleanup();
   process.exit();
 });
 
 process.on('SIGTERM', () => {
+  log('Received SIGTERM');
   cleanup();
   process.exit();
+});
+
+process.on('exit', (code) => {
+  log(`Process exiting with code ${code}`);
 });
 
 // ============================================================================

@@ -4,9 +4,9 @@
 
 echo "Building Chrome Qwen Bridge..."
 
-# Ensure we're in the right directory
+# Ensure we're in the project root directory (where both scripts/ and extension/ are)
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR/.."
 
 # Create dist directory
 mkdir -p dist

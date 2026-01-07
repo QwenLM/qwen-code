@@ -13,7 +13,10 @@ import {
   WaitingMessage,
 } from './components/messages/index.js';
 import { PermissionDrawer } from './components/PermissionDrawer/PermissionDrawer.js';
-import type { PermissionOption, ToolCall } from './components/PermissionDrawer/PermissionRequest.js';
+import type {
+  PermissionOption,
+  ToolCall,
+} from './components/PermissionDrawer/PermissionRequest.js';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -61,7 +64,12 @@ export const App: React.FC = () => {
 
       switch (message.type) {
         case 'STATUS_UPDATE':
-          setIsConnected((message as { status: string }).status !== 'disconnected');
+          const statusData = message.data as { status: string } | undefined;
+          if (statusData && 'status' in statusData) {
+            setIsConnected(statusData.status !== 'disconnected');
+          } else {
+            setIsConnected(false); // default to disconnected if status data is missing
+          }
           break;
         case 'hostInfo': {
           console.log('[HostInfo]', (message as any).data);
@@ -73,48 +81,81 @@ export const App: React.FC = () => {
           break;
         }
         case 'authUpdate': {
-          const uri = (message as { data?: { authUri?: string } }).data?.authUri;
+          const uri = (message as { data?: { authUri?: string } }).data
+            ?.authUri;
           if (uri) setAuthUri(uri);
           break;
         }
         case 'availableCommands': {
-          const cmds = (message as { data?: { availableCommands?: any[] } }).data?.availableCommands || [];
+          const cmds =
+            (message as { data?: { availableCommands?: any[] } }).data
+              ?.availableCommands || [];
           setAvailableCommands(cmds);
           console.log('[App] Available commands:', cmds);
           break;
         }
         case 'mcpTools': {
-          const tools = (message as { data?: { tools?: any[] } }).data?.tools || [];
+          const tools =
+            (message as { data?: { tools?: any[] } }).data?.tools || [];
           setMcpTools(tools);
           console.log('[App] MCP tools:', tools);
           break;
         }
         case 'internalMcpTools': {
-          const tools = (message as { data?: { tools?: any[] } }).data?.tools || [];
+          const tools =
+            (message as { data?: { tools?: any[] } }).data?.tools || [];
           setInternalTools(tools);
           console.log('[App] Internal MCP tools:', tools);
           break;
         }
 
         case 'toolProgress': {
-          const payload = (message as { data?: { name?: string; stage?: string; ok?: boolean; error?: string } }).data || ({} as any);
+          const payload =
+            (
+              message as {
+                data?: {
+                  name?: string;
+                  stage?: string;
+                  ok?: boolean;
+                  error?: string;
+                };
+              }
+            ).data || ({} as any);
           const name = payload.name || '';
           const stage = payload.stage || '';
           const ok = payload.ok;
           const pretty = (n: string) => {
             switch (n) {
-              case 'read_page': return 'Read Page';
-              case 'capture_screenshot': return 'Capture Screenshot';
-              case 'get_network_logs': return 'Get Network Logs';
-              case 'get_console_logs': return 'Get Console Logs';
-              default: return n;
+              case 'read_page':
+                return 'Read Page';
+              case 'capture_screenshot':
+                return 'Capture Screenshot';
+              case 'get_network_logs':
+                return 'Get Network Logs';
+              case 'get_console_logs':
+                return 'Get Console Logs';
+              default:
+                return n;
             }
           };
           if (stage === 'start') {
-            setMessages(prev => [...prev, { role: 'assistant', content: `Running tool: ${pretty(name)}…`, timestamp: Date.now() }]);
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: `Running tool: ${pretty(name)}…`,
+                timestamp: Date.now(),
+              },
+            ]);
           } else if (stage === 'end') {
-            const endText = ok === false ? `Tool failed: ${pretty(name)}${payload.error ? ` — ${payload.error}` : ''}` : `Tool finished: ${pretty(name)}`;
-            setMessages(prev => [...prev, { role: 'assistant', content: endText, timestamp: Date.now() }]);
+            const endText =
+              ok === false
+                ? `Tool failed: ${pretty(name)}${payload.error ? ` — ${payload.error}` : ''}`
+                : `Tool finished: ${pretty(name)}`;
+            setMessages((prev) => [
+              ...prev,
+              { role: 'assistant', content: endText, timestamp: Date.now() },
+            ]);
           }
           break;
         }
@@ -126,16 +167,23 @@ export const App: React.FC = () => {
           break;
 
         case 'streamChunk':
-          setStreamingContent(prev => prev + ((message as { data: { chunk: string } }).data?.chunk || ''));
+          setStreamingContent(
+            (prev) =>
+              prev +
+              ((message as { data: { chunk: string } }).data?.chunk || ''),
+          );
           break;
 
         case 'streamEnd':
           if (streamingContent) {
-            setMessages(prev => [...prev, {
-              role: 'assistant',
-              content: streamingContent,
-              timestamp: Date.now(),
-            }]);
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: streamingContent,
+                timestamp: Date.now(),
+              },
+            ]);
           }
           setIsStreaming(false);
           setStreamingContent('');
@@ -144,11 +192,14 @@ export const App: React.FC = () => {
         case 'message':
           const msgData = (message as { data: Message }).data;
           if (msgData) {
-            setMessages(prev => [...prev, {
-              role: msgData.role,
-              content: msgData.content,
-              timestamp: msgData.timestamp || Date.now(),
-            }]);
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: msgData.role,
+                content: msgData.content,
+                timestamp: msgData.timestamp || Date.now(),
+              },
+            ]);
           }
           break;
 
@@ -161,7 +212,15 @@ export const App: React.FC = () => {
         case 'permissionRequest':
           // Handle permission request from Qwen CLI
           console.log('[App] Permission request:', message);
-          const permData = (message as { data: { requestId: number; options: PermissionOption[]; toolCall: ToolCall } }).data;
+          const permData = (
+            message as {
+              data: {
+                requestId: number;
+                options: PermissionOption[];
+                toolCall: ToolCall;
+              };
+            }
+          ).data;
           if (permData) {
             setPermissionRequest({
               requestId: permData.requestId,
@@ -185,7 +244,13 @@ export const App: React.FC = () => {
   // Check connection status on mount
   useEffect(() => {
     const checkStatus = async () => {
-      const response = await vscode.postMessage({ type: 'GET_STATUS' }) as { connected?: boolean; status?: string; availableCommands?: any[]; mcpTools?: any[]; internalTools?: any[] } | null;
+      const response = (await vscode.postMessage({ type: 'GET_STATUS' })) as {
+        connected?: boolean;
+        status?: string;
+        availableCommands?: any[];
+        mcpTools?: any[];
+        internalTools?: any[];
+      } | null;
       if (response) {
         setIsConnected(response.connected || false);
         if (Array.isArray(response.availableCommands)) {
@@ -203,34 +268,40 @@ export const App: React.FC = () => {
   }, [vscode]);
 
   // Handle submit
-  const handleSubmit = useCallback(async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = useCallback(
+    async (e: React.FormEvent) => {
+      e.preventDefault();
 
-    const text = inputText.trim();
-    if (!text || isStreaming || isWaitingForResponse) return;
+      const text = inputText.trim();
+      if (!text || isStreaming || isWaitingForResponse) return;
 
-    // Add user message
-    setMessages(prev => [...prev, {
-      role: 'user',
-      content: text,
-      timestamp: Date.now(),
-    }]);
+      // Add user message
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'user',
+          content: text,
+          timestamp: Date.now(),
+        },
+      ]);
 
-    // Clear input
-    setInputText('');
-    if (inputFieldRef.current) {
-      inputFieldRef.current.textContent = '';
-    }
+      // Clear input
+      setInputText('');
+      if (inputFieldRef.current) {
+        inputFieldRef.current.textContent = '';
+      }
 
-    // Send to background
-    setIsWaitingForResponse(true);
-    setLoadingMessage('Thinking...');
+      // Send to background
+      setIsWaitingForResponse(true);
+      setLoadingMessage('Thinking...');
 
-    await vscode.postMessage({
-      type: 'sendMessage',
-      data: { text },
-    });
-  }, [inputText, isStreaming, isWaitingForResponse, vscode]);
+      await vscode.postMessage({
+        type: 'sendMessage',
+        data: { text },
+      });
+    },
+    [inputText, isStreaming, isWaitingForResponse, vscode],
+  );
 
   // Handle cancel
   const handleCancel = useCallback(async () => {
@@ -243,7 +314,10 @@ export const App: React.FC = () => {
   // Handle connect
   const handleConnect = useCallback(async () => {
     setLoadingMessage('Connecting...');
-    const response = await vscode.postMessage({ type: 'CONNECT' }) as { success?: boolean; status?: string } | null;
+    const response = (await vscode.postMessage({ type: 'CONNECT' })) as {
+      success?: boolean;
+      status?: string;
+    } | null;
     if (response?.success) {
       setIsConnected(true);
       setLoadingMessage(null);
@@ -258,19 +332,39 @@ export const App: React.FC = () => {
     try {
       setIsWaitingForResponse(true);
       setLoadingMessage('Reading page...');
-      const extract = (await vscode.postMessage({ type: 'EXTRACT_PAGE_DATA' })) as any;
+      const extract = (await vscode.postMessage({
+        type: 'EXTRACT_PAGE_DATA',
+      })) as any;
       if (!extract || !extract.success) {
         setIsWaitingForResponse(false);
         setLoadingMessage(null);
-        setMessages(prev => [...prev, { role: 'assistant', content: `Read Page failed: ${extract?.error || 'unknown error'}`, timestamp: Date.now() }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `Read Page failed: ${extract?.error || 'unknown error'}`,
+            timestamp: Date.now(),
+          },
+        ]);
         return;
       }
-      await vscode.postMessage({ type: 'SEND_TO_QWEN', action: 'analyze_page', data: extract.data });
+      await vscode.postMessage({
+        type: 'SEND_TO_QWEN',
+        action: 'analyze_page',
+        data: extract.data,
+      });
       // streamStart will arrive from service worker; keep waiting state until it starts streaming
     } catch (err: any) {
       setIsWaitingForResponse(false);
       setLoadingMessage(null);
-      setMessages(prev => [...prev, { role: 'assistant', content: `Read Page error: ${err?.message || String(err)}`, timestamp: Date.now() }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Read Page error: ${err?.message || String(err)}`,
+          timestamp: Date.now(),
+        },
+      ]);
     }
   }, [vscode]);
 
@@ -279,41 +373,150 @@ export const App: React.FC = () => {
     try {
       setIsWaitingForResponse(true);
       setLoadingMessage('Collecting network logs...');
-      const resp = (await vscode.postMessage({ type: 'GET_NETWORK_LOGS' })) as any;
+      const resp = (await vscode.postMessage({
+        type: 'GET_NETWORK_LOGS',
+      })) as any;
       if (!resp || !resp.success) {
         setIsWaitingForResponse(false);
         setLoadingMessage(null);
-        setMessages(prev => [...prev, { role: 'assistant', content: `Get Network Logs failed: ${resp?.error || 'unknown error'}`, timestamp: Date.now() }]);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `Get Network Logs failed: ${resp?.error || 'unknown error'}`,
+            timestamp: Date.now(),
+          },
+        ]);
         return;
       }
       const logs = resp.data || resp.logs || [];
       const summary = Array.isArray(logs) ? logs.slice(-50) : [];
-      const text = `Network logs (last ${summary.length} entries):\n` + JSON.stringify(summary.map((l:any)=>({method:l.method,url:l.params?.request?.url||l.params?.documentURL,status:l.params?.response?.status,timestamp:l.timestamp})), null, 2);
+      const text =
+        `Network logs (last ${summary.length} entries):\n` +
+        JSON.stringify(
+          summary.map((l: any) => ({
+            method: l.method,
+            url: l.params?.request?.url || l.params?.documentURL,
+            status: l.params?.response?.status,
+            timestamp: l.timestamp,
+          })),
+          null,
+          2,
+        );
       // Show a short message to user
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Running tool: Get Network Logs…', timestamp: Date.now() }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: 'Running tool: Get Network Logs…',
+          timestamp: Date.now(),
+        },
+      ]);
       // Ask Qwen to analyze
-      await vscode.postMessage({ type: 'SEND_TO_QWEN', action: 'ai_analyze', data: { pageData: { content: { text } }, prompt: 'Please analyze these network logs, list failed or slow requests and possible causes.' } });
-    } catch (err:any) {
+      await vscode.postMessage({
+        type: 'SEND_TO_QWEN',
+        action: 'ai_analyze',
+        data: {
+          pageData: { content: { text } },
+          prompt:
+            'Please analyze these network logs, list failed or slow requests and possible causes.',
+        },
+      });
+    } catch (err: any) {
       setIsWaitingForResponse(false);
       setLoadingMessage(null);
-      setMessages(prev => [...prev, { role: 'assistant', content: `Get Network Logs error: ${err?.message || String(err)}`, timestamp: Date.now() }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Get Network Logs error: ${err?.message || String(err)}`,
+          timestamp: Date.now(),
+        },
+      ]);
     }
   }, [vscode]);
 
   // Handle permission response
-  const handlePermissionResponse = useCallback((optionId: string) => {
-    if (!permissionRequest) return;
+  const handlePermissionResponse = useCallback(
+    (optionId: string) => {
+      if (!permissionRequest) return;
 
-    console.log('[App] Sending permission response:', optionId, 'for requestId:', permissionRequest.requestId);
-    vscode.postMessage({
-      type: 'permissionResponse',
-      data: {
-        requestId: permissionRequest.requestId,
+      console.log(
+        '[App] Sending permission response:',
         optionId,
-      },
-    });
-    setPermissionRequest(null);
-  }, [vscode, permissionRequest]);
+        'for requestId:',
+        permissionRequest.requestId,
+      );
+      vscode.postMessage({
+        type: 'permissionResponse',
+        data: {
+          requestId: permissionRequest.requestId,
+          optionId,
+        },
+      });
+      setPermissionRequest(null);
+    },
+    [vscode, permissionRequest],
+  );
+
+  // Get console logs and send to Qwen to analyze (bypasses MCP; uses content-script capture)
+  const handleGetConsoleLogs = useCallback(async () => {
+    try {
+      setIsWaitingForResponse(true);
+      setLoadingMessage('Collecting console logs...');
+      const resp = (await vscode.postMessage({
+        type: 'GET_CONSOLE_LOGS',
+      })) as any;
+      if (!resp || !resp.success) {
+        setIsWaitingForResponse(false);
+        setLoadingMessage(null);
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `Get Console Logs failed: ${resp?.error || 'unknown error'}`,
+            timestamp: Date.now(),
+          },
+        ]);
+        return;
+      }
+      const logs = resp.data || [];
+      const formatted = logs
+        .slice(-50)
+        .map((l: any) => `[${l.type}] ${l.message}`)
+        .join('\n');
+      const text = `Console logs (last ${Math.min(logs.length, 50)} entries):
+${formatted || '(no logs captured)'}`;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: 'Running tool: Get Console Logs…',
+          timestamp: Date.now(),
+        },
+      ]);
+      await vscode.postMessage({
+        type: 'SEND_TO_QWEN',
+        action: 'ai_analyze',
+        data: {
+          pageData: { content: { text } },
+          prompt:
+            'Please analyze these console logs and summarize errors/warnings.',
+        },
+      });
+    } catch (err: any) {
+      setIsWaitingForResponse(false);
+      setLoadingMessage(null);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `Get Console Logs error: ${err?.message || String(err)}`,
+          timestamp: Date.now(),
+        },
+      ]);
+    }
+  }, [vscode]);
 
   const hasContent = messages.length > 0 || isStreaming || streamingContent;
 
@@ -323,9 +526,13 @@ export const App: React.FC = () => {
       <div className="flex items-center justify-between p-3 border-b border-gray-700">
         <h1 className="text-sm font-medium">Qwen Code</h1>
         <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-500'}`} />
+          <span
+            className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-500'}`}
+          />
           <span className="text-xs text-gray-400">
-            {isConnected ? `Connected (${mcpTools.length + internalTools.length} tools)` : 'Disconnected'}
+            {isConnected
+              ? `Connected (${mcpTools.length + internalTools.length} tools)`
+              : 'Disconnected'}
           </span>
           {isConnected && (
             <button
@@ -354,10 +561,10 @@ export const App: React.FC = () => {
               Console Logs
             </button>
           )}
-          {isConnected && (mcpTools.length + internalTools.length) > 0 && (
+          {isConnected && mcpTools.length + internalTools.length > 0 && (
             <button
               className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
-              onClick={() => setShowToolsPanel(v => !v)}
+              onClick={() => setShowToolsPanel((v) => !v)}
               title="Show available tools"
             >
               Tools
@@ -378,7 +585,7 @@ export const App: React.FC = () => {
           />
         ) : (
           <>
-            {messages.map((msg, index) => (
+            {messages.map((msg, index) =>
               msg.role === 'user' ? (
                 <UserMessage
                   key={index}
@@ -393,8 +600,8 @@ export const App: React.FC = () => {
                   timestamp={msg.timestamp}
                   onFileClick={() => {}}
                 />
-              )
-            ))}
+              ),
+            )}
 
             {/* Streaming message */}
             {isStreaming && streamingContent && (
@@ -406,12 +613,14 @@ export const App: React.FC = () => {
             )}
 
             {/* Waiting indicator */}
-            {(isWaitingForResponse && loadingMessage) && (
+            {isWaitingForResponse && loadingMessage && (
               <WaitingMessage loadingMessage={loadingMessage} />
             )}
             {/* If streaming started but no chunks yet, show thinking indicator */}
-            {(isStreaming && !streamingContent) && (
-              <WaitingMessage loadingMessage={loadingMessage || 'Thinking...'} />
+            {isStreaming && !streamingContent && (
+              <WaitingMessage
+                loadingMessage={loadingMessage || 'Thinking...'}
+              />
             )}
 
             <div ref={messagesEndRef} />
@@ -423,7 +632,7 @@ export const App: React.FC = () => {
       {isConnected ? (
         <InputForm
           inputText={inputText}
-          inputFieldRef={inputFieldRef}
+          inputFieldRef={inputFieldRef as React.RefObject<HTMLDivElement>}
           isStreaming={isStreaming}
           isWaitingForResponse={isWaitingForResponse}
           isComposing={isComposing}
@@ -479,30 +688,57 @@ export const App: React.FC = () => {
             <button
               className="px-2 py-0.5 rounded bg-yellow-700 hover:bg-yellow-600 text-white"
               onClick={() => {
-                try { chrome.tabs.create({ url: authUri }); } catch (_) {}
+                try {
+                  chrome.tabs.create({ url: authUri });
+                } catch (_) {}
               }}
-            >Open Link</button>
-            <button className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600" onClick={() => setAuthUri(null)}>Dismiss</button>
+            >
+              Open Link
+            </button>
+            <button
+              className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
+              onClick={() => setAuthUri(null)}
+            >
+              Dismiss
+            </button>
           </div>
         </div>
       )}
 
       {/* Debug: Tools panel */}
-      {showToolsPanel && (mcpTools.length + internalTools.length) > 0 && (
+      {showToolsPanel && mcpTools.length + internalTools.length > 0 && (
         <div className="absolute right-3 top-10 z-50 max-w-[80%] w-[360px] max-h-[50vh] overflow-auto bg-[#2a2d2e] text-[13px] text-gray-200 border border-gray-700 rounded shadow-lg p-2">
           <div className="flex items-center justify-between mb-2">
-            <div className="font-semibold">Available Tools ({mcpTools.length + internalTools.length})</div>
-            <button className="text-gray-400 hover:text-gray-200" onClick={() => setShowToolsPanel(false)}>×</button>
+            <div className="font-semibold">
+              Available Tools ({mcpTools.length + internalTools.length})
+            </div>
+            <button
+              className="text-gray-400 hover:text-gray-200"
+              onClick={() => setShowToolsPanel(false)}
+            >
+              ×
+            </button>
           </div>
-          <div className="text-[11px] text-gray-400 mb-1">Internal (chrome-browser)</div>
+          <div className="text-[11px] text-gray-400 mb-1">
+            Internal (chrome-browser)
+          </div>
           <ul className="space-y-1 mb-2">
             {internalTools.map((t: any, i: number) => {
               const name = (t && (t.name || t.tool?.name)) || String(t);
               const desc = (t && (t.description || t.tool?.description)) || '';
               return (
-                <li key={`internal-${i}`} className="px-2 py-1 rounded hover:bg-[#3a3d3e]">
-                  <div className="font-mono text-xs text-[#a6e22e] break-all">{name}</div>
-                  {desc && <div className="text-[11px] text-gray-400 break-words">{desc}</div>}
+                <li
+                  key={`internal-${i}`}
+                  className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
+                >
+                  <div className="font-mono text-xs text-[#a6e22e] break-all">
+                    {name}
+                  </div>
+                  {desc && (
+                    <div className="text-[11px] text-gray-400 break-words">
+                      {desc}
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -513,9 +749,18 @@ export const App: React.FC = () => {
               const name = (t && (t.name || t.tool?.name)) || String(t);
               const desc = (t && (t.description || t.tool?.description)) || '';
               return (
-                <li key={`discovered-${i}`} className="px-2 py-1 rounded hover:bg-[#3a3d3e]">
-                  <div className="font-mono text-xs text-[#a6e22e] break-all">{name}</div>
-                  {desc && <div className="text-[11px] text-gray-400 break-words">{desc}</div>}
+                <li
+                  key={`discovered-${i}`}
+                  className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
+                >
+                  <div className="font-mono text-xs text-[#a6e22e] break-all">
+                    {name}
+                  </div>
+                  {desc && (
+                    <div className="text-[11px] text-gray-400 break-words">
+                      {desc}
+                    </div>
+                  )}
                 </li>
               );
             })}
@@ -526,28 +771,3 @@ export const App: React.FC = () => {
   );
 };
 
-
-  // Get console logs and send to Qwen to analyze (bypasses MCP; uses content-script capture)
-  const handleGetConsoleLogs = useCallback(async () => {
-    try {
-      setIsWaitingForResponse(true);
-      setLoadingMessage('Collecting console logs...');
-      const resp = (await vscode.postMessage({ type: 'GET_CONSOLE_LOGS' })) as any;
-      if (!resp || !resp.success) {
-        setIsWaitingForResponse(false);
-        setLoadingMessage(null);
-        setMessages(prev => [...prev, { role: 'assistant', content: `Get Console Logs failed: ${resp?.error || 'unknown error'}`, timestamp: Date.now() }]);
-        return;
-      }
-      const logs = resp.data || [];
-      const formatted = logs.slice(-50).map((l:any)=>`[${l.type}] ${l.message}`).join('\n');
-      const text = `Console logs (last ${Math.min(logs.length,50)} entries):
-${formatted || '(no logs captured)'}`;
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Running tool: Get Console Logs…', timestamp: Date.now() }]);
-      await vscode.postMessage({ type: 'SEND_TO_QWEN', action: 'ai_analyze', data: { pageData: { content: { text } }, prompt: 'Please analyze these console logs and summarize errors/warnings.' } });
-    } catch (err:any) {
-      setIsWaitingForResponse(false);
-      setLoadingMessage(null);
-      setMessages(prev => [...prev, { role: 'assistant', content: `Get Console Logs error: ${err?.message || String(err)}`, timestamp: Date.now() }]);
-    }
-  }, [vscode]);

@@ -34,7 +34,7 @@ cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/native-host/host.js",
+  "path": "$SCRIPT_DIR/../native-host/src/host.js",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://*/"]
 }
@@ -60,7 +60,7 @@ echo ""
 echo -e "  2️⃣  点击 ${GREEN}「加载已解压的扩展程序」${NC} 按钮"
 echo ""
 echo -e "  3️⃣  选择以下目录："
-echo -e "      ${BLUE}$SCRIPT_DIR/extension${NC}"
+echo -e "      ${BLUE}$SCRIPT_DIR/../extension${NC}"
 echo ""
 echo -e "  4️⃣  ${YELLOW}重要：${NC} 记下显示的扩展 ID（类似 ${CYAN}abcdefghijklmnopqrstuvwx${NC}）"
 echo ""
@@ -80,7 +80,7 @@ else
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/native-host/host.js",
+  "path": "$SCRIPT_DIR/../native-host/src/host.js",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXTENSION_ID/",

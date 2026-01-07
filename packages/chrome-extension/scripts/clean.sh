@@ -5,8 +5,8 @@
 echo "Cleaning up Chrome Extension build artifacts..."
 
 # Remove build output
-rm -rf extension/sidepanel/sidepanel-app.js
-rm -rf extension/sidepanel/sidepanel-app.js.map
+rm -rf extension/sidepanel/dist/sidepanel-app.js
+rm -rf extension/sidepanel/dist/sidepanel-app.js.map
 
 # Remove any zip files
 rm -f chrome-extension.zip

@@ -15,6 +15,7 @@ NC='\033[0m'
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 HOST_NAME="com.qwen.cli.bridge"
+HOST_SCRIPT="$SCRIPT_DIR/../host.js"
 
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
@@ -140,7 +141,7 @@ if [[ "$EXTENSION_ID" == "*" ]]; then
 {
   "name": "$HOST_NAME",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/host.js",
+  "path": "$HOST_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://*/"
@@ -154,7 +155,7 @@ else
 {
   "name": "$HOST_NAME",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/host.js",
+  "path": "$HOST_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXTENSION_ID/",
@@ -169,13 +170,13 @@ fi
 echo -e "\n${BLUE}验证配置...${NC}"
 
 # 检查 host.js 是否存在
-if [[ ! -f "$SCRIPT_DIR/host.js" ]]; then
+if [[ ! -f "$HOST_SCRIPT" ]]; then
     echo -e "${RED}✗ host.js 文件不存在${NC}"
     exit 1
 fi
 
 # 确保 host.js 可执行
-chmod +x "$SCRIPT_DIR/host.js"
+chmod +x "$HOST_SCRIPT"
 echo -e "${GREEN}✓${NC} host.js 已设置为可执行"
 
 # 检查 manifest 文件
@@ -298,7 +299,7 @@ setTimeout(() => {
 }, 5000);
 EOF
 
-        node /tmp/test-native-host.js "$SCRIPT_DIR/host.js"
+        node /tmp/test-native-host.js "$HOST_SCRIPT"
         rm /tmp/test-native-host.js
     fi
 fi

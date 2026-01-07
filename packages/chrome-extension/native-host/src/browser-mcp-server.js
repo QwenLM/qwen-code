@@ -143,17 +143,75 @@ async function handleToolCall(name, args) {
     case 'browser_get_network_logs': {
       const data = await callBridge('get_network_logs');
       const logs = data.logs || [];
-      const summary = logs.slice(-50).map((log) => ({
-        method: log.method,
-        url: log.params?.request?.url || log.params?.documentURL,
-        status: log.params?.response?.status,
-        timestamp: log.timestamp,
-      }));
+
+      if (!logs.length) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                'No network entries captured yet. Try reloading the page or triggering a request, then run again.',
+            },
+          ],
+        };
+      }
+
+      // Aggregate by requestId to include method/url/status/headers/bodies
+      const byRequest = new Map();
+      for (const log of logs) {
+        const reqId = log.params?.requestId;
+        if (!reqId) continue;
+        const entry = byRequest.get(reqId) || { requestId: reqId };
+
+        switch (log.method) {
+          case 'Network.requestWillBeSent': {
+            entry.method = log.params?.request?.method;
+            entry.url =
+              log.params?.request?.url || log.params?.documentURL || entry.url;
+            entry.requestHeaders = log.params?.request?.headers;
+            entry.requestBody = log.params?.request?.postData;
+            entry.timestamp = log.timestamp;
+            break;
+          }
+          case 'Network.responseReceived': {
+            entry.status = log.params?.response?.status;
+            entry.statusText = log.params?.response?.statusText;
+            entry.responseHeaders = log.params?.response?.headers;
+            entry.timestamp = log.timestamp;
+            break;
+          }
+          case 'Network.responseBody': {
+            entry.responseBody = log.params?.body;
+            entry.responseBodyBase64 = log.params?.base64Encoded;
+            if (log.params?.error) entry.responseBodyError = log.params.error;
+            entry.timestamp = log.timestamp;
+            break;
+          }
+          case 'Network.loadingFailed': {
+            entry.error = log.params?.errorText || log.params?.error;
+            entry.timestamp = log.timestamp;
+            break;
+          }
+          default:
+            break;
+        }
+
+        byRequest.set(reqId, entry);
+      }
+
+      // Take the most recent 20 requests
+      const items = Array.from(byRequest.values()).slice(-20);
+      const text = `Network requests (last ${items.length}):\n${JSON.stringify(
+        items,
+        null,
+        2,
+      )}`;
+
       return {
         content: [
           {
             type: 'text',
-            text: `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`,
+            text,
           },
         ],
       };

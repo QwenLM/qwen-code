@@ -74,7 +74,7 @@ async function build() {
     minify: isProduction,
     sourcemap: !isProduction,
     platform: 'browser',
-    outfile: 'extension/sidepanel/sidepanel-app.js',
+    outfile: 'extension/sidepanel/dist/sidepanel-app.js',
     jsx: 'automatic',
     define: {
       'process.env.NODE_ENV': isProduction ? '"production"' : '"development"',

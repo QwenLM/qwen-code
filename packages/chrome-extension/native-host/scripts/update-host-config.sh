@@ -7,6 +7,7 @@ set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 HOST_NAME="com.qwen.cli.bridge"
+HOST_SCRIPT="$SCRIPT_DIR/../host.js"
 
 echo "==============================================="
 echo "Qwen CLI Chrome Extension - Native Host Configuration Updater"
@@ -45,13 +46,13 @@ echo "✓ Directory created: $MANIFEST_DIR"
 echo ""
 
 # Check if host.js exists
-if [[ ! -f "$SCRIPT_DIR/host.js" ]]; then
-    echo "Error: host.js not found in $SCRIPT_DIR"
+if [[ ! -f "$HOST_SCRIPT" ]]; then
+    echo "Error: host.js not found at $HOST_SCRIPT"
     exit 1
 fi
 
 # Make host.js executable
-chmod +x "$SCRIPT_DIR/host.js"
+chmod +x "$HOST_SCRIPT"
 echo "✓ Made host.js executable"
 echo ""
 
@@ -83,7 +84,7 @@ if [[ "$CONFIG_OPTION" == "1" ]]; then
 {
   "name": "$HOST_NAME",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/host.js",
+  "path": "$HOST_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXTENSION_ID/",
@@ -99,7 +100,7 @@ elif [[ "$CONFIG_OPTION" == "2" ]]; then
 {
   "name": "$HOST_NAME",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/host.js",
+  "path": "$HOST_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://*/"

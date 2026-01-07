@@ -36,7 +36,7 @@
     "update:host": "cd native-host && ./scripts/update-host-config.sh",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
     "package": "zip -r chrome-extension.zip extension/",
-    "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id extension/sidepanel/sidepanel-app.js extension/sidepanel/sidepanel-app.js.map",
+    "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id extension/sidepanel/dist/sidepanel-app.js extension/sidepanel/dist/sidepanel-app.js.map",
     "logs": "tail -f /tmp/qwen-bridge-host.log"
   },
   "engines": {
@@ -48,6 +48,7 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@types/chrome": "^0.1.32",
     "@types/markdown-it": "^14.1.2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

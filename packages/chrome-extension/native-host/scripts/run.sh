@@ -23,4 +23,4 @@ if [ -z "$QWEN_CLI_PATH" ]; then
   fi
 fi
 
-exec "$NODE_PATH" "$DIR/host.js"
+exec "$NODE_PATH" "$DIR/../host.js"

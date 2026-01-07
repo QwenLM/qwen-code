@@ -311,14 +311,14 @@ async function sendToNativeHost(message) {
     });
 
     // Set timeout for request
-    // Default 30s, but ACP session creation and MCP discovery can take longer
+    // Default 30s, but ACP session creation / MCP discovery / long prompts need more time
     let timeoutMs = 30000;
-    if (message && message.type === 'start_qwen') timeoutMs = 180000; // 3 minutes for startup + MCP discovery
+    if (message && message.type === 'start_qwen') timeoutMs = 300000; // 5 minutes
     if (
       message &&
       (message.type === 'qwen_prompt' || message.type === 'qwen_request')
     )
-      timeoutMs = 180000;
+      timeoutMs = 300000; // 5 minutes
     setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
@@ -1153,6 +1153,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 // Network logging using both webRequest and debugger APIs
 const networkLogs = new Map(); // Store logs for each tab
 const MAX_LOGS_PER_TAB = 1000; // Limit logs to prevent memory issues
+const MAX_BODIES_PER_FETCH = 20; // Limit body fetches to avoid heavy overhead
 
 // Initialize network logging for a tab
 async function initNetworkLogging(tabId) {
@@ -1169,102 +1170,85 @@ async function initNetworkLogging(tabId) {
   }
 }
 
-// Enhanced network logging using webRequest API for broader coverage
-chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    const tabId = details.tabId;
-    if (tabId === -1) return; // Skip requests not associated with a tab
+// Enhanced network logging using webRequest API for broader coverage (metadata only)
+chrome.webRequest.onBeforeRequest.addListener((details) => {
+  const tabId = details.tabId;
+  if (tabId === -1) return; // Skip requests not associated with a tab
 
-    // Initialize log storage for this tab if needed
-    if (!networkLogs.has(tabId)) {
-      networkLogs.set(tabId, []);
-    }
+  if (!networkLogs.has(tabId)) {
+    networkLogs.set(tabId, []);
+  }
 
-    const tabLogs = networkLogs.get(tabId);
-    tabLogs.push({
-      method: 'Network.requestWillBeSent',
-      params: {
-        requestId: details.requestId,
-        request: {
-          url: details.url,
-          method: details.method,
-          headers: details.requestHeaders || {},
-        },
-        timestamp: Date.now(),
+  const tabLogs = networkLogs.get(tabId);
+  tabLogs.push({
+    method: 'Network.requestWillBeSent',
+    params: {
+      requestId: details.requestId,
+      request: {
+        url: details.url,
+        method: details.method,
       },
       timestamp: Date.now(),
-    });
+    },
+    timestamp: Date.now(),
+  });
 
-    // Limit the number of logs to prevent memory issues
-    if (tabLogs.length > MAX_LOGS_PER_TAB) {
-      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-    }
-  },
-  { urls: ['<all_urls>'] },
-  ['requestHeaders'],
-);
+  if (tabLogs.length > MAX_LOGS_PER_TAB) {
+    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+  }
+}, { urls: ['<all_urls>'] });
 
-chrome.webRequest.onCompleted.addListener(
-  (details) => {
-    const tabId = details.tabId;
-    if (tabId === -1) return; // Skip requests not associated with a tab
+chrome.webRequest.onCompleted.addListener((details) => {
+  const tabId = details.tabId;
+  if (tabId === -1) return; // Skip requests not associated with a tab
 
-    if (!networkLogs.has(tabId)) {
-      networkLogs.set(tabId, []);
-    }
+  if (!networkLogs.has(tabId)) {
+    networkLogs.set(tabId, []);
+  }
 
-    const tabLogs = networkLogs.get(tabId);
-    tabLogs.push({
-      method: 'Network.responseReceived',
-      params: {
-        requestId: details.requestId,
-        response: {
-          url: details.url,
-          status: details.statusCode,
-          statusText: details.statusLine,
-          headers: details.responseHeaders || {},
-        },
-        timestamp: Date.now(),
+  const tabLogs = networkLogs.get(tabId);
+  tabLogs.push({
+    method: 'Network.responseReceived',
+    params: {
+      requestId: details.requestId,
+      response: {
+        url: details.url,
+        status: details.statusCode,
+        statusText: details.statusLine,
       },
       timestamp: Date.now(),
-    });
+    },
+    timestamp: Date.now(),
+  });
 
-    // Limit the number of logs to prevent memory issues
-    if (tabLogs.length > MAX_LOGS_PER_TAB) {
-      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-    }
-  },
-  { urls: ['<all_urls>'] },
-  ['responseHeaders'],
-);
+  if (tabLogs.length > MAX_LOGS_PER_TAB) {
+    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+  }
+}, { urls: ['<all_urls>'] });
 
-chrome.webRequest.onErrorOccurred.addListener(
-  (details) => {
-    const tabId = details.tabId;
-    if (tabId === -1) return; // Skip requests not associated with a tab
+chrome.webRequest.onErrorOccurred.addListener((details) => {
+  const tabId = details.tabId;
+  if (tabId === -1) return; // Skip requests not associated with a tab
 
-    if (!networkLogs.has(tabId)) {
-      networkLogs.set(tabId, []);
-    }
+  if (!networkLogs.has(tabId)) {
+    networkLogs.set(tabId, []);
+  }
 
-    const tabLogs = networkLogs.get(tabId);
-    tabLogs.push({
-      method: 'Network.loadingFailed',
-      params: {
-        requestId: details.requestId,
-        errorText: details.error,
-        timestamp: Date.now(),
-      },
+  const tabLogs = networkLogs.get(tabId);
+  tabLogs.push({
+    method: 'Network.loadingFailed',
+    params: {
+      requestId: details.requestId,
+      errorText: details.error,
       timestamp: Date.now(),
-    });
+    },
+    timestamp: Date.now(),
+  });
 
-    // Limit the number of logs to prevent memory issues
-    if (tabLogs.length > MAX_LOGS_PER_TAB) {
-      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-    }
-  },
-  { urls: ['<all_urls>'] },
-);
+  if (tabLogs.length > MAX_LOGS_PER_TAB) {
+    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+  }
+}, { urls: ['<all_urls>'] });
 
 // Listen for network events via debugger API for additional details
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -1288,6 +1272,54 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   }
 });
 
+async function attachResponseBodies(tabId, tabLogs) {
+  // Collect unique requestIds that have a responseReceived entry
+  const requestIds = [];
+  for (const log of tabLogs) {
+    if (
+      log.method === 'Network.responseReceived' &&
+      log.params?.requestId &&
+      !requestIds.includes(log.params.requestId)
+    ) {
+      requestIds.push(log.params.requestId);
+    }
+  }
+
+  const limitedIds = requestIds.slice(-MAX_BODIES_PER_FETCH);
+
+  for (const requestId of limitedIds) {
+    try {
+      const body = await chrome.debugger.sendCommand(
+        { tabId },
+        'Network.getResponseBody',
+        { requestId },
+      );
+      tabLogs.push({
+        method: 'Network.responseBody',
+        params: {
+          requestId,
+          body: body.body,
+          base64Encoded: body.base64Encoded,
+        },
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      tabLogs.push({
+        method: 'Network.responseBody',
+        params: {
+          requestId,
+          error: err?.message || String(err),
+        },
+        timestamp: Date.now(),
+      });
+    }
+
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  }
+}
+
 // Get network logs for a specific tab
 async function getNetworkLogs(tabId) {
   if (!tabId) {
@@ -1296,10 +1328,49 @@ async function getNetworkLogs(tabId) {
     if (!tabId) throw new Error('No active tab found');
   }
 
+  const wasInitialized = networkLogs.has(tabId);
   // Initialize network logging for the tab if not already done
   await initNetworkLogging(tabId);
 
-  return networkLogs.get(tabId) || [];
+  const tabLogs = networkLogs.get(tabId) || [];
+
+  // If we just initialized and have no entries yet, add a marker so the tool returns something helpful
+  if (!wasInitialized && tabLogs.length === 0) {
+    tabLogs.push({
+      method: 'Network.loggingInitialized',
+      params: {
+        message:
+          'Network logging started for this tab. Please reproduce the request and run again to see entries.',
+      },
+      timestamp: Date.now(),
+    });
+    networkLogs.set(tabId, tabLogs);
+  } else if (tabLogs.length === 0) {
+    tabLogs.push({
+      method: 'Network.noEntries',
+      params: {
+        message:
+          'No network entries captured yet. Try reloading the page or triggering a request, then run again.',
+      },
+      timestamp: Date.now(),
+    });
+    networkLogs.set(tabId, tabLogs);
+  }
+
+  // Enrich with response bodies for recent requests (best-effort)
+  try {
+    await attachResponseBodies(tabId, tabLogs);
+  } catch (e) {
+    tabLogs.push({
+      method: 'Network.responseBody',
+      params: {
+        error: `Failed to fetch response bodies: ${e?.message || e}`,
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  return tabLogs;
 }
 
 // Clean up network logs on tab close

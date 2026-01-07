@@ -15,4 +15,4 @@ echo "[$(date)] 工作目录: $DIR" >> "$LOG_FILE"
 echo "[$(date)] Node 路径: $(which node)" >> "$LOG_FILE"
 
 # 启动 Node.js Native Host
-exec /usr/bin/env node "$DIR/host.js" 2>> "$LOG_FILE"
+exec /usr/bin/env node "$DIR/../host.js" 2>> "$LOG_FILE"

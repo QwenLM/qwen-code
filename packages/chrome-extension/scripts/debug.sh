@@ -65,7 +65,7 @@ cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/native-host/host.js",
+  "path": "$SCRIPT_DIR/../native-host/src/host.js",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://*/"]
 }
@@ -300,7 +300,7 @@ echo -e "${GREEN}✓${NC} 测试服务器已启动 (http://localhost:3000)"
 echo -e "\n${BLUE}[5/5]${NC} 启动 Chrome 并加载插件..."
 
 "$CHROME_PATH" \
-    --load-extension="$SCRIPT_DIR/extension" \
+    --load-extension="$SCRIPT_DIR/../extension" \
     --auto-open-devtools-for-tabs \
     --no-first-run \
     --no-default-browser-check \
