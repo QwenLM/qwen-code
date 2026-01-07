@@ -320,6 +320,45 @@ function migrateSettingsToV2(
   return v2Settings;
 }
 
+/**
+ * Applies legacy V1 keys as aliases on top of a V2 settings object.
+ *
+ * This is intentionally in-memory only: it avoids rewriting user files that
+ * already declare `$version: 2` but still contain deprecated top-level keys.
+ */
+function applyLegacyKeyAliases(settings: Record<string, unknown>): void {
+  for (const [oldKey, newPath] of Object.entries(MIGRATION_MAP)) {
+    if (oldKey === newPath) {
+      continue;
+    }
+    if (!(oldKey in settings)) {
+      continue;
+    }
+
+    const oldValue = settings[oldKey];
+
+    // If this key is a V2 container (like 'model') and it's already an object,
+    // it's likely already in V2 format. Skip aliasing to prevent double-nesting
+    // (e.g., model.name.name).
+    if (
+      KNOWN_V2_CONTAINERS.has(oldKey) &&
+      typeof oldValue === 'object' &&
+      oldValue !== null &&
+      !Array.isArray(oldValue)
+    ) {
+      continue;
+    }
+
+    // If the V2 path is already set, prefer it.
+    const existingValue = getNestedProperty(settings, newPath);
+    if (existingValue !== undefined) {
+      continue;
+    }
+
+    setNestedProperty(settings, newPath, oldValue);
+  }
+}
+
 function getNestedProperty(
   obj: Record<string, unknown>,
   path: string,
@@ -729,6 +768,14 @@ export function loadSettings(
   );
   const userOriginalSettings = structuredClone(userResult.settings);
   const workspaceOriginalSettings = structuredClone(workspaceResult.settings);
+
+  // Apply legacy key aliases on the in-memory settings objects (not persisted).
+  applyLegacyKeyAliases(systemResult.settings as Record<string, unknown>);
+  applyLegacyKeyAliases(
+    systemDefaultsResult.settings as Record<string, unknown>,
+  );
+  applyLegacyKeyAliases(userResult.settings as Record<string, unknown>);
+  applyLegacyKeyAliases(workspaceResult.settings as Record<string, unknown>);
 
   // Environment variables for runtime use
   systemSettings = resolveEnvVarsInObject(systemResult.settings);
