@@ -49,7 +49,7 @@ A Chrome extension that bridges your browser with Qwen CLI, enabling AI-powered 
 1. Open Chrome and navigate to `chrome://extensions/`
 2. Enable "Developer mode" (toggle in top right)
 3. Click "Load unpacked"
-4. Select the `chrome-qwen-bridge/extension` folder
+4. Select the `chrome-extension/extension` folder
 5. Note the Extension ID that appears (you'll need this for the next step)
 
 ### Step 2: Install the Native Messaging Host
@@ -59,7 +59,7 @@ The Native Messaging Host allows the Chrome extension to communicate with Qwen C
 #### macOS/Linux
 
 ```bash
-cd chrome-qwen-bridge/native-host
+cd chrome-extension/native-host
 ./install.sh
 ```
 
@@ -70,7 +70,7 @@ When prompted, enter your Chrome Extension ID.
 1. Run Command Prompt as Administrator
 2. Navigate to the `native-host` directory:
    ```cmd
-   cd chrome-qwen-bridge\native-host
+   cd chrome-extension\native-host
    ```
 3. Run the installation script:
    ```cmd
@@ -126,7 +126,7 @@ The extension supports the following actions that can be sent to Qwen CLI:
 ### Project Structure
 
 ```
-chrome-qwen-bridge/
+chrome-extension/
 ├── extension/              # Chrome extension source
 │   ├── manifest.json       # Extension manifest
 │   ├── background/         # Service worker

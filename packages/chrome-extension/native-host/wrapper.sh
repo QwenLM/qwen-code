@@ -5,4 +5,4 @@ echo "$(date): PWD=$PWD" >> /tmp/qwen-wrapper-error.log
 echo "$(date): Node=$(which node)" >> /tmp/qwen-wrapper-error.log
 
 # 运行实际的 host.js
-exec /usr/local/bin/node /Users/yiliang/projects/temp/qwen-code/packages/chrome-qwen-bridge/native-host/host.js
+exec /usr/local/bin/node /Users/yiliang/projects/temp/qwen-code/packages/chrome-extension/native-host/host.js

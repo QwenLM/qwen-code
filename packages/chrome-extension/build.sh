@@ -18,9 +18,9 @@ cp -r extension dist/
 # Create a zip file for Chrome Web Store
 echo "Creating extension package..."
 cd dist
-zip -r ../chrome-qwen-bridge.zip extension/
+zip -r ../chrome-extension.zip extension/
 cd ..
 
 echo "✅ Build complete!"
-echo "   Extension package: chrome-qwen-bridge.zip"
+echo "   Extension package: chrome-extension.zip"
 echo "   Extension files: dist/extension/"

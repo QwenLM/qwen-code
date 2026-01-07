@@ -6,7 +6,7 @@
 
 ```bash
 # 进入项目目录
-cd packages/chrome-qwen-bridge
+cd packages/chrome-extension
 
 # 运行安装向导
 npm run install:all

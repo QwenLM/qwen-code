@@ -69,7 +69,7 @@ document.getElementById('extensionId').textContent = chrome.runtime.id;
 document.getElementById('helpLink').addEventListener('click', (e) => {
   e.preventDefault();
   chrome.tabs.create({
-    url: 'https://github.com/QwenLM/qwen-code/tree/main/packages/chrome-qwen-bridge'
+    url: 'https://github.com/QwenLM/qwen-code/tree/main/packages/chrome-extension',
   });
 });
 

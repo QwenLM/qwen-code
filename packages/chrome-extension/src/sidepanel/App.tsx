@@ -540,8 +540,7 @@ export const App: React.FC = () => {
         return;
       }
       const logs = resp.data || [];
-      const formatted = logs.slice(-50).map((l:any)=>`[${l.type}] ${l.message}`).join('
-');
+      const formatted = logs.slice(-50).map((l:any)=>`[${l.type}] ${l.message}`).join('\n');
       const text = `Console logs (last ${Math.min(logs.length,50)} entries):
 ${formatted || '(no logs captured)'}`;
       setMessages(prev => [...prev, { role: 'assistant', content: 'Running tool: Get Console Logs…', timestamp: Date.now() }]);

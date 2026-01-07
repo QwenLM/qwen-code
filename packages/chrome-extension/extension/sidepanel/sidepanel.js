@@ -439,7 +439,7 @@ openOptionsBtn.addEventListener('click', (e) => {
 helpBtn.addEventListener('click', (e) => {
   e.preventDefault();
   chrome.tabs.create({
-    url: 'https://github.com/QwenLM/qwen-code/tree/main/packages/chrome-qwen-bridge'
+    url: 'https://github.com/QwenLM/qwen-code/tree/main/packages/chrome-extension',
   });
 });
 

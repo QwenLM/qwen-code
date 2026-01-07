@@ -6,7 +6,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/QwenLM/qwen-code.git",
-    "directory": "packages/chrome-qwen-bridge"
+    "directory": "packages/chrome-extension"
   },
   "keywords": [
     "chrome-extension",
@@ -35,7 +35,7 @@
     "install:all": "./first-install.sh",
     "update:host": "cd native-host && ./update-host-config.sh",
     "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
-    "package": "zip -r chrome-qwen-bridge.zip extension/",
+    "package": "zip -r chrome-extension.zip extension/",
     "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id",
     "logs": "tail -f /tmp/qwen-bridge-host.log"
   },
