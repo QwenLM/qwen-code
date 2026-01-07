@@ -1150,9 +1150,145 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
-// Network logging using debugger API
-const debuggerTargets = new Map();
+// Network logging using both webRequest and debugger APIs
+const networkLogs = new Map(); // Store logs for each tab
+const MAX_LOGS_PER_TAB = 1000; // Limit logs to prevent memory issues
 
+// Initialize network logging for a tab
+async function initNetworkLogging(tabId) {
+  if (!networkLogs.has(tabId)) {
+    networkLogs.set(tabId, []);
+
+    // Attach debugger for detailed network information
+    try {
+      await chrome.debugger.attach({ tabId }, '1.3');
+      await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+    } catch (error) {
+      console.warn(`Failed to attach debugger to tab ${tabId}:`, error.message);
+    }
+  }
+}
+
+// Enhanced network logging using webRequest API for broader coverage
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId === -1) return; // Skip requests not associated with a tab
+
+    // Initialize log storage for this tab if needed
+    if (!networkLogs.has(tabId)) {
+      networkLogs.set(tabId, []);
+    }
+
+    const tabLogs = networkLogs.get(tabId);
+    tabLogs.push({
+      method: 'Network.requestWillBeSent',
+      params: {
+        requestId: details.requestId,
+        request: {
+          url: details.url,
+          method: details.method,
+          headers: details.requestHeaders || {},
+        },
+        timestamp: Date.now(),
+      },
+      timestamp: Date.now(),
+    });
+
+    // Limit the number of logs to prevent memory issues
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['requestHeaders']
+);
+
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId === -1) return; // Skip requests not associated with a tab
+
+    if (!networkLogs.has(tabId)) {
+      networkLogs.set(tabId, []);
+    }
+
+    const tabLogs = networkLogs.get(tabId);
+    tabLogs.push({
+      method: 'Network.responseReceived',
+      params: {
+        requestId: details.requestId,
+        response: {
+          url: details.url,
+          status: details.statusCode,
+          statusText: details.statusLine,
+          headers: details.responseHeaders || {},
+        },
+        timestamp: Date.now(),
+      },
+      timestamp: Date.now(),
+    });
+
+    // Limit the number of logs to prevent memory issues
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  },
+  { urls: ['<all_urls>'] },
+  ['responseHeaders']
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId === -1) return; // Skip requests not associated with a tab
+
+    if (!networkLogs.has(tabId)) {
+      networkLogs.set(tabId, []);
+    }
+
+    const tabLogs = networkLogs.get(tabId);
+    tabLogs.push({
+      method: 'Network.loadingFailed',
+      params: {
+        requestId: details.requestId,
+        errorText: details.error,
+        timestamp: Date.now(),
+      },
+      timestamp: Date.now(),
+    });
+
+    // Limit the number of logs to prevent memory issues
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  },
+  { urls: ['<all_urls>'] }
+);
+
+// Listen for network events via debugger API for additional details
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (source.tabId && method.startsWith('Network.')) {
+    // Initialize log storage for this tab if needed
+    if (!networkLogs.has(source.tabId)) {
+      networkLogs.set(source.tabId, []);
+    }
+
+    const tabLogs = networkLogs.get(source.tabId);
+    tabLogs.push({
+      method,
+      params,
+      timestamp: Date.now(),
+    });
+
+    // Limit the number of logs to prevent memory issues
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(source.tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  }
+});
+
+// Get network logs for a specific tab
 async function getNetworkLogs(tabId) {
   if (!tabId) {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1160,39 +1296,30 @@ async function getNetworkLogs(tabId) {
     if (!tabId) throw new Error('No active tab found');
   }
 
-  // Check if debugger is already attached
-  if (!debuggerTargets.has(tabId)) {
-    await chrome.debugger.attach({ tabId }, '1.3');
-    await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+  // Initialize network logging for the tab if not already done
+  await initNetworkLogging(tabId);
 
-    // Store network logs
-    debuggerTargets.set(tabId, { logs: [] });
-
-    // Listen for network events
-    chrome.debugger.onEvent.addListener((source, method, params) => {
-      if (source.tabId === tabId) {
-        const target = debuggerTargets.get(tabId);
-        if (target && method.startsWith('Network.')) {
-          target.logs.push({
-            method,
-            params,
-            timestamp: Date.now(),
-          });
-        }
-      }
-    });
-  }
-
-  const target = debuggerTargets.get(tabId);
-  return target?.logs || [];
+  return networkLogs.get(tabId) || [];
 }
 
-// Clean up debugger on tab close
+// Clean up network logs on tab close
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (debuggerTargets.has(tabId)) {
-    chrome.debugger.detach({ tabId });
-    debuggerTargets.delete(tabId);
+  // Remove logs for this tab
+  networkLogs.delete(tabId);
+
+  // Detach debugger if attached
+  chrome.debugger.detach({ tabId }).catch(() => {
+    // Ignore errors if debugger wasn't attached
+  });
+});
+
+// Also clean up when extension is shut down
+chrome.runtime.onSuspend.addListener(() => {
+  // Detach all debuggers
+  for (const tabId of networkLogs.keys()) {
+    chrome.debugger.detach({ tabId }).catch(() => {});
   }
+  networkLogs.clear();
 });
 
 // Listen for extension installation or update
