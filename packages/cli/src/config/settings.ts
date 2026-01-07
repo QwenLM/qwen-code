@@ -160,6 +160,34 @@ export function getSystemDefaultsPath(): string {
   );
 }
 
+function getVsCodeSettingsPath(workspaceDir: string): string {
+  return path.join(workspaceDir, '.vscode', 'settings.json');
+}
+
+function loadVsCodeSettings(workspaceDir: string): Settings {
+  const vscodeSettingsPath = getVsCodeSettingsPath(workspaceDir);
+  try {
+    if (fs.existsSync(vscodeSettingsPath)) {
+      const content = fs.readFileSync(vscodeSettingsPath, 'utf-8');
+      const rawSettings: unknown = JSON.parse(stripJsonComments(content));
+
+      if (
+        typeof rawSettings !== 'object' ||
+        rawSettings === null ||
+        Array.isArray(rawSettings)
+      ) {
+        console.error(`VS Code settings file is not a valid JSON object: ${vscodeSettingsPath}`);
+        return {};
+      }
+
+      return rawSettings as Settings;
+    }
+  } catch (error: unknown) {
+    console.error(`Error loading VS Code settings from ${vscodeSettingsPath}:`, getErrorMessage(error));
+  }
+  return {};
+}
+
 export type { DnsResolutionOrder } from './settingsSchema.js';
 
 export enum SettingScope {
@@ -632,6 +660,9 @@ export function loadSettings(
     workspaceDir,
   ).getWorkspaceSettingsPath();
 
+  // Load VS Code settings as an additional source of configuration
+  const vscodeSettings = loadVsCodeSettings(workspaceDir);
+
   const loadAndMigrate = (
     filePath: string,
     scope: SettingScope,
@@ -736,6 +767,14 @@ export function loadSettings(
   userSettings = resolveEnvVarsInObject(userResult.settings);
   workspaceSettings = resolveEnvVarsInObject(workspaceResult.settings);
 
+  // Merge VS Code settings into workspace settings (VS Code settings take precedence)
+  workspaceSettings = customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    workspaceSettings,
+    vscodeSettings,
+  ) as Settings;
+
   // Support legacy theme names
   if (userSettings.ui?.theme === 'VS') {
     userSettings.ui.theme = DefaultLight.name;
@@ -749,11 +788,13 @@ export function loadSettings(
   }
 
   // For the initial trust check, we can only use user and system settings.
+  // We also include VS Code settings as they may contain trust-related settings
   const initialTrustCheckSettings = customDeepMerge(
     getMergeStrategyForPath,
     {},
     systemSettings,
     userSettings,
+    vscodeSettings, // Include VS Code settings
   );
   const isTrusted =
     isWorkspaceTrusted(initialTrustCheckSettings as Settings).isTrusted ?? true;
@@ -767,9 +808,18 @@ export function loadSettings(
     isTrusted,
   );
 
+  // Add VS Code settings to the temp merged settings for environment loading
+  // Since loadEnvironment depends on settings, we need to consider VS Code settings as well
+  const tempMergedSettingsWithVsCode = customDeepMerge(
+    getMergeStrategyForPath,
+    {},
+    tempMergedSettings,
+    vscodeSettings,
+  ) as Settings;
+
   // loadEnviroment depends on settings so we have to create a temp version of
   // the settings to avoid a cycle
-  loadEnvironment(tempMergedSettings);
+  loadEnvironment(tempMergedSettingsWithVsCode);
 
   // Create LoadedSettings first
 

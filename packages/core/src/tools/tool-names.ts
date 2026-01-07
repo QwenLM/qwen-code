@@ -25,6 +25,9 @@ export const ToolNames = {
   WEB_FETCH: 'web_fetch',
   WEB_SEARCH: 'web_search',
   LS: 'list_directory',
+  LSP_WORKSPACE_SYMBOL: 'lsp_workspace_symbol',
+  LSP_GO_TO_DEFINITION: 'lsp_go_to_definition',
+  LSP_FIND_REFERENCES: 'lsp_find_references',
 } as const;
 
 /**
@@ -48,6 +51,9 @@ export const ToolDisplayNames = {
   WEB_FETCH: 'WebFetch',
   WEB_SEARCH: 'WebSearch',
   LS: 'ListFiles',
+  LSP_WORKSPACE_SYMBOL: 'LspWorkspaceSymbol',
+  LSP_GO_TO_DEFINITION: 'LspGoToDefinition',
+  LSP_FIND_REFERENCES: 'LspFindReferences',
 } as const;
 
 // Migration from old tool names to new tool names
@@ -56,6 +62,8 @@ export const ToolDisplayNames = {
 export const ToolNamesMigration = {
   search_file_content: ToolNames.GREP, // Legacy name from grep tool
   replace: ToolNames.EDIT, // Legacy name from edit tool
+  go_to_definition: ToolNames.LSP_GO_TO_DEFINITION,
+  find_references: ToolNames.LSP_FIND_REFERENCES,
 } as const;
 
 // Migration from old tool display names to new tool display names

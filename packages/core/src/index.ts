@@ -85,6 +85,7 @@ export * from './skills/index.js';
 
 // Export prompt logic
 export * from './prompts/mcp-prompts.js';
+export * from './lsp/types.js';
 
 // Export specific tool logic
 export * from './tools/read-file.js';
@@ -99,6 +100,8 @@ export * from './tools/memoryTool.js';
 export * from './tools/shell.js';
 export * from './tools/web-search/index.js';
 export * from './tools/read-many-files.js';
+export * from './tools/lsp-go-to-definition.js';
+export * from './tools/lsp-find-references.js';
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';

@@ -1008,6 +1008,47 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  lsp: {
+    type: 'object',
+    label: 'LSP',
+    category: 'LSP',
+    requiresRestart: true,
+    default: {},
+    description: 'Settings for the native Language Server Protocol integration.',
+    showInDialog: false,
+    properties: {
+      enabled: {
+        type: 'boolean',
+        label: 'Enable LSP',
+        category: 'LSP',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the native LSP client to connect to language servers discovered in the workspace.',
+        showInDialog: false,
+      },
+      allowed: {
+        type: 'array',
+        label: 'Allow LSP Servers',
+        category: 'LSP',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Optional allowlist of LSP server names. If set, only matching servers will start.',
+        showInDialog: false,
+      },
+      excluded: {
+        type: 'array',
+        label: 'Exclude LSP Servers',
+        category: 'LSP',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Optional blocklist of LSP server names that should not start.',
+        showInDialog: false,
+      },
+    },
+  },
   useSmartEdit: {
     type: 'boolean',
     label: 'Use Smart Edit',

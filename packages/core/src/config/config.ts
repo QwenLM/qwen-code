@@ -61,6 +61,10 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { LspWorkspaceSymbolTool } from '../tools/lsp-workspace-symbol.js';
+import { LspGoToDefinitionTool } from '../tools/lsp-go-to-definition.js';
+import { LspFindReferencesTool } from '../tools/lsp-find-references.js';
+import type { LspClient } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -281,6 +285,12 @@ export interface ConfigParameters {
   toolCallCommand?: string;
   mcpServerCommand?: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  lsp?: {
+    enabled?: boolean;
+    allowed?: string[];
+    excluded?: string[];
+  };
+  lspClient?: LspClient;
   userMemory?: string;
   geminiMdFileCount?: number;
   approvalMode?: ApprovalMode;
@@ -413,6 +423,10 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  private readonly lspEnabled: boolean;
+  private readonly lspAllowed?: string[];
+  private readonly lspExcluded?: string[];
+  private lspClient?: LspClient;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
@@ -521,6 +535,10 @@ export class Config {
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
+    this.lspEnabled = params.lsp?.enabled ?? false;
+    this.lspAllowed = params.lsp?.allowed?.filter(Boolean);
+    this.lspExcluded = params.lsp?.excluded?.filter(Boolean);
+    this.lspClient = params.lspClient;
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -894,6 +912,32 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  isLspEnabled(): boolean {
+    return this.lspEnabled;
+  }
+
+  getLspAllowed(): string[] | undefined {
+    return this.lspAllowed;
+  }
+
+  getLspExcluded(): string[] | undefined {
+    return this.lspExcluded;
+  }
+
+  getLspClient(): LspClient | undefined {
+    return this.lspClient;
+  }
+
+  /**
+   * Allows wiring an LSP client after Config construction but before initialize().
+   */
+  setLspClient(client: LspClient | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP client after initialization');
+    }
+    this.lspClient = client;
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -1402,6 +1446,11 @@ export class Config {
     // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
       registerCoreTool(WebSearchTool, this);
+    }
+    if (this.isLspEnabled() && this.getLspClient()) {
+      registerCoreTool(LspGoToDefinitionTool, this);
+      registerCoreTool(LspFindReferencesTool, this);
+      registerCoreTool(LspWorkspaceSymbolTool, this);
     }
 
     await registry.discoverAllTools();

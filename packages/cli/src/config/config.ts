@@ -23,9 +23,11 @@ import {
   InputFormat,
   OutputFormat,
   SessionService,
+  ideContextStore,
   type ResumedSessionData,
   type FileFilteringOptions,
   type MCPServerConfig,
+  type LspClient,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
@@ -42,6 +44,7 @@ import { annotateActiveExtensions } from './extension.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
+import { NativeLspService } from '../services/lsp/NativeLspService.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import type { ExtensionEnablementManager } from './extensions/extensionEnablement.js';
@@ -146,6 +149,44 @@ export interface CliArgs {
   excludeTools: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
+}
+
+export interface LoadCliConfigOptions {
+  /**
+   * Whether to start the native LSP service during config load.
+   * Disable when doing preflight runs (e.g., sandbox preparation).
+   */
+  startLsp?: boolean;
+}
+
+class NativeLspClient implements LspClient {
+  constructor(private readonly service: NativeLspService) {}
+
+  workspaceSymbols(query: string, limit?: number) {
+    return this.service.workspaceSymbols(query, limit);
+  }
+
+  definitions(
+    location: Parameters<NativeLspService['definitions']>[0],
+    serverName?: string,
+    limit?: number,
+  ) {
+    return this.service.definitions(location, serverName, limit);
+  }
+
+  references(
+    location: Parameters<NativeLspService['references']>[0],
+    serverName?: string,
+    includeDeclaration?: boolean,
+    limit?: number,
+  ) {
+    return this.service.references(
+      location,
+      serverName,
+      includeDeclaration,
+      limit,
+    );
+  }
 }
 
 function normalizeOutputFormat(
@@ -673,6 +714,7 @@ export async function loadCliConfig(
   extensionEnablementManager: ExtensionEnablementManager,
   argv: CliArgs,
   cwd: string = process.cwd(),
+  options: LoadCliConfigOptions = {},
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -749,6 +791,12 @@ export async function loadCliConfig(
   );
 
   let mcpServers = mergeMcpServers(settings, activeExtensions);
+
+  // LSP configuration derived from settings; defaults to disabled for safety.
+  const lspEnabled = settings.lsp?.enabled ?? false;
+  const lspAllowed = settings.lsp?.allowed ?? settings.mcp?.allowed;
+  const lspExcluded = settings.lsp?.excluded ?? settings.mcp?.excluded;
+  let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
     (argv.inputFormat as InputFormat | undefined) ?? InputFormat.TEXT;
@@ -952,7 +1000,7 @@ export async function loadCliConfig(
     }
   }
 
-  return new Config({
+  const config = new Config({
     sessionId,
     sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -1055,7 +1103,39 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
+    lsp: {
+      enabled: lspEnabled,
+      allowed: lspAllowed,
+      excluded: lspExcluded,
+    },
   });
+
+  const shouldStartLsp = options.startLsp ?? true;
+  if (shouldStartLsp && lspEnabled) {
+    try {
+      const lspService = new NativeLspService(
+        config,
+        config.getWorkspaceContext(),
+        appEvents,
+        fileService,
+        ideContextStore,
+        {
+          allowedServers: lspAllowed,
+          excludedServers: lspExcluded,
+          requireTrustedWorkspace: folderTrust,
+        },
+      );
+
+      await lspService.discoverAndPrepare();
+      await lspService.start();
+      lspClient = new NativeLspClient(lspService);
+      config.setLspClient(lspClient);
+    } catch (err) {
+      logger.warn('Failed to initialize native LSP service:', err);
+    }
+  }
+
+  return config;
 }
 
 function allowedMcpServers(

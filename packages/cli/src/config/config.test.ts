@@ -21,6 +21,23 @@ import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { ExtensionEnablementManager } from './extensions/extensionEnablement.js';
 
+const mockDiscoverAndPrepare = vi.fn();
+const mockStartLsp = vi.fn();
+const mockDefinitions = vi.fn().mockResolvedValue([]);
+const mockReferences = vi.fn().mockResolvedValue([]);
+const mockWorkspaceSymbols = vi.fn().mockResolvedValue([]);
+const nativeLspServiceMock = vi.fn().mockImplementation(() => ({
+  discoverAndPrepare: mockDiscoverAndPrepare,
+  start: mockStartLsp,
+  definitions: mockDefinitions,
+  references: mockReferences,
+  workspaceSymbols: mockWorkspaceSymbols,
+}));
+
+vi.mock('../services/lsp/NativeLspService.js', () => ({
+  NativeLspService: nativeLspServiceMock,
+}));
+
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi
     .fn()
@@ -518,6 +535,16 @@ describe('loadCliConfig', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockDiscoverAndPrepare.mockReset();
+    mockStartLsp.mockReset();
+    mockWorkspaceSymbols.mockReset();
+    mockWorkspaceSymbols.mockResolvedValue([]);
+    nativeLspServiceMock.mockReset();
+    nativeLspServiceMock.mockImplementation(() => ({
+      discoverAndPrepare: mockDiscoverAndPrepare,
+      start: mockStartLsp,
+      workspaceSymbols: mockWorkspaceSymbols,
+    }));
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
   });
@@ -585,6 +612,61 @@ describe('loadCliConfig', () => {
       argv,
     );
     expect(config.getShowMemoryUsage()).toBe(false);
+  });
+
+  it('should initialize native LSP service when enabled', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {
+      lsp: {
+        enabled: true,
+        allowed: ['typescript-language-server'],
+        excluded: ['pylsp'],
+      },
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      [],
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      argv,
+    );
+
+    expect(config.isLspEnabled()).toBe(true);
+    expect(config.getLspAllowed()).toEqual(['typescript-language-server']);
+    expect(config.getLspExcluded()).toEqual(['pylsp']);
+    expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
+    expect(mockDiscoverAndPrepare).toHaveBeenCalledTimes(1);
+    expect(mockStartLsp).toHaveBeenCalledTimes(1);
+
+    const options = nativeLspServiceMock.mock.calls[0][5];
+    expect(options?.allowedServers).toEqual(['typescript-language-server']);
+    expect(options?.excludedServers).toEqual(['pylsp']);
+  });
+
+  it('should skip native LSP startup when startLsp option is false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = { lsp: { enabled: true } };
+
+    const config = await loadCliConfig(
+      settings,
+      [],
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      argv,
+      undefined,
+      { startLsp: false },
+    );
+
+    expect(config.isLspEnabled()).toBe(true);
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
+    expect(mockDiscoverAndPrepare).not.toHaveBeenCalled();
   });
 
   it('should set showMemoryUsage to false by default from settings if CLI flag is not present', async () => {
