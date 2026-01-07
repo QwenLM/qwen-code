@@ -93,6 +93,7 @@ export type ModeInfo = z.infer<typeof modeInfoSchema>;
 export type ModesData = z.infer<typeof modesDataSchema>;
 
 export type AgentInfo = z.infer<typeof agentInfoSchema>;
+export type ModelInfo = z.infer<typeof modelInfoSchema>;
 
 export type PromptCapabilities = z.infer<typeof promptCapabilitiesSchema>;
 
@@ -254,8 +255,26 @@ export const authenticateUpdateSchema = z.object({
 
 export type AuthenticateUpdate = z.infer<typeof authenticateUpdateSchema>;
 
+export const acpMetaSchema = z.record(z.unknown()).nullable().optional();
+
+export const modelIdSchema = z.string();
+
+export const modelInfoSchema = z.object({
+  _meta: acpMetaSchema,
+  description: z.string().nullable().optional(),
+  modelId: modelIdSchema,
+  name: z.string(),
+});
+
+export const sessionModelStateSchema = z.object({
+  _meta: acpMetaSchema,
+  availableModels: z.array(modelInfoSchema),
+  currentModelId: modelIdSchema,
+});
+
 export const newSessionResponseSchema = z.object({
   sessionId: z.string(),
+  models: sessionModelStateSchema,
 });
 
 export const loadSessionResponseSchema = z.null();
@@ -514,6 +533,13 @@ export const currentModeUpdateSchema = z.object({
 
 export type CurrentModeUpdate = z.infer<typeof currentModeUpdateSchema>;
 
+export const currentModelUpdateSchema = z.object({
+  sessionUpdate: z.literal('current_model_update'),
+  model: modelInfoSchema,
+});
+
+export type CurrentModelUpdate = z.infer<typeof currentModelUpdateSchema>;
+
 export const sessionUpdateSchema = z.union([
   z.object({
     content: contentBlockSchema,
@@ -555,6 +581,7 @@ export const sessionUpdateSchema = z.union([
     sessionUpdate: z.literal('plan'),
   }),
   currentModeUpdateSchema,
+  currentModelUpdateSchema,
   availableCommandsUpdateSchema,
 ]);
 

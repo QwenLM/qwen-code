@@ -143,9 +143,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
 
-      // If explicitly marked as background and doesn't already end with &, add it
-      if (shouldRunInBackground && !finalCommand.trim().endsWith('&')) {
+      // On non-Windows, use & to run in background.
+      // On Windows, we don't use start /B because it creates a detached process that
+      // doesn't die when the parent dies. Instead, we rely on the race logic below
+      // to return early while keeping the process attached (detached: false).
+      if (
+        !isWindows &&
+        shouldRunInBackground &&
+        !finalCommand.trim().endsWith('&')
+      ) {
         finalCommand = finalCommand.trim() + ' &';
+      }
+
+      // On Windows, we rely on the race logic below to handle background tasks.
+      // We just ensure the command string is clean.
+      if (isWindows && shouldRunInBackground) {
+        finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
       }
 
       // pgrep is not available on Windows, so we can't get background PIDs
@@ -169,10 +182,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           commandToExecute,
           cwd,
           (event: ShellOutputEvent) => {
-            if (!updateOutput) {
-              return;
-            }
-
             let shouldUpdate = false;
 
             switch (event.type) {
@@ -201,7 +210,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               }
             }
 
-            if (shouldUpdate) {
+            if (shouldUpdate && updateOutput) {
               updateOutput(
                 typeof cumulativeOutput === 'string'
                   ? cumulativeOutput
@@ -217,6 +226,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       if (pid && setPidCallback) {
         setPidCallback(pid);
+      }
+
+      if (shouldRunInBackground) {
+        // For background tasks, return immediately with PID info
+        // Note: We cannot reliably detect startup errors for background processes
+        // since their stdio is typically detached/ignored
+        const pidMsg = pid ? ` PID: ${pid}` : '';
+        const killHint = isWindows
+          ? ' (Use taskkill /F /T /PID <pid> to stop)'
+          : ' (Use kill <pid> to stop)';
+
+        return {
+          llmContent: `Background command started.${pidMsg}${killHint}`,
+          returnDisplay: `Background command started.${pidMsg}${killHint}`,
+        };
       }
 
       const result = await resultPromise;

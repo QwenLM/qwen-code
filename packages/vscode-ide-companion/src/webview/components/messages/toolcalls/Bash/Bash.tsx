@@ -9,9 +9,10 @@
 import type React from 'react';
 import type { BaseToolCallProps } from '../shared/types.js';
 import { ToolCallContainer } from '../shared/LayoutComponents.js';
-import { safeTitle, groupContent } from '../shared/utils.js';
+import { safeTitle, groupContent } from '../../../../utils/utils.js';
 import { useVSCode } from '../../../../hooks/useVSCode.js';
-import { createAndOpenTempFile } from '../../../../utils/tempFileManager.js';
+import { createAndOpenTempFile } from '../../../../utils/diffUtils.js';
+import { CopyButton } from '../shared/copyUtils.js';
 import './Bash.css';
 
 /**
@@ -37,19 +38,14 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
 
   // Handle click on IN section
   const handleInClick = () => {
-    createAndOpenTempFile(
-      vscode.postMessage,
-      inputCommand,
-      'bash-input',
-      '.sh',
-    );
+    createAndOpenTempFile(vscode, inputCommand, `bash-input-${toolCallId}`);
   };
 
   // Handle click on OUT section
   const handleOutClick = () => {
     if (textOutputs.length > 0) {
       const output = textOutputs.join('\n');
-      createAndOpenTempFile(vscode.postMessage, output, 'bash-output', '.txt');
+      createAndOpenTempFile(vscode, output, `bash-output-${toolCallId}`);
     }
   };
 
@@ -84,7 +80,7 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
           <div className="bash-toolcall-content">
             {/* IN row */}
             <div
-              className="bash-toolcall-row"
+              className="bash-toolcall-row bash-toolcall-row-with-copy group"
               onClick={handleInClick}
               style={{ cursor: 'pointer' }}
             >
@@ -92,6 +88,7 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
               <div className="bash-toolcall-row-content">
                 <pre className="bash-toolcall-pre">{inputCommand}</pre>
               </div>
+              <CopyButton text={inputCommand} />
             </div>
 
             {/* ERROR row */}
@@ -131,7 +128,7 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
           <div className="bash-toolcall-content">
             {/* IN row */}
             <div
-              className="bash-toolcall-row"
+              className="bash-toolcall-row bash-toolcall-row-with-copy group"
               onClick={handleInClick}
               style={{ cursor: 'pointer' }}
             >
@@ -139,6 +136,7 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
               <div className="bash-toolcall-row-content">
                 <pre className="bash-toolcall-pre">{inputCommand}</pre>
               </div>
+              <CopyButton text={inputCommand} />
             </div>
 
             {/* OUT row */}

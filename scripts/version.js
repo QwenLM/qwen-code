@@ -37,7 +37,8 @@ if (!versionType) {
 run(`npm version ${versionType} --no-git-tag-version --allow-same-version`);
 
 // 3. Get all workspaces and filter out the one we don't want to version.
-const workspacesToExclude = [];
+// We intend to maintain sdk version independently.
+const workspacesToExclude = ['@qwen-code/sdk'];
 let lsOutput;
 try {
   lsOutput = JSON.parse(

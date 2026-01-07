@@ -191,6 +191,7 @@ See [settings](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/se
 
 Looking for a graphical interface?
 
+- [**AionUi**](https://github.com/iOfficeAI/AionUi) A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) A cross-platform desktop/web/mobile UI for Qwen Code
 
 ## Troubleshooting

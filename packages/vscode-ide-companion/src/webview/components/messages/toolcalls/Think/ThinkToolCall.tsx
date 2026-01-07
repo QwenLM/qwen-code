@@ -13,7 +13,7 @@ import {
   ToolCallCard,
   ToolCallRow,
 } from '../shared/LayoutComponents.js';
-import { groupContent } from '../shared/utils.js';
+import { groupContent } from '../../../../utils/utils.js';
 
 /**
  * Specialized component for Think tool calls

@@ -5,12 +5,14 @@
  */
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
 import { showDiffCommand } from '../../commands/index.js';
+import {
+  findLeftGroupOfChatWebview,
+  ensureLeftGroupOfChatWebview,
+} from '../../utils/editorGroupUtils.js';
+import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
 
 /**
  * File message handler
@@ -396,7 +398,7 @@ export class FileMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Create and open temporary file
+   * Create and open temporary readonly file
    */
   private async handleCreateAndOpenTempFile(
     data: Record<string, unknown> | undefined,
@@ -411,26 +413,78 @@ export class FileMessageHandler extends BaseMessageHandler {
     try {
       const content = (data.content as string) || '';
       const fileName = (data.fileName as string) || 'temp';
-      const fileExtension = (data.fileExtension as string) || '.txt';
 
-      // Create temporary file path
-      const tempDir = os.tmpdir();
-      const tempFileName = `${fileName}-${Date.now()}${fileExtension}`;
-      const tempFilePath = path.join(tempDir, tempFileName);
+      // Get readonly file system provider from global singleton
+      const readonlyProvider = ReadonlyFileSystemProvider.getInstance();
+      if (!readonlyProvider) {
+        const errorMessage = 'Readonly file system provider not initialized';
+        console.error('[FileMessageHandler]', errorMessage);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMessage },
+        });
+        return;
+      }
 
-      // Write content to temporary file
-      await fs.promises.writeFile(tempFilePath, content, 'utf8');
+      // Create readonly URI (without timestamp to ensure consistency)
+      const uri = readonlyProvider.createUri(fileName, content);
+      readonlyProvider.setContent(uri, content);
 
-      // Open the temporary file in VS Code
-      const uri = vscode.Uri.file(tempFilePath);
-      await vscode.window.showTextDocument(uri, {
+      // If the document already has an open tab, focus that same tab instead of opening a new one.
+      let foundExistingTab = false;
+      let existingViewColumn: vscode.ViewColumn | undefined;
+      for (const tabGroup of vscode.window.tabGroups.all) {
+        for (const tab of tabGroup.tabs) {
+          const input = tab.input as { uri?: vscode.Uri } | undefined;
+          if (input?.uri && input.uri.toString() === uri.toString()) {
+            foundExistingTab = true;
+            existingViewColumn = tabGroup.viewColumn;
+            break;
+          }
+        }
+        if (foundExistingTab) {
+          break;
+        }
+      }
+
+      if (foundExistingTab) {
+        const document = await vscode.workspace.openTextDocument(uri);
+        const showOptions: vscode.TextDocumentShowOptions = {
+          preview: false,
+          preserveFocus: false,
+        };
+        if (existingViewColumn !== undefined) {
+          showOptions.viewColumn = existingViewColumn;
+        }
+        await vscode.window.showTextDocument(document, showOptions);
+        console.log(
+          '[FileMessageHandler] Focused on existing readonly file:',
+          uri.toString(),
+          'in viewColumn:',
+          existingViewColumn,
+        );
+        return;
+      }
+
+      // Find or ensure left group of chat webview
+      let targetViewColumn = findLeftGroupOfChatWebview();
+      if (targetViewColumn === undefined) {
+        targetViewColumn = await ensureLeftGroupOfChatWebview();
+      }
+
+      // Open as readonly document in the left group and focus it (single click should be enough)
+      const document = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(document, {
+        viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
         preview: false,
         preserveFocus: false,
       });
 
       console.log(
-        '[FileMessageHandler] Created and opened temporary file:',
-        tempFilePath,
+        '[FileMessageHandler] Created and opened readonly file:',
+        uri.toString(),
+        'in viewColumn:',
+        targetViewColumn ?? 'Beside',
       );
     } catch (error) {
       console.error(

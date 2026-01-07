@@ -12,7 +12,7 @@ import type { BaseToolCallProps } from '../shared/types.js';
 import {
   groupContent,
   mapToolStatusToContainerStatus,
-} from '../shared/utils.js';
+} from '../../../../utils/utils.js';
 import { FileLink } from '../../../layout/FileLink.js';
 import { useVSCode } from '../../../../hooks/useVSCode.js';
 import { handleOpenDiff } from '../../../../utils/diffUtils.js';

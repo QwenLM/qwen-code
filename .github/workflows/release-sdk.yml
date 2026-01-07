@@ -91,6 +91,8 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
 
       - name: 'Install Dependencies'
         run: |-
@@ -126,6 +128,14 @@ jobs:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
 
+      - name: 'Set SDK package version (local only)'
+        env:
+          RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
+        run: |-
+          # Ensure the package version matches the computed release version.
+          # This is required for nightly/preview because npm does not allow re-publishing the same version.
+          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
+
       - name: 'Build CLI Bundle'
         run: |
           npm run build
@@ -158,7 +168,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: 'Build SDK'
+        working-directory: 'packages/sdk-typescript'
+        run: |-
+          npm run build
+
+      - name: 'Publish @qwen-code/sdk'
+        working-directory: 'packages/sdk-typescript'
+        run: |-
+          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
       - name: 'Create and switch to a release branch'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         id: 'release_branch'
         env:
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
@@ -167,50 +191,22 @@ jobs:
           git switch -c "${BRANCH_NAME}"
           echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Update package version'
-        env:
-          RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
-        run: |-
-          # Use npm workspaces so the root lockfile is updated consistently.
-          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
-
-      - name: 'Commit and Conditionally Push package version'
+      - name: 'Commit and Push package version (stable only)'
+        if: |-
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          IS_DRY_RUN: '${{ steps.vars.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
+          # Only persist version bumps after a successful publish.
           git add packages/sdk-typescript/package.json package-lock.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
             git commit -m "chore(release): sdk-typescript ${RELEASE_TAG}"
           fi
-          if [[ "${IS_DRY_RUN}" == "false" ]]; then
-            echo "Pushing release branch to remote..."
-            git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
-          else
-            echo "Dry run enabled. Skipping push."
-          fi
-
-      - name: 'Build SDK'
-        working-directory: 'packages/sdk-typescript'
-        run: |-
-          npm run build
-
-      - name: 'Configure npm for publishing'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
-      - name: 'Publish @qwen-code/sdk'
-        working-directory: 'packages/sdk-typescript'
-        run: |-
-          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
-        env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          echo "Pushing release branch to remote..."
+          git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
 
       - name: 'Create GitHub Release and Tag'
         if: |-
@@ -220,16 +216,29 @@ jobs:
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
           PREVIOUS_RELEASE_TAG: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
+          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          REF: '${{ github.event.inputs.ref || github.sha }}'
         run: |-
+          # For stable releases, use the release branch; for nightly/preview, use the current ref
+          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
+            TARGET="${REF}"
+            PRERELEASE_FLAG="--prerelease"
+          else
+            TARGET="${RELEASE_BRANCH}"
+            PRERELEASE_FLAG=""
+          fi
+
           gh release create "sdk-typescript-${RELEASE_TAG}" \
-            --target "$RELEASE_BRANCH" \
+            --target "${TARGET}" \
             --title "SDK TypeScript Release ${RELEASE_TAG}" \
             --notes-start-tag "sdk-typescript-${PREVIOUS_RELEASE_TAG}" \
-            --generate-notes
+            --generate-notes \
+            ${PRERELEASE_FLAG}
 
       - name: 'Create PR to merge release branch into main'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         id: 'pr'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
@@ -251,7 +260,7 @@ jobs:
 
       - name: 'Wait for CI checks to complete'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
@@ -262,7 +271,7 @@ jobs:
 
       - name: 'Enable auto-merge for release PR'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'

@@ -8,7 +8,7 @@
 
 import type React from 'react';
 import type { BaseToolCallProps } from './shared/types.js';
-import { shouldShowToolCall } from './shared/utils.js';
+import { shouldShowToolCall } from '../../../utils/utils.js';
 import { GenericToolCall } from './GenericToolCall.js';
 import { ReadToolCall } from './Read/ReadToolCall.js';
 import { WriteToolCall } from './Write/WriteToolCall.js';

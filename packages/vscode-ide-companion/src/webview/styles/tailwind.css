@@ -151,6 +151,28 @@
     fill: var(--app-qwen-ivory);
   }
 
+  .context-indicator {
+    @apply inline-flex items-center gap-1 px-1 py-0.5 rounded-small text-[0.8em] select-none;
+    color: var(--app-secondary-foreground);
+  }
+  .context-indicator svg {
+    width: 20px;
+    height: 20px;
+  }
+  .context-indicator__track,
+  .context-indicator__progress {
+    fill: none;
+    stroke-width: 2.5;
+  }
+  .context-indicator__track {
+    stroke: var(--app-secondary-foreground);
+    opacity: 0.35;
+  }
+  .context-indicator__progress {
+    stroke: var(--app-secondary-foreground);
+    stroke-linecap: round;
+  }
+
   .composer-overlay {
     @apply absolute inset-0 rounded-large z-0;
     background: var(--app-input-background);

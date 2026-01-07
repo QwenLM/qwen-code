@@ -24,6 +24,8 @@ export default tseslint.config(
       '.integration-tests/**',
       'packages/**/.integration-test/**',
       'dist/**',
+      'docs-site/.next/**',
+      'docs-site/out/**',
     ],
   },
   eslint.configs.recommended,

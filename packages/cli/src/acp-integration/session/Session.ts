@@ -41,9 +41,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { getErrorMessage } from '../../utils/errors.js';
+import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
+  type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
 import type {
   AvailableCommand,
@@ -62,12 +64,6 @@ import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-
-/**
- * Built-in commands that are allowed in ACP integration mode.
- * Only safe, read-only commands that don't require interactive UI.
- */
-export const ALLOWED_BUILTIN_COMMANDS_FOR_ACP = ['init'];
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -167,24 +163,26 @@ export class Session implements SessionContext {
     const firstTextBlock = params.prompt.find((block) => block.type === 'text');
     const inputText = firstTextBlock?.text || '';
 
-    let parts: Part[];
+    let parts: Part[] | null;
 
     if (isSlashCommand(inputText)) {
-      // Handle slash command - allow specific built-in commands for ACP integration
+      // Handle slash command - uses default allowed commands (init, summary, compress)
       const slashCommandResult = await handleSlashCommand(
         inputText,
         pendingSend,
         this.config,
         this.settings,
-        ALLOWED_BUILTIN_COMMANDS_FOR_ACP,
       );
 
-      if (slashCommandResult) {
-        // Use the result from the slash command
-        parts = slashCommandResult as Part[];
-      } else {
-        // Slash command didn't return a prompt, continue with normal processing
-        parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+      parts = await this.#processSlashCommandResult(
+        slashCommandResult,
+        params.prompt,
+      );
+
+      // If parts is null, the command was fully handled (e.g., /summary completed)
+      // Return early without sending to the model
+      if (parts === null) {
+        return { stopReason: 'end_turn' };
       }
     } else {
       // Normal processing for non-slash commands
@@ -295,11 +293,10 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
+      // Use default allowed commands from getAvailableCommands
       const slashCommands = await getAvailableCommands(
         this.config,
-        this.settings,
         abortController.signal,
-        ALLOWED_BUILTIN_COMMANDS_FOR_ACP,
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
@@ -644,6 +641,103 @@ export class Session implements SessionContext {
       });
 
       return errorResponse(error);
+    }
+  }
+
+  /**
+   * Processes the result of a slash command execution.
+   *
+   * Supported result types in ACP mode:
+   * - submit_prompt: Submits content to the model
+   * - stream_messages: Streams multiple messages to the client (ACP-specific)
+   * - unsupported: Command cannot be executed in ACP mode
+   * - no_command: No command was found, use original prompt
+   *
+   * Note: 'message' type is not supported in ACP mode - commands should use
+   * 'stream_messages' instead for consistent async handling.
+   *
+   * @param result The result from handleSlashCommand
+   * @param originalPrompt The original prompt blocks
+   * @returns Parts to use for the prompt, or null if command was handled without needing model interaction
+   */
+  async #processSlashCommandResult(
+    result: NonInteractiveSlashCommandResult,
+    originalPrompt: acp.ContentBlock[],
+  ): Promise<Part[] | null> {
+    switch (result.type) {
+      case 'submit_prompt':
+        // Command wants to submit a prompt to the model
+        // Convert PartListUnion to Part[]
+        return normalizePartList(result.content);
+
+      case 'message': {
+        // 'message' type is not ideal for ACP mode, but we handle it for compatibility
+        // by converting it to a stream_messages-like notification
+        await this.client.sendCustomNotification('_qwencode/slash_command', {
+          sessionId: this.sessionId,
+          command: originalPrompt
+            .filter((block) => block.type === 'text')
+            .map((block) => (block.type === 'text' ? block.text : ''))
+            .join(' '),
+          messageType: result.messageType,
+          message: result.content || '',
+        });
+
+        if (result.messageType === 'error') {
+          // Throw error to stop execution
+          throw new Error(result.content || 'Slash command failed.');
+        }
+        // For info messages, return null to indicate command was handled
+        return null;
+      }
+
+      case 'stream_messages': {
+        // Command returns multiple messages via async generator (ACP-preferred)
+        const command = originalPrompt
+          .filter((block) => block.type === 'text')
+          .map((block) => (block.type === 'text' ? block.text : ''))
+          .join(' ');
+
+        // Stream all messages to the client
+        for await (const msg of result.messages) {
+          await this.client.sendCustomNotification('_qwencode/slash_command', {
+            sessionId: this.sessionId,
+            command,
+            messageType: msg.messageType,
+            message: msg.content,
+          });
+
+          // If we encounter an error message, throw after sending
+          if (msg.messageType === 'error') {
+            throw new Error(msg.content || 'Slash command failed.');
+          }
+        }
+
+        // All messages sent successfully, return null to indicate command was handled
+        return null;
+      }
+
+      case 'unsupported': {
+        // Command returned an unsupported result type
+        const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
+        throw new Error(unsupportedError);
+      }
+
+      case 'no_command':
+        // No command was found or executed, use original prompt
+        return originalPrompt.map((block) => {
+          if (block.type === 'text') {
+            return { text: block.text };
+          }
+          throw new Error(`Unsupported block type: ${block.type}`);
+        });
+
+      default: {
+        // Exhaustiveness check
+        const _exhaustive: never = result;
+        const unknownError = `Unknown slash command result type: ${(_exhaustive as NonInteractiveSlashCommandResult).type}`;
+        throw new Error(unknownError);
+      }
     }
   }
 

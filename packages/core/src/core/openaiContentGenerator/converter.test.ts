@@ -542,4 +542,206 @@ describe('OpenAIContentConverter', () => {
       expect(original).toEqual(originalCopy);
     });
   });
+
+  describe('mergeConsecutiveAssistantMessages', () => {
+    it('should merge two consecutive assistant messages with string content', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'First part' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Second part' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('assistant');
+      const content = messages[0]
+        .content as OpenAI.Chat.ChatCompletionContentPart[];
+      expect(content).toHaveLength(2);
+      expect(content[0]).toEqual({ type: 'text', text: 'First part' });
+      expect(content[1]).toEqual({ type: 'text', text: 'Second part' });
+    });
+
+    it('should merge multiple consecutive assistant messages', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'Part 1' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Part 2' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Part 3' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('assistant');
+      const content = messages[0]
+        .content as OpenAI.Chat.ChatCompletionContentPart[];
+      expect(content).toHaveLength(3);
+    });
+
+    it('should merge tool_calls from consecutive assistant messages', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_1',
+                  name: 'tool_1',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_1',
+                  name: 'tool_1',
+                  response: { output: 'result_1' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_2',
+                  name: 'tool_2',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_2',
+                  name: 'tool_2',
+                  response: { output: 'result_2' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      // Should have: assistant (tool_call_1), tool (result_1), assistant (tool_call_2), tool (result_2)
+      expect(messages).toHaveLength(4);
+      expect(messages[0].role).toBe('assistant');
+      expect(messages[1].role).toBe('tool');
+      expect(messages[2].role).toBe('assistant');
+      expect(messages[3].role).toBe('tool');
+    });
+
+    it('should not merge assistant messages separated by user messages', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'First assistant' }],
+          },
+          {
+            role: 'user',
+            parts: [{ text: 'User message' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Second assistant' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      expect(messages).toHaveLength(3);
+      expect(messages[0].role).toBe('assistant');
+      expect(messages[1].role).toBe('user');
+      expect(messages[2].role).toBe('assistant');
+    });
+
+    it('should handle merging when one message has array content and another has string', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'Text part' }],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Another text' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      expect(messages).toHaveLength(1);
+      const content = messages[0]
+        .content as OpenAI.Chat.ChatCompletionContentPart[];
+      expect(Array.isArray(content)).toBe(true);
+      expect(content).toHaveLength(2);
+    });
+
+    it('should merge empty content correctly', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [{ text: 'First' }],
+          },
+          {
+            role: 'model',
+            parts: [],
+          },
+          {
+            role: 'model',
+            parts: [{ text: 'Second' }],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      // Empty messages should be filtered out
+      expect(messages).toHaveLength(1);
+      const content = messages[0]
+        .content as OpenAI.Chat.ChatCompletionContentPart[];
+      expect(content).toHaveLength(2);
+      expect(content[0]).toEqual({ type: 'text', text: 'First' });
+      expect(content[1]).toEqual({ type: 'text', text: 'Second' });
+    });
+  });
 });

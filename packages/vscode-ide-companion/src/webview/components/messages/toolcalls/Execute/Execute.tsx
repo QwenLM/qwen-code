@@ -8,9 +8,12 @@
 
 import type React from 'react';
 import type { BaseToolCallProps } from '../shared/types.js';
-import { safeTitle, groupContent } from '../shared/utils.js';
+import { safeTitle, groupContent } from '../../../../utils/utils.js';
 import './Execute.css';
 import type { ToolCallContainerProps } from '../shared/LayoutComponents.js';
+import { useVSCode } from '../../../../hooks/useVSCode.js';
+import { createAndOpenTempFile } from '../../../../utils/diffUtils.js';
+import { CopyButton } from '../shared/copyUtils.js';
 
 export const ToolCallContainer: React.FC<ToolCallContainerProps> = ({
   label,
@@ -48,6 +51,7 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
   const commandText = safeTitle(
     (rawInput as Record<string, unknown>)?.description || title,
   );
+  const vscode = useVSCode();
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
@@ -60,6 +64,19 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
   } else if (typeof rawInput === 'string') {
     inputCommand = rawInput;
   }
+
+  // Handle click on IN section
+  const handleInClick = () => {
+    createAndOpenTempFile(vscode, inputCommand, `execute-input-${toolCallId}`);
+  };
+
+  // Handle click on OUT section
+  const handleOutClick = () => {
+    if (textOutputs.length > 0) {
+      const output = textOutputs.join('\n');
+      createAndOpenTempFile(vscode, output, `execute-output-${toolCallId}`);
+    }
+  };
 
   // Map tool status to container status for proper bullet coloring
   const containerStatus:
@@ -92,11 +109,16 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
         <div className="execute-toolcall-card">
           <div className="execute-toolcall-content">
             {/* IN row */}
-            <div className="execute-toolcall-row">
+            <div
+              className="execute-toolcall-row execute-toolcall-row-with-copy group"
+              onClick={handleInClick}
+              style={{ cursor: 'pointer' }}
+            >
               <div className="execute-toolcall-label">IN</div>
               <div className="execute-toolcall-row-content">
                 <pre className="execute-toolcall-pre">{inputCommand}</pre>
               </div>
+              <CopyButton text={inputCommand} />
             </div>
 
             {/* ERROR row */}
@@ -135,15 +157,24 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
         <div className="execute-toolcall-card">
           <div className="execute-toolcall-content">
             {/* IN row */}
-            <div className="execute-toolcall-row">
+            <div
+              className="execute-toolcall-row execute-toolcall-row-with-copy group"
+              onClick={handleInClick}
+              style={{ cursor: 'pointer' }}
+            >
               <div className="execute-toolcall-label">IN</div>
               <div className="execute-toolcall-row-content">
                 <pre className="execute-toolcall-pre">{inputCommand}</pre>
               </div>
+              <CopyButton text={inputCommand} />
             </div>
 
             {/* OUT row */}
-            <div className="execute-toolcall-row">
+            <div
+              className="execute-toolcall-row"
+              onClick={handleOutClick}
+              style={{ cursor: 'pointer' }}
+            >
               <div className="execute-toolcall-label">OUT</div>
               <div className="execute-toolcall-row-content">
                 <div className="execute-toolcall-output-subtle">
@@ -164,7 +195,11 @@ export const ExecuteToolCall: React.FC<BaseToolCallProps> = ({ toolCall }) => {
       status={containerStatus}
       toolCallId={toolCallId}
     >
-      <div className="inline-flex text-[var(--app-secondary-foreground)] text-[0.85em] opacity-70 mt-[2px] mb-[2px] flex-row items-start w-full gap-1">
+      <div
+        className="inline-flex text-[var(--app-secondary-foreground)] text-[0.85em] opacity-70 mt-[2px] mb-[2px] flex-row items-start w-full gap-1"
+        onClick={handleInClick}
+        style={{ cursor: 'pointer' }}
+      >
         <span className="flex-shrink-0 relative top-[-0.1em]">⎿</span>
         <span className="flex-shrink-0 w-full">{commandText}</span>
       </div>

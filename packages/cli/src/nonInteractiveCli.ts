@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallRequestInfo,
+  ToolResultDisplay,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -41,6 +45,55 @@ import {
   createTaskToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
+
+/**
+ * Emits a final message for slash command results.
+ * Note: systemMessage should already be emitted before calling this function.
+ */
+async function emitNonInteractiveFinalMessage(params: {
+  message: string;
+  isError: boolean;
+  adapter?: JsonOutputAdapterInterface;
+  config: Config;
+  startTimeMs: number;
+}): Promise<void> {
+  const { message, isError, adapter, config } = params;
+
+  if (!adapter) {
+    // Text output mode: write directly to stdout/stderr
+    const target = isError ? process.stderr : process.stdout;
+    target.write(`${message}\n`);
+    return;
+  }
+
+  // JSON output mode: emit assistant message and result
+  // (systemMessage should already be emitted by caller)
+  adapter.startAssistantMessage();
+  adapter.processEvent({
+    type: GeminiEventType.Content,
+    value: message,
+  } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  adapter.finalizeAssistantMessage();
+
+  const metrics = uiTelemetryService.getMetrics();
+  const usage = computeUsageFromMetrics(metrics);
+  const outputFormat = config.getOutputFormat();
+  const stats =
+    outputFormat === OutputFormat.JSON
+      ? uiTelemetryService.getMetrics()
+      : undefined;
+
+  adapter.emitResult({
+    isError,
+    durationMs: Date.now() - params.startTimeMs,
+    apiDurationMs: 0,
+    numTurns: 0,
+    errorMessage: isError ? message : undefined,
+    usage,
+    stats,
+    summary: message,
+  });
+}
 
 /**
  * Provides optional overrides for `runNonInteractive` execution.
@@ -115,6 +168,16 @@ export async function runNonInteractive(
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
 
+      // Emit systemMessage first (always the first message in JSON mode)
+      if (adapter) {
+        const systemMessage = await buildSystemMessage(
+          config,
+          sessionId,
+          permissionMode,
+        );
+        adapter.emitMessage(systemMessage);
+      }
+
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
@@ -128,10 +191,45 @@ export async function runNonInteractive(
             config,
             settings,
           );
-          if (slashCommandResult) {
-            // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
-            initialPartList = slashCommandResult as PartListUnion;
-            slashHandled = true;
+          switch (slashCommandResult.type) {
+            case 'submit_prompt':
+              // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
+              initialPartList = slashCommandResult.content;
+              slashHandled = true;
+              break;
+            case 'message': {
+              // systemMessage already emitted above
+              await emitNonInteractiveFinalMessage({
+                message: slashCommandResult.content,
+                isError: slashCommandResult.messageType === 'error',
+                adapter,
+                config,
+                startTimeMs: startTime,
+              });
+              return;
+            }
+            case 'stream_messages':
+              throw new FatalInputError(
+                'Stream messages mode is not supported in non-interactive CLI',
+              );
+            case 'unsupported': {
+              await emitNonInteractiveFinalMessage({
+                message: slashCommandResult.reason,
+                isError: true,
+                adapter,
+                config,
+                startTimeMs: startTime,
+              });
+              return;
+            }
+            case 'no_command':
+              break;
+            default: {
+              const _exhaustive: never = slashCommandResult;
+              throw new FatalInputError(
+                `Unhandled slash command result type: ${(_exhaustive as { type: string }).type}`,
+              );
+            }
           }
         }
 
@@ -162,15 +260,6 @@ export async function runNonInteractive(
 
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
-
-      if (adapter) {
-        const systemMessage = await buildSystemMessage(
-          config,
-          sessionId,
-          permissionMode,
-        );
-        adapter.emitMessage(systemMessage);
-      }
 
       let isFirstTurn = true;
       while (true) {
@@ -223,6 +312,8 @@ export async function runNonInteractive(
                 config.getContentGeneratorConfig()?.authType,
               );
               process.stderr.write(`${errorText}\n`);
+              // Throw error to exit with non-zero code
+              throw new Error(errorText);
             }
           }
         }
@@ -248,7 +339,7 @@ export async function runNonInteractive(
                 ? options.controlService.permission.getToolCallUpdateCallback()
                 : undefined;
 
-            // Only pass outputUpdateHandler for Task tool
+            // Create output handler for Task tool (for subagent execution)
             const isTaskTool = finalRequestInfo.name === 'task';
             const taskToolProgress = isTaskTool
               ? createTaskToolProgressHandler(
@@ -258,20 +349,41 @@ export async function runNonInteractive(
                 )
               : undefined;
             const taskToolProgressHandler = taskToolProgress?.handler;
+
+            // Create output handler for non-Task tools in text mode (for console output)
+            const nonTaskOutputHandler =
+              !isTaskTool && !adapter
+                ? (callId: string, outputChunk: ToolResultDisplay) => {
+                    // Print tool output to console in text mode
+                    if (typeof outputChunk === 'string') {
+                      process.stdout.write(outputChunk);
+                    } else if (
+                      outputChunk &&
+                      typeof outputChunk === 'object' &&
+                      'ansiOutput' in outputChunk
+                    ) {
+                      // Handle ANSI output - just print as string for now
+                      process.stdout.write(String(outputChunk.ansiOutput));
+                    }
+                  }
+                : undefined;
+
+            // Combine output handlers
+            const outputUpdateHandler =
+              taskToolProgressHandler || nonTaskOutputHandler;
+
             const toolResponse = await executeToolCall(
               config,
               finalRequestInfo,
               abortController.signal,
-              isTaskTool && taskToolProgressHandler
+              outputUpdateHandler || toolCallUpdateCallback
                 ? {
-                    outputUpdateHandler: taskToolProgressHandler,
-                    onToolCallsUpdate: toolCallUpdateCallback,
-                  }
-                : toolCallUpdateCallback
-                  ? {
+                    ...(outputUpdateHandler && { outputUpdateHandler }),
+                    ...(toolCallUpdateCallback && {
                       onToolCallsUpdate: toolCallUpdateCallback,
-                    }
-                  : undefined,
+                    }),
+                  }
+                : undefined,
             );
 
             // Note: In JSON mode, subagent messages are automatically added to the main

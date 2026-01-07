@@ -21,6 +21,7 @@ import { CompletionMenu } from '../layout/CompletionMenu.js';
 import type { CompletionItem } from '../../../types/completionItemTypes.js';
 import { getApprovalModeInfoFromString } from '../../../types/acpTypes.js';
 import type { ApprovalModeValue } from '../../../types/approvalModeValueTypes.js';
+import { ContextIndicator } from './ContextIndicator.js';
 
 interface InputFormProps {
   inputText: string;
@@ -36,6 +37,11 @@ interface InputFormProps {
   activeSelection: { startLine: number; endLine: number } | null;
   // Whether to auto-load the active editor selection/path into context
   skipAutoActiveContext: boolean;
+  contextUsage: {
+    percentLeft: number;
+    usedTokens: number;
+    tokenLimit: number;
+  } | null;
   onInputChange: (text: string) => void;
   onCompositionStart: () => void;
   onCompositionEnd: () => void;
@@ -96,6 +102,7 @@ export const InputForm: React.FC<InputFormProps> = ({
   activeFileName,
   activeSelection,
   skipAutoActiveContext,
+  contextUsage,
   onInputChange,
   onCompositionStart,
   onCompositionEnd,
@@ -239,6 +246,9 @@ export const InputForm: React.FC<InputFormProps> = ({
 
             {/* Spacer */}
             <div className="flex-1 min-w-0" />
+
+            {/* Context usage indicator */}
+            <ContextIndicator contextUsage={contextUsage} />
 
             {/* @yiliang114. closed temporarily */}
             {/* Thinking button */}

@@ -61,11 +61,7 @@
 /* Truncated content styling */
 .execute-toolcall-row-content:not(.execute-toolcall-full) {
   max-height: 60px;
-  mask-image: linear-gradient(
-    to bottom,
-    var(--app-primary-background) 40px,
-    transparent 60px
-  );
+  mask-image: linear-gradient(to bottom, var(--app-primary-background) 40px, transparent 60px);
   overflow: hidden;
 }
 
@@ -87,7 +83,6 @@
 
 /* Output content with subtle styling */
 .execute-toolcall-output-subtle {
-  background-color: var(--app-code-background);
   white-space: pre;
   overflow-x: auto;
   max-width: 100%;
@@ -99,4 +94,10 @@
 /* Error content styling */
 .execute-toolcall-error-content {
   color: #c74e39;
+}
+
+/* Row with copy button */
+.execute-toolcall-row-with-copy {
+  position: relative;
+  grid-template-columns: max-content 1fr max-content;
 }

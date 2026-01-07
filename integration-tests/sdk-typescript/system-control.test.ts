@@ -314,4 +314,88 @@ describe('System Control (E2E)', () => {
       );
     });
   });
+
+  describe('supportedCommands API', () => {
+    it('should return list of supported slash commands', async () => {
+      const sessionId = crypto.randomUUID();
+      const generator = (async function* () {
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: { role: 'user', content: 'Hello' },
+          parent_tool_use_id: null,
+        } as SDKUserMessage;
+      })();
+
+      const q = query({
+        prompt: generator,
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          model: 'qwen3-max',
+          debug: false,
+        },
+      });
+
+      try {
+        const result = await q.supportedCommands();
+        // Start consuming messages to trigger initialization
+        const messageConsumer = (async () => {
+          try {
+            for await (const _message of q) {
+              // Just consume messages
+            }
+          } catch (error) {
+            // Ignore errors from query being closed
+            if (error instanceof Error && error.message !== 'Query is closed') {
+              throw error;
+            }
+          }
+        })();
+
+        // Verify result structure
+        expect(result).toBeDefined();
+        expect(result).toHaveProperty('commands');
+        expect(Array.isArray(result?.['commands'])).toBe(true);
+
+        const commands = result?.['commands'] as string[];
+
+        // Verify default allowed built-in commands are present
+        expect(commands).toContain('init');
+        expect(commands).toContain('summary');
+        expect(commands).toContain('compress');
+
+        // Verify commands are sorted
+        const sortedCommands = [...commands].sort();
+        expect(commands).toEqual(sortedCommands);
+
+        // Verify all commands are strings
+        commands.forEach((cmd) => {
+          expect(typeof cmd).toBe('string');
+          expect(cmd.length).toBeGreaterThan(0);
+        });
+
+        await q.close();
+        await messageConsumer;
+      } catch (error) {
+        await q.close();
+        throw error;
+      }
+    });
+
+    it('should throw error when supportedCommands is called on closed query', async () => {
+      const q = query({
+        prompt: 'Hello',
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          model: 'qwen3-max',
+        },
+      });
+
+      await q.close();
+
+      await expect(q.supportedCommands()).rejects.toThrow('Query is closed');
+    });
+  });
 });

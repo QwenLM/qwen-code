@@ -58,8 +58,6 @@ export class DefaultOpenAICompatibleProvider
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      topP: 0.95,
-    };
+    return {};
   }
 }

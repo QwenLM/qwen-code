@@ -88,6 +88,9 @@ export default {
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
     '查看或更改工具使用的审批模式',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    '无效的审批模式 "{{arg}}"。有效模式：{{modes}}',
+  'Approval mode set to "{{mode}}"': '审批模式已设置为 "{{mode}}"',
   'View or change the language setting': '查看或更改语言设置',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
@@ -101,7 +104,7 @@ export default {
   'Theme "{{themeName}}" not found.': '未找到主题 "{{themeName}}"。',
   'Theme "{{themeName}}" not found in selected scope.':
     '在所选作用域中未找到主题 "{{themeName}}"。',
-  'clear the screen and conversation history': '清屏并清除对话历史',
+  'Clear conversation history and free up context': '清除对话历史并释放上下文',
   'Compresses the context by replacing it with a summary.':
     '通过用摘要替换来压缩上下文',
   'open full Qwen Code documentation in your browser':
@@ -249,6 +252,8 @@ export default {
   ', Tab to change focus': '，Tab 切换焦点',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必须重启 Qwen Code。按 r 退出并立即应用更改。',
+  'The command "/{{command}}" is not supported in non-interactive mode.':
+    '不支持在非交互模式下使用命令 "/{{command}}"。',
   // ============================================================================
   // Settings Labels
   // ============================================================================
@@ -560,6 +565,12 @@ export default {
   'No conversation found to summarize.': '未找到要总结的对话',
   'Failed to generate project context summary: {{error}}':
     '生成项目上下文摘要失败：{{error}}',
+  'Saved project summary to {{filePathForDisplay}}.':
+    '项目摘要已保存到 {{filePathForDisplay}}',
+  'Saving project summary...': '正在保存项目摘要...',
+  'Generating project summary...': '正在生成项目摘要...',
+  'Failed to generate summary - no text content received from LLM response':
+    '生成摘要失败 - 未从 LLM 响应中接收到文本内容',
 
   // ============================================================================
   // Commands - Model
@@ -573,8 +584,9 @@ export default {
   // ============================================================================
   // Commands - Clear
   // ============================================================================
-  'Clearing terminal and resetting chat.': '正在清屏并重置聊天',
-  'Clearing terminal.': '正在清屏',
+  'Starting a new session, resetting chat, and clearing terminal.':
+    '正在开始新会话，重置聊天并清屏。',
+  'Starting a new session and clearing.': '正在开始新会话并清屏。',
 
   // ============================================================================
   // Commands - Compress
@@ -880,165 +892,39 @@ export default {
   // ============================================================================
   'Waiting for user confirmation...': '等待用户确认...',
   '(esc to cancel, {{time}})': '（按 esc 取消，{{time}}）',
-  "I'm Feeling Lucky": '我感觉很幸运',
-  'Shipping awesomeness... ': '正在运送精彩内容... ',
-  'Painting the serifs back on...': '正在重新绘制衬线...',
-  'Navigating the slime mold...': '正在导航粘液霉菌...',
-  'Consulting the digital spirits...': '正在咨询数字精灵...',
-  'Reticulating splines...': '正在网格化样条曲线...',
-  'Warming up the AI hamsters...': '正在预热 AI 仓鼠...',
-  'Asking the magic conch shell...': '正在询问魔法海螺壳...',
-  'Generating witty retort...': '正在生成机智的反驳...',
-  'Polishing the algorithms...': '正在打磨算法...',
-  "Don't rush perfection (or my code)...": '不要急于追求完美（或我的代码）...',
-  'Brewing fresh bytes...': '正在酿造新鲜字节...',
-  'Counting electrons...': '正在计算电子...',
-  'Engaging cognitive processors...': '正在启动认知处理器...',
-  'Checking for syntax errors in the universe...':
-    '正在检查宇宙中的语法错误...',
-  'One moment, optimizing humor...': '稍等片刻，正在优化幽默感...',
-  'Shuffling punchlines...': '正在洗牌笑点...',
-  'Untangling neural nets...': '正在解开神经网络...',
-  'Compiling brilliance...': '正在编译智慧...',
-  'Loading wit.exe...': '正在加载 wit.exe...',
-  'Summoning the cloud of wisdom...': '正在召唤智慧云...',
-  'Preparing a witty response...': '正在准备机智的回复...',
-  "Just a sec, I'm debugging reality...": '稍等片刻，我正在调试现实...',
-  'Confuzzling the options...': '正在混淆选项...',
-  'Tuning the cosmic frequencies...': '正在调谐宇宙频率...',
-  'Crafting a response worthy of your patience...':
-    '正在制作值得您耐心等待的回复...',
-  'Compiling the 1s and 0s...': '正在编译 1 和 0...',
-  'Resolving dependencies... and existential crises...':
-    '正在解决依赖关系...和存在主义危机...',
-  'Defragmenting memories... both RAM and personal...':
-    '正在整理记忆碎片...包括 RAM 和个人记忆...',
-  'Rebooting the humor module...': '正在重启幽默模块...',
-  'Caching the essentials (mostly cat memes)...':
-    '正在缓存必需品（主要是猫咪表情包）...',
-  'Optimizing for ludicrous speed': '正在优化到荒谬的速度',
-  "Swapping bits... don't tell the bytes...": '正在交换位...不要告诉字节...',
-  'Garbage collecting... be right back...': '正在垃圾回收...马上回来...',
-  'Assembling the interwebs...': '正在组装互联网...',
-  'Converting coffee into code...': '正在将咖啡转换为代码...',
-  'Updating the syntax for reality...': '正在更新现实的语法...',
-  'Rewiring the synapses...': '正在重新连接突触...',
-  'Looking for a misplaced semicolon...': '正在寻找放错位置的分号...',
-  "Greasin' the cogs of the machine...": '正在给机器的齿轮上油...',
-  'Pre-heating the servers...': '正在预热服务器...',
-  'Calibrating the flux capacitor...': '正在校准通量电容器...',
-  'Engaging the improbability drive...': '正在启动不可能性驱动器...',
-  'Channeling the Force...': '正在引导原力...',
-  'Aligning the stars for optimal response...': '正在对齐星星以获得最佳回复...',
-  'So say we all...': '我们都说...',
-  'Loading the next great idea...': '正在加载下一个伟大的想法...',
-  "Just a moment, I'm in the zone...": '稍等片刻，我正进入状态...',
-  'Preparing to dazzle you with brilliance...': '正在准备用智慧让您眼花缭乱...',
-  "Just a tick, I'm polishing my wit...": '稍等片刻，我正在打磨我的智慧...',
-  "Hold tight, I'm crafting a masterpiece...": '请稍等，我正在制作杰作...',
-  "Just a jiffy, I'm debugging the universe...": '稍等片刻，我正在调试宇宙...',
-  "Just a moment, I'm aligning the pixels...": '稍等片刻，我正在对齐像素...',
-  "Just a sec, I'm optimizing the humor...": '稍等片刻，我正在优化幽默感...',
-  "Just a moment, I'm tuning the algorithms...": '稍等片刻，我正在调整算法...',
-  'Warp speed engaged...': '曲速已启动...',
-  'Mining for more Dilithium crystals...': '正在挖掘更多二锂晶体...',
-  "Don't panic...": '不要惊慌...',
-  'Following the white rabbit...': '正在跟随白兔...',
-  'The truth is in here... somewhere...': '真相在这里...某个地方...',
-  'Blowing on the cartridge...': '正在吹卡带...',
-  'Loading... Do a barrel roll!': '正在加载...做个桶滚！',
-  'Waiting for the respawn...': '等待重生...',
-  'Finishing the Kessel Run in less than 12 parsecs...':
-    '正在以不到 12 秒差距完成凯塞尔航线...',
-  "The cake is not a lie, it's just still loading...":
-    '蛋糕不是谎言，只是还在加载...',
-  'Fiddling with the character creation screen...': '正在摆弄角色创建界面...',
-  "Just a moment, I'm finding the right meme...":
-    '稍等片刻，我正在寻找合适的表情包...',
-  "Pressing 'A' to continue...": "按 'A' 继续...",
-  'Herding digital cats...': '正在放牧数字猫...',
-  'Polishing the pixels...': '正在打磨像素...',
-  'Finding a suitable loading screen pun...': '正在寻找合适的加载屏幕双关语...',
-  'Distracting you with this witty phrase...':
-    '正在用这个机智的短语分散您的注意力...',
-  'Almost there... probably...': '快到了...可能...',
-  'Our hamsters are working as fast as they can...':
-    '我们的仓鼠正在尽可能快地工作...',
-  'Giving Cloudy a pat on the head...': '正在拍拍 Cloudy 的头...',
-  'Petting the cat...': '正在抚摸猫咪...',
-  'Rickrolling my boss...': '正在 Rickroll 我的老板...',
-  'Never gonna give you up, never gonna let you down...':
-    '永远不会放弃你，永远不会让你失望...',
-  'Slapping the bass...': '正在拍打低音...',
-  'Tasting the snozberries...': '正在品尝 snozberries...',
-  "I'm going the distance, I'm going for speed...":
-    '我要走得更远，我要追求速度...',
-  'Is this the real life? Is this just fantasy?...':
-    '这是真实的生活吗？还是只是幻想？...',
-  "I've got a good feeling about this...": '我对这个感觉很好...',
-  'Poking the bear...': '正在戳熊...',
-  'Doing research on the latest memes...': '正在研究最新的表情包...',
-  'Figuring out how to make this more witty...': '正在想办法让这更有趣...',
-  'Hmmm... let me think...': '嗯...让我想想...',
-  'What do you call a fish with no eyes? A fsh...':
-    '没有眼睛的鱼叫什么？一条鱼...',
-  'Why did the computer go to therapy? It had too many bytes...':
-    '为什么电脑去看心理医生？因为它有太多字节...',
-  "Why don't programmers like nature? It has too many bugs...":
-    '为什么程序员不喜欢大自然？因为虫子太多了...',
-  'Why do programmers prefer dark mode? Because light attracts bugs...':
-    '为什么程序员喜欢暗色模式？因为光会吸引虫子...',
-  'Why did the developer go broke? Because they used up all their cache...':
-    '为什么开发者破产了？因为他们用完了所有缓存...',
-  "What can you do with a broken pencil? Nothing, it's pointless...":
-    '你能用断了的铅笔做什么？什么都不能，因为它没有笔尖...',
-  'Applying percussive maintenance...': '正在应用敲击维护...',
-  'Searching for the correct USB orientation...': '正在寻找正确的 USB 方向...',
-  'Ensuring the magic smoke stays inside the wires...':
-    '确保魔法烟雾留在电线内...',
-  'Rewriting in Rust for no particular reason...':
-    '正在用 Rust 重写，没有特别的原因...',
-  'Trying to exit Vim...': '正在尝试退出 Vim...',
-  'Spinning up the hamster wheel...': '正在启动仓鼠轮...',
-  "That's not a bug, it's an undocumented feature...":
-    '这不是一个错误，这是一个未记录的功能...',
-  'Engage.': '启动。',
-  "I'll be back... with an answer.": '我会回来的...带着答案。',
-  'My other process is a TARDIS...': '我的另一个进程是 TARDIS...',
-  'Communing with the machine spirit...': '正在与机器精神交流...',
-  'Letting the thoughts marinate...': '让想法慢慢酝酿...',
-  'Just remembered where I put my keys...': '刚刚想起我把钥匙放在哪里了...',
-  'Pondering the orb...': '正在思考球体...',
-  "I've seen things you people wouldn't believe... like a user who reads loading messages.":
-    '我见过你们不会相信的事情...比如一个阅读加载消息的用户。',
-  'Initiating thoughtful gaze...': '正在启动深思凝视...',
-  "What's a computer's favorite snack? Microchips.":
-    '电脑最喜欢的零食是什么？微芯片。',
-  "Why do Java developers wear glasses? Because they don't C#.":
-    '为什么 Java 开发者戴眼镜？因为他们不会 C#。',
-  'Charging the laser... pew pew!': '正在给激光充电...砰砰！',
-  'Dividing by zero... just kidding!': '除以零...只是开玩笑！',
-  'Looking for an adult superviso... I mean, processing.':
-    '正在寻找成人监督...我是说，处理中。',
-  'Making it go beep boop.': '让它发出哔哔声。',
-  'Buffering... because even AIs need a moment.':
-    '正在缓冲...因为即使是 AI 也需要片刻。',
-  'Entangling quantum particles for a faster response...':
-    '正在纠缠量子粒子以获得更快的回复...',
-  'Polishing the chrome... on the algorithms.': '正在打磨铬...在算法上。',
-  'Are you not entertained? (Working on it!)': '你不觉得有趣吗？（正在努力！）',
-  'Summoning the code gremlins... to help, of course.':
-    '正在召唤代码小精灵...当然是来帮忙的。',
-  'Just waiting for the dial-up tone to finish...': '只是等待拨号音结束...',
-  'Recalibrating the humor-o-meter.': '正在重新校准幽默计。',
-  'My other loading screen is even funnier.': '我的另一个加载屏幕更有趣。',
-  "Pretty sure there's a cat walking on the keyboard somewhere...":
-    '很确定有只猫在某个地方键盘上走...',
-  'Enhancing... Enhancing... Still loading.':
-    '正在增强...正在增强...仍在加载。',
-  "It's not a bug, it's a feature... of this loading screen.":
-    '这不是一个错误，这是一个功能...这个加载屏幕的功能。',
-  'Have you tried turning it off and on again? (The loading screen, not me.)':
-    '你试过把它关掉再打开吗？（加载屏幕，不是我。）',
-  'Constructing additional pylons...': '正在建造额外的能量塔...',
+  WITTY_LOADING_PHRASES: [
+    // --- 职场搬砖系列 ---
+    '正在努力搬砖，请稍候...',
+    '老板在身后，快加载啊！',
+    '头发掉光前，一定能加载完...',
+    '服务器正在深呼吸，准备放大招...',
+    '正在向服务器投喂咖啡...',
+
+    // --- 大厂黑话系列 ---
+    '正在赋能全链路，寻找关键抓手...',
+    '正在降本增效，优化加载路径...',
+    '正在打破部门壁垒，沉淀方法论...',
+    '正在拥抱变化，迭代核心价值...',
+    '正在对齐颗粒度，打磨底层逻辑...',
+    '大力出奇迹，正在强行加载...',
+
+    // --- 程序员自嘲系列 ---
+    '只要我不写代码，代码就没有 Bug...',
+    '正在把 Bug 转化为 Feature...',
+    '只要我不尴尬，Bug 就追不上我...',
+    '正在试图理解去年的自己写了什么...',
+    '正在猿力觉醒中，请耐心等待...',
+
+    // --- 合作愉快系列 ---
+    '正在询问产品经理：这需求是真的吗？',
+    '正在给产品经理画饼，请稍等...',
+
+    // --- 温暖治愈系列 ---
+    '每一行代码，都在努力让世界变得更好一点点...',
+    '每一个伟大的想法，都值得这份耐心的等待...',
+    '别急，美好的事物总是需要一点时间去酝酿...',
+    '愿你的代码永无 Bug，愿你的梦想终将成真...',
+    '哪怕只有 0.1% 的进度，也是在向目标靠近...',
+    '加载的是字节，承载的是对技术的热爱...',
+  ],
 };

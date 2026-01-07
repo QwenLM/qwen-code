@@ -11,9 +11,13 @@ import type {
   PermissionOption,
   ToolCall as PermissionToolCall,
 } from '../components/PermissionDrawer/PermissionRequest.js';
-import type { ToolCallUpdate } from '../../types/chatTypes.js';
+import type {
+  ToolCallUpdate,
+  UsageStatsPayload,
+} from '../../types/chatTypes.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
+import type { ModelInfo } from '../../types/acpTypes.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -119,6 +123,10 @@ interface UseWebViewMessagesProps {
   setEditMode?: (mode: ApprovalModeValue) => void;
   // Authentication state setter
   setIsAuthenticated?: (authenticated: boolean | null) => void;
+  // Usage stats setter
+  setUsageStats?: (stats: UsageStatsPayload | undefined) => void;
+  // Model info setter
+  setModelInfo?: (info: ModelInfo | null) => void;
 }
 
 /**
@@ -137,12 +145,15 @@ export const useWebViewMessages = ({
   setInputText,
   setEditMode,
   setIsAuthenticated,
+  setUsageStats,
+  setModelInfo,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
   // Track active long-running tool calls (execute/bash/command) so we can
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
+  const modelInfoRef = useRef<ModelInfo | null>(null);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -153,6 +164,8 @@ export const useWebViewMessages = ({
     setPlanEntries,
     handlePermissionRequest,
     setIsAuthenticated,
+    setUsageStats,
+    setModelInfo,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -198,6 +211,8 @@ export const useWebViewMessages = ({
       setPlanEntries,
       handlePermissionRequest,
       setIsAuthenticated,
+      setUsageStats,
+      setModelInfo,
     };
   });
 
@@ -226,6 +241,42 @@ export const useWebViewMessages = ({
             setEditMode?.(modeId);
           } catch (_error) {
             // Ignore error when setting mode
+          }
+          break;
+        }
+
+        case 'usageStats': {
+          const stats = message.data as UsageStatsPayload | undefined;
+          handlers.setUsageStats?.(stats);
+          break;
+        }
+
+        case 'modelInfo': {
+          const info = message.data as Partial<ModelInfo> | undefined;
+          if (
+            info &&
+            typeof info.name === 'string' &&
+            info.name.trim().length > 0
+          ) {
+            const modelId =
+              typeof info.modelId === 'string' && info.modelId.trim().length > 0
+                ? info.modelId.trim()
+                : info.name.trim();
+            const normalized: ModelInfo = {
+              modelId,
+              name: info.name.trim(),
+              ...(typeof info.description !== 'undefined'
+                ? { description: info.description ?? null }
+                : {}),
+              ...(typeof info._meta !== 'undefined'
+                ? { _meta: info._meta }
+                : {}),
+            };
+            modelInfoRef.current = normalized;
+            handlers.setModelInfo?.(normalized);
+          } else {
+            modelInfoRef.current = null;
+            handlers.setModelInfo?.(null);
           }
           break;
         }

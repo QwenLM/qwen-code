@@ -118,6 +118,20 @@ export class WebViewProvider {
       });
     });
 
+    this.agentManager.onUsageUpdate((stats) => {
+      this.sendMessageToWebView({
+        type: 'usageStats',
+        data: stats,
+      });
+    });
+
+    this.agentManager.onModelInfo((info) => {
+      this.sendMessageToWebView({
+        type: 'modelInfo',
+        data: info,
+      });
+    });
+
     // Setup end-turn handler from ACP stopReason notifications
     this.agentManager.onEndTurn((reason) => {
       // Ensure WebView exits streaming state even if no explicit streamEnd was emitted elsewhere

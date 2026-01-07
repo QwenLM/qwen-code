@@ -520,6 +520,13 @@ export const useSlashCommandProcessor = (
                     true,
                   );
                 }
+                case 'stream_messages': {
+                  // stream_messages is only used in ACP/Zed integration mode
+                  // and should not be returned in interactive UI mode
+                  throw new Error(
+                    'stream_messages result type is not supported in interactive mode',
+                  );
+                }
                 default: {
                   const unhandled: never = result;
                   throw new Error(

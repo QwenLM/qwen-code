@@ -3,10 +3,10 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Execute tool call styles - Enhanced styling with semantic class names
+ * Bash tool call styles - Enhanced styling with semantic class names
  */
 
-/* Root container for execute tool call output */
+/* Root container for bash tool call output */
 .bash-toolcall-card {
   border: 0.5px solid var(--app-input-border);
   border-radius: 5px;
@@ -99,4 +99,10 @@
 /* Error content styling */
 .bash-toolcall-error-content {
   color: #c74e39;
+}
+
+/* Row with copy button */
+.bash-toolcall-row-with-copy {
+  position: relative;
+  grid-template-columns: max-content 1fr max-content;
 }

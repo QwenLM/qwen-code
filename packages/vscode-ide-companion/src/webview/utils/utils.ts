@@ -9,8 +9,102 @@
 import type {
   ToolCallContent,
   GroupedContent,
+  ToolCallData,
   ToolCallStatus,
-} from './types.js';
+} from '../components/messages/toolcalls/shared/types.js';
+
+/**
+ * Extract output from command execution result text
+ * Handles both JSON format and structured text format
+ *
+ * Example structured text:
+ * ```
+ * Command: lsof -i :5173
+ * Directory: (root)
+ * Output: COMMAND   PID    USER...
+ * Error: (none)
+ * Exit Code: 0
+ * ```
+ */
+export const extractCommandOutput = (text: string): string => {
+  // First try: Parse as JSON and extract output field
+  try {
+    const parsed = JSON.parse(text) as { output?: unknown; Output?: unknown };
+    const output = parsed.output ?? parsed.Output;
+    if (output !== undefined && output !== null) {
+      return typeof output === 'string'
+        ? output
+        : JSON.stringify(output, null, 2);
+    }
+  } catch (_error) {
+    // Not JSON, continue with text parsing
+  }
+
+  // Second try: Extract from structured text format
+  // Look for "Output: " followed by content until "Error: " or end of string
+  // Only match if there's actual content after "Output:" (not just whitespace)
+  // Avoid treating the next line (e.g. "Error: ...") as output when the Output line is empty.
+  // Intentionally do not allow `\s*` here since it would consume newlines.
+  const outputMatch = text.match(/Output:[ \t]*(.+?)(?=\nError:|$)/i);
+  if (outputMatch && outputMatch[1]) {
+    const output = outputMatch[1].trim();
+    // Only return if there's meaningful content (not just "(none)" or empty)
+    if (output && output !== '(none)' && output.length > 0) {
+      return output;
+    }
+  }
+
+  // Third try: Check if text starts with structured format (Command:, Directory:, etc.)
+  // If so, try to extract everything between first line and "Error:" or "Exit Code:"
+  if (text.match(/^Command:/)) {
+    const lines = text.split('\n');
+    const outputLines: string[] = [];
+    let inOutput = false;
+
+    for (const line of lines) {
+      // Stop at metadata lines
+      if (
+        line.startsWith('Error:') ||
+        line.startsWith('Exit Code:') ||
+        line.startsWith('Signal:') ||
+        line.startsWith('Background PIDs:') ||
+        line.startsWith('Process Group PGID:')
+      ) {
+        break;
+      }
+      // Skip header lines
+      if (line.startsWith('Command:') || line.startsWith('Directory:')) {
+        continue;
+      }
+      // Start collecting after "Output:" label
+      if (line.startsWith('Output:')) {
+        inOutput = true;
+        const content = line.substring('Output:'.length).trim();
+        if (content && content !== '(none)') {
+          outputLines.push(content);
+        }
+        continue;
+      }
+      // Collect output lines
+      if (
+        inOutput ||
+        (!line.startsWith('Command:') && !line.startsWith('Directory:'))
+      ) {
+        outputLines.push(line);
+      }
+    }
+
+    if (outputLines.length > 0) {
+      const result = outputLines.join('\n').trim();
+      if (result && result !== '(none)') {
+        return result;
+      }
+    }
+  }
+
+  // Fallback: Return original text
+  return text;
+};
 
 /**
  * Format any value to a string for display
@@ -20,13 +114,8 @@ export const formatValue = (value: unknown): string => {
     return '';
   }
   if (typeof value === 'string') {
-    // TODO: Trying to take out the Output part from the string
-    try {
-      value = (JSON.parse(value) as { output?: unknown }).output ?? value;
-    } catch (_error) {
-      // ignore JSON parse errors
-    }
-    return value as string;
+    // Extract command output from structured text
+    return extractCommandOutput(value);
   }
   // Handle Error objects specially
   if (value instanceof Error) {
@@ -72,9 +161,7 @@ export const shouldShowToolCall = (kind: string): boolean =>
  * Check if a tool call has actual output to display
  * Returns false for tool calls that completed successfully but have no visible output
  */
-export const hasToolCallOutput = (
-  toolCall: import('./types.js').ToolCallData,
-): boolean => {
+export const hasToolCallOutput = (toolCall: ToolCallData): boolean => {
   // Always show failed tool calls (even without content)
   if (toolCall.status === 'failed') {
     return true;

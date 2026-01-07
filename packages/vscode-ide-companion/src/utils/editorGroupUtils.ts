@@ -54,10 +54,39 @@ export function findLeftGroupOfChatWebview(): vscode.ViewColumn | undefined {
 }
 
 /**
+ * Wait for a condition to become true, driven by tab-group change events.
+ * Falls back to a timeout to avoid hanging forever.
+ */
+function waitForTabGroupsCondition(
+  condition: () => boolean,
+  timeout: number = 2000,
+): Promise<boolean> {
+  if (condition()) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const subscription = vscode.window.tabGroups.onDidChangeTabGroups(() => {
+      if (!condition()) {
+        return;
+      }
+      clearTimeout(timeoutHandle);
+      subscription.dispose();
+      resolve(true);
+    });
+
+    const timeoutHandle = setTimeout(() => {
+      subscription.dispose();
+      resolve(false);
+    }, timeout);
+  });
+}
+
+/**
  * Ensure there is an editor group directly to the left of the Qwen chat webview.
  * - If one exists, return its ViewColumn.
  * - If none exists, focus the chat panel and create a new group on its left,
- *   then return the new group's ViewColumn (which equals the chat's previous column).
+ *   then return the new group's ViewColumn.
  * - If the chat webview cannot be located, returns undefined.
  */
 export async function ensureLeftGroupOfChatWebview(): Promise<
@@ -87,7 +116,7 @@ export async function ensureLeftGroupOfChatWebview(): Promise<
     return undefined;
   }
 
-  const previousChatColumn = webviewGroup.viewColumn;
+  const initialGroupCount = vscode.window.tabGroups.all.length;
 
   // Make the chat group active by revealing the panel
   try {
@@ -104,6 +133,22 @@ export async function ensureLeftGroupOfChatWebview(): Promise<
     return undefined;
   }
 
+  // Wait for the new group to actually be created (check that group count increased)
+  const groupCreated = await waitForTabGroupsCondition(
+    () => vscode.window.tabGroups.all.length > initialGroupCount,
+    1000, // 1 second timeout
+  );
+
+  if (!groupCreated) {
+    // Fallback if group creation didn't complete in time
+    return vscode.ViewColumn.One;
+  }
+
+  // After creating a new group to the left, the new group takes ViewColumn.One
+  // and all existing groups shift right. So the new left group is always ViewColumn.One.
+  // However, to be safe, let's query for it again.
+  const newLeftGroup = findLeftGroupOfChatWebview();
+
   // Restore focus to chat (optional), so we don't disturb user focus
   try {
     await vscode.commands.executeCommand(openChatCommand);
@@ -111,6 +156,7 @@ export async function ensureLeftGroupOfChatWebview(): Promise<
     // Ignore
   }
 
-  // The new left group's column equals the chat's previous column
-  return previousChatColumn;
+  // If we successfully found the new left group, return it
+  // Otherwise, fallback to ViewColumn.One (the newly created group should be first)
+  return newLeftGroup ?? vscode.ViewColumn.One;
 }

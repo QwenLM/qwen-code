@@ -13,6 +13,16 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 vi.mock('../../i18n/index.js', () => ({
   setLanguageAsync: vi.fn().mockResolvedValue(undefined),
   getCurrentLanguage: vi.fn().mockReturnValue('en'),
+  detectSystemLanguage: vi.fn().mockReturnValue('en'),
+  getLanguageNameFromLocale: vi.fn((locale: string) => {
+    const map: Record<string, string> = {
+      zh: 'Chinese',
+      en: 'English',
+      ru: 'Russian',
+      de: 'German',
+    };
+    return map[locale] || 'English';
+  }),
   t: vi.fn((key: string) => key),
 }));
 
@@ -61,7 +71,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 // Import modules after mocking
 import * as i18n from '../../i18n/index.js';
-import { languageCommand } from './languageCommand.js';
+import {
+  languageCommand,
+  initializeLlmOutputLanguage,
+} from './languageCommand.js';
 
 describe('languageCommand', () => {
   let mockContext: CommandContext;
@@ -184,6 +197,39 @@ describe('languageCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('Chinese'),
+      });
+    });
+
+    it('should parse Unicode LLM output language from marker', async () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        [
+          '# ⚠️ CRITICAL: 中文 Output Language Rule - HIGHEST PRIORITY ⚠️',
+          '<!-- qwen-code:llm-output-language: 中文 -->',
+          '',
+          'Some other content...',
+        ].join('\n'),
+      );
+
+      vi.mocked(i18n.t).mockImplementation(
+        (key: string, params?: Record<string, string>) => {
+          if (params && key.includes('{{lang}}')) {
+            return key.replace('{{lang}}', params['lang'] || '');
+          }
+          return key;
+        },
+      );
+
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const result = await languageCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('中文'),
       });
     });
   });
@@ -400,6 +446,34 @@ describe('languageCommand', () => {
       });
     });
 
+    it('should normalize locale code "ru" to "Russian"', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'output ru');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Russian'),
+        'utf-8',
+      );
+    });
+
+    it('should normalize locale code "de" to "German"', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'output de');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('German'),
+        'utf-8',
+      );
+    });
+
     it('should handle file write errors gracefully', async () => {
       vi.mocked(fs.writeFileSync).mockImplementation(() => {
         throw new Error('Permission denied');
@@ -481,6 +555,8 @@ describe('languageCommand', () => {
       const nestedNames = uiSubcommand?.subCommands?.map((c) => c.name);
       expect(nestedNames).toContain('zh-CN');
       expect(nestedNames).toContain('en-US');
+      expect(nestedNames).toContain('ru-RU');
+      expect(nestedNames).toContain('de-DE');
     });
 
     it('should have action that sets language', async () => {
@@ -542,16 +618,9 @@ describe('languageCommand', () => {
     const enUSSubcommand = uiSubcommand?.subCommands?.find(
       (c) => c.name === 'en-US',
     );
-
-    it('zh-CN should have aliases', () => {
-      expect(zhCNSubcommand?.altNames).toContain('zh');
-      expect(zhCNSubcommand?.altNames).toContain('chinese');
-    });
-
-    it('en-US should have aliases', () => {
-      expect(enUSSubcommand?.altNames).toContain('en');
-      expect(enUSSubcommand?.altNames).toContain('english');
-    });
+    const deDESubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'de-DE',
+    );
 
     it('zh-CN action should set Chinese', async () => {
       if (!zhCNSubcommand?.action) {
@@ -583,6 +652,21 @@ describe('languageCommand', () => {
       });
     });
 
+    it('de-DE action should set German', async () => {
+      if (!deDESubcommand?.action) {
+        throw new Error('de-DE subcommand must have an action.');
+      }
+
+      const result = await deDESubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('de');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
     it('should reject extra arguments', async () => {
       if (!zhCNSubcommand?.action) {
         throw new Error('zh-CN subcommand must have an action.');
@@ -595,6 +679,76 @@ describe('languageCommand', () => {
         messageType: 'error',
         content: expect.stringContaining('do not accept additional arguments'),
       });
+    });
+  });
+
+  describe('initializeLlmOutputLanguage', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
+      vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
+    });
+
+    it('should create file when it does not exist', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('en');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.mkdirSync).toHaveBeenCalled();
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('English'),
+        'utf-8',
+      );
+    });
+
+    it('should NOT overwrite existing file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should detect Chinese locale and create Chinese rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Chinese'),
+        'utf-8',
+      );
+    });
+
+    it('should detect Russian locale and create Russian rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('ru');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Russian'),
+        'utf-8',
+      );
+    });
+
+    it('should detect German locale and create German rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('de');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('German'),
+        'utf-8',
+      );
     });
   });
 });

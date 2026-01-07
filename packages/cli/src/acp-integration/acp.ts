@@ -99,6 +99,14 @@ export class AgentSideConnection implements Client {
   }
 
   /**
+   * Sends a custom notification to the client.
+   * Used for extension-specific notifications that are not part of the core ACP protocol.
+   */
+  async sendCustomNotification<T>(method: string, params: T): Promise<void> {
+    return await this.#connection.sendNotification(method, params);
+  }
+
+  /**
    * Request permission before running a tool
    *
    * The agent specifies a series of permission options with different granularity,
@@ -374,6 +382,7 @@ export interface Client {
   ): Promise<schema.RequestPermissionResponse>;
   sessionUpdate(params: schema.SessionNotification): Promise<void>;
   authenticateUpdate(params: schema.AuthenticateUpdate): Promise<void>;
+  sendCustomNotification<T>(method: string, params: T): Promise<void>;
   writeTextFile(
     params: schema.WriteTextFileRequest,
   ): Promise<schema.WriteTextFileResponse>;

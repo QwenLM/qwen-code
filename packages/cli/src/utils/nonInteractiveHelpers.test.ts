@@ -35,22 +35,33 @@ import {
 } from './nonInteractiveHelpers.js';
 
 // Mock dependencies
-vi.mock('../services/CommandService.js', () => ({
-  CommandService: {
-    create: vi.fn().mockResolvedValue({
-      getCommands: vi
-        .fn()
-        .mockReturnValue([
-          { name: 'help' },
-          { name: 'commit' },
-          { name: 'memory' },
-        ]),
-    }),
-  },
-}));
+vi.mock('../nonInteractiveCliCommands.js', () => ({
+  getAvailableCommands: vi
+    .fn()
+    .mockImplementation(
+      async (
+        _config: unknown,
+        _signal: AbortSignal,
+        allowedBuiltinCommandNames?: string[],
+      ) => {
+        const allowedSet = new Set(allowedBuiltinCommandNames ?? []);
+        const allCommands = [
+          { name: 'help', kind: 'built-in' },
+          { name: 'commit', kind: 'file' },
+          { name: 'memory', kind: 'built-in' },
+          { name: 'init', kind: 'built-in' },
+          { name: 'summary', kind: 'built-in' },
+          { name: 'compress', kind: 'built-in' },
+        ];
 
-vi.mock('../services/BuiltinCommandLoader.js', () => ({
-  BuiltinCommandLoader: vi.fn().mockImplementation(() => ({})),
+        // Filter commands: always include file commands, only include allowed built-in commands
+        return allCommands.filter(
+          (cmd) =>
+            cmd.kind === 'file' ||
+            (cmd.kind === 'built-in' && allowedSet.has(cmd.name)),
+        );
+      },
+    ),
 }));
 
 vi.mock('../ui/utils/computeStats.js', () => ({
@@ -511,10 +522,12 @@ describe('buildSystemMessage', () => {
   });
 
   it('should build system message with all fields', async () => {
+    const allowedBuiltinCommands = ['init', 'summary', 'compress'];
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
+      allowedBuiltinCommands,
     );
 
     expect(result).toEqual({
@@ -530,7 +543,7 @@ describe('buildSystemMessage', () => {
       ],
       model: 'test-model',
       permission_mode: 'auto',
-      slash_commands: ['commit', 'help', 'memory'],
+      slash_commands: ['commit', 'compress', 'init', 'summary'],
       qwen_code_version: '1.0.0',
       agents: [],
     });
@@ -546,6 +559,7 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
+      ['init', 'summary'],
     );
 
     expect(result.tools).toEqual([]);
@@ -561,6 +575,7 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
+      ['init', 'summary'],
     );
 
     expect(result.mcp_servers).toEqual([]);
@@ -576,9 +591,36 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
+      ['init', 'summary'],
     );
 
     expect(result.qwen_code_version).toBe('unknown');
+  });
+
+  it('should only include allowed built-in commands and all file commands', async () => {
+    const allowedBuiltinCommands = ['init', 'summary'];
+    const result = await buildSystemMessage(
+      mockConfig,
+      'test-session-id',
+      'auto' as PermissionMode,
+      allowedBuiltinCommands,
+    );
+
+    // Should include: 'commit' (FILE), 'init' (BUILT_IN, allowed), 'summary' (BUILT_IN, allowed)
+    // Should NOT include: 'help', 'memory', 'compress' (BUILT_IN but not in allowed set)
+    expect(result.slash_commands).toEqual(['commit', 'init', 'summary']);
+  });
+
+  it('should include only file commands when no built-in commands are allowed', async () => {
+    const result = await buildSystemMessage(
+      mockConfig,
+      'test-session-id',
+      'auto' as PermissionMode,
+      [], // Empty array - no built-in commands allowed
+    );
+
+    // Should only include 'commit' (FILE command)
+    expect(result.slash_commands).toEqual(['commit']);
   });
 });
 

@@ -15,10 +15,10 @@ import {
   qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
-  buildApiHistoryFromConversation,
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
+  tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
@@ -165,9 +165,30 @@ class GeminiAgent {
     this.setupFileSystem(config);
 
     const session = await this.createAndStoreSession(config);
+    const configuredModel = (
+      config.getModel() ||
+      this.config.getModel() ||
+      ''
+    ).trim();
+    const modelId = configuredModel || 'default';
+    const modelName = configuredModel || modelId;
 
     return {
       sessionId: session.getId(),
+      models: {
+        currentModelId: modelId,
+        availableModels: [
+          {
+            modelId,
+            name: modelName,
+            description: null,
+            _meta: {
+              contextLimit: tokenLimit(modelId),
+            },
+          },
+        ],
+        _meta: null,
+      },
     };
   }
 
@@ -327,12 +348,20 @@ class GeminiAgent {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
 
-    const history = conversation
-      ? buildApiHistoryFromConversation(conversation)
-      : undefined;
-    const chat = history
-      ? await geminiClient.startChat(history)
-      : await geminiClient.startChat();
+    // Use GeminiClient to manage chat lifecycle properly
+    // This ensures geminiClient.chat is in sync with the session's chat
+    //
+    // Note: When loading a session, config.initialize() has already been called
+    // in newSessionConfig(), which in turn calls geminiClient.initialize().
+    // The GeminiClient.initialize() method checks config.getResumedSessionData()
+    // and automatically loads the conversation history into the chat instance.
+    // So we only need to initialize if it hasn't been done yet.
+    if (!geminiClient.isInitialized()) {
+      await geminiClient.initialize();
+    }
+
+    // Now get the chat instance that's managed by GeminiClient
+    const chat = geminiClient.getChat();
 
     const session = new Session(
       sessionId,

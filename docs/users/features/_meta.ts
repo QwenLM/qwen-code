@@ -10,4 +10,5 @@ export default {
   mcp: 'MCP',
   'token-caching': 'Token Caching',
   sandbox: 'Sandboxing',
+  language: 'i18n',
 };

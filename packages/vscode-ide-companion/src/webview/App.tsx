@@ -27,7 +27,7 @@ import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { PermissionDrawer } from './components/PermissionDrawer/PermissionDrawer.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
-import { hasToolCallOutput } from './components/messages/toolcalls/shared/utils.js';
+import { hasToolCallOutput } from './utils/utils.js';
 import { EmptyState } from './components/layout/EmptyState.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
@@ -45,7 +45,12 @@ import { SessionSelector } from './components/layout/SessionSelector.js';
 import { FileIcon, UserIcon } from './components/icons/index.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
-import type { PlanEntry } from '../types/chatTypes.js';
+import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
+import type { ModelInfo } from '../types/acpTypes.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  tokenLimit,
+} from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -70,6 +75,8 @@ export const App: React.FC = () => {
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true); // Track if we're still initializing/loading
+  const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
+  const [usageStats, setUsageStats] = useState<UsageStatsPayload | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(
     null,
   ) as React.RefObject<HTMLDivElement>;
@@ -160,6 +167,48 @@ export const App: React.FC = () => {
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
 
+  const contextUsage = useMemo(() => {
+    if (!usageStats && !modelInfo) {
+      return null;
+    }
+
+    const modelName =
+      modelInfo?.modelId && typeof modelInfo.modelId === 'string'
+        ? modelInfo.modelId
+        : modelInfo?.name && typeof modelInfo.name === 'string'
+          ? modelInfo.name
+          : undefined;
+
+    const derivedLimit =
+      modelName && modelName.length > 0 ? tokenLimit(modelName) : undefined;
+
+    const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
+    const metaLimit =
+      typeof metaLimitRaw === 'number' || metaLimitRaw === null
+        ? metaLimitRaw
+        : undefined;
+
+    const limit =
+      usageStats?.tokenLimit ??
+      metaLimit ??
+      derivedLimit ??
+      DEFAULT_TOKEN_LIMIT;
+
+    const used = usageStats?.usage?.promptTokens ?? 0;
+    if (typeof limit !== 'number' || limit <= 0 || used < 0) {
+      return null;
+    }
+    const percentLeft = Math.max(
+      0,
+      Math.min(100, Math.round(((limit - used) / limit) * 100)),
+    );
+    return {
+      percentLeft,
+      usedTokens: used,
+      tokenLimit: limit,
+    };
+  }, [usageStats, modelInfo]);
+
   // Track a lightweight signature of workspace files to detect content changes even when length is unchanged
   const workspaceFilesSignature = useMemo(
     () =>
@@ -248,6 +297,10 @@ export const App: React.FC = () => {
     setInputText,
     setEditMode,
     setIsAuthenticated,
+    setUsageStats: (stats) => setUsageStats(stats ?? null),
+    setModelInfo: (info) => {
+      setModelInfo(info);
+    },
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -760,6 +813,7 @@ export const App: React.FC = () => {
           activeFileName={fileContext.activeFileName}
           activeSelection={fileContext.activeSelection}
           skipAutoActiveContext={skipAutoActiveContext}
+          contextUsage={contextUsage}
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}

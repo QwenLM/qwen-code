@@ -28,3 +28,22 @@ export const handleOpenDiff = (
     });
   }
 };
+
+/**
+ * Creates a temporary readonly file with the given content and opens it in VS Code
+ * @param content The content to write to the temporary file
+ * @param fileName File name (will be auto-generated with timestamp)
+ */
+export const createAndOpenTempFile = (
+  vscode: VSCodeAPI,
+  content: string,
+  fileName: string = 'temp',
+): void => {
+  vscode.postMessage({
+    type: 'createAndOpenTempFile',
+    data: {
+      content,
+      fileName,
+    },
+  });
+};

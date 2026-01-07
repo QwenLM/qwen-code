@@ -10,9 +10,12 @@
  * Handles session updates from ACP and dispatches them to appropriate callbacks
  */
 
-import type { AcpSessionUpdate } from '../types/acpTypes.js';
+import type { AcpSessionUpdate, SessionUpdateMeta } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
-import type { QwenAgentCallbacks } from '../types/chatTypes.js';
+import type {
+  QwenAgentCallbacks,
+  UsageStatsPayload,
+} from '../types/chatTypes.js';
 
 /**
  * Qwen Session Update Handler class
@@ -57,6 +60,7 @@ export class QwenSessionUpdateHandler {
         if (update.content?.text && this.callbacks.onStreamChunk) {
           this.callbacks.onStreamChunk(update.content.text);
         }
+        this.emitUsageMeta(update._meta);
         break;
 
       case 'agent_thought_chunk':
@@ -71,6 +75,7 @@ export class QwenSessionUpdateHandler {
             this.callbacks.onStreamChunk(update.content.text);
           }
         }
+        this.emitUsageMeta(update._meta);
         break;
 
       case 'tool_call': {
@@ -159,5 +164,18 @@ export class QwenSessionUpdateHandler {
         console.log('[QwenAgentManager] Unhandled session update type');
         break;
     }
+  }
+
+  private emitUsageMeta(meta?: SessionUpdateMeta): void {
+    if (!meta || !this.callbacks.onUsageUpdate) {
+      return;
+    }
+
+    const payload: UsageStatsPayload = {
+      usage: meta.usage || undefined,
+      durationMs: meta.durationMs ?? undefined,
+    };
+
+    this.callbacks.onUsageUpdate(payload);
   }
 }
