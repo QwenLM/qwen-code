@@ -15,25 +15,28 @@ npm run dev
 ```
 
 This will:
+
 - Launch Chrome with the extension loaded
 - Open DevTools automatically
-- Start a test server at http://localhost:3000
-- Provide a test page for functionality verification
+- You can open any target page manually for debugging
 
 ### Native Host Logging
 
 The native host logs are stored at:
-- **macOS/Linux**: `/tmp/qwen-bridge-host.log`
-- **Windows**: `%TEMP%\qwen-bridge-host.log`
+
+- **macOS/Linux**: `$HOME/.qwen/chrome-bridge/qwen-bridge-host.log`（若主目录不可写则回落 `/tmp/qwen-bridge-host.log`）
+- **Windows**: `%USERPROFILE%\.qwen\chrome-bridge\qwen-bridge-host.log`（若不可写则回落 `%TEMP%\qwen-bridge-host.log`）
 
 To monitor the logs in real-time:
+
 ```bash
 npm run logs
 ```
 
 Or directly:
+
 ```bash
-tail -f /tmp/qwen-bridge-host.log
+tail -f "$HOME/.qwen/chrome-bridge/qwen-bridge-host.log"
 ```
 
 ### Chrome Extension Debugging
@@ -52,7 +55,7 @@ If the extension can't connect to the native host:
 
 1. Verify Node.js is installed: `node --version`
 2. Check the native host installation: `./native-host/scripts/smart-install.sh`
-3. Check logs: `/tmp/qwen-bridge-host.log`
+3. Check logs: `$HOME/.qwen/chrome-bridge/qwen-bridge-host.log`
 4. Verify extension ID matches the one in native host manifest
 
 ### Qwen CLI Communication Issues
@@ -84,13 +87,17 @@ The following scripts are available for debugging:
 ## Troubleshooting Tips
 
 ### Check Extension Status
+
 Check the extension's status in the extension popup or through the API.
 
 ### Verify Permissions
+
 Ensure all required permissions are granted in the extension settings.
 
 ### Network Requests
+
 Monitor network requests to ensure proper communication between components.
 
 ### Console Messages
+
 Watch console messages in both the extension's background script and content scripts.

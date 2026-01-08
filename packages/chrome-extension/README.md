@@ -49,7 +49,7 @@ A Chrome extension that bridges your browser with Qwen CLI, enabling AI-powered 
 1. Open Chrome and navigate to `chrome://extensions/`
 2. Enable "Developer mode" (toggle in top right)
 3. Click "Load unpacked"
-4. Select the `chrome-extension/extension` folder
+4. Select the `chrome-extension/dist/extension` folder (运行 `npm run build` 后生成)
 5. Note the Extension ID that appears (you'll need this for the next step)
 
 ### Step 2: Install the Native Messaging Host
@@ -60,7 +60,7 @@ The Native Messaging Host allows the Chrome extension to communicate with Qwen C
 
 ```bash
 cd chrome-extension/native-host
-./install.sh
+./scripts/smart-install.sh
 ```
 
 When prompted, enter your Chrome Extension ID.
@@ -127,12 +127,12 @@ The extension supports the following actions that can be sent to Qwen CLI:
 
 ```
 chrome-extension/
-├── extension/              # Chrome extension source
-│   ├── manifest.json       # Extension manifest
-│   ├── background/         # Service worker
-│   ├── content/           # Content scripts
-│   ├── popup/             # Popup UI
-│   └── icons/             # Extension icons
+├── public/                 # 静态资源（manifest、icons、sidepanel.html 模板）
+├── src/                    # 前端代码
+│   ├── background/         # Service worker 源码
+│   ├── content/            # Content script 源码
+│   └── sidepanel/          # React Side Panel 源码
+├── dist/extension/         # 构建输出，加载 unpacked 时使用
 ├── native-host/           # Native messaging host
 │   ├── host.js           # Node.js host script
 │   ├── manifest.json     # Native host manifest
@@ -143,16 +143,17 @@ chrome-extension/
 ### Building from Source
 
 1. Clone the repository
-2. No build step required - the extension uses vanilla JavaScript
-3. Load the extension as unpacked in Chrome for development
+2. Run `npm run build`（输出到 `dist/extension`，适合加载/打包）
+   - 开发模式可用 `npm run dev`（watch 同步 + esbuild，输出同样在 `dist/extension`）
+3. 在 Chrome 中加载 unpacked：选择 `packages/chrome-extension/dist/extension`
 
 ### Testing
 
 1. Enable Chrome Developer Tools
 2. Check the extension's background page console for logs
 3. Native host logs are written to:
-   - macOS/Linux: `/tmp/qwen-bridge-host.log`
-   - Windows: `%TEMP%\qwen-bridge-host.log`
+   - macOS/Linux: `$HOME/.qwen/chrome-bridge/qwen-bridge-host.log`（若主目录不可写则回落 `/tmp/qwen-bridge-host.log`）
+   - Windows: `%USERPROFILE%\.qwen\chrome-bridge\qwen-bridge-host.log`（若不可写则回落 `%TEMP%\qwen-bridge-host.log`）
 
 ## Troubleshooting
 
@@ -199,6 +200,7 @@ MIT License - See LICENSE file for details
 ## Support
 
 For issues, questions, or feature requests:
+
 - Open an issue on GitHub
 - Check the logs for debugging information
 - Ensure all prerequisites are properly installed

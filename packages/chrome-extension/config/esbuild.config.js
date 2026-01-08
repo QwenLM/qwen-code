@@ -1,7 +1,10 @@
 /**
- * esbuild configuration for Chrome Extension Side Panel React App
+ * @file esbuild configuration for Chrome Extension Side Panel React App
  * Bundles React components with Tailwind CSS
+ * @type {import('esbuild').BuildOptions}
  */
+
+/* global process, console */
 
 import * as esbuild from 'esbuild';
 import * as fs from 'fs';
@@ -12,6 +15,7 @@ import autoprefixer from 'autoprefixer';
 
 const isWatch = process.argv.includes('--watch');
 const isProduction = process.argv.includes('--production');
+const outDir = process.env.EXTENSION_OUT_DIR || 'extension';
 
 /**
  * Custom CSS plugin that processes CSS through PostCSS/Tailwind
@@ -30,7 +34,10 @@ const cssInjectPlugin = {
       while ((match = importRegex.exec(cssContent)) !== null) {
         const importPath = path.resolve(path.dirname(cssPath), match[1]);
         if (fs.existsSync(importPath)) {
-          const importedContent = await fs.promises.readFile(importPath, 'utf8');
+          const importedContent = await fs.promises.readFile(
+            importPath,
+            'utf8',
+          );
           cssContent = cssContent.replace(match[0], importedContent);
         }
       }
@@ -74,7 +81,7 @@ async function build() {
     minify: isProduction,
     sourcemap: !isProduction,
     platform: 'browser',
-    outfile: 'extension/sidepanel/dist/sidepanel-app.js',
+    outfile: path.join(outDir, 'sidepanel/dist/sidepanel-app.js'),
     jsx: 'automatic',
     define: {
       'process.env.NODE_ENV': isProduction ? '"production"' : '"development"',

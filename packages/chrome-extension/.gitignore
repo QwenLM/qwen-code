@@ -21,5 +21,3 @@ Thumbs.db
 # Temporary files
 *.tmp
 .temp/
-
-packages/chrome-extension/extension/sidepanel/dist/

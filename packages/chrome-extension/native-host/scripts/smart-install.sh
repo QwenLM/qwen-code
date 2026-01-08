@@ -14,8 +14,10 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOST_NAME="com.qwen.cli.bridge"
 HOST_SCRIPT="$SCRIPT_DIR/../host.js"
+EXTENSION_ID_FILE="$ROOT_DIR/.extension-id"
 
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║                                                                ║${NC}"
@@ -77,11 +79,23 @@ if [[ -d "$EXTENSIONS_DIR" ]]; then
     done
 fi
 
-# 方法2: 检查之前保存的 ID
-if [[ -z "$EXTENSION_ID" && -f "$SCRIPT_DIR/../.extension-id" ]]; then
-    EXTENSION_ID=$(cat "$SCRIPT_DIR/../.extension-id")
-    echo -e "${GREEN}✓${NC} 使用保存的扩展 ID: ${CYAN}$EXTENSION_ID${NC}"
-    AUTO_DETECTED=true
+# 方法2: 检查之前保存的 ID（统一使用根目录的 .extension-id，兼容旧路径）
+if [[ -z "$EXTENSION_ID" ]]; then
+    if [[ -f "$EXTENSION_ID_FILE" ]]; then
+        EXTENSION_ID=$(cat "$EXTENSION_ID_FILE")
+        echo -e "${GREEN}✓${NC} 使用保存的扩展 ID: ${CYAN}$EXTENSION_ID${NC}"
+        AUTO_DETECTED=true
+    else
+        for legacy in "$SCRIPT_DIR/../.extension-id" "$SCRIPT_DIR/../../scripts/.extension-id"; do
+            if [[ -z "$EXTENSION_ID" && -f "$legacy" ]]; then
+                EXTENSION_ID=$(cat "$legacy")
+                echo "$EXTENSION_ID" > "$EXTENSION_ID_FILE"
+                echo -e "${GREEN}✓${NC} 已从旧路径迁移扩展 ID: ${CYAN}$EXTENSION_ID${NC}"
+                AUTO_DETECTED=true
+                break
+            fi
+        done
+    fi
 fi
 
 # 如果自动检测失败，提供选项
@@ -103,7 +117,7 @@ if [[ -z "$EXTENSION_ID" ]]; then
             read -p "> " EXTENSION_ID
             if [[ -n "$EXTENSION_ID" ]]; then
                 # 保存 ID 供以后使用
-                echo "$EXTENSION_ID" > "$SCRIPT_DIR/../.extension-id"
+                echo "$EXTENSION_ID" > "$EXTENSION_ID_FILE"
                 echo -e "${GREEN}✓${NC} 扩展 ID 已保存"
             fi
             ;;
@@ -118,7 +132,7 @@ if [[ -z "$EXTENSION_ID" ]]; then
             echo -e "${YELLOW}找到 Qwen CLI Chrome Extension 扩展后，输入其 ID:${NC}"
             read -p "> " EXTENSION_ID
             if [[ -n "$EXTENSION_ID" && "$EXTENSION_ID" != "*" ]]; then
-                echo "$EXTENSION_ID" > "$SCRIPT_DIR/../.extension-id"
+                echo "$EXTENSION_ID" > "$EXTENSION_ID_FILE"
             fi
             ;;
         *)
@@ -215,7 +229,7 @@ fi
 echo ""
 echo -e "${CYAN}提示：${NC}"
 echo -e "  • 如需重新配置，随时可以重新运行此脚本"
-echo -e "  • 日志文件位置: /tmp/qwen-bridge-host.log"
+echo -e "  • 日志文件位置: \$HOME/.qwen/chrome-bridge/qwen-bridge-host.log（若主目录不可写则回落 /tmp/qwen-bridge-host.log）"
 echo -e "  • 如遇问题，请查看: $SCRIPT_DIR/../docs/debugging.md"
 echo ""
 

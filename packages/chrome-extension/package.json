@@ -21,23 +21,25 @@
   "license": "Apache-2.0",
   "type": "module",
   "files": [
-    "extension/",
+    "public/",
     "native-host/",
     "README.md"
   ],
   "scripts": {
-    "dev": "./scripts/debug.sh",
+    "dev": "EXTENSION_OUT_DIR=dist/extension node scripts/dev-watch.js",
+    "debug:mac": "./scripts/debug.sh",
+    "sync:extension": "node scripts/sync-extension.js",
     "build:ui": "node config/esbuild.config.js",
     "build:ui:watch": "node config/esbuild.config.js --watch",
-    "build": "npm run build:ui",
+    "build": "EXTENSION_OUT_DIR=dist/extension npm run clean && EXTENSION_OUT_DIR=dist/extension node scripts/sync-extension.js && EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js --production",
     "install:extension": "./scripts/first-install.sh",
     "install:host": "cd native-host && ./scripts/smart-install.sh",
     "install:all": "./scripts/first-install.sh",
     "update:host": "cd native-host && ./scripts/update-host-config.sh",
-    "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/extension --auto-open-devtools-for-tabs",
-    "package": "zip -r chrome-extension.zip extension/",
-    "clean": "rm -rf dist *.zip /tmp/qwen-bridge-host.log /tmp/qwen-server.log .extension-id extension/sidepanel/dist/sidepanel-app.js extension/sidepanel/dist/sidepanel-app.js.map",
-    "logs": "tail -f /tmp/qwen-bridge-host.log"
+    "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
+    "package": "npm run build && cd dist && zip -r ../chrome-extension.zip extension/",
+    "clean": "./scripts/clean.sh",
+    "logs": "tail -f $HOME/.qwen/chrome-bridge/qwen-bridge-host.log"
   },
   "engines": {
     "node": ">=18.0.0"

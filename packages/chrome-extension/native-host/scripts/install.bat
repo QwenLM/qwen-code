@@ -83,12 +83,12 @@ if %ERRORLEVEL% EQU 0 (
     echo Next steps:
     echo 1. Load the Chrome extension in chrome://extensions
     echo 2. Enable 'Developer mode'
-    echo 3. Click 'Load unpacked' and select: %SCRIPT_DIR%..\extension
+    echo 3. Click 'Load unpacked' and select: %SCRIPT_DIR%..\dist\extension  (run "npm run build" first)
     echo 4. Copy the extension ID and re-run this script if needed
     echo 5. Click the extension icon and connect to Qwen CLI
     echo.
     echo Host manifest: %MANIFEST_FILE%
-    echo Log file location: %%TEMP%%\qwen-bridge-host.log
+echo Log file location: %%USERPROFILE%%\.qwen\chrome-bridge\qwen-bridge-host.log (fallback: %%TEMP%%\qwen-bridge-host.log)
 ) else (
     echo.
     echo ❌ Failed to add registry entry

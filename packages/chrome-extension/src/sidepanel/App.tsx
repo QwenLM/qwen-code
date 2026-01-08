@@ -3,7 +3,8 @@
  * Simplified version adapted from vscode-ide-companion
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import type React from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useVSCode } from './hooks/useVSCode.js';
 import { InputForm } from './components/layout/InputForm.js';
 import { EmptyState } from './components/layout/EmptyState.js';
@@ -24,6 +25,18 @@ interface Message {
   timestamp: number;
 }
 
+interface McpTool {
+  name: string;
+  description: string;
+  // Add other properties as needed based on the actual structure
+}
+
+interface InternalTool {
+  name: string;
+  description: string;
+  // Add other properties as needed based on the actual structure
+}
+
 export const App: React.FC = () => {
   const vscode = useVSCode();
 
@@ -36,9 +49,8 @@ export const App: React.FC = () => {
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState('');
   // Debug: cache slash-commands (available_commands_update) & MCP tools list
-  const [availableCommands, setAvailableCommands] = useState<any[]>([]);
-  const [mcpTools, setMcpTools] = useState<any[]>([]);
-  const [internalTools, setInternalTools] = useState<any[]>([]);
+  const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
+  const [internalTools, setInternalTools] = useState<InternalTool[]>([]);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [authUri, setAuthUri] = useState<string | null>(null);
   const [isComposing, setIsComposing] = useState(false);
@@ -63,7 +75,7 @@ export const App: React.FC = () => {
       console.log('[App] Received message:', message);
 
       switch (message.type) {
-        case 'STATUS_UPDATE':
+        case 'STATUS_UPDATE': {
           const statusData = message.data as { status: string } | undefined;
           if (statusData && 'status' in statusData) {
             setIsConnected(statusData.status !== 'disconnected');
@@ -71,39 +83,37 @@ export const App: React.FC = () => {
             setIsConnected(false); // default to disconnected if status data is missing
           }
           break;
+        }
         case 'hostInfo': {
-          console.log('[HostInfo]', (message as any).data);
+          const messageAny = message as { data?: unknown };
+          console.log('[HostInfo]', messageAny.data);
           break;
         }
         case 'hostLog': {
-          const line = (message as { data?: { line?: string } }).data?.line;
+          const logMessage = message as { data?: { line?: string } };
+          const line = logMessage.data?.line;
           if (line) console.log('[HostLog]', line);
           break;
         }
         case 'authUpdate': {
-          const uri = (message as { data?: { authUri?: string } }).data
-            ?.authUri;
+          const authMessage = message as { data?: { authUri?: string } };
+          const uri = authMessage.data?.authUri;
           if (uri) setAuthUri(uri);
           break;
         }
-        case 'availableCommands': {
-          const cmds =
-            (message as { data?: { availableCommands?: any[] } }).data
-              ?.availableCommands || [];
-          setAvailableCommands(cmds);
-          console.log('[App] Available commands:', cmds);
-          break;
-        }
         case 'mcpTools': {
-          const tools =
-            (message as { data?: { tools?: any[] } }).data?.tools || [];
+          const toolMessage: { data?: { tools?: McpTool[] } } = message as {
+            data?: { tools?: McpTool[] };
+          };
+          const tools = toolMessage.data?.tools || [];
           setMcpTools(tools);
           console.log('[App] MCP tools:', tools);
           break;
         }
         case 'internalMcpTools': {
-          const tools =
-            (message as { data?: { tools?: any[] } }).data?.tools || [];
+          const internalToolMessage: { data?: { tools?: InternalTool[] } } =
+            message as { data?: { tools?: InternalTool[] } };
+          const tools = internalToolMessage.data?.tools || [];
           setInternalTools(tools);
           console.log('[App] Internal MCP tools:', tools);
           break;
@@ -120,7 +130,7 @@ export const App: React.FC = () => {
                   error?: string;
                 };
               }
-            ).data || ({} as any);
+            ).data || {};
           const name = payload.name || '';
           const stage = payload.stage || '';
           const ok = payload.ok;
@@ -160,21 +170,22 @@ export const App: React.FC = () => {
           break;
         }
 
-        case 'streamStart':
+        case 'streamStart': {
           setIsStreaming(true);
           setIsWaitingForResponse(false);
           setStreamingContent('');
           break;
+        }
 
-        case 'streamChunk':
+        case 'streamChunk': {
+          const chunkMessage = message as { data: { chunk: string } };
           setStreamingContent(
-            (prev) =>
-              prev +
-              ((message as { data: { chunk: string } }).data?.chunk || ''),
+            (prev) => prev + (chunkMessage.data?.chunk || ''),
           );
           break;
+        }
 
-        case 'streamEnd':
+        case 'streamEnd': {
           if (streamingContent) {
             setMessages((prev) => [
               ...prev,
@@ -188,8 +199,9 @@ export const App: React.FC = () => {
           setIsStreaming(false);
           setStreamingContent('');
           break;
+        }
 
-        case 'message':
+        case 'message': {
           const msgData = (message as { data: Message }).data;
           if (msgData) {
             setMessages((prev) => [
@@ -202,14 +214,15 @@ export const App: React.FC = () => {
             ]);
           }
           break;
-
-        case 'error':
+        }
+        case 'error': {
           setIsStreaming(false);
           setIsWaitingForResponse(false);
           setLoadingMessage(null);
           break;
+        }
 
-        case 'permissionRequest':
+        case 'permissionRequest': {
           // Handle permission request from Qwen CLI
           console.log('[App] Permission request:', message);
           const permData = (
@@ -229,6 +242,12 @@ export const App: React.FC = () => {
             });
           }
           break;
+        }
+
+        default:
+          // Handle unknown message types
+          console.log('[App] Unknown message type:', message.type);
+          break;
       }
     };
 
@@ -247,15 +266,11 @@ export const App: React.FC = () => {
       const response = (await vscode.postMessage({ type: 'GET_STATUS' })) as {
         connected?: boolean;
         status?: string;
-        availableCommands?: any[];
-        mcpTools?: any[];
-        internalTools?: any[];
+        mcpTools?: McpTool[];
+        internalTools?: InternalTool[];
       } | null;
       if (response) {
         setIsConnected(response.connected || false);
-        if (Array.isArray(response.availableCommands)) {
-          setAvailableCommands(response.availableCommands);
-        }
         if (Array.isArray(response.mcpTools)) {
           setMcpTools(response.mcpTools);
         }
@@ -328,7 +343,7 @@ export const App: React.FC = () => {
   }, [vscode]);
 
   // Read current page and ask Qwen to analyze (bypasses MCP; uses content-script extractor)
-  const handleReadPage = useCallback(async () => {
+  /* const handleReadPage = useCallback(async () => {
     try {
       setIsWaitingForResponse(true);
       setLoadingMessage('Reading page...');
@@ -366,10 +381,10 @@ export const App: React.FC = () => {
         },
       ]);
     }
-  }, [vscode]);
+  }, [vscode]); */
 
   // Get network logs and send to Qwen to analyze (bypasses MCP; uses debugger API)
-  const handleGetNetworkLogs = useCallback(async () => {
+  /* const handleGetNetworkLogs = useCallback(async () => {
     try {
       setIsWaitingForResponse(true);
       setLoadingMessage('Collecting network logs...');
@@ -434,7 +449,7 @@ export const App: React.FC = () => {
         },
       ]);
     }
-  }, [vscode]);
+  }, [vscode]); */
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
@@ -460,7 +475,7 @@ export const App: React.FC = () => {
   );
 
   // Get console logs and send to Qwen to analyze (bypasses MCP; uses content-script capture)
-  const handleGetConsoleLogs = useCallback(async () => {
+  /* const handleGetConsoleLogs = useCallback(async () => {
     try {
       setIsWaitingForResponse(true);
       setLoadingMessage('Collecting console logs...');
@@ -516,7 +531,7 @@ ${formatted || '(no logs captured)'}`;
         },
       ]);
     }
-  }, [vscode]);
+  }, [vscode]); */
 
   const hasContent = messages.length > 0 || isStreaming || streamingContent;
 
@@ -530,11 +545,9 @@ ${formatted || '(no logs captured)'}`;
             className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-gray-500'}`}
           />
           <span className="text-xs text-gray-400">
-            {isConnected
-              ? `Connected (${mcpTools.length + internalTools.length} tools)`
-              : 'Disconnected'}
+            {isConnected ? `Connected` : 'Disconnected'}
           </span>
-          {isConnected && (
+          {/* {isConnected && (
             <button
               className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
               onClick={handleReadPage}
@@ -569,7 +582,7 @@ ${formatted || '(no logs captured)'}`;
             >
               Tools
             </button>
-          )}
+          )} */}
         </div>
       </div>
 
@@ -591,14 +604,18 @@ ${formatted || '(no logs captured)'}`;
                   key={index}
                   content={msg.content}
                   timestamp={msg.timestamp}
-                  onFileClick={() => {}}
+                  onFileClick={() => {
+                    // No action required
+                  }}
                 />
               ) : (
                 <AssistantMessage
                   key={index}
                   content={msg.content}
                   timestamp={msg.timestamp}
-                  onFileClick={() => {}}
+                  onFileClick={() => {
+                    // No action required
+                  }}
                 />
               ),
             )}
@@ -644,19 +661,37 @@ ${formatted || '(no logs captured)'}`;
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={() => {}}
+          onKeyDown={() => {
+            // No special key handling required
+          }}
           onSubmit={handleSubmit}
           onCancel={handleCancel}
-          onToggleEditMode={() => {}}
-          onToggleThinking={() => {}}
-          onFocusActiveEditor={() => {}}
-          onToggleSkipAutoActiveContext={() => {}}
-          onShowCommandMenu={() => {}}
-          onAttachContext={() => {}}
+          onToggleEditMode={() => {
+            // No edit mode toggle required
+          }}
+          onToggleThinking={() => {
+            // No thinking mode toggle required
+          }}
+          onFocusActiveEditor={() => {
+            // No editor focus required
+          }}
+          onToggleSkipAutoActiveContext={() => {
+            // No context toggle required
+          }}
+          onShowCommandMenu={() => {
+            // No command menu required
+          }}
+          onAttachContext={() => {
+            // No context attachment required
+          }}
           completionIsOpen={false}
           completionItems={[]}
-          onCompletionSelect={() => {}}
-          onCompletionClose={() => {}}
+          onCompletionSelect={() => {
+            // No completion selection required
+          }}
+          onCompletionClose={() => {
+            // No completion closing required
+          }}
         />
       ) : (
         <div className="p-4 border-t border-gray-700">
@@ -690,7 +725,9 @@ ${formatted || '(no logs captured)'}`;
               onClick={() => {
                 try {
                   chrome.tabs.create({ url: authUri });
-                } catch (_) {}
+                } catch {
+                  // Ignore errors when opening tab
+                }
               }}
             >
               Open Link
@@ -723,51 +760,64 @@ ${formatted || '(no logs captured)'}`;
             Internal (chrome-browser)
           </div>
           <ul className="space-y-1 mb-2">
-            {internalTools.map((t: any, i: number) => {
-              const name = (t && (t.name || t.tool?.name)) || String(t);
-              const desc = (t && (t.description || t.tool?.description)) || '';
-              return (
-                <li
-                  key={`internal-${i}`}
-                  className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
-                >
-                  <div className="font-mono text-xs text-[#a6e22e] break-all">
-                    {name}
-                  </div>
-                  {desc && (
-                    <div className="text-[11px] text-gray-400 break-words">
-                      {desc}
+            {internalTools.map(
+              (
+                t: InternalTool & {
+                  tool?: { name?: string; description?: string };
+                },
+                i: number,
+              ) => {
+                const name = (t && (t.name || t.tool?.name)) || String(t);
+                const desc =
+                  (t && (t.description || t.tool?.description)) || '';
+                return (
+                  <li
+                    key={`internal-${i}`}
+                    className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
+                  >
+                    <div className="font-mono text-xs text-[#a6e22e] break-all">
+                      {name}
                     </div>
-                  )}
-                </li>
-              );
-            })}
+                    {desc && (
+                      <div className="text-[11px] text-gray-400 break-words">
+                        {desc}
+                      </div>
+                    )}
+                  </li>
+                );
+              },
+            )}
           </ul>
           <div className="text-[11px] text-gray-400 mb-1">Discovered (MCP)</div>
           <ul className="space-y-1">
-            {mcpTools.map((t: any, i: number) => {
-              const name = (t && (t.name || t.tool?.name)) || String(t);
-              const desc = (t && (t.description || t.tool?.description)) || '';
-              return (
-                <li
-                  key={`discovered-${i}`}
-                  className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
-                >
-                  <div className="font-mono text-xs text-[#a6e22e] break-all">
-                    {name}
-                  </div>
-                  {desc && (
-                    <div className="text-[11px] text-gray-400 break-words">
-                      {desc}
+            {mcpTools.map(
+              (
+                t: McpTool & { tool?: { name?: string; description?: string } },
+                i: number,
+              ) => {
+                const name = (t && (t.name || t.tool?.name)) || String(t);
+                const desc =
+                  (t && (t.description || t.tool?.description)) || '';
+                return (
+                  <li
+                    key={`discovered-${i}`}
+                    className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
+                  >
+                    <div className="font-mono text-xs text-[#a6e22e] break-all">
+                      {name}
                     </div>
-                  )}
-                </li>
-              );
-            })}
+                    {desc && (
+                      <div className="text-[11px] text-gray-400 break-words">
+                        {desc}
+                      </div>
+                    )}
+                  </li>
+                );
+              },
+            )}
           </ul>
         </div>
       )}
     </div>
   );
 };
-

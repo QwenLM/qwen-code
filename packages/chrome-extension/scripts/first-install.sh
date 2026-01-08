@@ -11,6 +11,8 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+EXTENSION_ID_FILE="$ROOT_DIR/.extension-id"
 
 clear
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
@@ -90,7 +92,7 @@ else
 EOF
 
     # 保存扩展 ID 供后续使用
-    echo "$EXTENSION_ID" > "$SCRIPT_DIR/.extension-id"
+    echo "$EXTENSION_ID" > "$EXTENSION_ID_FILE"
 
     echo -e "${GREEN}✓${NC} Native Host 已更新，支持扩展 ID: $EXTENSION_ID"
 fi

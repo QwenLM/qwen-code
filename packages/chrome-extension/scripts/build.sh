@@ -8,14 +8,10 @@ echo "Building Chrome Qwen Bridge..."
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR/.."
 
-# Create dist directory
-mkdir -p dist
+# Build latest assets into dist/extension
+npm run build
 
-# Copy extension files to dist
-echo "Copying extension files..."
-cp -r extension dist/
-
-# Create a zip file for Chrome Web Store
+# Create a zip file for Chrome Web Store / unpacked install
 echo "Creating extension package..."
 cd dist
 zip -r ../chrome-extension.zip extension/

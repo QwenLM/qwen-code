@@ -6,8 +6,10 @@
 set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOST_NAME="com.qwen.cli.bridge"
 HOST_SCRIPT="$SCRIPT_DIR/../host.js"
+EXTENSION_ID_FILE="$ROOT_DIR/.extension-id"
 
 echo "==============================================="
 echo "Qwen CLI Chrome Extension - Native Host Configuration Updater"
@@ -77,7 +79,7 @@ if [[ "$CONFIG_OPTION" == "1" ]]; then
     fi
 
     # Save extension ID for future use
-    echo "$EXTENSION_ID" > "$SCRIPT_DIR/../.extension-id"
+    echo "$EXTENSION_ID" > "$EXTENSION_ID_FILE"
 
     # Create manifest with specific extension ID
     cat > "$MANIFEST_FILE" << EOF

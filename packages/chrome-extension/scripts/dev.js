@@ -5,11 +5,11 @@
  * 自动完成所有配置和启动步骤
  */
 
-const { spawn, exec } = require('child_process');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const readline = require('readline');
+import { spawn, exec } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+// const readline = require('readline'); // Commenting out unused import
 
 // 颜色输出
 const colors = {
@@ -85,13 +85,6 @@ function getChromePath() {
   }
 
   return null;
-}
-
-// 获取扩展 ID
-function getExtensionId(extensionPath) {
-  // 这是一个简化的方法，实际的 Extension ID 是通过 Chrome 生成的
-  // 开发时可以固定使用一个 ID
-  return 'development-extension-id';
 }
 
 // 安装 Native Host
@@ -188,7 +181,7 @@ function startQwenServer(port = 8080) {
 
   return new Promise((resolve) => {
     // 检查端口是否被占用
-    exec(`lsof -i:${port} || netstat -an | grep ${port}`, (error, stdout) => {
+    exec(`lsof -i:${port} || netstat -an | grep ${port}`, (_error, stdout) => {
       if (stdout && stdout.length > 0) {
         logWarning(`Port ${port} is already in use`);
         logInfo('Qwen server might already be running');
@@ -273,10 +266,10 @@ function startChrome(extensionPath, chromePath) {
 }
 
 // 创建测试服务器
-function createTestServer(port = 3000) {
+async function createTestServer(port = 3000) {
   logStep(6, 'Starting test server...');
 
-  const http = require('http');
+  const { default: http } = await import('http');
   const testHtml = `
 <!DOCTYPE html>
 <html>
@@ -406,7 +399,7 @@ function createTestServer(port = 3000) {
 </html>
   `;
 
-  const server = http.createServer((req, res) => {
+  const server = http.createServer((_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     res.end(testHtml);
   });
@@ -432,7 +425,16 @@ async function main() {
     colors.bright + colors.cyan,
   );
 
-  const extensionPath = path.join(__dirname, 'extension');
+  const extensionPath = path.join(
+    __dirname,
+    process.env.EXTENSION_OUT_DIR || 'dist/extension',
+  );
+
+  if (!fs.existsSync(extensionPath)) {
+    logWarning(
+      `Extension output not found at ${extensionPath}. Run "npm run build" first or set EXTENSION_OUT_DIR.`,
+    );
+  }
 
   // Step 1: 检查 Chrome
   logStep(1, 'Checking Chrome installation...');
@@ -509,7 +511,7 @@ async function main() {
 ║  1. Click the extension icon in Chrome toolbar                 ║
 ║  2. Open Chrome DevTools (F12) to see console logs            ║
 ║  3. Check background page: chrome://extensions → Details      ║
-║  4. Native Host logs: /tmp/qwen-bridge-host.log              ║
+║  4. Native Host logs: $HOME/.qwen/chrome-bridge/qwen-bridge-host.log ║
 ║                                                                ║
 ║  🛑 Press Ctrl+C to stop all services                         ║
 ║                                                                ║

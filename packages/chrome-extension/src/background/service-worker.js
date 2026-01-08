@@ -3,6 +3,8 @@
  * Handles communication between extension components and native host
  */
 
+/* global chrome, console, setTimeout, clearTimeout, document, window */
+
 // Native messaging host name
 const NATIVE_HOST_NAME = 'com.qwen.cli.bridge';
 
@@ -180,9 +182,9 @@ function connectToNativeHost() {
         qwenCliStatus = 'disconnected';
 
         // Reject all pending requests
-        for (const [id, handler] of pendingRequests) {
+        pendingRequests.forEach((handler) => {
           handler.reject(new Error('Native host disconnected'));
-        }
+        });
         pendingRequests.clear();
 
         // Notify popup of disconnection
@@ -191,7 +193,9 @@ function connectToNativeHost() {
             type: 'STATUS_UPDATE',
             status: 'disconnected',
           })
-          .catch(() => {}); // Ignore errors if popup is closed
+          .catch(() => {
+            // Ignore errors if popup is closed
+          }); // Ignore errors if popup is closed
       });
 
       // Send initial handshake
@@ -247,7 +251,9 @@ function handleNativeMessage(message) {
         qwenInstalled: message.qwenInstalled,
         qwenVersion: message.qwenVersion,
       })
-      .catch(() => {});
+      .catch(() => {
+        // Ignore errors if receiver is not available
+      });
   } else if (message.type === 'browser_request') {
     // Handle browser requests from Qwen CLI via Native Host
     handleBrowserRequest(message);
@@ -286,7 +292,7 @@ function handleNativeMessage(message) {
       ) {
         broadcastToUI({ type: 'streamEnd' });
       }
-    } catch (_) {
+    } catch {
       // ignore
     }
   } else if (message.type === 'event') {
@@ -311,14 +317,14 @@ async function sendToNativeHost(message) {
     });
 
     // Set timeout for request
-    // Default 30s, but ACP session creation / MCP discovery / long prompts need more time
+    // Default 30s, but ACP session creation and MCP discovery can take longer
     let timeoutMs = 30000;
-    if (message && message.type === 'start_qwen') timeoutMs = 300000; // 5 minutes
+    if (message && message.type === 'start_qwen') timeoutMs = 180000; // 3 minutes for startup + MCP discovery
     if (
       message &&
       (message.type === 'qwen_prompt' || message.type === 'qwen_request')
     )
-      timeoutMs = 300000; // 5 minutes
+      timeoutMs = 180000;
     setTimeout(() => {
       if (pendingRequests.has(id)) {
         pendingRequests.delete(id);
@@ -340,7 +346,9 @@ async function handleBrowserRequest(message) {
         type: 'toolProgress',
         data: { name: requestType, stage: 'start' },
       });
-    } catch (_) {}
+    } catch {
+      // Ignore errors
+    }
 
     let data;
 
@@ -378,7 +386,9 @@ async function handleBrowserRequest(message) {
         type: 'toolProgress',
         data: { name: requestType, stage: 'end', ok: true },
       });
-    } catch (_) {}
+    } catch {
+      // Ignore errors
+    }
   } catch (error) {
     console.error('Browser request error:', error);
     nativePort.postMessage({
@@ -398,7 +408,9 @@ async function handleBrowserRequest(message) {
           error: String(error?.message || error),
         },
       });
-    } catch (_) {}
+    } catch {
+      // Ignore errors
+    }
   }
 }
 
@@ -593,7 +605,9 @@ function handleQwenEvent(event) {
     if (authUri) {
       try {
         chrome.tabs.create({ url: authUri });
-      } catch (_) {}
+      } catch {
+        // Ignore errors
+      }
     }
   } else if (eventData?.type === 'tools_list_changed') {
     // Forward MCP tools list to UI and cache it
@@ -644,7 +658,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             type: 'internalMcpTools',
             data: { tools: INTERNAL_MCP_TOOLS },
           });
-        } catch (_) {}
+        } catch {
+          // Ignore errors
+        }
       })
       .catch((error) => {
         sendResponse({ success: false, error: error.message });
@@ -1041,7 +1057,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         // Inform UI that a stream is starting
         try {
           broadcastToUI({ type: 'streamStart' });
-        } catch (_) {}
+        } catch {
+          // Ignore errors
+        }
 
         const response = await sendToNativeHost({
           type: 'qwen_request',
@@ -1064,7 +1082,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             type: 'error',
             data: { message: String(error?.message || error) },
           });
-        } catch (_) {}
+        } catch {
+          // Ignore errors
+        }
         const errMsg =
           error && error && error.message
             ? error && error.message
@@ -1171,84 +1191,93 @@ async function initNetworkLogging(tabId) {
 }
 
 // Enhanced network logging using webRequest API for broader coverage (metadata only)
-chrome.webRequest.onBeforeRequest.addListener((details) => {
-  const tabId = details.tabId;
-  if (tabId === -1) return; // Skip requests not associated with a tab
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId === -1) return; // Skip requests not associated with a tab
 
-  if (!networkLogs.has(tabId)) {
-    networkLogs.set(tabId, []);
-  }
+    if (!networkLogs.has(tabId)) {
+      networkLogs.set(tabId, []);
+    }
 
-  const tabLogs = networkLogs.get(tabId);
-  tabLogs.push({
-    method: 'Network.requestWillBeSent',
-    params: {
-      requestId: details.requestId,
-      request: {
-        url: details.url,
-        method: details.method,
+    const tabLogs = networkLogs.get(tabId);
+    tabLogs.push({
+      method: 'Network.requestWillBeSent',
+      params: {
+        requestId: details.requestId,
+        request: {
+          url: details.url,
+          method: details.method,
+        },
+        timestamp: Date.now(),
       },
       timestamp: Date.now(),
-    },
-    timestamp: Date.now(),
-  });
+    });
 
-  if (tabLogs.length > MAX_LOGS_PER_TAB) {
-    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-  }
-}, { urls: ['<all_urls>'] });
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  },
+  { urls: ['<all_urls>'] },
+);
 
-chrome.webRequest.onCompleted.addListener((details) => {
-  const tabId = details.tabId;
-  if (tabId === -1) return; // Skip requests not associated with a tab
+chrome.webRequest.onCompleted.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId === -1) return; // Skip requests not associated with a tab
 
-  if (!networkLogs.has(tabId)) {
-    networkLogs.set(tabId, []);
-  }
+    if (!networkLogs.has(tabId)) {
+      networkLogs.set(tabId, []);
+    }
 
-  const tabLogs = networkLogs.get(tabId);
-  tabLogs.push({
-    method: 'Network.responseReceived',
-    params: {
-      requestId: details.requestId,
-      response: {
-        url: details.url,
-        status: details.statusCode,
-        statusText: details.statusLine,
+    const tabLogs = networkLogs.get(tabId);
+    tabLogs.push({
+      method: 'Network.responseReceived',
+      params: {
+        requestId: details.requestId,
+        response: {
+          url: details.url,
+          status: details.statusCode,
+          statusText: details.statusLine,
+        },
+        timestamp: Date.now(),
       },
       timestamp: Date.now(),
-    },
-    timestamp: Date.now(),
-  });
+    });
 
-  if (tabLogs.length > MAX_LOGS_PER_TAB) {
-    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-  }
-}, { urls: ['<all_urls>'] });
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  },
+  { urls: ['<all_urls>'] },
+);
 
-chrome.webRequest.onErrorOccurred.addListener((details) => {
-  const tabId = details.tabId;
-  if (tabId === -1) return; // Skip requests not associated with a tab
+chrome.webRequest.onErrorOccurred.addListener(
+  (details) => {
+    const tabId = details.tabId;
+    if (tabId === -1) return; // Skip requests not associated with a tab
 
-  if (!networkLogs.has(tabId)) {
-    networkLogs.set(tabId, []);
-  }
+    if (!networkLogs.has(tabId)) {
+      networkLogs.set(tabId, []);
+    }
 
-  const tabLogs = networkLogs.get(tabId);
-  tabLogs.push({
-    method: 'Network.loadingFailed',
-    params: {
-      requestId: details.requestId,
-      errorText: details.error,
+    const tabLogs = networkLogs.get(tabId);
+    tabLogs.push({
+      method: 'Network.loadingFailed',
+      params: {
+        requestId: details.requestId,
+        errorText: details.error,
+        timestamp: Date.now(),
+      },
       timestamp: Date.now(),
-    },
-    timestamp: Date.now(),
-  });
+    });
 
-  if (tabLogs.length > MAX_LOGS_PER_TAB) {
-    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-  }
-}, { urls: ['<all_urls>'] });
+    if (tabLogs.length > MAX_LOGS_PER_TAB) {
+      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+    }
+  },
+  { urls: ['<all_urls>'] },
+);
 
 // Listen for network events via debugger API for additional details
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -1475,7 +1504,9 @@ try {
       }
     });
   }
-} catch (_) {}
+} catch {
+  // Ignore errors
+}
 
 // Listen for navigation to side panel to inject extension URI
 chrome.webNavigation?.onDOMContentLoaded?.addListener((details) => {
@@ -1504,10 +1535,12 @@ chrome.webNavigation?.onDOMContentLoaded?.addListener((details) => {
   }
 });
 
-// Export for testing
+// Export for testing (disabled for service worker environment)
+/*
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     connectToNativeHost,
     sendToNativeHost,
   };
 }
+*/

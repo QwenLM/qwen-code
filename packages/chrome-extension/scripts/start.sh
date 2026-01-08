@@ -31,7 +31,7 @@ print_error() {
 
 # 获取脚本所在目录
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-EXTENSION_DIR="$SCRIPT_DIR/extension"
+EXTENSION_DIR="${EXTENSION_OUT_DIR:-"$SCRIPT_DIR/dist/extension"}"
 NATIVE_HOST_DIR="$SCRIPT_DIR/native-host"
 
 # 清屏并显示标题
@@ -219,6 +219,13 @@ print_success "Test server started at http://localhost:3000"
 # 5. 启动 Chrome
 print_info "Starting Chrome with extension..."
 
+# Ensure extension is built
+if [[ ! -d "$EXTENSION_DIR" ]]; then
+    echo "Extension output not found at $EXTENSION_DIR"
+    echo "Please run: EXTENSION_OUT_DIR=dist/extension npm run build"
+    exit 1
+fi
+
 # Chrome 参数
 CHROME_ARGS=(
     "--load-extension=$EXTENSION_DIR"
@@ -251,7 +258,7 @@ echo ""
 echo "📝 Debug Locations:"
 echo "   • Extension Logs: Chrome DevTools Console"
 echo "   • Background Page: chrome://extensions → Service Worker"
-echo "   • Native Host Log: /tmp/qwen-bridge-host.log"
+echo "   • Native Host Log: \$HOME/.qwen/chrome-bridge/qwen-bridge-host.log (fallback: /tmp/qwen-bridge-host.log)"
 if [[ -n "${QWEN_PID:-}" ]]; then
     echo "   • Qwen Server Log: /tmp/qwen-server.log"
 fi
