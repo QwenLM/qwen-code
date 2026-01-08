@@ -384,6 +384,17 @@ export class WriteFileTool
     );
   }
 
+  protected override regularizeToolParams(
+    _params: WriteFileToolParams,
+  ): WriteFileToolParams {
+    // Issue: https://github.com/QwenLM/qwen-code/issues/535
+    // Workaround issue of some _params.content type is object, but their schema type is string.
+    if (typeof _params.content !== 'string') {
+      _params.content = JSON.stringify(_params.content, null, 2);
+    }
+    return _params;
+  }
+
   protected override validateToolParamValues(
     params: WriteFileToolParams,
   ): string | null {
