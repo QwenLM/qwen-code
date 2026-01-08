@@ -18,6 +18,29 @@ export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
+
+  // Handle objects with message property (error-like objects)
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof (error as { message: unknown }).message === 'string'
+  ) {
+    return (error as { message: string }).message;
+  }
+
+  // Handle plain objects by stringifying them
+  if (error !== null && typeof error === 'object') {
+    try {
+      const stringified = JSON.stringify(error);
+      // JSON.stringify can return undefined for objects with toJSON() returning undefined
+      return stringified ?? String(error);
+    } catch {
+      // If JSON.stringify fails (circular reference, etc.), fall back to String
+      return String(error);
+    }
+  }
+
   return String(error);
 }
 
