@@ -26,7 +26,7 @@ import {
 } from '../../i18n/languages.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage, createSecureDir } from '@qwen-code/qwen-code-core';
 
 const LLM_OUTPUT_LANGUAGE_RULE_FILENAME = 'output-language.md';
 const LLM_OUTPUT_LANGUAGE_MARKER_PREFIX = 'qwen-code:llm-output-language:';
@@ -238,9 +238,9 @@ function generateLlmOutputLanguageRuleFile(
     const normalizedLanguage = normalizeLanguageName(language);
     const content = generateLlmOutputLanguageRule(normalizedLanguage);
 
-    // Ensure directory exists
+    // Ensure directory exists with secure permissions
     const dir = path.dirname(filePath);
-    fs.mkdirSync(dir, { recursive: true });
+    createSecureDir(dir);
 
     // Write file (overwrite if exists)
     fs.writeFileSync(filePath, content, 'utf-8');

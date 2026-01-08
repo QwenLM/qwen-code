@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { createSecureDir, writeSecureFile } from './fileUtils.js';
 
 export class InstallationManager {
   private getInstallationIdPath(): string {
@@ -28,8 +29,8 @@ export class InstallationManager {
   private writeInstallationIdToFile(installationId: string) {
     const installationIdFile = this.getInstallationIdPath();
     const dir = path.dirname(installationIdFile);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(installationIdFile, installationId, 'utf-8');
+    createSecureDir(dir);
+    writeSecureFile(installationIdFile, installationId);
   }
 
   /**
