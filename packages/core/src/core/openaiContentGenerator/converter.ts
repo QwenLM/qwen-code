@@ -791,7 +791,7 @@ export class OpenAIContentConverter {
       const parts: Part[] = [];
 
       const reasoningText = (choice.delta as ExtendedCompletionChunkDelta)
-        .reasoning_content;
+        ?.reasoning_content;
       if (reasoningText) {
         parts.push({ text: reasoningText, thought: true });
       }
