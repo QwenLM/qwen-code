@@ -106,7 +106,7 @@ export function SuggestionsDisplay({
             </Box>
 
             {suggestion.description && (
-              <Box flexGrow={1} paddingLeft={3}>
+              <Box flexGrow={1} paddingLeft={2}>
                 <Text color={textColor} wrap="truncate">
                   {suggestion.description}
                 </Text>

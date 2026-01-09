@@ -59,6 +59,9 @@ describe('ShellTool', () => {
       getWorkspaceContext: vi
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
+      storage: {
+        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+      },
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
         enabled: true,
@@ -139,6 +142,42 @@ describe('ShellTool', () => {
         }),
       ).toThrow(
         "Directory '/not/in/workspace' is not within any of the registered workspace directories.",
+      );
+    });
+
+    it('should throw an error for a directory within the user skills directory', () => {
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir/.qwen/skills/my-skill',
+          is_background: false,
+        }),
+      ).toThrow(
+        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
+      );
+    });
+
+    it('should throw an error for the user skills directory itself', () => {
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir/.qwen/skills',
+          is_background: false,
+        }),
+      ).toThrow(
+        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
+      );
+    });
+
+    it('should resolve directory path before checking user skills directory', () => {
+      expect(() =>
+        shellTool.build({
+          command: 'ls',
+          directory: '/test/dir/.qwen/skills/../skills/my-skill',
+          is_background: false,
+        }),
+      ).toThrow(
+        'Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.',
       );
     });
 

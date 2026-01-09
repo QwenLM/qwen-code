@@ -573,6 +573,45 @@ describe('useSlashCompletion', () => {
       });
     });
 
+    it('should map completion items with descriptions for argument suggestions', async () => {
+      const mockCompletionFn = vi.fn().mockResolvedValue([
+        { value: 'pdf', description: 'Create PDF documents' },
+        { value: 'xlsx', description: 'Work with spreadsheets' },
+      ]);
+
+      const slashCommands = [
+        createTestCommand({
+          name: 'skills',
+          description: 'List available skills',
+          completion: mockCompletionFn,
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/skills ',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions).toEqual([
+          {
+            label: 'pdf',
+            value: 'pdf',
+            description: 'Create PDF documents',
+          },
+          {
+            label: 'xlsx',
+            value: 'xlsx',
+            description: 'Work with spreadsheets',
+          },
+        ]);
+      });
+    });
+
     it('should call command.completion with an empty string when args start with a space', async () => {
       const mockCompletionFn = vi
         .fn()

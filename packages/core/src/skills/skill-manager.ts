@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
@@ -29,6 +30,9 @@ export class SkillManager {
   private skillsCache: Map<SkillLevel, SkillConfig[]> | null = null;
   private readonly changeListeners: Set<() => void> = new Set();
   private parseErrors: Map<string, SkillError> = new Map();
+  private readonly watchers: Map<string, fsSync.FSWatcher> = new Map();
+  private watchStarted = false;
+  private refreshTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly config: Config) {}
 
@@ -219,6 +223,34 @@ export class SkillManager {
 
     this.skillsCache = skillsCache;
     this.notifyChangeListeners();
+  }
+
+  /**
+   * Starts watching skill directories for changes.
+   */
+  async startWatching(): Promise<void> {
+    if (this.watchStarted) {
+      return;
+    }
+
+    this.watchStarted = true;
+    await this.refreshCache();
+    this.updateWatchersFromCache();
+  }
+
+  /**
+   * Stops watching skill directories for changes.
+   */
+  stopWatching(): void {
+    for (const watcher of this.watchers.values()) {
+      watcher.close();
+    }
+    this.watchers.clear();
+    this.watchStarted = false;
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = null;
+    }
   }
 
   /**
@@ -448,5 +480,70 @@ export class SkillManager {
       const levelSkills = await this.listSkillsAtLevel(level);
       this.skillsCache.set(level, levelSkills);
     }
+  }
+
+  private updateWatchersFromCache(): void {
+    const desiredPaths = new Set<string>();
+    const recursiveSupported =
+      process.platform === 'darwin' || process.platform === 'win32';
+
+    for (const level of ['project', 'user'] as const) {
+      const baseDir = this.getSkillsBaseDir(level);
+      const parentDir = path.dirname(baseDir);
+      if (fsSync.existsSync(parentDir)) {
+        desiredPaths.add(parentDir);
+      }
+      if (fsSync.existsSync(baseDir)) {
+        desiredPaths.add(baseDir);
+      }
+
+      const levelSkills = this.skillsCache?.get(level) || [];
+      for (const skill of levelSkills) {
+        const skillDir = path.dirname(skill.filePath);
+        if (fsSync.existsSync(skillDir)) {
+          desiredPaths.add(skillDir);
+        }
+      }
+    }
+
+    for (const existingPath of this.watchers.keys()) {
+      if (!desiredPaths.has(existingPath)) {
+        this.watchers.get(existingPath)?.close();
+        this.watchers.delete(existingPath);
+      }
+    }
+
+    for (const watchPath of desiredPaths) {
+      if (this.watchers.has(watchPath)) {
+        continue;
+      }
+
+      try {
+        const watcher = fsSync.watch(
+          watchPath,
+          { recursive: recursiveSupported },
+          () => {
+            this.scheduleRefresh();
+          },
+        );
+        this.watchers.set(watchPath, watcher);
+      } catch (error) {
+        console.warn(
+          `Failed to watch skills directory at ${watchPath}:`,
+          error,
+        );
+      }
+    }
+  }
+
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+    }
+
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = null;
+      void this.refreshCache().then(() => this.updateWatchersFromCache());
+    }, 150);
   }
 }
