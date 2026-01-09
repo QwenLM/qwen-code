@@ -312,8 +312,16 @@ export async function activate(context: vscode.ExtensionContext) {
             'qwen-cli',
             'cli.js',
           ).fsPath;
-          const quote = (s: string) => `"${s.replaceAll('"', '\\"')}"`;
-          const qwenCmd = `${quote(process.execPath)} ${quote(cliEntry)}`;
+          const isWindows = process.platform === 'win32';
+          let qwenCmd: string;
+          if (isWindows) {
+            const escapedPath = cliEntry.replace(/'/g, "''");
+            qwenCmd = `node '${escapedPath}'`;
+          } else {
+            const quote = (s: string) => `"${s.replaceAll('"', '\\"')}"`;
+            qwenCmd = `node ${quote(cliEntry)}`;
+          }
+
           const terminal = vscode.window.createTerminal({
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
