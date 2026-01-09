@@ -104,7 +104,7 @@ Settings are organized into categories. All settings should be placed within the
 | `model.name`                                       | string  | The Qwen model to use for conversations.                                                                                                                                                                                                                                                                                                                               | `undefined` |
 | `model.maxSessionTurns`                            | number  | Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.                                                                                                                                                                                                                                                                                      | `-1`        |
 | `model.summarizeToolOutput`                        | object  | Enables or disables the summarization of tool output. You can specify the token budget for the summarization using the `tokenBudget` setting. Note: Currently only the `run_shell_command` tool is supported. For example `{"run_shell_command": {"tokenBudget": 2000}}`                                                                                               | `undefined` |
-| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.                                                                 | `undefined` |
+| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, `disableCacheControl`, and `defaultHeaders` (custom HTTP headers for API requests), along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.        | `undefined` |
 | `model.chatCompression.contextPercentageThreshold` | number  | Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely. | `0.7`       |
 | `model.skipNextSpeakerCheck`                       | boolean | Skip the next speaker check.                                                                                                                                                                                                                                                                                                                                           | `false`     |
 | `model.skipLoopDetection`                          | boolean | Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.                                                                                                                | `false`     |
@@ -114,12 +114,16 @@ Settings are organized into categories. All settings should be placed within the
 
 **Example model.generationConfig:**
 
-```
+```json
 {
   "model": {
     "generationConfig": {
       "timeout": 60000,
       "disableCacheControl": false,
+      "defaultHeaders": {
+        "X-Request-ID": "req-123",
+        "X-User-ID": "user-456"
+      },
       "samplingParams": {
         "temperature": 0.2,
         "top_p": 0.8,
@@ -129,6 +133,8 @@ Settings are organized into categories. All settings should be placed within the
   }
 }
 ```
+
+The `defaultHeaders` field allows you to add custom HTTP headers to all API requests. This is useful for request tracing, monitoring, API gateway routing, or when different models require different headers. Headers defined in `modelProviders[].generationConfig.defaultHeaders` will merge with and override headers from `model.generationConfig.defaultHeaders`.
 
 **model.openAILoggingDir examples:**
 
@@ -154,6 +160,10 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
         "generationConfig": {
           "timeout": 60000,
           "maxRetries": 3,
+          "defaultHeaders": {
+            "X-Model-Version": "v1.0",
+            "X-Request-Priority": "high"
+          },
           "samplingParams": { "temperature": 0.2 }
         }
       }
@@ -215,7 +225,7 @@ Per-field precedence for `generationConfig`:
 3. `settings.model.generationConfig`
 4. Content-generator defaults (`getDefaultGenerationConfig` for OpenAI, `getParameterValue` for Gemini, etc.)
 
-`samplingParams` is treated atomically; provider values replace the entire object. Defaults from the content generator apply last so each provider retains its tuned baseline.
+`samplingParams` is treated atomically; provider values replace the entire object. For `defaultHeaders`, a merge strategy is used: headers from `modelProviders[].generationConfig.defaultHeaders` will be merged with headers from `model.generationConfig.defaultHeaders`, with provider-specific headers taking precedence for duplicate keys. Defaults from the content generator apply last so each provider retains its tuned baseline.
 
 ##### Selection persistence and recommendations
 

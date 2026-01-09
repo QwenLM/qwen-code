@@ -163,7 +163,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
       headers['anthropic-beta'] = betas.join(',');
     }
 
-    return headers;
+    // Merge with custom defaultHeaders from config
+    const customHeaders = this.contentGeneratorConfig.defaultHeaders || {};
+    return {
+      ...headers,
+      ...customHeaders,
+    };
   }
 
   private async buildRequest(

@@ -48,11 +48,18 @@ export class DashScopeOpenAICompatibleProvider
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { authType } = this.contentGeneratorConfig;
-    return {
+    const baseHeaders: Record<string, string | undefined> = {
       'User-Agent': userAgent,
       'X-DashScope-CacheControl': 'enable',
       'X-DashScope-UserAgent': userAgent,
       'X-DashScope-AuthType': authType,
+    };
+
+    // Merge with custom defaultHeaders from config
+    const customHeaders = this.contentGeneratorConfig.defaultHeaders || {};
+    return {
+      ...baseHeaders,
+      ...customHeaders,
     };
   }
 
