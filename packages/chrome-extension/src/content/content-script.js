@@ -1,3 +1,5 @@
+/* global window, document, console, chrome, setTimeout, NodeFilter, Node, URL, MouseEvent, InputEvent, Event, module */
+
 /**
  * Content Script for Qwen CLI Chrome Extension
  * Extracts data from web pages and communicates with background script
@@ -188,30 +190,33 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
           case 'br':
             markdown += '\n';
             break;
-          case 'a':
+          case 'a': {
             const href = node.getAttribute('href');
             const text = node.textContent.trim();
             if (href) {
               markdown += `[${text}](${href}) `;
             }
             break;
-          case 'img':
+          }
+          case 'img': {
             const src = node.getAttribute('src');
             const alt = node.getAttribute('alt') || '';
             if (src) {
               markdown += `![${alt}](${src}) `;
             }
             break;
+          }
           case 'ul':
           case 'ol':
             markdown += '\n';
             listStack.push(node.tagName.toLowerCase());
             break;
-          case 'li':
+          case 'li': {
             const listType = listStack[listStack.length - 1];
             const prefix = listType === 'ol' ? '1. ' : '- ';
             markdown += prefix + node.textContent.trim() + '\n';
             break;
+          }
           case 'code':
             markdown += '`' + node.textContent + '`';
             break;
@@ -339,6 +344,113 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
     }
   }
 
+  // Simulate a click on a selector
+  function clickElement(selector) {
+    if (!selector) {
+      return { success: false, error: 'No selector provided' };
+    }
+    const element = document.querySelector(selector);
+    if (!element) {
+      return {
+        success: false,
+        error: `Element not found for selector: ${selector}`,
+      };
+    }
+    try {
+      if (typeof element.scrollIntoView === 'function') {
+        element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+      const evtOptions = { bubbles: true, cancelable: true, composed: true };
+      ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach((type) => {
+        try {
+          const evt = new MouseEvent(type, evtOptions);
+          element.dispatchEvent(evt);
+        } catch {
+          // ignore individual dispatch failures
+        }
+      });
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to click element:', error);
+      return { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  // Fill text into an input/textarea/contentEditable element
+  function fillInput(selector, text, options = {}) {
+    if (!selector) {
+      return { success: false, error: 'No selector provided' };
+    }
+
+    const element = document.querySelector(selector);
+    if (!element) {
+      return {
+        success: false,
+        error: `Element not found for selector: ${selector}`,
+      };
+    }
+
+    const clearExisting = options.clear !== false; // default: clear before typing
+
+    try {
+      // Scroll into view and focus
+      if (typeof element.scrollIntoView === 'function') {
+        element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+      if (typeof element.focus === 'function') {
+        element.focus({ preventScroll: true });
+      }
+
+      // Determine how to set text based on element type
+      const tag = element.tagName?.toLowerCase();
+      const isInput =
+        tag === 'input' || tag === 'textarea' || element.isContentEditable;
+
+      if (!isInput) {
+        return {
+          success: false,
+          error: 'Target is not an input, textarea, or contentEditable element',
+        };
+      }
+
+      // Helper to dispatch events so frameworks pick up the change
+      const dispatch = (name) => {
+        const evt =
+          name === 'input' && typeof InputEvent !== 'undefined'
+            ? new InputEvent(name, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+              })
+            : new Event(name, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+              });
+        element.dispatchEvent(evt);
+      };
+
+      if (tag === 'input' || tag === 'textarea') {
+        if (clearExisting) element.value = '';
+        element.value = text ?? '';
+      } else if (element.isContentEditable) {
+        if (clearExisting) element.innerText = '';
+        element.innerText = text ?? '';
+      }
+
+      dispatch('input');
+      dispatch('change');
+
+      return {
+        success: true,
+        appliedText: text ?? '',
+      };
+    } catch (error) {
+      console.error('Failed to fill input:', error);
+      return { success: false, error: error.message };
+    }
+  }
+
   // Execute custom JavaScript in page context
   function executeInPageContext(code) {
     try {
@@ -388,12 +500,207 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
     }
   }
 
+  const TEXT_INPUT_TYPES = new Set([
+    'text',
+    'email',
+    'search',
+    'tel',
+    'url',
+    'number',
+    'password',
+  ]);
+
+  function isWritableElement(el) {
+    if (!el || typeof el !== 'object') return false;
+    const tag = el.tagName?.toLowerCase();
+    if (tag === 'textarea') return true;
+    if (tag === 'input') {
+      const type = (el.type || '').toLowerCase();
+      return TEXT_INPUT_TYPES.has(type) || type === '' || type === 'date';
+    }
+    if (el.isContentEditable) return true;
+    return false;
+  }
+
+  function setElementText(
+    el,
+    text,
+    { mode = 'replace', simulateEvents = true, focus = false } = {},
+  ) {
+    if (!isWritableElement(el)) {
+      throw new Error('Element is not writable');
+    }
+
+    const applyValue = () => {
+      if (el.isContentEditable) {
+        el.innerText =
+          mode === 'append' ? `${el.innerText || ''}${text}` : text;
+      } else if (
+        el.tagName?.toLowerCase() === 'textarea' ||
+        el.tagName?.toLowerCase() === 'input'
+      ) {
+        el.value = mode === 'append' ? `${el.value || ''}${text}` : text;
+      }
+    };
+
+    if (focus) {
+      try {
+        el.focus();
+      } catch {
+        // ignore focus failures
+      }
+    }
+
+    applyValue();
+
+    if (simulateEvents) {
+      const events = ['input', 'change'];
+      events.forEach((type) => {
+        try {
+          const evt = new Event(type, { bubbles: true });
+          el.dispatchEvent(evt);
+        } catch {
+          // ignore dispatch failures
+        }
+      });
+      try {
+        el.blur();
+      } catch {
+        // ignore blur failures
+      }
+    }
+  }
+
+  function normalizeText(str) {
+    return String(str || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function findElementByLabel(labelText) {
+    const labelNorm = normalizeText(labelText);
+    if (!labelNorm) return null;
+
+    // <label> text -> for/id
+    const labels = Array.from(document.querySelectorAll('label')).filter(
+      (lbl) => normalizeText(lbl.textContent).includes(labelNorm),
+    );
+    for (const lbl of labels) {
+      const forId = lbl.getAttribute('for');
+      if (forId) {
+        const target = document.getElementById(forId);
+        if (target && isWritableElement(target)) return target;
+      }
+      const input = lbl.querySelector(
+        'input, textarea, [contenteditable="true"]',
+      );
+      if (input && isWritableElement(input)) return input;
+    }
+
+    // aria-label / placeholder / name fallback
+    const candidates = Array.from(
+      document.querySelectorAll('input, textarea, [contenteditable="true"]'),
+    );
+    for (const el of candidates) {
+      const aria = normalizeText(el.getAttribute?.('aria-label'));
+      const placeholder = normalizeText(el.getAttribute?.('placeholder'));
+      const name = normalizeText(el.getAttribute?.('name'));
+      if (
+        (aria && aria.includes(labelNorm)) ||
+        (placeholder && placeholder.includes(labelNorm)) ||
+        (name && name.includes(labelNorm))
+      ) {
+        if (isWritableElement(el)) return el;
+      }
+    }
+
+    return null;
+  }
+
+  function describeElement(el) {
+    if (!el) return 'unknown';
+    const tag = (el.tagName || '').toLowerCase();
+    const id = el.id ? `#${el.id}` : '';
+    const name = el.name ? `[name="${el.name}"]` : '';
+    const aria = el.getAttribute?.('aria-label')
+      ? `[aria-label="${el.getAttribute('aria-label')}"]`
+      : '';
+    const placeholder = el.getAttribute?.('placeholder')
+      ? `[placeholder="${el.getAttribute('placeholder')}"]`
+      : '';
+    return `${tag}${id}${name}${aria}${placeholder}` || tag || 'element';
+  }
+
+  function fillInputs(entries) {
+    if (!Array.isArray(entries)) {
+      throw new Error('entries must be an array');
+    }
+
+    const results = [];
+
+    entries.forEach((entry, idx) => {
+      const {
+        selector,
+        label,
+        text,
+        mode = 'replace',
+        simulateEvents = true,
+        focus = false,
+      } = entry || {};
+      const result = {
+        index: idx,
+        selector: selector || null,
+        label: label || null,
+        success: false,
+        message: '',
+        target: null,
+      };
+
+      try {
+        if (text === undefined || text === null) {
+          throw new Error('text is required');
+        }
+        const textValue = String(text);
+
+        let target = null;
+        if (selector) {
+          target = document.querySelector(selector);
+        }
+        if (!target && label) {
+          target = findElementByLabel(label);
+        }
+
+        if (!target) {
+          throw new Error('Target element not found');
+        }
+
+        if (!isWritableElement(target)) {
+          throw new Error('Target element is not writable');
+        }
+
+        setElementText(target, textValue, { mode, simulateEvents, focus });
+
+        result.success = true;
+        result.target = describeElement(target);
+        result.message = 'Filled successfully';
+      } catch (err) {
+        result.success = false;
+        result.message = err?.message || String(err);
+      }
+
+      results.push(result);
+    });
+
+    return results;
+  }
+
   // Message listener for communication with background script
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     console.log('Content script received message:', request);
 
     switch (request.type) {
-      case 'EXTRACT_DATA':
+      case 'EXTRACT_DATA': {
         // Extract and send page data
         const pageData = extractPageData();
         pageData.consoleLogs = consoleLogs;
@@ -402,6 +709,7 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
           data: pageData,
         });
         break;
+      }
 
       case 'GET_CONSOLE_LOGS':
         // Get captured console logs
@@ -419,13 +727,44 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
         });
         break;
 
-      case 'HIGHLIGHT_ELEMENT':
+      case 'FILL_INPUTS': {
+        try {
+          const results = fillInputs(request.entries || []);
+          sendResponse({
+            success: true,
+            data: { results },
+          });
+        } catch (error) {
+          sendResponse({
+            success: false,
+            error: error?.message || String(error),
+          });
+        }
+        break;
+      }
+
+      case 'HIGHLIGHT_ELEMENT': {
         // Highlight an element on the page
         const highlighted = highlightElement(request.selector);
         sendResponse({
           success: highlighted,
         });
         break;
+      }
+
+      case 'CLICK_ELEMENT': {
+        const result = clickElement(request.selector);
+        sendResponse(result);
+        break;
+      }
+
+      case 'FILL_INPUT': {
+        const result = fillInput(request.selector, request.text, {
+          clear: request.clear,
+        });
+        sendResponse(result);
+        break;
+      }
 
       case 'EXECUTE_CODE':
         // Execute JavaScript in page context
@@ -486,6 +825,7 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
       htmlToMarkdown,
       getSelectedText,
       highlightElement,
+      fillInput,
     };
   }
 }

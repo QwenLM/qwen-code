@@ -63,6 +63,7 @@ export const App: React.FC = () => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputFieldRef = useRef<HTMLDivElement>(null);
+  const autoConnectAttemptedRef = useRef(false);
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -186,18 +187,21 @@ export const App: React.FC = () => {
         }
 
         case 'streamEnd': {
-          if (streamingContent) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: 'assistant',
-                content: streamingContent,
-                timestamp: Date.now(),
-              },
-            ]);
-          }
+          setStreamingContent((current) => {
+            if (current) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  role: 'assistant',
+                  content: current,
+                  timestamp: Date.now(),
+                },
+              ]);
+            }
+            return '';
+          });
           setIsStreaming(false);
-          setStreamingContent('');
+          setIsWaitingForResponse(false);
           break;
         }
 
@@ -282,6 +286,8 @@ export const App: React.FC = () => {
     checkStatus();
   }, [vscode]);
 
+  // Auto-connect once on mount/when disconnected (defined after handleConnect to avoid TDZ)
+
   // Handle submit
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -341,6 +347,22 @@ export const App: React.FC = () => {
       setTimeout(() => setLoadingMessage(null), 3000);
     }
   }, [vscode]);
+
+  // Auto-connect once on mount/when disconnected
+  useEffect(() => {
+    if (!isConnected && !autoConnectAttemptedRef.current) {
+      autoConnectAttemptedRef.current = true;
+      (async () => {
+        try {
+          await handleConnect();
+        } catch (err) {
+          console.error('[AutoConnect] failed', err);
+          autoConnectAttemptedRef.current = false;
+          setLoadingMessage(null);
+        }
+      })();
+    }
+  }, [isConnected, handleConnect]);
 
   // Read current page and ask Qwen to analyze (bypasses MCP; uses content-script extractor)
   /* const handleReadPage = useCallback(async () => {

@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
   "main": "host.js",
+  "bin": {
+    "browser-bridge-mcp": "src/browser-mcp-server.js"
+  },
   "scripts": {
     "test": "node host.js --test"
   },

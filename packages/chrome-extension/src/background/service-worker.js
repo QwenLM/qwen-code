@@ -3,17 +3,16 @@
  * Handles communication between extension components and native host
  */
 
-/* global chrome, console, setTimeout, clearTimeout, document, window */
+/* global chrome, console, setTimeout, clearTimeout, fetch, AbortController */
 
-// Native messaging host name
-const NATIVE_HOST_NAME = 'com.qwen.cli.bridge';
+// Backend HTTP endpoint (replaces Native Messaging)
+const BACKEND_URL = 'http://127.0.0.1:18765';
 
 // Connection state
-let nativePort = null;
 let isConnected = false;
 let qwenCliStatus = 'disconnected';
 let pendingRequests = new Map();
-let requestId = 0;
+let eventPollerStarted = false;
 // Cache the latest available commands so late listeners (e.g. sidepanel opened later)
 // can fetch them via GET_STATUS.
 let lastAvailableCommands = [];
@@ -39,6 +38,16 @@ const INTERNAL_MCP_TOOLS = [
   {
     name: 'browser_get_console_logs',
     description: 'Get recent console logs from the active tab.',
+  },
+  {
+    name: 'browser_fill_form',
+    description:
+      'Fill inputs/textareas/contenteditable elements on the current page using selectors or labels.',
+  },
+  {
+    name: 'browser_input_text',
+    description:
+      'Fill a single input/textarea/contentEditable element using a CSS selector.',
   },
 ];
 
@@ -126,115 +135,92 @@ function shouldTriggerNetworkLogs(text) {
   return keywords.some((k) => t.includes(k));
 }
 
-// Connection management
-function connectToNativeHost() {
-  if (nativePort) {
-    return Promise.resolve(nativePort);
-  }
-
-  return new Promise((resolve, reject) => {
-    try {
-      console.log('Attempting to connect to Native Host:', NATIVE_HOST_NAME);
-      nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-
-      // Check for immediate errors
-      if (chrome.runtime.lastError) {
-        console.error('Chrome runtime error:', chrome.runtime.lastError);
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-
-      nativePort.onMessage.addListener((message) => {
-        // 简化日志输出，直接显示 data 内容
-        if (message.type === 'event' && message.data) {
-          console.log(
-            '[Native Event]',
-            message.data.type,
-            message.data.update || message.data,
-          );
-        } else if (message.type === 'response') {
-          console.log(
-            '[Native Response]',
-            'id:',
-            message.id,
-            message.success ? '✓' : '✗',
-            message.data || message.error,
-          );
-        } else {
-          console.log(
-            '[Native Message]',
-            message.type,
-            message.data || message,
-          );
-        }
-        handleNativeMessage(message);
-      });
-
-      nativePort.onDisconnect.addListener(() => {
-        const error = chrome.runtime.lastError;
-        console.log('Native host disconnected');
-        if (error) {
-          console.error('Disconnect error:', error);
-          console.error('Disconnect error message:', error.message);
-        }
-        nativePort = null;
-        isConnected = false;
-        qwenCliStatus = 'disconnected';
-
-        // Reject all pending requests
-        pendingRequests.forEach((handler) => {
-          handler.reject(new Error('Native host disconnected'));
-        });
-        pendingRequests.clear();
-
-        // Notify popup of disconnection
-        chrome.runtime
-          .sendMessage({
-            type: 'STATUS_UPDATE',
-            status: 'disconnected',
-          })
-          .catch(() => {
-            // Ignore errors if popup is closed
-          }); // Ignore errors if popup is closed
-      });
-
-      // Send initial handshake
-      console.log('Sending handshake...');
-      nativePort.postMessage({ type: 'handshake', version: '1.0.0' });
-
-      // Set timeout for handshake response
-      const handshakeTimeout = setTimeout(() => {
-        console.error('Handshake timeout - no response from Native Host');
-        if (nativePort) {
-          nativePort.disconnect();
-        }
-        reject(new Error('Handshake timeout'));
-      }, 5000);
-
-      // Store timeout so we can clear it when we get response
-      nativePort._handshakeTimeout = handshakeTimeout;
-
-      isConnected = true;
-      qwenCliStatus = 'connected';
-
-      resolve(nativePort);
-    } catch (error) {
-      console.error('Failed to connect to native host:', error);
-      reject(error);
+// Basic HTTP call helper
+async function callBackend(message) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(`${BACKEND_URL}/api`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
     }
-  });
+    return data.data;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Connection management (HTTP handshake)
+async function connectToNativeHost() {
+  if (isConnected) return true;
+  console.log('Attempting to connect to HTTP backend:', BACKEND_URL);
+  try {
+    const handshake = await callBackend({
+      type: 'handshake',
+      version: '1.0.0',
+    });
+    isConnected = true;
+    qwenCliStatus = handshake?.qwenStatus || 'connected';
+    // Notify popup
+    chrome.runtime
+      .sendMessage({
+        type: 'STATUS_UPDATE',
+        status: qwenCliStatus,
+        capabilities: handshake?.capabilities,
+        qwenInstalled: handshake?.qwenInstalled,
+        qwenVersion: handshake?.qwenVersion,
+      })
+      .catch(() => {});
+    // Start event polling once connected
+    if (!eventPollerStarted) {
+      eventPollerStarted = true;
+      startEventPolling();
+    }
+    return true;
+  } catch (error) {
+    console.error('Failed to connect to backend:', error);
+    isConnected = false;
+    qwenCliStatus = 'disconnected';
+    throw error;
+  }
+}
+
+// Long-poll event stream from backend
+async function startEventPolling() {
+  while (true) {
+    try {
+      const res = await fetch(`${BACKEND_URL}/events`, { method: 'GET' });
+      if (!res.ok) throw new Error(`Events HTTP ${res.status}`);
+      const data = await res.json();
+      if (data && Array.isArray(data.messages)) {
+        data.messages.forEach((msg) => {
+          try {
+            handleNativeMessage(msg);
+          } catch (err) {
+            console.error('Failed to handle event message:', err, msg);
+          }
+        });
+      }
+    } catch (err) {
+      console.warn('Event polling error:', err?.message || err);
+      // backoff on error
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+    // small delay between polls to avoid hot loop
+    await new Promise((r) => setTimeout(r, 500));
+  }
 }
 
 // Handle messages from native host
 function handleNativeMessage(message) {
   if (message.type === 'handshake_response') {
     console.log('Handshake successful:', message);
-
-    // Clear handshake timeout
-    if (nativePort && nativePort._handshakeTimeout) {
-      clearTimeout(nativePort._handshakeTimeout);
-      delete nativePort._handshakeTimeout;
-    }
 
     // Native host is connected, but Qwen CLI might not be running yet
     // 'disconnected' from host means Qwen CLI is not running, but we ARE connected to native host
@@ -303,35 +289,46 @@ function handleNativeMessage(message) {
 
 // Send request to native host
 async function sendToNativeHost(message) {
-  if (!nativePort || !isConnected) {
-    await connectToNativeHost();
+  await connectToNativeHost();
+  // Respect longer timeouts for heavy calls
+  let timeoutMs = 30000;
+  if (
+    message &&
+    (message.type === 'start_qwen' ||
+      message.type === 'qwen_prompt' ||
+      message.type === 'qwen_request')
+  ) {
+    timeoutMs = 180000;
   }
-
-  return new Promise((resolve, reject) => {
-    const id = ++requestId;
-    pendingRequests.set(id, { resolve, reject });
-
-    nativePort.postMessage({
-      ...message,
-      id,
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${BACKEND_URL}/api`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message),
+      signal: controller.signal,
     });
-
-    // Set timeout for request
-    // Default 30s, but ACP session creation and MCP discovery can take longer
-    let timeoutMs = 30000;
-    if (message && message.type === 'start_qwen') timeoutMs = 180000; // 3 minutes for startup + MCP discovery
-    if (
-      message &&
-      (message.type === 'qwen_prompt' || message.type === 'qwen_request')
-    )
-      timeoutMs = 180000;
-    setTimeout(() => {
-      if (pendingRequests.has(id)) {
-        pendingRequests.delete(id);
-        reject(new Error('Request timeout'));
+    const data = await res.json();
+    if (!res.ok || data.success === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    // When streaming completes, signal UI to end loader
+    try {
+      const payload = data?.data ?? data;
+      const inner = payload?.data ?? payload;
+      const stopReason =
+        inner?.stopReason || inner?.stop_reason || inner?.status === 'done';
+      if (stopReason) {
+        broadcastToUI({ type: 'streamEnd' });
       }
-    }, timeoutMs);
-  });
+    } catch {
+      // ignore
+    }
+    return data.data;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // Handle browser requests from Qwen CLI (via Native Host)
@@ -369,16 +366,33 @@ async function handleBrowserRequest(message) {
         data = await getBrowserConsoleLogs();
         break;
 
+      case 'fill_form':
+        data = await fillBrowserForm(params);
+        break;
+
+      case 'input_text':
+        data = await inputTextOnPage(
+          params?.selector,
+          params?.text,
+          params?.clear,
+        );
+        break;
+
       default:
         throw new Error(`Unknown browser request type: ${requestType}`);
     }
 
-    // Send response back to native host
-    nativePort.postMessage({
-      type: 'browser_response',
-      browserRequestId,
-      data,
-    });
+    // In HTTP mode there is no nativePort to respond to; log for debugging
+    console.log('Browser response ready', { browserRequestId, requestType });
+    try {
+      await sendToNativeHost({
+        type: 'browser_response',
+        browserRequestId,
+        data,
+      });
+    } catch (err) {
+      console.error('Failed to send browser_response:', err);
+    }
 
     // Notify UI tool end (success)
     try {
@@ -391,11 +405,15 @@ async function handleBrowserRequest(message) {
     }
   } catch (error) {
     console.error('Browser request error:', error);
-    nativePort.postMessage({
-      type: 'browser_response',
-      browserRequestId,
-      error: error.message,
-    });
+    try {
+      await sendToNativeHost({
+        type: 'browser_response',
+        browserRequestId,
+        error: error.message,
+      });
+    } catch (err) {
+      console.error('Failed to send browser_response error:', err);
+    }
 
     // Notify UI tool end (failure)
     try {
@@ -530,6 +548,121 @@ async function getBrowserConsoleLogs() {
           resolve({ logs: response.data || [] });
         } else {
           reject(new Error(response?.error || 'Failed to get console logs'));
+        }
+      },
+    );
+  });
+}
+
+// Fill inputs/textareas/contenteditable elements on the current page
+async function fillBrowserForm(params) {
+  const entries = params?.entries;
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error('entries array is required to fill form fields');
+  }
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+
+  if (!tab) {
+    throw new Error('No active tab found');
+  }
+
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js'],
+    });
+  } catch (injectError) {
+    console.log('Script injection skipped:', injectError.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      {
+        type: 'FILL_INPUTS',
+        entries,
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (response && response.success) {
+          resolve(response.data || {});
+        } else {
+          reject(
+            new Error(response?.error || 'Failed to fill inputs on the page'),
+          );
+        }
+      },
+    );
+  });
+}
+
+// Fill a single input/textarea/contentEditable element using a selector
+async function inputTextOnPage(selector, text, clear = true) {
+  if (!selector) {
+    throw new Error('selector is required to fill input');
+  }
+
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+
+  if (!tab) {
+    throw new Error('No active tab found');
+  }
+
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js'],
+    });
+  } catch (injectError) {
+    console.log('Script injection skipped:', injectError.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      {
+        type: 'FILL_INPUT',
+        selector,
+        text,
+        clear,
+      },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (response && response.success) {
+          resolve(response);
+        } else {
+          reject(
+            new Error(response?.error || 'Failed to fill input on the page'),
+          );
         }
       },
     );
@@ -924,6 +1057,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 (err.message.includes('No active session') ||
                   err.message.includes('session'));
               if (isSessionError && attempt < maxRetries) {
+                // Try to re-start Qwen CLI/session then retry prompt
+                try {
+                  await sendToNativeHost({
+                    type: 'start_qwen',
+                    cwd: request.data?.cwd || '/',
+                  });
+                  qwenCliStatus = 'running';
+                } catch {
+                  // ignore and continue retry loop
+                }
                 console.log(
                   `Session not ready, retry ${attempt}/${maxRetries} in ${delayMs}ms...`,
                 );
@@ -1519,9 +1662,9 @@ chrome.webNavigation?.onDOMContentLoaded?.addListener((details) => {
         .executeScript({
           target: { tabId: details.tabId },
           func: (uri) => {
-            // Set the extension URI on the document body
+            // eslint-disable-next-line no-undef
             document.body.setAttribute('data-extension-uri', uri);
-            // Also set it on window for backwards compatibility
+            // eslint-disable-next-line no-undef
             window.__EXTENSION_URI__ = uri;
           },
           args: [extensionUri],
@@ -1534,13 +1677,3 @@ chrome.webNavigation?.onDOMContentLoaded?.addListener((details) => {
     }
   }
 });
-
-// Export for testing (disabled for service worker environment)
-/*
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = {
-    connectToNativeHost,
-    sendToNativeHost,
-  };
-}
-*/

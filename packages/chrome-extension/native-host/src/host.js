@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 
+/* global require, process, Buffer, __dirname, setTimeout, clearTimeout, console */
+
 /**
  * Native Messaging Host for Qwen CLI Chrome Extension
  * This script acts as a bridge between the Chrome extension and Qwen CLI
  * Uses ACP (Agent Communication Protocol) for communication with Qwen CLI
  */
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const { spawn } = require('child_process');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require('fs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require('path');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const os = require('os');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const http = require('http');
 
 // ============================================================================
@@ -29,16 +36,23 @@ function log(message, level = 'INFO') {
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
     fs.appendFileSync(LOG_FILE, logLine);
-  } catch (err) {
+  } catch {
     // Fallback to tmp if home dir logging fails
     try {
-      fs.appendFileSync(path.join(os.tmpdir(), 'qwen-bridge-host.log'), logLine);
-    } catch (_) {}
+      fs.appendFileSync(
+        path.join(os.tmpdir(), 'qwen-bridge-host.log'),
+        logLine,
+      );
+    } catch {
+      /* ignore */
+    }
   }
   try {
     // Also emit to stderr so it can be tailed via Chrome native messaging logging
     process.stderr.write(logLine);
-  } catch (_) {}
+  } catch {
+    /* ignore */
+  }
 }
 
 function logError(message) {
@@ -49,19 +63,58 @@ function logDebug(message) {
   log(message, 'DEBUG');
 }
 
+// Event queue for HTTP polling (extension pulls events instead of native messaging)
+const eventQueue = [];
+const pendingEventPollers = new Set();
+
+function deliverEvents(messages) {
+  const payload =
+    messages ||
+    (pendingEventPollers.size > 0 ? eventQueue.splice(0) : undefined);
+  if (!payload || !payload.length) return;
+  // Respond to all pending pollers
+  for (const poller of Array.from(pendingEventPollers)) {
+    try {
+      poller.res.writeHead(200, { 'Content-Type': 'application/json' });
+      poller.res.end(JSON.stringify({ messages: payload }));
+    } catch {
+      // ignore send errors
+    }
+    clearTimeout(poller.timeout);
+    pendingEventPollers.delete(poller);
+  }
+}
+
+function enqueueEvent(message) {
+  eventQueue.push(message);
+  // Cap queue size to prevent unbounded growth
+  if (eventQueue.length > 1000) {
+    eventQueue.splice(0, eventQueue.length - 1000);
+  }
+  deliverEvents();
+}
+
 // ============================================================================
 // Native Messaging Protocol (Chrome Extension <-> Native Host)
 // ============================================================================
 
 function sendMessageToExtension(message) {
-  log(`Sending to extension: ${JSON.stringify(message).slice(0, 100)}`);
-  const buffer = Buffer.from(JSON.stringify(message));
-  const length = Buffer.allocUnsafe(4);
-  length.writeUInt32LE(buffer.length, 0);
+  // Queue for HTTP pollers
+  enqueueEvent(message);
 
-  process.stdout.write(length);
-  process.stdout.write(buffer);
-  log('Message sent successfully');
+  // Also emit to stdout for compatibility with native messaging (if used elsewhere)
+  try {
+    log(`Sending to extension: ${JSON.stringify(message).slice(0, 100)}`);
+    const buffer = Buffer.from(JSON.stringify(message));
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32LE(buffer.length, 0);
+
+    process.stdout.write(length);
+    process.stdout.write(buffer);
+    log('Message sent successfully');
+  } catch (err) {
+    logError(`Failed to write to stdout: ${err.message}`);
+  }
 }
 
 function readMessagesFromExtension() {
@@ -212,13 +265,13 @@ class AcpConnection {
         ) {
           normalizedCwd = chromeBridgeDir;
         }
-      } catch (_) {
+      } catch {
         try {
           const fallback = path.join(os.homedir(), '.qwen', 'chrome-bridge');
           if (!fs.existsSync(fallback))
             fs.mkdirSync(fallback, { recursive: true });
           normalizedCwd = fallback;
-        } catch (_) {
+        } catch {
           normalizedCwd = os.homedir();
         }
       }
@@ -247,7 +300,9 @@ class AcpConnection {
             if (fs.existsSync(candidate)) {
               return candidate;
             }
-          } catch {}
+          } catch {
+            /* ignore */
+          }
         }
 
         try {
@@ -258,13 +313,17 @@ class AcpConnection {
           ) {
             return process.env.QWEN_CLI_PATH;
           }
-        } catch {}
+        } catch {
+          /* ignore */
+        }
         try {
           // Fallback to previously used absolute path if it exists
           if (fs.existsSync('/Users/yiliang/.npm-global/bin/qwen')) {
             return '/Users/yiliang/.npm-global/bin/qwen';
           }
-        } catch {}
+        } catch {
+          /* ignore */
+        }
         // Last resort: rely on PATH
         return 'qwen';
       })();
@@ -311,7 +370,9 @@ class AcpConnection {
               type: 'event',
               data: { type: 'cli_stderr', line: message },
             });
-          } catch (_) {}
+          } catch {
+            /* ignore */
+          }
         }
       });
 
@@ -323,7 +384,7 @@ class AcpConnection {
         this.sessionId = null;
 
         // Reject all pending requests
-        for (const [id, { reject }] of this.pendingRequests) {
+        for (const [, { reject }] of this.pendingRequests) {
           reject(new Error('Qwen CLI process exited'));
         }
         this.pendingRequests.clear();
@@ -381,7 +442,7 @@ class AcpConnection {
       try {
         const message = JSON.parse(trimmed);
         this.handleAcpMessage(message);
-      } catch (err) {
+      } catch {
         logError(`Failed to parse ACP message: ${trimmed}`);
       }
     }
@@ -501,6 +562,16 @@ class AcpConnection {
         this.handleBrowserGetConsoleLogs(id, params);
         break;
 
+      case 'browser/fill_form':
+        // Fill multiple fields on the current page
+        this.handleBrowserFillForm(id, params);
+        break;
+
+      case 'browser/input_text':
+        // Fill a single field on the current page
+        this.handleBrowserInputText(id, params);
+        break;
+
       default:
         log(`Unknown ACP request: ${method}`);
         this.sendAcpResponse(id, {
@@ -609,6 +680,38 @@ class AcpConnection {
     }
   }
 
+  async handleBrowserFillForm(id, params) {
+    try {
+      const data = await sendBrowserRequest('fill_form', params);
+      this.sendAcpResponse(id, {
+        result: data || {},
+      });
+    } catch (err) {
+      this.sendAcpResponse(id, {
+        error: {
+          code: -32000,
+          message: `Failed to fill form: ${err.message}`,
+        },
+      });
+    }
+  }
+
+  async handleBrowserInputText(id, params) {
+    try {
+      const data = await sendBrowserRequest('input_text', params);
+      this.sendAcpResponse(id, {
+        result: data || {},
+      });
+    } catch (err) {
+      this.sendAcpResponse(id, {
+        error: {
+          code: -32000,
+          message: `Failed to fill input: ${err.message}`,
+        },
+      });
+    }
+  }
+
   sendAcpMessage(message) {
     if (!this.process || !this.process.stdin.writable) {
       throw new Error('Qwen CLI is not running');
@@ -637,7 +740,7 @@ class AcpConnection {
       }
 
       // Timeout after specified duration
-      const timer = setTimeout(() => {
+      setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
           reject(new Error(`Request ${method} timed out`));
@@ -690,7 +793,6 @@ class AcpConnection {
   async createSession(cwd) {
     try {
       // Helper to discover Chrome DevTools WS URL from env or default port
-      const http = require('http');
       async function fetchJson(url) {
         return new Promise((resolve) => {
           try {
@@ -700,14 +802,14 @@ class AcpConnection {
               res.on('end', () => {
                 try {
                   resolve(JSON.parse(body));
-                } catch (_) {
+                } catch {
                   resolve(null);
                 }
               });
             });
             req.on('error', () => resolve(null));
             req.end();
-          } catch (_) {
+          } catch {
             resolve(null);
           }
         });
@@ -773,10 +875,11 @@ class AcpConnection {
 
       log(`MCP servers config: ${JSON.stringify(mcpServersConfig)}`);
 
-      // Skip MCP server configuration to avoid slow tool discovery.
-      // Browser tools are handled via fallback mechanism in service-worker.js.
-      // To enable MCP (slower startup), set useMcp = true
-      const useMcp = false;
+      // Enable MCP by default; allow opt-out via env to avoid slower discovery/startup
+      const disableMcp =
+        process.env.QWEN_BRIDGE_DISABLE_MCP === '1' ||
+        process.env.QWEN_DISABLE_MCP === '1';
+      const useMcp = !disableMcp;
 
       const result = await this.sendAcpRequest(
         'session/new',
@@ -791,7 +894,9 @@ class AcpConnection {
       log(`Session created: ${this.sessionId}`);
       try {
         log(`Session/new result: ${JSON.stringify(result)}`);
-      } catch (_) {}
+      } catch {
+        /* ignore */
+      }
       return { success: true, data: result };
     } catch (err) {
       logError(`Failed to create session: ${err.message}`);
@@ -927,9 +1032,11 @@ async function checkQwenInstallation() {
   return new Promise((resolve) => {
     try {
       const qwenPath =
-        process.env.QWEN_CLI_PATH ||
-        '/Users/yiliang/.npm-global/bin/qwen' ||
-        'qwen';
+        process.env.QWEN_CLI_PATH && fs.existsSync(process.env.QWEN_CLI_PATH)
+          ? process.env.QWEN_CLI_PATH
+          : fs.existsSync('/Users/yiliang/.npm-global/bin/qwen')
+            ? '/Users/yiliang/.npm-global/bin/qwen'
+            : 'qwen';
       const checkProcess = spawn(qwenPath, ['--version'], {
         shell: true,
         windowsHide: true,
@@ -957,6 +1064,7 @@ async function checkQwenInstallation() {
         resolve({ installed: false });
       }, 5000);
     } catch (error) {
+      console.error('Qwen installation check error:', error);
       resolve({ installed: false });
     }
   });
@@ -1034,7 +1142,7 @@ async function handleExtensionMessage(message) {
       }
       break;
 
-    case 'start_qwen':
+    case 'start_qwen': {
       const cwd = message.cwd || process.cwd();
       const startResult = await acpConnection.start(cwd);
       response = {
@@ -1043,8 +1151,9 @@ async function handleExtensionMessage(message) {
         ...startResult,
       };
       break;
+    }
 
-    case 'stop_qwen':
+    case 'stop_qwen': {
       const stopResult = acpConnection.stop();
       response = {
         type: 'response',
@@ -1052,8 +1161,9 @@ async function handleExtensionMessage(message) {
         ...stopResult,
       };
       break;
+    }
 
-    case 'qwen_prompt':
+    case 'qwen_prompt': {
       const promptResult = await acpConnection.prompt(message.text);
       response = {
         type: 'response',
@@ -1061,8 +1171,9 @@ async function handleExtensionMessage(message) {
         ...promptResult,
       };
       break;
+    }
 
-    case 'qwen_cancel':
+    case 'qwen_cancel': {
       const cancelResult = await acpConnection.cancel();
       response = {
         type: 'response',
@@ -1070,6 +1181,7 @@ async function handleExtensionMessage(message) {
         ...cancelResult,
       };
       break;
+    }
 
     case 'permission_response':
       acpConnection.respondToPermission(message.requestId, message.optionId);
@@ -1080,7 +1192,7 @@ async function handleExtensionMessage(message) {
       };
       break;
 
-    case 'qwen_request':
+    case 'qwen_request': {
       // Handle generic requests from extension (analyze_page, analyze_screenshot, etc.)
       // Convert action + data to a prompt for Qwen CLI, including user's original request
       const promptText = buildPromptFromAction(
@@ -1104,8 +1216,9 @@ async function handleExtensionMessage(message) {
         };
       }
       break;
+    }
 
-    case 'get_status':
+    case 'get_status': {
       const status = acpConnection.getStatus();
       const installStatus = await checkQwenInstallation();
       response = {
@@ -1118,6 +1231,7 @@ async function handleExtensionMessage(message) {
         },
       };
       break;
+    }
 
     default:
       response = {
@@ -1131,73 +1245,270 @@ async function handleExtensionMessage(message) {
 }
 
 // ============================================================================
-// HTTP Bridge Server (for browser-mcp-server.js to call)
+// HTTP API Server (replaces native messaging bridge)
+// Fixed port: 18765
 // ============================================================================
 
 const HTTP_PORT = 18765;
 let httpServer = null;
 
-function startHttpBridgeServer() {
+function startHttpApiServer() {
   if (httpServer) return;
 
   httpServer = http.createServer(async (req, res) => {
-    // Set CORS headers
+    // CORS headers for extension fetch()
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
 
     if (req.method === 'OPTIONS') {
       res.writeHead(200);
-      res.end();
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    if (req.method === 'GET' && req.url === '/healthz') {
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
+    // Long-poll events: GET /events
+    if (req.method === 'GET' && req.url === '/events') {
+      if (eventQueue.length) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ messages: eventQueue.splice(0) }));
+        return;
+      }
+      const poller = { res, timeout: null };
+      poller.timeout = setTimeout(() => {
+        try {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ messages: [] }));
+        } catch {
+          // ignore
+        }
+        pendingEventPollers.delete(poller);
+      }, 25000);
+      res.on('close', () => {
+        clearTimeout(poller.timeout);
+        pendingEventPollers.delete(poller);
+      });
+      pendingEventPollers.add(poller);
       return;
     }
 
     if (req.method !== 'POST') {
       res.writeHead(405);
-      res.end(JSON.stringify({ error: 'Method not allowed' }));
+      res.end(JSON.stringify({ success: false, error: 'Method not allowed' }));
       return;
     }
 
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', async () => {
+      let request;
       try {
-        const request = JSON.parse(body);
-        log(`HTTP Bridge request: ${request.method}`);
+        request = JSON.parse(body || '{}');
+      } catch (err) {
+        console.error('JSON parsing error:', err);
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
 
-        let result;
-        switch (request.method) {
-          case 'read_page':
-            result = await sendBrowserRequest(
-              'read_page',
-              request.params || {},
-            );
-            break;
-          case 'capture_screenshot':
-            result = await sendBrowserRequest(
-              'capture_screenshot',
-              request.params || {},
-            );
-            break;
-          case 'get_network_logs':
-            result = await sendBrowserRequest(
-              'get_network_logs',
-              request.params || {},
-            );
-            break;
-          case 'get_console_logs':
-            result = await sendBrowserRequest(
-              'get_console_logs',
-              request.params || {},
-            );
-            break;
-          default:
-            throw new Error(`Unknown method: ${request.method}`);
+      try {
+        // Legacy bridge methods (kept for MCP server compatibility)
+        if (request.method) {
+          log(`HTTP Bridge request: ${request.method}`);
+          let result;
+          switch (request.method) {
+            case 'read_page':
+              result = await sendBrowserRequest(
+                'read_page',
+                request.params || {},
+              );
+              break;
+            case 'capture_screenshot':
+              result = await sendBrowserRequest(
+                'capture_screenshot',
+                request.params || {},
+              );
+              break;
+            case 'get_network_logs':
+              result = await sendBrowserRequest(
+                'get_network_logs',
+                request.params || {},
+              );
+              break;
+            case 'get_console_logs':
+              result = await sendBrowserRequest(
+                'get_console_logs',
+                request.params || {},
+              );
+              break;
+            case 'fill_form':
+              result = await sendBrowserRequest(
+                'fill_form',
+                request.params || {},
+              );
+              break;
+            case 'input_text':
+              result = await sendBrowserRequest(
+                'input_text',
+                request.params || {},
+              );
+              break;
+            default:
+              throw new Error(`Unknown method: ${request.method}`);
+          }
+          res.writeHead(200);
+          res.end(JSON.stringify({ success: true, data: result }));
+          return;
         }
 
-        res.writeHead(200);
-        res.end(JSON.stringify({ success: true, data: result }));
+        // Extension → host control surface
+        switch (request.type) {
+          case 'handshake': {
+            const data = {
+              type: 'handshake_response',
+              version: '1.0.0',
+              qwenInstalled: true,
+              qwenVersion: 'checking...',
+              qwenStatus: acpConnection.getStatus().status,
+              hostInfo: {
+                logFile: LOG_FILE,
+                node: process.execPath,
+                pid: process.pid,
+              },
+            };
+            // Send host_info event to mimic native messaging behavior
+            try {
+              sendMessageToExtension({
+                type: 'event',
+                data: {
+                  type: 'host_info',
+                  logFile: LOG_FILE,
+                  node: process.execPath,
+                  pid: process.pid,
+                },
+              });
+            } catch (e) {
+              logError(`Failed to enqueue host_info: ${e.message}`);
+            }
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true, data }));
+            return;
+          }
+
+          case 'start_qwen': {
+            const startResult = await acpConnection.start(
+              request.cwd || process.cwd(),
+            );
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: !startResult.error,
+                data: startResult,
+                error: startResult.error,
+              }),
+            );
+            return;
+          }
+
+          case 'stop_qwen': {
+            const stopResult = acpConnection.stop();
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: !stopResult.error,
+                data: stopResult,
+                error: stopResult.error,
+              }),
+            );
+            return;
+          }
+
+          case 'qwen_prompt': {
+            const promptResult = await acpConnection.prompt(request.text);
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: !promptResult.error,
+                data: promptResult,
+                error: promptResult.error,
+              }),
+            );
+            return;
+          }
+
+          case 'qwen_request': {
+            const promptText = buildPromptFromAction(
+              request.action,
+              request.data,
+              request.userPrompt,
+            );
+            const actionResult = await acpConnection.prompt(promptText);
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: !actionResult.error,
+                data: actionResult,
+                error: actionResult.error,
+              }),
+            );
+            return;
+          }
+
+          case 'qwen_cancel': {
+            const cancelResult = await acpConnection.cancel();
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: !cancelResult.error,
+                data: cancelResult,
+                error: cancelResult.error,
+              }),
+            );
+            return;
+          }
+
+          case 'get_status': {
+            const status = acpConnection.getStatus();
+            const installStatus = await checkQwenInstallation();
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                success: true,
+                data: {
+                  ...status,
+                  qwenInstalled: installStatus.installed,
+                  qwenVersion: installStatus.version,
+                },
+              }),
+            );
+            return;
+          }
+
+          case 'browser_response': {
+            handleBrowserResponse(request);
+            res.writeHead(200);
+            res.end(JSON.stringify({ success: true }));
+            return;
+          }
+
+          default:
+            res.writeHead(400);
+            res.end(
+              JSON.stringify({
+                success: false,
+                error: `Unknown request type: ${request.type}`,
+              }),
+            );
+            return;
+        }
       } catch (err) {
-        log(`HTTP Bridge error: ${err.message}`);
+        logError(`HTTP API error: ${err.message}`);
         res.writeHead(500);
         res.end(JSON.stringify({ success: false, error: err.message }));
       }
@@ -1205,11 +1516,11 @@ function startHttpBridgeServer() {
   });
 
   httpServer.listen(HTTP_PORT, '127.0.0.1', () => {
-    log(`HTTP Bridge server started on port ${HTTP_PORT}`);
+    log(`HTTP API server started on port ${HTTP_PORT}`);
   });
 
   httpServer.on('error', (err) => {
-    logError(`HTTP Bridge server error: ${err.message}`);
+    logError(`HTTP API server error: ${err.message}`);
   });
 }
 
@@ -1250,5 +1561,5 @@ log('Native host started (ACP mode) - Debug version');
 log(`Current working directory: ${process.cwd()}`);
 log(`Node.js version: ${process.version}`);
 log(`Platform: ${process.platform}`);
-startHttpBridgeServer();
+startHttpApiServer();
 readMessagesFromExtension();

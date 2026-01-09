@@ -1,105 +1,153 @@
 #!/usr/bin/env node
 
+/* global require, process, Buffer, __dirname, setTimeout, console */
+
 /**
  * Browser MCP Server
  * Provides browser tools (read_page, capture_screenshot, etc.) to Qwen CLI
  * Communicates with Native Host via HTTP to get browser data
  */
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const http = require('http');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const path = require('path');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { spawn } = require('child_process');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { TOOLS } = require('./shared/tools');
 
-const BRIDGE_URL = 'http://127.0.0.1:18765';
+const BRIDGE_BASE = process.env.BRIDGE_BASE || 'http://127.0.0.1:18765';
+const BRIDGE_URL = process.env.BRIDGE_URL || `${BRIDGE_BASE}/api`;
 
 // MCP Protocol version
 const PROTOCOL_VERSION = '2024-11-05';
 
-// Available tools
-const TOOLS = [
-  {
-    name: 'browser_read_page',
-    description:
-      'Read the content of the current browser page. Returns URL, title, text content, links, and images.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'browser_capture_screenshot',
-    description:
-      'Capture a screenshot of the current browser tab. Returns a base64-encoded PNG image.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'browser_get_network_logs',
-    description:
-      'Get network request logs from the current browser tab. Useful for debugging API calls.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: 'browser_get_console_logs',
-    description:
-      'Get console logs (log, error, warn, info) from the current browser tab.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  },
-];
+let bridgeReadyPromise = null;
+let hostProcess = null;
 
-// Send request to Native Host HTTP bridge
-async function callBridge(method, params = {}) {
+async function wait(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function checkBridgeHealth() {
   return new Promise((resolve, reject) => {
-    const data = JSON.stringify({ method, params });
-
     const req = http.request(
-      BRIDGE_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(data),
-        },
-      },
+      `${BRIDGE_BASE}/healthz`,
+      { method: 'GET' },
       (res) => {
-        let body = '';
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          try {
-            const result = JSON.parse(body);
-            if (result.success) {
-              resolve(result.data);
-            } else {
-              reject(new Error(result.error || 'Unknown error'));
-            }
-          } catch (err) {
-            reject(new Error(`Failed to parse response: ${err.message}`));
-          }
-        });
+        // any 2xx considered healthy
+        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+          resolve(true);
+        } else {
+          reject(new Error(`Health check status ${res.statusCode}`));
+        }
       },
     );
-
-    req.on('error', (err) => {
-      reject(
-        new Error(
-          `Bridge connection failed: ${err.message}. Make sure Chrome extension is running.`,
-        ),
-      );
-    });
-
-    req.write(data);
+    req.on('error', (err) => reject(err));
     req.end();
   });
+}
+
+async function ensureBridgeReady() {
+  if (bridgeReadyPromise) return bridgeReadyPromise;
+  bridgeReadyPromise = (async () => {
+    // If health OK, done
+    try {
+      await checkBridgeHealth();
+      return;
+    } catch {
+      // continue to spawn
+    }
+
+    // Spawn host.js so extension can talk to it
+    const hostPath = path.join(__dirname, '..', 'host.js');
+    hostProcess = spawn(process.execPath || 'node', [hostPath], {
+      stdio: 'inherit',
+      env: { ...process.env },
+    });
+
+    // Wait for health up to ~5s
+    for (let i = 0; i < 10; i++) {
+      await wait(500);
+      try {
+        await checkBridgeHealth();
+        return;
+      } catch {
+        // retry
+      }
+    }
+    throw new Error('Bridge health check failed after spawning host.js');
+  })();
+  return bridgeReadyPromise;
+}
+
+process.on('exit', () => {
+  if (hostProcess) {
+    try {
+      hostProcess.kill('SIGTERM');
+    } catch {
+      // ignore
+    }
+  }
+});
+
+// Send request to Native Host HTTP bridge with simple retry
+async function callBridge(method, params = {}) {
+  await ensureBridgeReady();
+  const data = JSON.stringify({ method, params });
+  const attempt = () =>
+    new Promise((resolve, reject) => {
+      const req = http.request(
+        BRIDGE_URL,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(data),
+          },
+        },
+        (res) => {
+          let body = '';
+          res.on('data', (chunk) => (body += chunk));
+          res.on('end', () => {
+            try {
+              const result = JSON.parse(body || '{}');
+              if (result.success) {
+                resolve(result.data);
+              } else {
+                reject(new Error(result.error || 'Unknown error'));
+              }
+            } catch (err) {
+              reject(new Error(`Failed to parse response: ${err.message}`));
+            }
+          });
+        },
+      );
+
+      req.on('error', (err) => {
+        reject(
+          new Error(
+            `Bridge connection failed: ${err.message}. Ensure host.js is running and the extension is loaded.`,
+          ),
+        );
+      });
+
+      req.write(data);
+      req.end();
+    });
+
+  // retry twice with small delay
+  let lastErr;
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await attempt();
+    } catch (err) {
+      lastErr = err;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+  throw lastErr;
 }
 
 // Handle MCP tool calls
@@ -149,8 +197,7 @@ async function handleToolCall(name, args) {
           content: [
             {
               type: 'text',
-              text:
-                'No network entries captured yet. Try reloading the page or triggering a request, then run again.',
+              text: 'No network entries captured yet. Try reloading the page or triggering a request, then run again.',
             },
           ],
         };
@@ -234,6 +281,40 @@ async function handleToolCall(name, args) {
       };
     }
 
+    case 'browser_fill_form': {
+      const data = await callBridge('fill_form', args);
+      const results = data.results || [];
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Fill results:\n${JSON.stringify(results, null, 2)}`,
+          },
+        ],
+      };
+    }
+
+    case 'browser_input_text': {
+      if (!args.selector || args.text === undefined) {
+        throw new Error('selector and text are required');
+      }
+      const data = await callBridge('input_text', args);
+      const success = data?.success !== false;
+      const message =
+        data?.error ||
+        data?.message ||
+        (success ? 'Filled successfully' : 'Failed to fill input');
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Input result: ${message}`,
+          },
+        ],
+        isError: !success,
+      };
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -275,10 +356,13 @@ async function handleMessage(message) {
 
       case 'tool': {
         // Return functionDeclarations compatible with Qwen's mcpToTool expectation
-        const functionDeclarations = TOOLS.map(t => ({
+        const functionDeclarations = TOOLS.map((t) => ({
           name: t.name,
           description: t.description,
-          parametersJsonSchema: t.inputSchema || { type: 'object', properties: {} },
+          parametersJsonSchema: t.inputSchema || {
+            type: 'object',
+            properties: {},
+          },
         }));
         sendResponse(id, { functionDeclarations });
         break;
@@ -355,10 +439,23 @@ process.stdin.on('data', (chunk) => {
     try {
       const message = JSON.parse(body.toString('utf8'));
       // Debug to stderr (not stdout): show basic method flow
-      try { console.error('[MCP <-]', message.method || 'response', message.id ?? ''); } catch (_) {}
+
+      try {
+        console.error(
+          '[MCP <-]',
+          message.method || 'response',
+          message.id ?? '',
+        );
+      } catch {
+        /* ignore */
+      }
       handleMessage(message);
     } catch (e) {
-      try { console.error('[MCP] JSON parse error:', e.message); } catch (_) {}
+      try {
+        console.error('[MCP] JSON parse error:', e.message);
+      } catch {
+        /* ignore */
+      }
       // ignore parse errors
     }
   }

@@ -8,7 +8,6 @@
     "activeTab",
     "tabs",
     "storage",
-    "nativeMessaging",
     "debugger",
     "webNavigation",
     "scripting",
@@ -17,7 +16,7 @@
     "sidePanel"
   ],
 
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:18765/*"],
 
   "externally_connectable": {
     "ids": ["aohjeidlpcjalobgghfkkehjbdhacjlo"],
