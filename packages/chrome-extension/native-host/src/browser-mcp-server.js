@@ -17,20 +17,51 @@ const { spawn } = require('child_process');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { TOOLS } = require('./shared/tools');
 
-const BRIDGE_BASE = process.env.BRIDGE_BASE || 'http://127.0.0.1:18765';
+// All logs must go to stderr to avoid corrupting MCP stdout framing.
+console.error('Browser MCP Server starting...');
+const BRIDGE_PORT = process.env.BRIDGE_PORT || '18765';
+const BRIDGE_BASE =
+  process.env.BRIDGE_BASE || `http://127.0.0.1:${BRIDGE_PORT}`;
 const BRIDGE_URL = process.env.BRIDGE_URL || `${BRIDGE_BASE}/api`;
+const DEBUG = process.env.BROWSER_MCP_DEBUG !== '0';
+console.error(`Bridge URL: ${BRIDGE_URL}`, `Debug: ${DEBUG}`);
+const SPAWN_ENABLED =
+  process.env.BROWSER_MCP_NO_SPAWN !== '1' &&
+  process.env.BROWSER_MCP_SPAWN !== '0';
 
 // MCP Protocol version
 const PROTOCOL_VERSION = '2024-11-05';
 
 let bridgeReadyPromise = null;
 let hostProcess = null;
+let bridgeAvailable = true;
+
+function logAlways(...args) {
+  try {
+     
+    console.error('[browser-mcp]', ...args);
+  } catch {
+    /* ignore */
+  }
+}
+
+function logDebug(...args) {
+  if (!DEBUG) return;
+  try {
+    // Use stderr to avoid corrupting MCP stdout framing
+     
+    console.error('[browser-mcp]', ...args);
+  } catch {
+    /* ignore */
+  }
+}
 
 async function wait(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 function checkBridgeHealth() {
+  logDebug('Checking bridge health at', `${BRIDGE_BASE}/healthz`);
   return new Promise((resolve, reject) => {
     const req = http.request(
       `${BRIDGE_BASE}/healthz`,
@@ -50,21 +81,54 @@ function checkBridgeHealth() {
 }
 
 async function ensureBridgeReady() {
+  logAlways('ensureBridgeReady: start', {
+    node: process.execPath,
+    argv: process.argv,
+    cwd: process.cwd(),
+  });
   if (bridgeReadyPromise) return bridgeReadyPromise;
   bridgeReadyPromise = (async () => {
     // If health OK, done
     try {
+      logDebug('Initial health check before spawning host');
       await checkBridgeHealth();
+      logDebug('Bridge already healthy, skip spawn');
       return;
     } catch {
-      // continue to spawn
+      // continue to spawn or bail based on env
+      if (!SPAWN_ENABLED) {
+        logAlways(
+          'Bridge not healthy and spawn is disabled (BROWSER_MCP_NO_SPAWN=1). Please start native-host/host.js manually.',
+        );
+        bridgeAvailable = false;
+        return;
+      }
     }
 
     // Spawn host.js so extension can talk to it
     const hostPath = path.join(__dirname, '..', 'host.js');
+    logDebug('Spawning host.js via node', hostPath);
+    logAlways('Spawning host.js', hostPath);
     hostProcess = spawn(process.execPath || 'node', [hostPath], {
-      stdio: 'inherit',
+      // Never send host stdout to MCP stdout (would corrupt Content-Length framing)
+      stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env },
+    });
+    if (hostProcess.stdout) {
+      hostProcess.stdout.on('data', (data) =>
+        logAlways('[host.js stdout]', data.toString('utf8').trimEnd()),
+      );
+    }
+    if (hostProcess.stderr) {
+      hostProcess.stderr.on('data', (data) =>
+        logAlways('[host.js stderr]', data.toString('utf8').trimEnd()),
+      );
+    }
+    hostProcess.on('error', (err) => {
+      logAlways('host.js process error', err?.message || err);
+    });
+    hostProcess.on('exit', (code, signal) => {
+      logAlways('host.js exited', { code, signal });
     });
 
     // Wait for health up to ~5s
@@ -72,12 +136,18 @@ async function ensureBridgeReady() {
       await wait(500);
       try {
         await checkBridgeHealth();
+        logDebug('Bridge healthy after spawn');
+        logAlways('Bridge healthy after spawn');
         return;
       } catch {
         // retry
+        logDebug('Health check retry', i + 1);
       }
     }
-    throw new Error('Bridge health check failed after spawning host.js');
+    logDebug('Bridge health check failed after spawning host.js');
+    logAlways('Bridge health check failed after spawning host.js');
+    bridgeAvailable = false;
+    return;
   })();
   return bridgeReadyPromise;
 }
@@ -95,6 +165,15 @@ process.on('exit', () => {
 // Send request to Native Host HTTP bridge with simple retry
 async function callBridge(method, params = {}) {
   await ensureBridgeReady();
+  if (!bridgeAvailable) {
+    // Return a predictable error payload instead of throwing to avoid timeouts
+    return {
+      success: false,
+      error:
+        'Bridge unavailable (failed to start or bind). If spawn is disabled, start native-host/host.js manually.',
+      method,
+    };
+  }
   const data = JSON.stringify({ method, params });
   const attempt = () =>
     new Promise((resolve, reject) => {
@@ -155,6 +234,17 @@ async function handleToolCall(name, args) {
   switch (name) {
     case 'browser_read_page': {
       const data = await callBridge('read_page');
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for read_page',
+            },
+          ],
+          isError: true,
+        };
+      }
       return {
         content: [
           {
@@ -177,6 +267,17 @@ async function handleToolCall(name, args) {
 
     case 'browser_capture_screenshot': {
       const data = await callBridge('capture_screenshot');
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for capture_screenshot',
+            },
+          ],
+          isError: true,
+        };
+      }
       return {
         content: [
           {
@@ -190,6 +291,17 @@ async function handleToolCall(name, args) {
 
     case 'browser_get_network_logs': {
       const data = await callBridge('get_network_logs');
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for get_network_logs',
+            },
+          ],
+          isError: true,
+        };
+      }
       const logs = data.logs || [];
 
       if (!logs.length) {
@@ -266,6 +378,17 @@ async function handleToolCall(name, args) {
 
     case 'browser_get_console_logs': {
       const data = await callBridge('get_console_logs');
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for get_console_logs',
+            },
+          ],
+          isError: true,
+        };
+      }
       const logs = data.logs || [];
       const formatted = logs
         .slice(-50)
@@ -283,6 +406,17 @@ async function handleToolCall(name, args) {
 
     case 'browser_fill_form': {
       const data = await callBridge('fill_form', args);
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for fill_form',
+            },
+          ],
+          isError: true,
+        };
+      }
       const results = data.results || [];
       return {
         content: [
@@ -296,6 +430,17 @@ async function handleToolCall(name, args) {
 
     case 'browser_fill_form_auto': {
       const data = await callBridge('fill_form_auto', args);
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for fill_form_auto',
+            },
+          ],
+          isError: true,
+        };
+      }
       const results = data.results || [];
       return {
         content: [
@@ -312,6 +457,17 @@ async function handleToolCall(name, args) {
         throw new Error('selector and text are required');
       }
       const data = await callBridge('input_text', args);
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for input_text',
+            },
+          ],
+          isError: true,
+        };
+      }
       const success = data?.success !== false;
       const message =
         data?.error ||
@@ -331,6 +487,17 @@ async function handleToolCall(name, args) {
     case 'browser_click': {
       if (!args.selector) throw new Error('selector is required');
       const data = await callBridge('click_element', args);
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for click_element',
+            },
+          ],
+          isError: true,
+        };
+      }
       const success = data?.success !== false;
       const message =
         data?.error || (success ? 'Click success' : 'Click failed');
@@ -348,6 +515,17 @@ async function handleToolCall(name, args) {
     case 'browser_click_text': {
       if (!args.text) throw new Error('text is required');
       const data = await callBridge('click_text', args);
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for click_text',
+            },
+          ],
+          isError: true,
+        };
+      }
       const success = data?.success !== false;
       const message =
         data?.error || (success ? 'Click success' : 'Click failed');
@@ -365,6 +543,17 @@ async function handleToolCall(name, args) {
     case 'browser_run_js': {
       if (!args.code) throw new Error('code is required');
       const data = await callBridge('run_js', { code: args.code });
+      if (data?.success === false) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: data.error || 'Bridge unavailable for run_js',
+            },
+          ],
+          isError: true,
+        };
+      }
       const success = data?.success !== false;
       const message = data?.error || JSON.stringify(data?.result ?? data);
       return {
@@ -385,11 +574,22 @@ async function handleToolCall(name, args) {
 
 // JSON-RPC framing over stdio (Content-Length)
 let inputBuffer = Buffer.alloc(0);
+let rawMode = false; // if client does not use Content-Length framing
 function writeMessage(obj) {
-  const json = Buffer.from(JSON.stringify(obj), 'utf8');
-  const header = Buffer.from(`Content-Length: ${json.length}\r\n\r\n`, 'utf8');
+  const jsonBuf = Buffer.from(JSON.stringify(obj), 'utf8');
+  if (rawMode) {
+    process.stdout.write(jsonBuf);
+    process.stdout.write('\n');
+    logAlways('stdout write (raw)', { length: jsonBuf.length + 1 });
+    return;
+  }
+  const header = Buffer.from(
+    `Content-Length: ${jsonBuf.length}\r\n\r\n`,
+    'utf8',
+  );
   process.stdout.write(header);
-  process.stdout.write(json);
+  process.stdout.write(jsonBuf);
+  logAlways('stdout write (CL)', { length: jsonBuf.length });
 }
 function sendResponse(id, result) {
   writeMessage({ jsonrpc: '2.0', id, result });
@@ -400,15 +600,24 @@ function sendError(id, code, message) {
 
 // Handle incoming JSON-RPC messages
 async function handleMessage(message) {
+  logAlways(
+    'Received message',
+    message?.method || 'response',
+    message?.id ?? '',
+  );
   const { id, method, params } = message;
+  // Use client-provided protocolVersion if available to maximize compatibility
+  const clientProtocolVersion = params?.protocolVersion;
+  const protocolVersion = clientProtocolVersion || PROTOCOL_VERSION;
 
   try {
     switch (method) {
       case 'initialize':
         sendResponse(id, {
-          protocolVersion: PROTOCOL_VERSION,
+          protocolVersion,
           capabilities: {
             tools: {},
+            resources: {},
           },
           serverInfo: {
             name: 'chrome-browser',
@@ -477,6 +686,14 @@ async function handleMessage(message) {
 
 // Main: Read JSON-RPC messages from stdin (Content-Length framed)
 process.stdin.on('data', (chunk) => {
+  const b64 = chunk.toString('base64');
+  const preview = chunk
+    .slice(0, 120)
+    .toString('utf8')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+  logAlways('stdin data length', chunk.length, 'b64', b64, 'preview', preview);
+
   inputBuffer = Buffer.concat([inputBuffer, chunk]);
   while (true) {
     let headerEnd = inputBuffer.indexOf('\r\n\r\n');
@@ -485,22 +702,57 @@ process.stdin.on('data', (chunk) => {
       headerEnd = inputBuffer.indexOf('\n\n');
       sepLen = 2;
     }
-    if (headerEnd === -1) return; // wait for full header
+    if (headerEnd === -1) {
+      // Fallback: if no header framing, try to parse the whole buffer as a single JSON message.
+      const bufStr = inputBuffer.toString('utf8').trim();
+      if (!bufStr) return; // nothing yet
+      try {
+        logAlways('Parsing message without Content-Length framing', {
+          length: inputBuffer.length,
+        });
+        const message = JSON.parse(bufStr);
+        rawMode = true; // respond using raw (newline-delimited) framing to match client
+        inputBuffer = Buffer.alloc(0);
+        handleMessage(message);
+        continue; // loop in case more data arrived together
+      } catch (e) {
+        logAlways('Waiting for header or complete JSON', e?.message || e, {
+          length: inputBuffer.length,
+        });
+        return; // wait for more data
+      }
+    }
 
     const headerStr = inputBuffer.slice(0, headerEnd).toString('utf8');
+    logAlways('Header found', { headerEnd, sepLen, headerStr });
     const match = headerStr.match(/Content-Length:\s*(\d+)/i);
     if (!match) {
       // drop until next header
+      logAlways('No Content-Length found, dropping header', headerStr);
       inputBuffer = inputBuffer.slice(headerEnd + sepLen);
       continue;
     }
     const length = parseInt(match[1], 10);
     const totalLen = headerEnd + sepLen + length;
-    if (inputBuffer.length < totalLen) return; // wait for full body
+    if (inputBuffer.length < totalLen) {
+      logAlways('Waiting for full body', {
+        have: inputBuffer.length,
+        need: totalLen,
+        contentLength: length,
+      });
+      return; // wait for full body
+    }
     const body = inputBuffer.slice(headerEnd + sepLen, totalLen);
     inputBuffer = inputBuffer.slice(totalLen);
     try {
-      const message = JSON.parse(body.toString('utf8'));
+      const raw = body.toString('utf8');
+      logAlways(
+        'Parsing message body length',
+        body.length,
+        'preview',
+        raw.slice(0, 200),
+      );
+      const message = JSON.parse(raw);
       // Debug to stderr (not stdout): show basic method flow
 
       try {
@@ -514,17 +766,54 @@ process.stdin.on('data', (chunk) => {
       }
       handleMessage(message);
     } catch (e) {
-      try {
-        console.error('[MCP] JSON parse error:', e.message);
-      } catch {
-        /* ignore */
-      }
+      logAlways('JSON parse error', e?.message || e);
+      logAlways('Offending body (base64)', body.toString('base64'));
+      logAlways('Header/len info', {
+        headerEnd,
+        sepLen,
+        contentLength: length,
+        bufferRemaining: inputBuffer.length,
+      });
       // ignore parse errors
     }
   }
 });
 
+process.stdin.on('end', () => {
+  logAlways('stdin ended');
+});
+
+process.stdin.on('error', (err) => {
+  logAlways('stdin error', err?.message || err);
+});
+
+process.on('exit', (code) => {
+  logAlways('browser-mcp exiting', { code });
+});
+
+// Kick off bridge readiness early so we see logs even before first tool call
+(async () => {
+  try {
+    logAlways('Pre-flight bridge check...');
+    await ensureBridgeReady();
+    logAlways('Pre-flight bridge check done.');
+  } catch (err) {
+    logAlways('Pre-flight bridge check failed', err?.message || err);
+  }
+})();
+
 // Handle errors
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
 });
+
+process.on('unhandledRejection', (reason) => {
+  logAlways('Unhandled rejection', reason);
+});
+
+// If no MCP traffic arrives within a short window, log a hint and keep running
+setTimeout(() => {
+  logAlways(
+    'No MCP traffic received yet. If this server was launched manually, that is normal. If launched by qwen mcp, ensure the process is still running and not being killed.',
+  );
+}, 3000);
