@@ -792,6 +792,22 @@ export default {
     'Authentifizierung abgelaufen. Bitte versuchen Sie es erneut.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Warten auf Authentifizierung... (ESC oder STRG+C zum Abbrechen drücken)',
+  'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
+    'API-Schlüssel für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie settings.security.auth.apiKey oder die Umgebungsvariable {{envKeyHint}}.',
+  '{{envKeyHint}} environment variable not found.':
+    'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden.',
+  '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
+    'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden. Bitte legen Sie sie in Ihrer .env-Datei oder den Systemumgebungsvariablen fest.',
+  '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
+    'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden (oder setzen Sie settings.security.auth.apiKey). Bitte legen Sie sie in Ihrer .env-Datei oder den Systemumgebungsvariablen fest.',
+  'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
+    'API-Schlüssel für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie die Umgebungsvariable {{envKeyHint}}.',
+  'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
+    'Anthropic-Anbieter fehlt erforderliche baseUrl in modelProviders[].baseUrl.',
+  'ANTHROPIC_BASE_URL environment variable not found.':
+    'Umgebungsvariable ANTHROPIC_BASE_URL wurde nicht gefunden.',
+  'Invalid auth method selected.':
+    'Ungültige Authentifizierungsmethode ausgewählt.',
   'Failed to authenticate. Message: {{message}}':
     'Authentifizierung fehlgeschlagen. Meldung: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
@@ -814,6 +830,15 @@ export default {
   // ============================================================================
   'Select Model': 'Modell auswählen',
   '(Press Esc to close)': '(Esc zum Schließen drücken)',
+  'Current (effective) configuration': 'Aktuelle (wirksame) Konfiguration',
+  AuthType: 'Authentifizierungstyp',
+  'API Key': 'API-Schlüssel',
+  unset: 'nicht gesetzt',
+  '(default)': '(Standard)',
+  '(set)': '(gesetzt)',
+  '(not set)': '(nicht gesetzt)',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
+    "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
   'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
     'Das neueste Qwen Coder Modell von Alibaba Cloud ModelStudio (Version: qwen3-coder-plus-2025-09-23)',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':

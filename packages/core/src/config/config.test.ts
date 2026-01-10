@@ -15,10 +15,16 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   QwenLogger,
 } from '../telemetry/index.js';
-import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
+import type {
+  ContentGenerator,
+  ContentGeneratorConfig,
+} from '../core/contentGenerator.js';
+import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
+  createContentGenerator,
   createContentGeneratorConfig,
+  resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { GeminiClient } from '../core/client.js';
 import { GitService } from '../services/gitService.js';
@@ -208,6 +214,19 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
     );
+
+    // Setup default mock for resolveContentGeneratorConfigWithSources
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+      (_config, authType, generationConfig) => ({
+        config: {
+          ...generationConfig,
+          authType,
+          model: generationConfig?.model || MODEL,
+          apiKey: 'test-key',
+        } as ContentGeneratorConfig,
+        sources: {},
+      }),
+    );
   });
 
   describe('initialize', () => {
@@ -255,31 +274,28 @@ describe('Server Config (config.ts)', () => {
       const mockContentConfig = {
         apiKey: 'test-key',
         model: 'qwen3-coder-plus',
+        authType,
       };
 
-      vi.mocked(createContentGeneratorConfig).mockReturnValue(
-        mockContentConfig,
-      );
-
-      // Set fallback mode to true to ensure it gets reset
-      config.setFallbackMode(true);
-      expect(config.isInFallbackMode()).toBe(true);
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: mockContentConfig as ContentGeneratorConfig,
+        sources: {},
+      });
 
       await config.refreshAuth(authType);
 
-      expect(createContentGeneratorConfig).toHaveBeenCalledWith(
+      expect(resolveContentGeneratorConfigWithSources).toHaveBeenCalledWith(
         config,
         authType,
-        {
+        expect.objectContaining({
           model: MODEL,
-          baseUrl: undefined,
-        },
+        }),
+        expect.anything(),
+        expect.anything(),
       );
       // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(GeminiClient).toHaveBeenCalledWith(config);
-      // Verify that fallback mode is reset
-      expect(config.isInFallbackMode()).toBe(false);
     });
 
     it('should not strip thoughts when switching from Vertex to GenAI', async () => {
@@ -297,6 +313,129 @@ describe('Server Config (config.ts)', () => {
       expect(
         config.getGeminiClient().stripThoughtsFromHistory,
       ).not.toHaveBeenCalledWith();
+    });
+  });
+
+  describe('model switching optimization (QWEN_OAUTH)', () => {
+    it('should switch qwen-oauth model in-place without refreshing auth when safe', async () => {
+      const config = new Config(baseParams);
+
+      const mockContentConfig: ContentGeneratorConfig = {
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
+        timeout: 60000,
+        maxRetries: 3,
+      } as ContentGeneratorConfig;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: {
+            ...mockContentConfig,
+            authType,
+            model: generationConfig?.model ?? mockContentConfig.model,
+          } as ContentGeneratorConfig,
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      // Establish initial qwen-oauth content generator config/content generator.
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+      // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
+      const refreshSpy = vi.spyOn(config, 'refreshAuth');
+
+      await config.switchModel(AuthType.QWEN_OAUTH, 'vision-model');
+
+      expect(config.getModel()).toBe('vision-model');
+      expect(refreshSpy).not.toHaveBeenCalled();
+      // Called once during initial refreshAuth + once during handleModelChange diffing.
+      expect(
+        vi.mocked(resolveContentGeneratorConfigWithSources),
+      ).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('model switching with different credentials (OpenAI)', () => {
+    it('should refresh auth when switching to model with different envKey', async () => {
+      // This test verifies the fix for switching between modelProvider models
+      // with different envKeys (e.g., deepseek-chat with DEEPSEEK_API_KEY)
+      const configWithModelProviders = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'model-a',
+              name: 'Model A',
+              baseUrl: 'https://api.example.com/v1',
+              envKey: 'API_KEY_A',
+            },
+            {
+              id: 'model-b',
+              name: 'Model B',
+              baseUrl: 'https://api.example.com/v1',
+              envKey: 'API_KEY_B',
+            },
+          ],
+        },
+      });
+
+      const mockContentConfigA: ContentGeneratorConfig = {
+        authType: AuthType.USE_OPENAI,
+        model: 'model-a',
+        apiKey: 'key-a',
+        baseUrl: 'https://api.example.com/v1',
+      } as ContentGeneratorConfig;
+
+      const mockContentConfigB: ContentGeneratorConfig = {
+        authType: AuthType.USE_OPENAI,
+        model: 'model-b',
+        apiKey: 'key-b',
+        baseUrl: 'https://api.example.com/v1',
+      } as ContentGeneratorConfig;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, _authType, generationConfig) => {
+          const model = generationConfig?.model;
+          return {
+            config:
+              model === 'model-b' ? mockContentConfigB : mockContentConfigA,
+            sources: {},
+          };
+        },
+      );
+
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      // Initialize with model-a
+      await configWithModelProviders.refreshAuth(AuthType.USE_OPENAI);
+
+      // Spy on refreshAuth to verify it's called when switching to model-b
+      const refreshSpy = vi.spyOn(configWithModelProviders, 'refreshAuth');
+
+      // Switch to model-b (different envKey)
+      await configWithModelProviders.switchModel(
+        AuthType.USE_OPENAI,
+        'model-b',
+      );
+
+      // Should trigger full refresh because envKey changed
+      expect(refreshSpy).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+      expect(configWithModelProviders.getModel()).toBe('model-b');
     });
   });
 

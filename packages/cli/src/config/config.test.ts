@@ -77,10 +77,8 @@ vi.mock('read-package-up', () => ({
   ),
 }));
 
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actualServer = await vi.importActual<typeof ServerConfig>(
-    '@qwen-code/qwen-code-core',
-  );
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actualServer = await importOriginal<typeof ServerConfig>();
   return {
     ...actualServer,
     IdeClient: {

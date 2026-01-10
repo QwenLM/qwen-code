@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2025-12-24T09:15:59.125Z",
+  "generatedAt": "2026-01-07T14:56:23.662Z",
   "keys": [
     "  - en-US: English",
     "  - zh-CN: Simplified Chinese",
@@ -9,9 +9,9 @@
     "Approval mode changed to: {{mode}} (saved to {{scope}} settings{{location}})",
     "Auto-edit mode - Automatically approve file edits",
     "Available approval modes:",
+    "Change auth (executes the /auth command)",
     "Chat history is already compressed.",
-    "Clearing terminal and resetting chat.",
-    "Clearing terminal.",
+    "Continue with {{model}}",
     "Conversation checkpoint '{{tag}}' has been deleted.",
     "Conversation checkpoint saved with tag: {{tag}}.",
     "Conversation shared to {{filePath}}",
@@ -24,6 +24,7 @@
     "Failed to change approval mode: {{error}}",
     "Failed to login. Message: {{message}}",
     "Failed to save approval mode: {{error}}",
+    "Failed to switch model to '{{modelId}}'.\n\n{{error}}",
     "Invalid file format. Only .md and .json are supported.",
     "Invalid language. Available: en-US, zh-CN",
     "List of saved conversations:",
@@ -43,6 +44,7 @@
     "Persist for this project/workspace",
     "Persist for this user on this machine",
     "Plan mode - Analyze only, do not modify files or execute commands",
+    "Pro quota limit reached for {{model}}.",
     "Qwen OAuth authentication cancelled.",
     "Qwen OAuth authentication timed out. Please try again.",
     "Resume a conversation from a checkpoint. Usage: /chat resume <tag>",
@@ -54,8 +56,7 @@
     "Share the current conversation to a markdown or json file. Usage: /chat share <file>",
     "Usage: /approval-mode <mode> [--session|--user|--project]",
     "Usage: /language ui [zh-CN|en-US]",
-    "YOLO mode - Automatically approve all tools",
-    "clear the screen and conversation history"
+    "YOLO mode - Automatically approve all tools"
   ],
-  "count": 55
+  "count": 56
 }

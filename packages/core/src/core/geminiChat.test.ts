@@ -20,7 +20,6 @@ import {
 } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
-import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
 import { AuthType } from './contentGenerator.js';
 import { type RetryOptions } from '../utils/retry.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -112,15 +111,11 @@ describe('GeminiChat', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getContentGeneratorConfig: vi.fn().mockReturnValue({
-        authType: 'gemini-api-key', // Ensure this is set for fallback tests
+        authType: 'gemini', // Ensure this is set for fallback tests
         model: 'test-model',
       }),
       getModel: vi.fn().mockReturnValue('gemini-pro'),
       setModel: vi.fn(),
-      isInFallbackMode: vi.fn().mockReturnValue(false),
-      getQuotaErrorOccurred: vi.fn().mockReturnValue(false),
-      setQuotaErrorOccurred: vi.fn(),
-      flashFallbackHandler: undefined,
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       storage: {
@@ -1349,9 +1344,8 @@ describe('GeminiChat', () => {
       ],
     } as unknown as GenerateContentResponse;
 
-    it('should use the FLASH model when in fallback mode (sendMessageStream)', async () => {
+    it('should pass the requested model through to generateContentStream', async () => {
       vi.mocked(mockConfig.getModel).mockReturnValue('gemini-pro');
-      vi.mocked(mockConfig.isInFallbackMode).mockReturnValue(true);
       vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
         async () =>
           (async function* () {
@@ -1370,7 +1364,7 @@ describe('GeminiChat', () => {
 
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: DEFAULT_GEMINI_FLASH_MODEL,
+          model: 'test-model',
         }),
         'prompt-id-res3',
       );
@@ -1422,9 +1416,6 @@ describe('GeminiChat', () => {
         authType,
       });
 
-      const isInFallbackModeSpy = vi.spyOn(mockConfig, 'isInFallbackMode');
-      isInFallbackModeSpy.mockReturnValue(false);
-
       vi.mocked(mockContentGenerator.generateContentStream)
         .mockRejectedValueOnce(error429) // Attempt 1 fails
         .mockResolvedValueOnce(
@@ -1441,10 +1432,7 @@ describe('GeminiChat', () => {
           })(),
         );
 
-      mockHandleFallback.mockImplementation(async () => {
-        isInFallbackModeSpy.mockReturnValue(true);
-        return true; // Signal retry
-      });
+      mockHandleFallback.mockImplementation(async () => true);
 
       const stream = await chat.sendMessageStream(
         'test-model',

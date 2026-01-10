@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, AuthType } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { InputFormat, logUserPrompt } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -252,22 +252,20 @@ export async function main() {
         argv,
       );
 
-      if (
-        settings.merged.security?.auth?.selectedType &&
-        !settings.merged.security?.auth?.useExternal
-      ) {
+      if (!settings.merged.security?.auth?.useExternal) {
         // Validate authentication here because the sandbox will interfere with the Oauth2 web redirect.
         try {
-          const err = validateAuthMethod(
-            settings.merged.security.auth.selectedType,
-          );
-          if (err) {
-            throw new Error(err);
-          }
+          const authType = partialConfig.modelsConfig.getCurrentAuthType();
+          // Fresh users may not have selected/persisted an authType yet.
+          // In that case, defer auth prompting/selection to the main interactive flow.
+          if (authType) {
+            const err = validateAuthMethod(authType, partialConfig);
+            if (err) {
+              throw new Error(err);
+            }
 
-          await partialConfig.refreshAuth(
-            settings.merged.security.auth.selectedType,
-          );
+            await partialConfig.refreshAuth(authType);
+          }
         } catch (err) {
           console.error('Error authenticating:', err);
           process.exit(1);
@@ -440,8 +438,6 @@ export async function main() {
     }
 
     const nonInteractiveConfig = await validateNonInteractiveAuth(
-      (argv.authType as AuthType) ||
-        settings.merged.security?.auth?.selectedType,
       settings.merged.security?.auth?.useExternal,
       config,
       settings,

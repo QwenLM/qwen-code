@@ -16,9 +16,8 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
-  AuthType,
 } from '../core/contentGenerator.js';
-import type { FallbackModelHandler } from '../fallback/types.js';
+import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
@@ -27,8 +26,9 @@ import type { AnyToolInvocation } from '../tools/tools.js';
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { GeminiClient } from '../core/client.js';
 import {
+  AuthType,
   createContentGenerator,
-  createContentGeneratorConfig,
+  resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 
@@ -94,7 +94,7 @@ import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
 } from './constants.js';
-import { DEFAULT_QWEN_EMBEDDING_MODEL, DEFAULT_QWEN_MODEL } from './models.js';
+import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
 import {
@@ -102,6 +102,12 @@ import {
   type ResumedSessionData,
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
+
+import {
+  ModelsConfig,
+  type ModelProvidersConfig,
+  type AvailableModel,
+} from '../models/index.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -318,6 +324,11 @@ export interface ConfigParameters {
   ideMode?: boolean;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
+  /**
+   * Optional source map for generationConfig fields (e.g. CLI/env/settings attribution).
+   * This is used to produce per-field source badges in the UI.
+   */
+  generationConfigSources?: ContentGeneratorConfigSources;
   cliVersion?: string;
   loadMemoryFromIncludeDirectories?: boolean;
   chatRecording?: boolean;
@@ -353,6 +364,8 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /** Model providers configuration grouped by authType */
+  modelProvidersConfig?: ModelProvidersConfig;
 }
 
 function normalizeConfigOutputFormat(
@@ -394,9 +407,12 @@ export class Config {
   private skillManager!: SkillManager;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
+  private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
-  private _generationConfig: Partial<ContentGeneratorConfig>;
   private readonly embeddingModel: string;
+
+  private _modelsConfig!: ModelsConfig;
+  private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private readonly targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -445,7 +461,6 @@ export class Config {
   private readonly folderTrust: boolean;
   private ideMode: boolean;
 
-  private inFallbackMode = false;
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -454,8 +469,6 @@ export class Config {
     name: string;
     extensionName: string;
   }>;
-  fallbackModelHandler?: FallbackModelHandler;
-  private quotaErrorOccurred: boolean = false;
   private readonly summarizeToolOutput:
     | Record<string, SummarizeToolOutputSettings>
     | undefined;
@@ -570,13 +583,7 @@ export class Config {
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
-    this._generationConfig = {
-      model: params.model,
-      ...(params.generationConfig || {}),
-      baseUrl: params.generationConfig?.baseUrl,
-    };
-    this.contentGeneratorConfig = this
-      ._generationConfig as ContentGeneratorConfig;
+    this.modelProvidersConfig = params.modelProvidersConfig;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -618,6 +625,22 @@ export class Config {
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
+
+    // Create ModelsConfig for centralized model management
+    // Prefer params.authType over generationConfig.authType because:
+    // - params.authType preserves undefined (user hasn't selected yet)
+    // - generationConfig.authType may have a default value from resolvers
+    this._modelsConfig = new ModelsConfig({
+      initialAuthType: params.authType ?? params.generationConfig?.authType,
+      modelProvidersConfig: this.modelProvidersConfig,
+      generationConfig: {
+        model: params.model,
+        ...(params.generationConfig || {}),
+        baseUrl: params.generationConfig?.baseUrl,
+      },
+      generationConfigSources: params.generationConfigSources,
+      onModelChange: this.handleModelChange.bind(this),
+    });
 
     if (this.telemetrySettings.enabled) {
       initializeTelemetry(this);
@@ -670,44 +693,60 @@ export class Config {
   }
 
   /**
+   * Get the ModelsConfig instance for model-related operations.
+   * External code (e.g., CLI) can use this to access model configuration.
+   */
+  get modelsConfig(): ModelsConfig {
+    return this._modelsConfig;
+  }
+
+  /**
    * Updates the credentials in the generation config.
-   * This is needed when credentials are set after Config construction.
+   * Exclusive for `OpenAIKeyPrompt` to update credentials via `/auth`
+   * Delegates to ModelsConfig.
    */
   updateCredentials(credentials: {
     apiKey?: string;
     baseUrl?: string;
     model?: string;
   }): void {
-    if (credentials.apiKey) {
-      this._generationConfig.apiKey = credentials.apiKey;
-    }
-    if (credentials.baseUrl) {
-      this._generationConfig.baseUrl = credentials.baseUrl;
-    }
-    if (credentials.model) {
-      this._generationConfig.model = credentials.model;
-    }
+    this._modelsConfig.updateCredentials(credentials);
   }
 
+  /**
+   * Refresh authentication and rebuild ContentGenerator.
+   */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    const newContentGeneratorConfig = createContentGeneratorConfig(
+    // Sync modelsConfig state for this auth refresh
+    const modelId = this._modelsConfig.getModel();
+    this._modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
+
+    // Check and consume cached credentials flag
+    const requireCached =
+      this._modelsConfig.consumeRequireCachedCredentialsFlag();
+
+    const { config, sources } = resolveContentGeneratorConfigWithSources(
       this,
       authMethod,
-      this._generationConfig,
+      this._modelsConfig.getGenerationConfig(),
+      this._modelsConfig.getGenerationConfigSources(),
+      {
+        strictModelProvider:
+          this._modelsConfig.isStrictModelProviderSelection(),
+      },
     );
+    const newContentGeneratorConfig = config;
     this.contentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
-      isInitialAuth,
+      requireCached ? true : isInitialAuth,
     );
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
+    this.contentGeneratorConfigSources = sources;
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
-
-    // Reset the session flag since we're explicitly changing auth and using default model
-    this.inFallbackMode = false;
   }
 
   /**
@@ -767,31 +806,125 @@ export class Config {
     return this.contentGeneratorConfig;
   }
 
-  getModel(): string {
-    return this.contentGeneratorConfig?.model || DEFAULT_QWEN_MODEL;
+  getContentGeneratorConfigSources(): ContentGeneratorConfigSources {
+    // If contentGeneratorConfigSources is empty (before initializeAuth),
+    // get sources from ModelsConfig
+    if (
+      Object.keys(this.contentGeneratorConfigSources).length === 0 &&
+      this._modelsConfig
+    ) {
+      return this._modelsConfig.getGenerationConfigSources();
+    }
+    return this.contentGeneratorConfigSources;
   }
 
+  getModel(): string {
+    return this.contentGeneratorConfig?.model || this._modelsConfig.getModel();
+  }
+
+  /**
+   * Set model programmatically (e.g., VLM auto-switch, fallback).
+   * Delegates to ModelsConfig.
+   */
   async setModel(
     newModel: string,
-    _metadata?: { reason?: string; context?: string },
+    metadata?: { reason?: string; context?: string },
   ): Promise<void> {
+    await this._modelsConfig.setModel(newModel, metadata);
+    // Also update contentGeneratorConfig for hot-update compatibility
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
     }
-    // TODO: Log _metadata for telemetry if needed
-    // This _metadata can be used for tracking model switches (reason, context)
   }
 
-  isInFallbackMode(): boolean {
-    return this.inFallbackMode;
+  /**
+   * Handle model change from ModelsConfig.
+   * This updates the content generator config with the new model settings.
+   */
+  private async handleModelChange(
+    authType: AuthType,
+    requiresRefresh: boolean,
+  ): Promise<void> {
+    if (!this.contentGeneratorConfig) {
+      return;
+    }
+
+    // Hot update path: only supported for qwen-oauth.
+    // For other auth types we always refresh to recreate the ContentGenerator.
+    //
+    // Rationale:
+    // - Non-qwen providers may need to re-validate credentials / baseUrl / envKey.
+    // - ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources.
+    // - Refresh keeps runtime behavior consistent and centralized.
+    if (authType === AuthType.QWEN_OAUTH && !requiresRefresh) {
+      const { config, sources } = resolveContentGeneratorConfigWithSources(
+        this,
+        authType,
+        this._modelsConfig.getGenerationConfig(),
+        this._modelsConfig.getGenerationConfigSources(),
+        {
+          strictModelProvider:
+            this._modelsConfig.isStrictModelProviderSelection(),
+        },
+      );
+
+      // Hot-update fields (qwen-oauth models share the same auth + client).
+      this.contentGeneratorConfig.model = config.model;
+      this.contentGeneratorConfig.samplingParams = config.samplingParams;
+      this.contentGeneratorConfig.disableCacheControl =
+        config.disableCacheControl;
+
+      if ('model' in sources) {
+        this.contentGeneratorConfigSources['model'] = sources['model'];
+      }
+      if ('samplingParams' in sources) {
+        this.contentGeneratorConfigSources['samplingParams'] =
+          sources['samplingParams'];
+      }
+      if ('disableCacheControl' in sources) {
+        this.contentGeneratorConfigSources['disableCacheControl'] =
+          sources['disableCacheControl'];
+      }
+      return;
+    }
+
+    // Full refresh path
+    await this.refreshAuth(authType);
   }
 
-  setFallbackMode(active: boolean): void {
-    this.inFallbackMode = active;
+  /**
+   * Get available models for the current authType.
+   * Delegates to ModelsConfig.
+   */
+  getAvailableModels(): AvailableModel[] {
+    return this._modelsConfig.getAvailableModels();
   }
 
-  setFallbackModelHandler(handler: FallbackModelHandler): void {
-    this.fallbackModelHandler = handler;
+  /**
+   * Get available models for a specific authType.
+   * Delegates to ModelsConfig.
+   */
+  getAvailableModelsForAuthType(authType: AuthType): AvailableModel[] {
+    return this._modelsConfig.getAvailableModelsForAuthType(authType);
+  }
+
+  /**
+   * Switch authType+model via registry-backed selection.
+   * This triggers a refresh of the ContentGenerator when required (always on authType changes).
+   * For qwen-oauth model switches that are hot-update safe, this may update in place.
+   *
+   * @param authType - Target authentication type
+   * @param modelId - Target model ID
+   * @param options - Additional options like requireCachedCredentials
+   * @param metadata - Metadata for logging/tracking
+   */
+  async switchModel(
+    authType: AuthType,
+    modelId: string,
+    options?: { requireCachedCredentials?: boolean },
+    metadata?: { reason?: string; context?: string },
+  ): Promise<void> {
+    await this._modelsConfig.switchModel(authType, modelId, options, metadata);
   }
 
   getMaxSessionTurns(): number {
@@ -800,14 +933,6 @@ export class Config {
 
   getSessionTokenLimit(): number {
     return this.sessionTokenLimit;
-  }
-
-  setQuotaErrorOccurred(value: boolean): void {
-    this.quotaErrorOccurred = value;
-  }
-
-  getQuotaErrorOccurred(): boolean {
-    return this.quotaErrorOccurred;
   }
 
   getEmbeddingModel(): string {
@@ -1151,7 +1276,7 @@ export class Config {
   }
 
   getAuthType(): AuthType | undefined {
-    return this.contentGeneratorConfig.authType;
+    return this.contentGeneratorConfig?.authType;
   }
 
   getCliVersion(): string | undefined {

@@ -94,6 +94,14 @@ export class OpenAIContentConverter {
   }
 
   /**
+   * Update the model used for response metadata (modelVersion/logging) and any
+   * model-specific conversion behavior.
+   */
+  setModel(model: string): void {
+    this.model = model;
+  }
+
+  /**
    * Reset streaming tool calls parser for new stream processing
    * This should be called at the beginning of each stream to prevent
    * data pollution from previous incomplete streams
@@ -791,7 +799,7 @@ export class OpenAIContentConverter {
       const parts: Part[] = [];
 
       const reasoningText = (choice.delta as ExtendedCompletionChunkDelta)
-        .reasoning_content;
+        ?.reasoning_content;
       if (reasoningText) {
         parts.push({ text: reasoningText, thought: true });
       }
