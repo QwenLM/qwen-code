@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-/* global require, process, Buffer, __dirname, setTimeout, clearTimeout, console */
+/* global require, process, Buffer, __dirname, setTimeout, setInterval, clearInterval, console */
 
 /**
  * Native Messaging Host for Qwen CLI Chrome Extension
@@ -63,35 +63,28 @@ function logDebug(message) {
   log(message, 'DEBUG');
 }
 
-// Event queue for HTTP polling (extension pulls events instead of native messaging)
+// Event queue for SSE streaming
 const eventQueue = [];
-const pendingEventPollers = new Set();
-
-function deliverEvents(messages) {
-  const payload =
-    messages ||
-    (pendingEventPollers.size > 0 ? eventQueue.splice(0) : undefined);
-  if (!payload || !payload.length) return;
-  // Respond to all pending pollers
-  for (const poller of Array.from(pendingEventPollers)) {
-    try {
-      poller.res.writeHead(200, { 'Content-Type': 'application/json' });
-      poller.res.end(JSON.stringify({ messages: payload }));
-    } catch {
-      // ignore send errors
-    }
-    clearTimeout(poller.timeout);
-    pendingEventPollers.delete(poller);
-  }
-}
+const sseClients = new Set();
 
 function enqueueEvent(message) {
   eventQueue.push(message);
-  // Cap queue size to prevent unbounded growth
   if (eventQueue.length > 1000) {
     eventQueue.splice(0, eventQueue.length - 1000);
   }
-  deliverEvents();
+  const payload = `data: ${JSON.stringify(message)}\n\n`;
+  for (const client of Array.from(sseClients)) {
+    try {
+      client.res.write(payload);
+    } catch {
+      try {
+        client.res.end();
+      } catch {
+        /* ignore */
+      }
+      sseClients.delete(client);
+    }
+  }
 }
 
 // ============================================================================
@@ -201,6 +194,16 @@ function readMessagesFromExtension() {
 
   process.stdin.on('end', () => {
     log('stdin ended');
+    if (process.env.QWEN_BRIDGE_NO_STDIO_EXIT === '1') {
+      log('stdin ended but NO_STDIO_EXIT set; ignoring exit.');
+      return;
+    }
+    // If no data ever arrived and we're running standalone (no stdio),
+    // keep the HTTP server alive instead of exiting immediately.
+    if (process.env.QWEN_BRIDGE_NO_STDIO_STAYALIVE === '1') {
+      log('stdin ended; staying alive due to NO_STDIO_STAYALIVE.');
+      return;
+    }
     cleanup();
     process.exit();
   });
@@ -228,6 +231,11 @@ class AcpConnection {
 
   async start(cwd = process.cwd()) {
     if (this.process) {
+      // If process exists but session is missing, try to create a new session instead of failing.
+      if (!this.sessionId) {
+        const sessionResult = await this.createSession(cwd);
+        return sessionResult;
+      }
       return { success: false, error: 'Qwen CLI is already running' };
     }
 
@@ -887,7 +895,7 @@ class AcpConnection {
           cwd,
           mcpServers: useMcp ? mcpServersConfig : [],
         },
-        useMcp ? 180000 : 30000, // Fast startup without MCP
+        useMcp ? 240000 : 30000, // MCP discovery can be slow; extend to 4 min
       );
 
       this.sessionId = result.sessionId;
@@ -1273,33 +1281,48 @@ function startHttpApiServer() {
       return;
     }
 
-    // Long-poll events: GET /events
+    // SSE events: GET /events
     if (req.method === 'GET' && req.url === '/events') {
-      if (eventQueue.length) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ messages: eventQueue.splice(0) }));
-        return;
-      }
-      const poller = { res, timeout: null };
-      poller.timeout = setTimeout(() => {
-        try {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ messages: [] }));
-        } catch {
-          // ignore
-        }
-        pendingEventPollers.delete(poller);
-      }, 25000);
-      res.on('close', () => {
-        clearTimeout(poller.timeout);
-        pendingEventPollers.delete(poller);
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
       });
-      pendingEventPollers.add(poller);
+      // Flush headers
+      res.write('\n');
+      // Replay backlog (best-effort)
+      try {
+        for (const msg of eventQueue) {
+          res.write(`data: ${JSON.stringify(msg)}\n\n`);
+        }
+      } catch {
+        // ignore errors
+      }
+      const client = { res };
+      sseClients.add(client);
+      const heartbeat = setInterval(() => {
+        try {
+          res.write(':heartbeat\n\n');
+        } catch {
+          clearInterval(heartbeat);
+          try {
+            res.end();
+          } catch {
+            /* ignore */
+          }
+          sseClients.delete(client);
+        }
+      }, 15000);
+      res.on('close', () => {
+        clearInterval(heartbeat);
+        sseClients.delete(client);
+      });
       return;
     }
 
     if (req.method !== 'POST') {
-      res.writeHead(405);
+      res.writeHead(405, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'Method not allowed' }));
       return;
     }
@@ -1312,7 +1335,7 @@ function startHttpApiServer() {
         request = JSON.parse(body || '{}');
       } catch (err) {
         console.error('JSON parsing error:', err);
-        res.writeHead(400);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
         return;
       }
@@ -1344,6 +1367,12 @@ function startHttpApiServer() {
             case 'get_console_logs':
               result = await sendBrowserRequest(
                 'get_console_logs',
+                request.params || {},
+              );
+              break;
+            case 'click_text':
+              result = await sendBrowserRequest(
+                'click_text',
                 request.params || {},
               );
               break;

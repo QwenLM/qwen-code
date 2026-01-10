@@ -376,6 +376,46 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
     }
   }
 
+  // Click element by visible text
+  function clickElementByText(text) {
+    if (!text) {
+      return { success: false, error: 'No text provided' };
+    }
+    const norm = text.toLowerCase().trim();
+    const candidates = Array.from(
+      document.querySelectorAll(
+        'button, a, [role="button"], input[type="button"], input[type="submit"], input[type="reset"]',
+      ),
+    );
+    for (const el of candidates) {
+      const txt = (el.textContent || '').toLowerCase().trim();
+      if (txt && txt.includes(norm)) {
+        try {
+          if (typeof el.scrollIntoView === 'function') {
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          }
+          const evtOptions = {
+            bubbles: true,
+            cancelable: true,
+            composed: true,
+          };
+          ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach((type) => {
+            try {
+              const evt = new MouseEvent(type, evtOptions);
+              el.dispatchEvent(evt);
+            } catch {
+              /* ignore */
+            }
+          });
+          return { success: true };
+        } catch (error) {
+          return { success: false, error: error?.message || String(error) };
+        }
+      }
+    }
+    return { success: false, error: `No element found with text: ${text}` };
+  }
+
   // Fill text into an input/textarea/contentEditable element
   function fillInput(selector, text, options = {}) {
     if (!selector) {
@@ -754,6 +794,12 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
 
       case 'CLICK_ELEMENT': {
         const result = clickElement(request.selector);
+        sendResponse(result);
+        break;
+      }
+
+      case 'CLICK_TEXT': {
+        const result = clickElementByText(request.text);
         sendResponse(result);
         break;
       }

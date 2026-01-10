@@ -3,7 +3,7 @@
  * Handles communication between extension components and native host
  */
 
-/* global chrome, console, setTimeout, clearTimeout, fetch, AbortController */
+/* global chrome, console, setTimeout, clearTimeout, fetch, AbortController, EventSource */
 
 // Backend HTTP endpoint (replaces Native Messaging)
 const BACKEND_URL = 'http://127.0.0.1:18765';
@@ -18,6 +18,9 @@ let eventPollerStarted = false;
 let lastAvailableCommands = [];
 // Cache latest MCP tools list (from notifications/tools/list_changed)
 let lastMcpTools = [];
+// Debounce stream end to avoid cutting off late chunks
+let streamEndTimeout = null;
+const STREAM_END_DEBOUNCE_MS = 300;
 // Static list of internal Chrome browser MCP tools exposed by this extension
 const INTERNAL_MCP_TOOLS = [
   {
@@ -50,6 +53,22 @@ const INTERNAL_MCP_TOOLS = [
       'Fill a single input/textarea/contentEditable element using a CSS selector.',
   },
 ];
+
+// Check whether MCP discovery already surfaced the browser tools so we can
+// defer to standard MCP tool-calls instead of running local heuristics.
+function hasBrowserMcpTools() {
+  return Array.isArray(lastMcpTools)
+    ? lastMcpTools.some((t) => t?.name?.startsWith('browser_'))
+    : false;
+}
+
+function scheduleStreamEnd() {
+  if (streamEndTimeout) clearTimeout(streamEndTimeout);
+  streamEndTimeout = setTimeout(() => {
+    streamEndTimeout = null;
+    broadcastToUI({ type: 'streamEnd' });
+  }, STREAM_END_DEBOUNCE_MS);
+}
 
 // Heuristic: detect if user intent asks to read current page
 function shouldTriggerReadPage(text) {
@@ -191,29 +210,75 @@ async function connectToNativeHost() {
   }
 }
 
-// Long-poll event stream from backend
+// SSE event stream from backend (fallback to polling if needed)
 async function startEventPolling() {
   while (true) {
     try {
-      const res = await fetch(`${BACKEND_URL}/events`, { method: 'GET' });
-      if (!res.ok) throw new Error(`Events HTTP ${res.status}`);
-      const data = await res.json();
-      if (data && Array.isArray(data.messages)) {
-        data.messages.forEach((msg) => {
-          try {
-            handleNativeMessage(msg);
-          } catch (err) {
-            console.error('Failed to handle event message:', err, msg);
-          }
-        });
-      }
+      const es = new EventSource(`${BACKEND_URL}/events`);
+      es.onmessage = (evt) => {
+        try {
+          const msg = JSON.parse(evt.data);
+          handleNativeMessage(msg);
+        } catch (err) {
+          console.error('Failed to handle SSE message:', err, evt.data);
+        }
+      };
+      es.onerror = (err) => {
+        console.warn('SSE error, will retry:', err);
+        try {
+          es.close();
+        } catch {
+          // ignore errors
+        }
+        setTimeout(() => startEventPolling(), 1000);
+      };
+      // Exit loop; reconnection handled in onerror
+      return;
     } catch (err) {
-      console.warn('Event polling error:', err?.message || err);
-      // backoff on error
+      console.warn('EventSource not available, retrying with backoff:', err);
+      // fallback: try short-poll if EventSource ctor fails
+      try {
+        await pollEventsOnce();
+      } catch {
+        // ignore
+      }
       await new Promise((r) => setTimeout(r, 3000));
     }
-    // small delay between polls to avoid hot loop
-    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+// Fallback single poll for events (used if EventSource ctor fails)
+async function pollEventsOnce() {
+  const res = await fetch(`${BACKEND_URL}/events`, {
+    method: 'GET',
+    headers: { Accept: 'text/event-stream, application/json' },
+  });
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('text/event-stream')) {
+    // naive SSE parse for one line
+    const text = await res.text();
+    text
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .forEach((l) => {
+        const data = l.replace(/^data:\s*/, '');
+        try {
+          handleNativeMessage(JSON.parse(data));
+        } catch (err) {
+          console.error('Failed to parse fallback SSE data:', err, data);
+        }
+      });
+    return;
+  }
+  const data = await res.json();
+  if (data && Array.isArray(data.messages)) {
+    data.messages.forEach((msg) => {
+      try {
+        handleNativeMessage(msg);
+      } catch (err) {
+        console.error('Failed to handle polled message:', err, msg);
+      }
+    });
   }
 }
 
@@ -276,7 +341,7 @@ function handleNativeMessage(message) {
           message.data.stop_reason ||
           message.data.status === 'done')
       ) {
-        broadcastToUI({ type: 'streamEnd' });
+        scheduleStreamEnd();
       }
     } catch {
       // ignore
@@ -320,7 +385,7 @@ async function sendToNativeHost(message) {
       const stopReason =
         inner?.stopReason || inner?.stop_reason || inner?.status === 'done';
       if (stopReason) {
-        broadcastToUI({ type: 'streamEnd' });
+        scheduleStreamEnd();
       }
     } catch {
       // ignore
@@ -376,6 +441,22 @@ async function handleBrowserRequest(message) {
           params?.text,
           params?.clear,
         );
+        break;
+
+      case 'fill_form_auto':
+        data = await fillBrowserFormAuto(params);
+        break;
+
+      case 'click_text':
+        data = await clickElementByText(params?.text);
+        break;
+
+      case 'click_element':
+        data = await clickElementOnPage(params?.selector);
+        break;
+
+      case 'run_js':
+        data = await executeJsOnPage(params?.code);
         break;
 
       default:
@@ -611,6 +692,22 @@ async function fillBrowserForm(params) {
   });
 }
 
+// Auto-fill form by matching keys to label/placeholder/name heuristics
+async function fillBrowserFormAuto(params) {
+  const fields = params?.fields;
+  if (!Array.isArray(fields) || fields.length === 0) {
+    throw new Error('fields array is required');
+  }
+  const entries = fields.map((f) => ({
+    label: f.key,
+    text: f.value,
+    mode: f.mode || 'replace',
+    simulateEvents: f.simulateEvents !== false,
+    focus: !!f.focus,
+  }));
+  return fillBrowserForm({ entries });
+}
+
 // Fill a single input/textarea/contentEditable element using a selector
 async function inputTextOnPage(selector, text, clear = true) {
   if (!selector) {
@@ -669,6 +766,139 @@ async function inputTextOnPage(selector, text, clear = true) {
   });
 }
 
+// Click an element on the page
+async function clickElementOnPage(selector) {
+  if (!selector) throw new Error('selector is required to click element');
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab) throw new Error('No active tab found');
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js'],
+    });
+  } catch (e) {
+    console.log('Script injection skipped:', e.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      { type: 'CLICK_ELEMENT', selector },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (response && response.success) {
+          resolve(response);
+        } else {
+          reject(new Error(response?.error || 'Failed to click element'));
+        }
+      },
+    );
+  });
+}
+
+async function clickElementByText(text) {
+  if (!text) throw new Error('text is required to click element by text');
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab) throw new Error('No active tab found');
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js'],
+    });
+  } catch (e) {
+    console.log('Script injection skipped:', e.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      { type: 'CLICK_TEXT', text },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (response && response.success) {
+          resolve(response);
+        } else {
+          reject(
+            new Error(response?.error || 'Failed to click element by text'),
+          );
+        }
+      },
+    );
+  });
+}
+
+// Execute JS in page context
+async function executeJsOnPage(code) {
+  if (!code) throw new Error('code is required to run js');
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab) throw new Error('No active tab found');
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js'],
+    });
+  } catch (e) {
+    console.log('Script injection skipped:', e.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      { type: 'EXECUTE_CODE', code },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        if (response && response.success) {
+          resolve({ success: true, result: response.data });
+        } else {
+          reject(new Error(response?.error || 'Failed to execute code'));
+        }
+      },
+    );
+  });
+}
+
 // Handle events from Qwen CLI (ACP events)
 function handleQwenEvent(event) {
   const eventData = event.data;
@@ -695,6 +925,8 @@ function handleQwenEvent(event) {
         type: 'streamChunk',
         data: { chunk: update.content?.text || '' },
       });
+      // If an end signal was already scheduled, push it out to allow late chunks.
+      if (streamEndTimeout) scheduleStreamEnd();
     } else if (update?.sessionUpdate === 'available_commands_update') {
       // Cache and forward available commands list to UI for visibility/debugging
       lastAvailableCommands = Array.isArray(update.availableCommands)
@@ -854,188 +1086,191 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         // Fallback: if user intent asks to read page (and MCP might not be available),
         // directly read the page via content script and send to Qwen for analysis.
-        try {
-          if (shouldTriggerReadPage(text)) {
+        if (!hasBrowserMcpTools()) {
+          // Only use heuristics when browser MCP tools are not yet available.
+          try {
+            if (shouldTriggerReadPage(text)) {
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'read_page', stage: 'start' },
+              });
+              const data = await getBrowserPageContent();
+              // start stream for qwen_request path
+              broadcastToUI({ type: 'streamStart' });
+              await sendToNativeHost({
+                type: 'qwen_request',
+                action: 'analyze_page',
+                data: data,
+                userPrompt: text, // Include user's full request for context
+              });
+              // do not send original prompt to avoid duplication
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'read_page', stage: 'end', ok: true },
+              });
+              sendResponse({ success: true });
+              return;
+            }
+          } catch (e) {
+            console.warn('Fallback read_page failed:', e);
             broadcastToUI({
               type: 'toolProgress',
-              data: { name: 'read_page', stage: 'start' },
-            });
-            const data = await getBrowserPageContent();
-            // start stream for qwen_request path
-            broadcastToUI({ type: 'streamStart' });
-            await sendToNativeHost({
-              type: 'qwen_request',
-              action: 'analyze_page',
-              data: data,
-              userPrompt: text, // Include user's full request for context
-            });
-            // do not send original prompt to avoid duplication
-            broadcastToUI({
-              type: 'toolProgress',
-              data: { name: 'read_page', stage: 'end', ok: true },
-            });
-            sendResponse({ success: true });
-            return;
-          }
-        } catch (e) {
-          console.warn('Fallback read_page failed:', e);
-          broadcastToUI({
-            type: 'toolProgress',
-            data: {
-              name: 'read_page',
-              stage: 'end',
-              ok: false,
-              error: String((e && e.message) || e),
-            },
-          });
-          // continue to send prompt normally
-        }
-
-        // Fallback: get console logs
-        try {
-          const shouldGetConsole = shouldTriggerConsoleLogs(text);
-          console.log(
-            '[Fallback] shouldTriggerConsoleLogs:',
-            shouldGetConsole,
-            'text:',
-            text,
-          );
-          if (shouldGetConsole) {
-            console.log('[Fallback] Triggering console logs...');
-            broadcastToUI({
-              type: 'toolProgress',
-              data: { name: 'console_logs', stage: 'start' },
-            });
-            const data = await getBrowserConsoleLogs();
-            console.log('[Fallback] Console logs data:', data);
-            const logs = data.logs || [];
-            const formatted = logs
-              .slice(-50)
-              .map((log) => `[${log.type}] ${log.message}`)
-              .join('\n');
-            broadcastToUI({ type: 'streamStart' });
-            await sendToNativeHost({
-              type: 'qwen_request',
-              action: 'process_text',
               data: {
-                text: `Console logs (last ${Math.min(logs.length, 50)} entries):\n${formatted || '(no logs captured)'}`,
-                context: 'console logs from browser',
+                name: 'read_page',
+                stage: 'end',
+                ok: false,
+                error: String((e && e.message) || e),
               },
-              userPrompt: text, // Include user's full request
             });
-            broadcastToUI({
-              type: 'toolProgress',
-              data: { name: 'console_logs', stage: 'end', ok: true },
-            });
-            sendResponse({ success: true });
-            return;
+            // continue to send prompt normally
           }
-        } catch (e) {
-          console.error('[Fallback] Console logs failed:', e);
-          broadcastToUI({
-            type: 'toolProgress',
-            data: {
-              name: 'console_logs',
-              stage: 'end',
-              ok: false,
-              error: String((e && e.message) || e),
-            },
-          });
-        }
 
-        // Fallback: capture screenshot
-        try {
-          if (shouldTriggerScreenshot(text)) {
+          // Fallback: get console logs
+          try {
+            const shouldGetConsole = shouldTriggerConsoleLogs(text);
+            console.log(
+              '[Fallback] shouldTriggerConsoleLogs:',
+              shouldGetConsole,
+              'text:',
+              text,
+            );
+            if (shouldGetConsole) {
+              console.log('[Fallback] Triggering console logs...');
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'console_logs', stage: 'start' },
+              });
+              const data = await getBrowserConsoleLogs();
+              console.log('[Fallback] Console logs data:', data);
+              const logs = data.logs || [];
+              const formatted = logs
+                .slice(-50)
+                .map((log) => `[${log.type}] ${log.message}`)
+                .join('\n');
+              broadcastToUI({ type: 'streamStart' });
+              await sendToNativeHost({
+                type: 'qwen_request',
+                action: 'process_text',
+                data: {
+                  text: `Console logs (last ${Math.min(logs.length, 50)} entries):\n${formatted || '(no logs captured)'}`,
+                  context: 'console logs from browser',
+                },
+                userPrompt: text, // Include user's full request
+              });
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'console_logs', stage: 'end', ok: true },
+              });
+              sendResponse({ success: true });
+              return;
+            }
+          } catch (e) {
+            console.error('[Fallback] Console logs failed:', e);
             broadcastToUI({
               type: 'toolProgress',
-              data: { name: 'screenshot', stage: 'start' },
-            });
-            const screenshot = await getBrowserScreenshot();
-            const tabs = await chrome.tabs.query({
-              active: true,
-              currentWindow: true,
-            });
-            broadcastToUI({ type: 'streamStart' });
-            await sendToNativeHost({
-              type: 'qwen_request',
-              action: 'analyze_screenshot',
               data: {
-                dataUrl: screenshot.dataUrl,
-                url: tabs[0]?.url || 'unknown',
+                name: 'console_logs',
+                stage: 'end',
+                ok: false,
+                error: String((e && e.message) || e),
               },
-              userPrompt: text, // Include user's full request
             });
-            broadcastToUI({
-              type: 'toolProgress',
-              data: { name: 'screenshot', stage: 'end', ok: true },
-            });
-            sendResponse({ success: true });
-            return;
           }
-        } catch (e) {
-          console.warn('Fallback screenshot failed:', e);
-          broadcastToUI({
-            type: 'toolProgress',
-            data: {
-              name: 'screenshot',
-              stage: 'end',
-              ok: false,
-              error: String((e && e.message) || e),
-            },
-          });
-        }
 
-        // Fallback: get network logs
-        try {
-          const shouldGetNetwork = shouldTriggerNetworkLogs(text);
-          console.log(
-            '[Fallback] shouldTriggerNetworkLogs:',
-            shouldGetNetwork,
-            'text:',
-            text,
-          );
-          if (shouldGetNetwork) {
-            console.log('[Fallback] Triggering network logs...');
+          // Fallback: capture screenshot
+          try {
+            if (shouldTriggerScreenshot(text)) {
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'screenshot', stage: 'start' },
+              });
+              const screenshot = await getBrowserScreenshot();
+              const tabs = await chrome.tabs.query({
+                active: true,
+                currentWindow: true,
+              });
+              broadcastToUI({ type: 'streamStart' });
+              await sendToNativeHost({
+                type: 'qwen_request',
+                action: 'analyze_screenshot',
+                data: {
+                  dataUrl: screenshot.dataUrl,
+                  url: tabs[0]?.url || 'unknown',
+                },
+                userPrompt: text, // Include user's full request
+              });
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'screenshot', stage: 'end', ok: true },
+              });
+              sendResponse({ success: true });
+              return;
+            }
+          } catch (e) {
+            console.warn('Fallback screenshot failed:', e);
             broadcastToUI({
               type: 'toolProgress',
-              data: { name: 'network_logs', stage: 'start' },
-            });
-            const logs = await getNetworkLogs(null);
-            console.log('[Fallback] Network logs count:', logs?.length);
-            const summary = logs.slice(-50).map((log) => ({
-              method: log.method,
-              url: log.params?.request?.url || log.params?.documentURL,
-              status: log.params?.response?.status,
-              timestamp: log.timestamp,
-            }));
-            broadcastToUI({ type: 'streamStart' });
-            await sendToNativeHost({
-              type: 'qwen_request',
-              action: 'process_text',
               data: {
-                text: `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`,
-                context: 'network request logs from browser',
+                name: 'screenshot',
+                stage: 'end',
+                ok: false,
+                error: String((e && e.message) || e),
               },
-              userPrompt: text, // Include user's full request
             });
+          }
+
+          // Fallback: get network logs
+          try {
+            const shouldGetNetwork = shouldTriggerNetworkLogs(text);
+            console.log(
+              '[Fallback] shouldTriggerNetworkLogs:',
+              shouldGetNetwork,
+              'text:',
+              text,
+            );
+            if (shouldGetNetwork) {
+              console.log('[Fallback] Triggering network logs...');
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'network_logs', stage: 'start' },
+              });
+              const logs = await getNetworkLogs(null);
+              console.log('[Fallback] Network logs count:', logs?.length);
+              const summary = logs.slice(-50).map((log) => ({
+                method: log.method,
+                url: log.params?.request?.url || log.params?.documentURL,
+                status: log.params?.response?.status,
+                timestamp: log.timestamp,
+              }));
+              broadcastToUI({ type: 'streamStart' });
+              await sendToNativeHost({
+                type: 'qwen_request',
+                action: 'process_text',
+                data: {
+                  text: `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`,
+                  context: 'network request logs from browser',
+                },
+                userPrompt: text, // Include user's full request
+              });
+              broadcastToUI({
+                type: 'toolProgress',
+                data: { name: 'network_logs', stage: 'end', ok: true },
+              });
+              sendResponse({ success: true });
+              return;
+            }
+          } catch (e) {
+            console.error('[Fallback] Network logs failed:', e);
             broadcastToUI({
               type: 'toolProgress',
-              data: { name: 'network_logs', stage: 'end', ok: true },
+              data: {
+                name: 'network_logs',
+                stage: 'end',
+                ok: false,
+                error: String((e && e.message) || e),
+              },
             });
-            sendResponse({ success: true });
-            return;
           }
-        } catch (e) {
-          console.error('[Fallback] Network logs failed:', e);
-          broadcastToUI({
-            type: 'toolProgress',
-            data: {
-              name: 'network_logs',
-              stage: 'end',
-              ok: false,
-              error: String((e && e.message) || e),
-            },
-          });
         }
 
         // Send the prompt with retry logic for session initialization

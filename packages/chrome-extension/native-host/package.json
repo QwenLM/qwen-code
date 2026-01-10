@@ -1,12 +1,16 @@
 {
   "name": "qwen-cli-bridge-host",
   "version": "1.0.0",
-  "description": "Native messaging host for Qwen CLI Chrome Extension",
+  "description": "Bridge service + MCP server for the Qwen Chrome Extension (HTTP bridge, browser MCP tools)",
   "main": "host.js",
   "bin": {
-    "browser-bridge-mcp": "src/browser-mcp-server.js"
+    "browser-bridge-mcp": "src/browser-mcp-server.js",
+    "chrome-browser-mcp": "src/browser-mcp-server.js",
+    "qwen-bridge-host": "host.js"
   },
   "scripts": {
+    "start": "node host.js",
+    "mcp": "node src/browser-mcp-server.js",
     "test": "node host.js --test"
   },
   "keywords": [
@@ -14,10 +18,17 @@
     "native-messaging",
     "qwen",
     "cli",
-    "bridge"
+    "bridge",
+    "mcp"
   ],
   "author": "",
   "license": "MIT",
+  "files": [
+    "host.js",
+    "src/",
+    "scripts/",
+    "README.md"
+  ],
   "engines": {
     "node": ">=14.0.0"
   },

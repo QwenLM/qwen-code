@@ -294,6 +294,19 @@ async function handleToolCall(name, args) {
       };
     }
 
+    case 'browser_fill_form_auto': {
+      const data = await callBridge('fill_form_auto', args);
+      const results = data.results || [];
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Auto fill results:\n${JSON.stringify(results, null, 2)}`,
+          },
+        ],
+      };
+    }
+
     case 'browser_input_text': {
       if (!args.selector || args.text === undefined) {
         throw new Error('selector and text are required');
@@ -309,6 +322,56 @@ async function handleToolCall(name, args) {
           {
             type: 'text',
             text: `Input result: ${message}`,
+          },
+        ],
+        isError: !success,
+      };
+    }
+
+    case 'browser_click': {
+      if (!args.selector) throw new Error('selector is required');
+      const data = await callBridge('click_element', args);
+      const success = data?.success !== false;
+      const message =
+        data?.error || (success ? 'Click success' : 'Click failed');
+      return {
+        content: [
+          {
+            type: 'text',
+            text: message,
+          },
+        ],
+        isError: !success,
+      };
+    }
+
+    case 'browser_click_text': {
+      if (!args.text) throw new Error('text is required');
+      const data = await callBridge('click_text', args);
+      const success = data?.success !== false;
+      const message =
+        data?.error || (success ? 'Click success' : 'Click failed');
+      return {
+        content: [
+          {
+            type: 'text',
+            text: message,
+          },
+        ],
+        isError: !success,
+      };
+    }
+
+    case 'browser_run_js': {
+      if (!args.code) throw new Error('code is required');
+      const data = await callBridge('run_js', { code: args.code });
+      const success = data?.success !== false;
+      const message = data?.error || JSON.stringify(data?.result ?? data);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: success ? `Result: ${message}` : `Error: ${message}`,
           },
         ],
         isError: !success,
