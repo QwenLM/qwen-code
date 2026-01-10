@@ -31,7 +31,8 @@ import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 
 import type { FunctionDeclaration } from '@google/genai';
 import { mcpToTool } from '@google/genai';
-import { basename } from 'node:path';
+import { existsSync } from 'node:fs';
+import { basename, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
@@ -1347,6 +1348,28 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.command) {
+    // Validate that the entry script exists for stdio-based MCP servers
+    // This provides a clear error message instead of a silent connection failure
+    if (mcpServerConfig.args?.length) {
+      const entryPath = mcpServerConfig.args[0];
+      // Check if it looks like a file path (contains path separators or starts with .)
+      if (
+        entryPath.includes('/') ||
+        entryPath.includes('\\') ||
+        entryPath.startsWith('.')
+      ) {
+        // Resolve relative paths against cwd before checking existence
+        const resolvedPath = isAbsolute(entryPath)
+          ? entryPath
+          : resolve(mcpServerConfig.cwd ?? process.cwd(), entryPath);
+        if (!existsSync(resolvedPath)) {
+          throw new Error(
+            `MCP server '${mcpServerName}' entry script not found at: ${resolvedPath}`,
+          );
+        }
+      }
+    }
+
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,
       args: mcpServerConfig.args || [],
