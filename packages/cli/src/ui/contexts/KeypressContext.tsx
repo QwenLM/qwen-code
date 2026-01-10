@@ -613,6 +613,10 @@ export function KeypressProvider({
       }
     };
 
+    const isCarriageReturn = (b: Buffer) => b.includes(0x0d);
+    const isCRLF = (b: Buffer) =>
+      b.length === 2 && b[0] === 0x0d && b[1] === 0x0a;
+
     const createPasteKeyEvent = (
       name: 'paste-start' | 'paste-end' | '' = '',
       sequence: string = '',
@@ -681,9 +685,23 @@ export function KeypressProvider({
         return;
       }
 
+      // Some Windows terminals emit CRLF as a standalone chunk during paste.
+      // Treat it as a paste event so the UI inserts a newline instead of
+      // interpreting the CR as a submit.
+      if (!isPaste && isCRLF(rawDataBuffer)) {
+        handleKeypress(undefined, createPasteKeyEvent('paste-start'));
+        keypressStream.write(rawDataBuffer);
+        handleKeypress(undefined, createPasteKeyEvent('paste-end'));
+        rawDataBuffer = Buffer.alloc(0);
+        clearRawFlushTimeout();
+        return;
+      }
+
+      const hasCarriageReturn = isCarriageReturn(rawDataBuffer);
+
       if (
-        (rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d)) ||
-        !rawDataBuffer.includes(0x0d) ||
+        (rawDataBuffer.length <= 2 && hasCarriageReturn) ||
+        !hasCarriageReturn ||
         isPaste
       ) {
         keypressStream.write(rawDataBuffer);
@@ -706,11 +724,16 @@ export function KeypressProvider({
 
       clearRawFlushTimeout();
 
+      if (isCRLF(rawDataBuffer)) {
+        flushRawBuffer();
+        return;
+      }
+
       // On some Windows terminals, during a paste, the terminal might send a
       // single return character chunk. In this case, we need to wait a time period
       // to know if it is part of a paste or just a return character.
       const isReturnChar =
-        rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d);
+        rawDataBuffer.length <= 2 && isCarriageReturn(rawDataBuffer);
       if (isReturnChar) {
         rawFlushTimeout = setTimeout(flushRawBuffer, 100);
       } else {
