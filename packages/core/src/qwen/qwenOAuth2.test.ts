@@ -16,6 +16,8 @@ import {
   isDeviceTokenPending,
   isDeviceTokenSuccess,
   isErrorResponse,
+  qwenOAuth2Events,
+  QwenOAuth2Event,
   QwenOAuth2Client,
   type DeviceAuthorizationResponse,
   type DeviceTokenResponse,
@@ -843,6 +845,58 @@ describe('getQwenOAuthClient', () => {
 
     expect(global.fetch).not.toHaveBeenCalled();
 
+    SharedTokenManager.getInstance = originalGetInstance;
+  });
+
+  it('should include troubleshooting hints when device auth fetch fails', async () => {
+    // Make SharedTokenManager fail so we hit the fallback device-flow path
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('Token refresh failed')),
+    };
+
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    const tlsCause = new Error('unable to verify the first certificate');
+    (tlsCause as Error & { code?: string }).code =
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE';
+
+    const fetchError = new TypeError('fetch failed') as TypeError & {
+      cause?: unknown;
+    };
+    fetchError.cause = tlsCause;
+
+    vi.mocked(global.fetch).mockRejectedValue(fetchError);
+
+    const emitSpy = vi.spyOn(qwenOAuth2Events, 'emit');
+
+    let thrownError: unknown;
+    try {
+      const { getQwenOAuthClient } = await import('./qwenOAuth2.js');
+      await getQwenOAuthClient(mockConfig);
+    } catch (error: unknown) {
+      thrownError = error;
+    }
+
+    expect(thrownError).toBeInstanceOf(Error);
+    expect((thrownError as Error).message).toContain(
+      'Device authorization flow failed: fetch failed',
+    );
+    expect((thrownError as Error).message).toContain(
+      'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    );
+    expect((thrownError as Error).message).toContain('NODE_EXTRA_CA_CERTS');
+    expect((thrownError as Error).message).toContain('--proxy');
+
+    expect(emitSpy).toHaveBeenCalledWith(
+      QwenOAuth2Event.AuthProgress,
+      'error',
+      expect.stringContaining('NODE_EXTRA_CA_CERTS'),
+    );
+
+    emitSpy.mockRestore();
     SharedTokenManager.getInstance = originalGetInstance;
   });
 });

@@ -478,6 +478,74 @@ export type AuthResult =
  */
 export const qwenOAuth2Events = new EventEmitter();
 
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  if (
+    'code' in error &&
+    typeof (error as Record<string, unknown>)['code'] === 'string'
+  ) {
+    return (error as Record<string, string>)['code'];
+  }
+
+  return undefined;
+}
+
+function formatUnknownErrorMessage(error: unknown): string | undefined {
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (
+    typeof error === 'number' ||
+    typeof error === 'boolean' ||
+    typeof error === 'bigint'
+  ) {
+    return String(error);
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (!error || typeof error !== 'object') {
+    return undefined;
+  }
+
+  const message = (error as Record<string, unknown>)['message'];
+  if (typeof message === 'string') {
+    return message;
+  }
+
+  return undefined;
+}
+
+function formatErrorCause(error: unknown): string | undefined {
+  if (!(error instanceof Error)) {
+    return undefined;
+  }
+
+  const cause = (error as Error & { cause?: unknown }).cause;
+  if (!cause) {
+    return undefined;
+  }
+
+  const causeCode = getErrorCode(cause);
+  const causeMessage = formatUnknownErrorMessage(cause);
+
+  if (!causeCode && !causeMessage) {
+    return undefined;
+  }
+
+  if (causeCode && causeMessage && !causeMessage.includes(causeCode)) {
+    return `${causeCode}: ${causeMessage}`;
+  }
+
+  return causeMessage ?? causeCode;
+}
+
 export async function getQwenOAuthClient(
   config: Config,
   options?: { requireCachedCredentials?: boolean },
@@ -848,7 +916,66 @@ async function authWithQwenDeviceFlow(
     return { success: false, reason: 'timeout', message: timeoutMessage };
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const message = `Device authorization flow failed: ${errorMessage}`;
+    const causeCode =
+      error instanceof Error
+        ? getErrorCode((error as Error & { cause?: unknown }).cause)
+        : undefined;
+    const cause = formatErrorCause(error);
+
+    const fullErrorMessage = [
+      errorMessage,
+      cause ? `(cause: ${cause})` : undefined,
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+    const shouldShowFetchHints =
+      errorMessage.toLowerCase().includes('fetch failed') ||
+      (causeCode != null &&
+        [
+          'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+          'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+          'SELF_SIGNED_CERT_IN_CHAIN',
+          'DEPTH_ZERO_SELF_SIGNED_CERT',
+          'CERT_HAS_EXPIRED',
+          'ERR_TLS_CERT_ALTNAME_INVALID',
+          'ECONNRESET',
+          'ETIMEDOUT',
+          'ECONNREFUSED',
+          'ENOTFOUND',
+          'EAI_AGAIN',
+          'EHOSTUNREACH',
+          'ENETUNREACH',
+        ].includes(causeCode));
+
+    const shouldShowTlsHint =
+      causeCode != null &&
+      [
+        'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+        'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+        'SELF_SIGNED_CERT_IN_CHAIN',
+        'DEPTH_ZERO_SELF_SIGNED_CERT',
+        'CERT_HAS_EXPIRED',
+        'ERR_TLS_CERT_ALTNAME_INVALID',
+      ].includes(causeCode);
+
+    const maybeHints = shouldShowFetchHints
+      ? [
+          '',
+          'Troubleshooting:',
+          `- Confirm you can reach ${QWEN_OAUTH_BASE_URL} from this machine.`,
+          '- If you are behind a proxy, pass `--proxy <url>` (or set `proxy` in settings).',
+          ...(shouldShowTlsHint
+            ? [
+                '- If your network uses a corporate TLS inspection CA, set `NODE_EXTRA_CA_CERTS` to your CA bundle.',
+              ]
+            : []),
+        ].join('\n')
+      : '';
+
+    const message = `Device authorization flow failed: ${fullErrorMessage}${maybeHints}`;
+
+    qwenOAuth2Events.emit(QwenOAuth2Event.AuthProgress, 'error', message);
     console.error(message);
     return { success: false, reason: 'error', message };
   } finally {
