@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.cli.protocol.data.AssistantUsage;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.PermissionMode;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.TextAssistantContent;
-import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssistantContent;
+import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThinkingAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolResultAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolUseAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.behavior.Behavior.Operation;
@@ -44,7 +44,7 @@ class SessionTest {
             }
 
             @Override
-            public void onThinking(Session session, ThingkingAssistantContent thingkingAssistantContent) {
+            public void onThinking(Session session, ThinkingAssistantContent thingkingAssistantContent) {
                 log.info("receive thingkingAssistantContent {}", thingkingAssistantContent);
             }
 

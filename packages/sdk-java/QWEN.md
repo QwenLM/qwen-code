@@ -204,7 +204,7 @@ The `SessionEventConsumers` interface provides callbacks for different types of 
 The `AssistantContentConsumers` interface handles different types of content within assistant messages:
 
 - `onText`: Handles text content (receives Session and TextAssistantContent)
-- `onThinking`: Handles thinking content (receives Session and ThingkingAssistantContent)
+- `onThinking`: Handles thinking content (receives Session and ThinkingAssistantContent)
 - `onToolUse`: Handles tool use content (receives Session and ToolUseAssistantContent)
 - `onToolResult`: Handles tool result content (receives Session and ToolResultAssistantContent)
 - `onOtherContent`: Handles other content types (receives Session and AssistantContent)
