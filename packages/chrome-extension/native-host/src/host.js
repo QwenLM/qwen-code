@@ -833,12 +833,41 @@ class AcpConnection {
       }
 
       // Get the path to browser-mcp-server.js (supports running from root or src)
+      // Enhanced path resolution with environment variable override and better error reporting
       const browserMcpServerPath = (() => {
-        const localPath = path.join(__dirname, 'browser-mcp-server.js');
-        if (fs.existsSync(localPath)) return localPath;
-        const srcPath = path.join(__dirname, 'src', 'browser-mcp-server.js');
-        if (fs.existsSync(srcPath)) return srcPath;
-        return localPath;
+        const candidates = [];
+
+        // Allow environment variable override for custom installations
+        if (process.env.QWEN_BROWSER_MCP_SERVER_PATH) {
+          candidates.push(
+            path.resolve(process.env.QWEN_BROWSER_MCP_SERVER_PATH),
+          );
+        }
+
+        // Standard candidate paths relative to __dirname
+        candidates.push(
+          path.join(__dirname, 'browser-mcp-server.js'),
+          path.join(__dirname, 'src', 'browser-mcp-server.js'),
+          path.join(__dirname, '..', 'browser-mcp-server.js'),
+          path.join(__dirname, '..', 'src', 'browser-mcp-server.js'),
+        );
+
+        for (const candidate of candidates) {
+          try {
+            if (fs.existsSync(candidate)) {
+              log(`Found browser-mcp-server.js at: ${candidate}`);
+              return candidate;
+            }
+          } catch {
+            /* ignore filesystem errors */
+          }
+        }
+
+        // Log error when file not found - this helps diagnose MCP discovery failures
+        logError(
+          `browser-mcp-server.js not found. Tried: ${candidates.join(', ')}`,
+        );
+        return candidates[0] || path.join(__dirname, 'browser-mcp-server.js');
       })();
 
       log(`Creating session with MCP server: ${browserMcpServerPath}`);
@@ -1261,7 +1290,9 @@ async function handleExtensionMessage(message) {
 // Fixed port: 18765
 // ============================================================================
 
-const HTTP_PORT = 18765;
+const HTTP_PORT = process.env.BRIDGE_PORT
+  ? Number(process.env.BRIDGE_PORT)
+  : 18765;
 let httpServer = null;
 
 function startHttpApiServer() {
