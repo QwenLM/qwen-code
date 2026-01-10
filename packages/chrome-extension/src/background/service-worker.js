@@ -1066,7 +1066,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           try {
             await sendToNativeHost({
               type: 'start_qwen',
-              cwd: request.data?.cwd || '/',
+              // Do not use '/' as default cwd - it's not a trusted folder
+              // and MCP tools won't be discovered. Use undefined to let host.js
+              // use its own default (which is ~/.qwen/chrome-bridge or process.cwd())
+              cwd: request.data?.cwd,
             });
             qwenCliStatus = 'running';
           } catch (startError) {

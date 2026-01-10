@@ -1151,7 +1151,11 @@ async function handleExtensionMessage(message) {
       break;
 
     case 'start_qwen': {
-      const cwd = message.cwd || process.cwd();
+      // Use user's home directory as default cwd to ensure MCP tools are discovered.
+      // The root directory '/' or arbitrary paths may not be trusted folders,
+      // which causes MCP tool discovery to be skipped entirely.
+      const defaultCwd = process.env.HOME || process.cwd();
+      const cwd = message.cwd || defaultCwd;
       const startResult = await acpConnection.start(cwd);
       response = {
         type: 'response',
