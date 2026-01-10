@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.cli.example;
 import com.alibaba.qwen.code.cli.QwenCodeCli;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.TextAssistantContent;
-import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssistantContent;
+import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThinkingAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolResultAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolUseAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantUsage;
@@ -78,7 +78,7 @@ public class QuickStartExample {
                     }
 
                     @Override
-                    public void onThinking(Session session, ThingkingAssistantContent thingkingAssistantContent) {
+                    public void onThinking(Session session, ThinkingAssistantContent thingkingAssistantContent) {
                         logger.info("Thinking content received: {}", thingkingAssistantContent.getThinking());
                     }
 
