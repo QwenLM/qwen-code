@@ -14,6 +14,7 @@ import { AnsiOutputText } from '../AnsiOutput.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
+import { StickyHeader } from '../StickyHeader.js';
 import type {
   TodoResultDisplay,
   TaskResultDisplay,
@@ -220,6 +221,9 @@ const DiffResultRenderer: React.FC<{
 );
 
 export interface ToolMessageProps extends IndividualToolCallDisplay {
+  isFirst?: boolean;
+  borderColor?: string;
+  borderDimColor?: boolean;
   availableTerminalHeight?: number;
   terminalWidth: number;
   emphasis?: TextEmphasis;
@@ -231,6 +235,9 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
+  isFirst = true,
+  borderColor = theme.border.default,
+  borderDimColor = false,
   description,
   resultDisplay,
   status,
@@ -299,32 +306,50 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  const childWidth = terminalWidth - 3; // account for padding.
+  const childWidth = terminalWidth - 4; // account for left border (1) + left padding (1) + right padding (1) + right border (1).
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
 
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
-      <Box minHeight={1}>
-        <ToolStatusIndicator status={status} name={name} />
-        <ToolInfo
-          name={name}
-          status={status}
-          description={description}
-          emphasis={emphasis}
-        />
-        {shouldShowFocusHint && (
-          <Box marginLeft={1} flexShrink={0}>
-            <Text color={theme.text.accent}>
-              {isThisShellFocused ? '(Focused)' : '(ctrl+f to focus)'}
-            </Text>
-          </Box>
-        )}
-        {emphasis === 'high' && <TrailingIndicator />}
-      </Box>
-      {displayRenderer.type !== 'none' && (
-        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
+    <Box flexDirection="column" width={terminalWidth}>
+      <StickyHeader
+        width={terminalWidth}
+        isFirst={isFirst}
+        borderColor={borderColor}
+        borderDimColor={borderDimColor}
+      >
+        <Box minHeight={1}>
+          <ToolStatusIndicator status={status} name={name} />
+          <ToolInfo
+            name={name}
+            status={status}
+            description={description}
+            emphasis={emphasis}
+          />
+          {shouldShowFocusHint && (
+            <Box marginLeft={1} flexShrink={0}>
+              <Text color={theme.text.accent}>
+                {isThisShellFocused ? '(Focused)' : '(ctrl+f to focus)'}
+              </Text>
+            </Box>
+          )}
+          {emphasis === 'high' && <TrailingIndicator />}
+        </Box>
+      </StickyHeader>
+      <Box
+        width={terminalWidth}
+        borderStyle="round"
+        borderColor={borderColor}
+        borderDimColor={borderDimColor}
+        borderTop={false}
+        borderBottom={false}
+        borderLeft={true}
+        borderRight={true}
+        paddingX={1}
+        flexDirection="column"
+      >
+        {displayRenderer.type !== 'none' && (
           <Box flexDirection="column">
             {displayRenderer.type === 'todo' && (
               <TodoResultRenderer data={displayRenderer.data} />
@@ -366,16 +391,16 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
           </Box>
-        </Box>
-      )}
-      {isThisShellFocused && config && (
-        <Box paddingLeft={STATUS_INDICATOR_WIDTH} marginTop={1}>
-          <ShellInputPrompt
-            activeShellPtyId={activeShellPtyId ?? null}
-            focus={embeddedShellFocused}
-          />
-        </Box>
-      )}
+        )}
+        {isThisShellFocused && config && (
+          <Box paddingLeft={STATUS_INDICATOR_WIDTH} marginTop={1}>
+            <ShellInputPrompt
+              activeShellPtyId={activeShellPtyId ?? null}
+              focus={embeddedShellFocused}
+            />
+          </Box>
+        )}
+      </Box>
     </Box>
   );
 };

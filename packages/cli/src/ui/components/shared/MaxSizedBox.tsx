@@ -311,7 +311,9 @@ function visitBoxRow(element: React.ReactNode): Row {
       return;
     }
     if (typeof element === 'string' || typeof element === 'number') {
-      const text = String(element);
+      // Expand tabs to spaces to ensure correct width calculation.
+      // string-width returns 0 for tabs, causing overflow issues.
+      const text = String(element).replace(/\t/g, '    ');
       // Ignore empty strings as they don't need to be rendered.
       if (!text) {
         return;
