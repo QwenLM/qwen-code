@@ -199,12 +199,30 @@ class GeminiAgent {
   ): Promise<Config> {
     const mergedMcpServers = { ...this.settings.merged.mcpServers };
 
-    for (const { command, args, env: rawEnv, name } of mcpServers) {
+    for (const {
+      command,
+      args,
+      env: rawEnv,
+      name,
+      timeout,
+      trust,
+    } of mcpServers) {
       const env: Record<string, string> = {};
       for (const { name: envName, value } of rawEnv) {
         env[envName] = value;
       }
-      mergedMcpServers[name] = new MCPServerConfig(command, args, env, cwd);
+      mergedMcpServers[name] = new MCPServerConfig(
+        command,
+        args,
+        env,
+        cwd,
+        undefined, // url (SSE transport)
+        undefined, // httpUrl (HTTP transport)
+        undefined, // headers
+        undefined, // tcp (WebSocket)
+        timeout,
+        trust,
+      );
     }
 
     const settings = { ...this.settings.merged, mcpServers: mergedMcpServers };

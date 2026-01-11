@@ -1,0 +1,102 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Execute tool call styles - Enhanced styling with semantic class names
+ */
+
+/* Root container for execute tool call output */
+.bash-toolcall-card {
+  border: 0.5px solid var(--app-input-border);
+  border-radius: 5px;
+  background: var(--app-tool-background);
+  margin: 8px 0;
+  max-width: 100%;
+  font-size: 1em;
+  align-items: start;
+}
+
+/* Content wrapper inside the card */
+.bash-toolcall-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px;
+}
+
+/* Individual input/output row */
+.bash-toolcall-row {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  border-top: 0.5px solid var(--app-input-border);
+  padding: 4px;
+}
+
+/* First row has no top border */
+.bash-toolcall-row:first-child {
+  border-top: none;
+}
+
+/* Row label (IN/OUT/ERROR) */
+.bash-toolcall-label {
+  grid-column: 1;
+  color: var(--app-secondary-foreground);
+  text-align: left;
+  opacity: 50%;
+  padding: 4px 8px 4px 4px;
+  font-family: var(--app-monospace-font-family);
+  font-size: 0.85em;
+}
+
+/* Row content area */
+.bash-toolcall-row-content {
+  grid-column: 2;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  padding: 4px;
+}
+
+/* Truncated content styling */
+.bash-toolcall-row-content:not(.bash-toolcall-full) {
+  max-height: 60px;
+  mask-image: linear-gradient(
+    to bottom,
+    var(--app-primary-background) 40px,
+    transparent 60px
+  );
+  overflow: hidden;
+}
+
+/* Preformatted content */
+.bash-toolcall-pre {
+  margin-block: 0;
+  overflow: hidden;
+  font-family: var(--app-monospace-font-family);
+  font-size: 0.85em;
+}
+
+/* Code content */
+.bash-toolcall-code {
+  margin: 0;
+  padding: 0;
+  font-family: var(--app-monospace-font-family);
+  font-size: 0.85em;
+}
+
+/* Output content with subtle styling */
+.bash-toolcall-output-subtle {
+  background-color: var(--app-code-background);
+  white-space: pre;
+  overflow-x: auto;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Error content styling */
+.bash-toolcall-error-content {
+  color: #c74e39;
+}
