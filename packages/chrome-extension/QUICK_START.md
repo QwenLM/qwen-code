@@ -2,6 +2,39 @@
 
 Get started quickly with the Qwen CLI Chrome Extension.
 
+## New
+
+### 准备工作
+
+```
+# 首次运行
+npm i -g qwen-cli-chrome-bridge-host
+
+qwen mcp add --transport stdio chrome-browser "chrome-browser-mcp"
+
+# 启动 host 服务
+qwen-bridge-host
+
+# 检查 qwen 是否装载 mcp 正常
+$ qwen mcp list
+Configured MCP servers:
+
+✓ chrome-browser: chrome-browser-mcp  (stdio) - Connected
+# 如果显示 Disconnected 可稍等一会之后再执行。
+```
+
+### chrome 插件
+
+1. 开启 chrome 开发者模式之后，加载 `packages/chrome-extension/dist/extension` 目录下的插件
+2. 点击插件图标，自动启动 qwen 服务
+
+### 操作
+
+1. 点击 "Extract Page Data" 按钮，提取页面数据
+2. 点击 "Capture Screenshot" 按钮，截图
+3. 点击 "Show me the network requests" 按钮，显示网络请求
+4. 点击 "Show me the console logs" 按钮，显示 console 日志
+
 ## Installation
 
 1. **Prerequisites**: Make sure you have Node.js installed:
