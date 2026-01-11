@@ -13,7 +13,7 @@ REM Set variables
 set HOST_NAME=com.qwen.cli.bridge
 set SCRIPT_DIR=%~dp0
 set HOST_SCRIPT=%SCRIPT_DIR%host.bat
-set HOST_JS=%SCRIPT_DIR%..\host.js
+set HOST_JS=%SCRIPT_DIR%..\dist\host.js
 
 REM Check if Node.js is installed
 where node >nul 2>nul
@@ -41,7 +41,7 @@ if not exist "%HOST_SCRIPT%" (
 )
 
 if not exist "%HOST_JS%" (
-    echo Error: host.js not found at %HOST_JS%
+    echo Error: host.js not found at %HOST_JS% (please run npm run build in native-host)
     pause
     exit /b 1
 )

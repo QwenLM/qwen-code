@@ -489,6 +489,7 @@ export const App: React.FC = () => {
         data: {
           requestId: permissionRequest.requestId,
           optionId,
+          sessionId: permissionRequest.sessionId,
         },
       });
       setPermissionRequest(null);

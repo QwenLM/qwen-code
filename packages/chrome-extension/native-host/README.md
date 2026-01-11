@@ -7,6 +7,11 @@ Bridge service + browser MCP server for the Qwen Chrome Extension. Provides an H
 - Node.js 18+ recommended (14+ minimum per engines)
 - Qwen Chrome Extension installed/loaded
 
+## Development (TypeScript)
+
+- `npm run dev` watches/compiles TypeScript to `dist/` (used by the shim entries `host.js` and `src/*.js`), handy to keep running alongside `npm run dev` in `packages/chrome-extension`.
+- `npm run build` cleans and emits production-ready JS + `.d.ts` to `dist/` (also invoked by the Chrome extension `npm run build`).
+
 ## Install & add to Qwen as MCP
 
 From repo root:

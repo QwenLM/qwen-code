@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// @ts-nocheck
 
-/* global require, process, Buffer, __dirname, setTimeout, setInterval, clearInterval, console */
+/* global process, Buffer, __dirname, setTimeout, setInterval, clearInterval, console */
 
 /**
  * Native Messaging Host for Qwen CLI Chrome Extension
@@ -8,16 +11,11 @@
  * Uses ACP (Agent Communication Protocol) for communication with Qwen CLI
  */
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { spawn } = require('child_process');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const fs = require('fs');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const path = require('path');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const os = require('os');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const http = require('http');
+import { spawn } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import http from 'http';
 
 // ============================================================================
 // Logging
@@ -64,8 +62,8 @@ function logDebug(message) {
 }
 
 // Event queue for SSE streaming
-const eventQueue = [];
-const sseClients = new Set();
+const eventQueue: any[] = [];
+const sseClients = new Set<{ res: any }>();
 
 function enqueueEvent(message) {
   eventQueue.push(message);
@@ -220,6 +218,16 @@ function readMessagesFromExtension() {
 const ACP_PROTOCOL_VERSION = 1;
 
 class AcpConnection {
+  process: any;
+  status: string;
+  sessionId: string | null;
+  pendingRequests: Map<
+    number,
+    { resolve: (value: any) => void; reject: (reason?: any) => void }
+  >;
+  nextRequestId: number;
+  inputBuffer: string;
+
   constructor() {
     this.process = null;
     this.status = 'disconnected';
@@ -429,7 +437,7 @@ class AcpConnection {
           status: 'running',
           pid: this.process.pid,
           sessionId: this.sessionId,
-          agentInfo: initResult.data.agentInfo,
+          agentInfo: (initResult as any).data?.agentInfo,
         },
       };
     } catch (error) {
@@ -801,8 +809,8 @@ class AcpConnection {
   async createSession(cwd) {
     try {
       // Helper to discover Chrome DevTools WS URL from env or default port
-      async function fetchJson(url) {
-        return new Promise((resolve) => {
+      async function fetchJson(url: string): Promise<any> {
+        return new Promise<any>((resolve) => {
           try {
             const req = http.get(url, (res) => {
               let body = '';
@@ -827,7 +835,9 @@ class AcpConnection {
         if (process.env.DEVTOOLS_WS_URL) return process.env.DEVTOOLS_WS_URL;
         // 2) Provided port
         const port = process.env.CHROME_REMOTE_DEBUG_PORT || '9222';
-        const json = await fetchJson(`http://127.0.0.1:${port}/json/version`);
+        const json: any = await fetchJson(
+          `http://127.0.0.1:${port}/json/version`,
+        );
         if (json && json.webSocketDebuggerUrl) return json.webSocketDebuggerUrl;
         return null;
       }
@@ -918,7 +928,7 @@ class AcpConnection {
         process.env.QWEN_DISABLE_MCP === '1';
       const useMcp = !disableMcp;
 
-      const result = await this.sendAcpRequest(
+      const result: any = await this.sendAcpRequest(
         'session/new',
         {
           cwd,
@@ -974,14 +984,26 @@ class AcpConnection {
     }
   }
 
-  respondToPermission(requestId, optionId) {
-    this.sendAcpResponse(requestId, {
-      result: {
-        outcome: optionId
-          ? { outcome: 'selected', optionId }
-          : { outcome: 'cancelled' },
-      },
-    });
+  respondToPermission(requestId, optionId, sessionId?) {
+    try {
+      log(
+        `Permission response -> requestId=${requestId} sessionId=${sessionId || 'n/a'} optionId=${optionId || 'cancel'}`,
+      );
+      this.sendAcpResponse(requestId, {
+        result: {
+          outcome: optionId
+            ? { outcome: 'selected', optionId }
+            : { outcome: 'cancelled' },
+        },
+      });
+    } catch (err) {
+      logError(
+        `Failed to send permission response for ${requestId}: ${
+          err?.message || err
+        }`,
+      );
+      throw err;
+    }
   }
 
   stop() {
@@ -1021,8 +1043,11 @@ let browserRequestId = 0;
 /**
  * Send a request to Chrome Extension and wait for response
  */
-function sendBrowserRequest(requestType, params) {
-  return new Promise((resolve, reject) => {
+function sendBrowserRequest(
+  requestType: string,
+  params: Record<string, unknown>,
+): Promise<any> {
+  return new Promise<any>((resolve, reject) => {
     const id = ++browserRequestId;
     pendingBrowserRequests.set(id, { resolve, reject });
 
@@ -1065,8 +1090,8 @@ function handleBrowserResponse(message) {
 const acpConnection = new AcpConnection();
 
 // Check if Qwen CLI is installed
-async function checkQwenInstallation() {
-  return new Promise((resolve) => {
+async function checkQwenInstallation(): Promise<any> {
+  return new Promise<any>((resolve) => {
     try {
       const qwenPath =
         process.env.QWEN_CLI_PATH && fs.existsSync(process.env.QWEN_CLI_PATH)
@@ -1225,12 +1250,25 @@ async function handleExtensionMessage(message) {
     }
 
     case 'permission_response':
-      acpConnection.respondToPermission(message.requestId, message.optionId);
-      response = {
-        type: 'response',
-        id: message.id,
-        success: true,
-      };
+      try {
+        acpConnection.respondToPermission(
+          message.requestId,
+          message.optionId,
+          message.sessionId,
+        );
+        response = {
+          type: 'response',
+          id: message.id,
+          success: true,
+        };
+      } catch (err) {
+        response = {
+          type: 'response',
+          id: message.id,
+          success: false,
+          error: err?.message || String(err),
+        };
+      }
       break;
 
     case 'qwen_request': {

@@ -14,7 +14,10 @@ LOG_FILE="/tmp/cbmcp.log"
   echo "[wrapper] env BROWSER_MCP_DEBUG=${BROWSER_MCP_DEBUG:-}"
 } >>"${LOG_FILE}" 2>&1
 
-/usr/local/bin/node /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/src/browser-mcp-server.js "$@" \
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+/usr/local/bin/node "$ROOT_DIR/native-host/dist/browser-mcp-server.js" "$@" \
   2>>"${LOG_FILE}"
 
 exit_code=$?

@@ -1,6 +1,9 @@
 #!/usr/bin/env node
+/* eslint-disable @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// @ts-nocheck
 
-/* global require, process, Buffer, __dirname, setTimeout, console */
+/* global process, Buffer, __dirname, setTimeout, console */
 
 /**
  * Browser MCP Server
@@ -8,14 +11,10 @@
  * Communicates with Native Host via HTTP to get browser data
  */
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const http = require('http');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const path = require('path');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { spawn } = require('child_process');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { TOOLS } = require('./shared/tools');
+import http from 'http';
+import path from 'path';
+import { spawn } from 'child_process';
+import { TOOLS } from './shared/tools';
 
 // All logs must go to stderr to avoid corrupting MCP stdout framing.
 console.error('Browser MCP Server starting...');
@@ -38,7 +37,6 @@ let bridgeAvailable = true;
 
 function logAlways(...args) {
   try {
-     
     console.error('[browser-mcp]', ...args);
   } catch {
     /* ignore */
@@ -49,7 +47,7 @@ function logDebug(...args) {
   if (!DEBUG) return;
   try {
     // Use stderr to avoid corrupting MCP stdout framing
-     
+
     console.error('[browser-mcp]', ...args);
   } catch {
     /* ignore */
@@ -98,7 +96,7 @@ async function ensureBridgeReady() {
       // continue to spawn or bail based on env
       if (!SPAWN_ENABLED) {
         logAlways(
-          'Bridge not healthy and spawn is disabled (BROWSER_MCP_NO_SPAWN=1). Please start native-host/host.js manually.',
+          'Bridge not healthy and spawn is disabled (BROWSER_MCP_NO_SPAWN=1). Please start native-host/dist/host.js manually.',
         );
         bridgeAvailable = false;
         return;
@@ -163,20 +161,23 @@ process.on('exit', () => {
 });
 
 // Send request to Native Host HTTP bridge with simple retry
-async function callBridge(method, params = {}) {
+async function callBridge(
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<any> {
   await ensureBridgeReady();
   if (!bridgeAvailable) {
     // Return a predictable error payload instead of throwing to avoid timeouts
     return {
       success: false,
       error:
-        'Bridge unavailable (failed to start or bind). If spawn is disabled, start native-host/host.js manually.',
+        'Bridge unavailable (failed to start or bind). If spawn is disabled, start native-host/dist/host.js manually.',
       method,
     };
   }
   const data = JSON.stringify({ method, params });
   const attempt = () =>
-    new Promise((resolve, reject) => {
+    new Promise<any>((resolve, reject) => {
       const req = http.request(
         BRIDGE_URL,
         {

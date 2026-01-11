@@ -52,6 +52,23 @@ const INTERNAL_MCP_TOOLS = [
     description:
       'Fill a single input/textarea/contentEditable element using a CSS selector.',
   },
+  {
+    name: 'browser_fill_form_auto',
+    description:
+      'Auto-fill form fields by matching provided keys to labels/placeholder/name.',
+  },
+  {
+    name: 'browser_click',
+    description: 'Click an element on the current page using a CSS selector.',
+  },
+  {
+    name: 'browser_click_text',
+    description: 'Click an element (button/link) by matching its visible text.',
+  },
+  {
+    name: 'browser_run_js',
+    description: 'Execute a JavaScript snippet in the page context.',
+  },
 ];
 
 // Check whether MCP discovery already surfaced the browser tools so we can
@@ -152,6 +169,51 @@ function shouldTriggerNetworkLogs(text) {
     '网络记录',
   ];
   return keywords.some((k) => t.includes(k));
+}
+
+// Heuristic: detect if user intent asks to fill/enter text
+function shouldTriggerFormFill(text) {
+  if (!text) return false;
+  const t = String(text).toLowerCase();
+  const keywords = [
+    'fill form',
+    'fill the form',
+    'fill input',
+    'type into',
+    'enter text',
+    '填写',
+    '填表',
+    '输入',
+    '录入',
+    '填入',
+    '搜索框',
+  ];
+  return keywords.some((k) => t.includes(k));
+}
+
+// Build a short hint to guide the model toward browser MCP tools
+function buildToolIntentHint(text) {
+  const hints = [];
+  if (shouldTriggerNetworkLogs(text)) {
+    hints.push(
+      '如需检查接口/网络请求，请调用 browser_get_network_logs（返回 method/url/status/headers/body）。',
+    );
+  }
+  if (shouldTriggerConsoleLogs(text)) {
+    hints.push('如需查看前端/控制台错误，请调用 browser_get_console_logs。');
+  }
+  if (shouldTriggerReadPage(text)) {
+    hints.push('如需获取当前页面内容，请调用 browser_read_page。');
+  }
+  if (shouldTriggerScreenshot(text)) {
+    hints.push('需要视觉信息时，可调用 browser_capture_screenshot。');
+  }
+  if (shouldTriggerFormFill(text)) {
+    hints.push(
+      '如需在页面输入/填表，请调用 browser_fill_form / browser_fill_form_auto（缺 selector/label/key 时请先向用户询问）。',
+    );
+  }
+  return hints.length ? hints.join('\n') : '';
 }
 
 // Basic HTTP call helper
@@ -1056,6 +1118,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // First ensure Qwen CLI is started
     const startAndSend = async () => {
       try {
+        let promptText = text;
         // Check if connected
         if (!isConnected) {
           await connectToNativeHost();
@@ -1276,6 +1339,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         }
 
+        // Inject tool-intent hints to help the model call browser tools proactively
+        const toolHint = buildToolIntentHint(text);
+        if (toolHint) {
+          promptText = `${toolHint}\n\n${text}`;
+        }
+
         // Send the prompt with retry logic for session initialization
         // Notify UI that a new stream is starting right before sending prompt
         broadcastToUI({ type: 'streamStart' });
@@ -1286,7 +1355,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             try {
               await sendToNativeHost({
                 type: 'qwen_prompt',
-                text: text,
+                text: promptText,
               });
               return; // Success
             } catch (err) {
@@ -1347,13 +1416,31 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // Handle permission response
   if (request.type === 'permissionResponse') {
+    const reqId = request.data?.requestId;
+    const optionId = request.data?.optionId;
+    const sessionId = request.data?.sessionId;
+    if (!reqId) {
+      console.warn('[Permission] Missing requestId, cannot respond');
+      sendResponse({ success: false, error: 'Missing requestId' });
+      return false;
+    }
+    console.log(
+      '[Permission] Sending response to native host',
+      reqId,
+      optionId,
+      sessionId || 'no-session',
+    );
     sendToNativeHost({
       type: 'permission_response',
-      requestId: request.data?.requestId,
-      optionId: request.data?.optionId,
+      requestId: reqId,
+      optionId,
+      sessionId,
     })
       .then(() => sendResponse({ success: true }))
-      .catch((error) => sendResponse({ success: false, error: error.message }));
+      .catch((error) => {
+        console.error('[Permission] Failed to respond:', error);
+        sendResponse({ success: false, error: error.message });
+      });
     return true;
   }
 

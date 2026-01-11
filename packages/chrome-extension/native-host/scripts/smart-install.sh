@@ -16,7 +16,7 @@ NC='\033[0m'
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOST_NAME="com.qwen.cli.bridge"
-HOST_SCRIPT="$SCRIPT_DIR/../host.js"
+HOST_SCRIPT="$SCRIPT_DIR/../dist/host.js"
 EXTENSION_ID_FILE="$ROOT_DIR/.extension-id"
 
 echo -e "${CYAN}╔════════════════════════════════════════════════════════════════╗${NC}"
@@ -185,7 +185,7 @@ echo -e "\n${BLUE}验证配置...${NC}"
 
 # 检查 host.js 是否存在
 if [[ ! -f "$HOST_SCRIPT" ]]; then
-    echo -e "${RED}✗ host.js 文件不存在${NC}"
+    echo -e "${RED}✗ host.js 文件不存在 (请先在 native-host 目录运行 npm run build)${NC}"
     exit 1
 fi
 

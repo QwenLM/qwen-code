@@ -9,6 +9,8 @@ echo "Cleaning up Chrome Extension build artifacts..."
 
 # Remove any dist directories and zips
 rm -rf dist/
+rm -rf "$ROOT_DIR/native-host/dist/"
+rm -f "$ROOT_DIR/native-host/tsconfig.tsbuildinfo"
 rm -f chrome-extension.zip
 
 # Remove log files

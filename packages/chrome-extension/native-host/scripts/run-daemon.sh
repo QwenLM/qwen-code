@@ -12,7 +12,7 @@ LOG_FILE="${LOG_DIR}/qwen-bridge-host.log"
 mkdir -p "$LOG_DIR"
 
 NODE_BIN="${NODE_BIN:-node}"
-HOST_ENTRY="${HOST_ENTRY:-$ROOT_DIR/host.js}"
+HOST_ENTRY="${HOST_ENTRY:-$ROOT_DIR/dist/host.js}"
 
 echo "Starting qwen-bridge-host via $NODE_BIN $HOST_ENTRY"
 echo "Logs: $LOG_FILE"

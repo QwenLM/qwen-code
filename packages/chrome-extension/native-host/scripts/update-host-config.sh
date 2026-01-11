@@ -8,7 +8,7 @@ set -e
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HOST_NAME="com.qwen.cli.bridge"
-HOST_SCRIPT="$SCRIPT_DIR/../host.js"
+HOST_SCRIPT="$SCRIPT_DIR/../dist/host.js"
 EXTENSION_ID_FILE="$ROOT_DIR/.extension-id"
 
 echo "==============================================="
@@ -49,7 +49,7 @@ echo ""
 
 # Check if host.js exists
 if [[ ! -f "$HOST_SCRIPT" ]]; then
-    echo "Error: host.js not found at $HOST_SCRIPT"
+    echo "Error: host.js not found at $HOST_SCRIPT (run npm run build in native-host first)"
     exit 1
 fi
 

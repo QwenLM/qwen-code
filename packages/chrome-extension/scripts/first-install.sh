@@ -36,7 +36,7 @@ cat > "$MANIFEST_DIR/com.qwen.cli.bridge.json" << EOF
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/../native-host/src/host.js",
+  "path": "$SCRIPT_DIR/../native-host/dist/host.js",
   "type": "stdio",
   "allowed_origins": ["chrome-extension://*/"]
 }
@@ -82,7 +82,7 @@ else
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "$SCRIPT_DIR/../native-host/src/host.js",
+  "path": "$SCRIPT_DIR/../native-host/dist/host.js",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://$EXTENSION_ID/",

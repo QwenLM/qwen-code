@@ -55,6 +55,7 @@ async function main() {
       `--target=${outDir}`,
     ]),
     startProcess('node', ['config/esbuild.config.js', '--watch']),
+    startProcess('npm', ['--prefix', 'native-host', 'run', 'dev']),
   ];
 
   // 优雅退出
