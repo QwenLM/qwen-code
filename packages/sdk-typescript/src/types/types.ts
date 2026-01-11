@@ -4,11 +4,13 @@ import type {
   SubagentConfig,
   SDKMcpServerConfig,
 } from './protocol.js';
+import type { SpawnInfo } from '../utils/cliPath.js';
 
 export type { PermissionMode };
 
 export type TransportOptions = {
-  pathToQwenExecutable: string;
+  pathToQwenExecutable?: string;
+  spawnInfo?: SpawnInfo;
   cwd?: string;
   model?: string;
   permissionMode?: PermissionMode;
@@ -177,32 +179,25 @@ export interface QueryOptions {
   model?: string;
 
   /**
-   * Path to the Qwen CLI executable or runtime specification.
+   * Path to the Qwen CLI executable.
+   *
+   * If not provided, the SDK automatically uses the bundled CLI included in the package.
    *
    * Supports multiple formats:
-   * - 'qwen' -> native binary (auto-detected from PATH)
-   * - '/path/to/qwen' -> native binary (explicit path)
-   * - '/path/to/cli.js' -> Node.js bundle (default for .js files)
-   * - '/path/to/index.ts' -> TypeScript source (requires tsx)
-   * - 'bun:/path/to/cli.js' -> Force Bun runtime
-   * - 'node:/path/to/cli.js' -> Force Node.js runtime
-   * - 'tsx:/path/to/index.ts' -> Force tsx runtime
-   * - 'deno:/path/to/cli.ts' -> Force Deno runtime
+   * - Command name (no path separators): `'qwen'` -> executes from PATH
+   * - JavaScript file: `'/path/to/cli.js'` -> uses Node.js (or Bun if running under Bun)
+   * - TypeScript file: `'/path/to/index.ts'` -> uses tsx if available (silent support for dev/debug)
+   * - Native binary: `'/path/to/qwen'` -> executes directly
    *
-   * If not provided, the SDK will auto-detect the native binary in this order:
-   * 1. QWEN_CODE_CLI_PATH environment variable
-   * 2. ~/.volta/bin/qwen
-   * 3. ~/.npm-global/bin/qwen
-   * 4. /usr/local/bin/qwen
-   * 5. ~/.local/bin/qwen
-   * 6. ~/node_modules/.bin/qwen
-   * 7. ~/.yarn/bin/qwen
+   * Runtime detection:
+   * - `.js/.mjs/.cjs` files: Node.js (or Bun if running under Bun)
+   * - `.ts/.tsx` files: tsx if available, otherwise treated as native
+   * - Command names: executed directly from PATH
+   * - Other files: executed as native binaries
    *
-   * The .ts files are only supported for debugging purposes.
-   *
+   * @example '/path/to/cli.js'
    * @example 'qwen'
-   * @example '/usr/local/bin/qwen'
-   * @example 'tsx:/path/to/packages/cli/src/index.ts'
+   * @example './packages/cli/index.ts'
    */
   pathToQwenExecutable?: string;
 

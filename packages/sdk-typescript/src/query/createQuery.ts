@@ -5,7 +5,7 @@
 import type { SDKUserMessage } from '../types/protocol.js';
 import { serializeJsonLine } from '../utils/jsonLines.js';
 import { ProcessTransport } from '../transport/ProcessTransport.js';
-import { parseExecutableSpec } from '../utils/cliPath.js';
+import { prepareSpawnInfo, type SpawnInfo } from '../utils/cliPath.js';
 import { Query } from './Query.js';
 import type { QueryOptions } from '../types/types.js';
 import { QueryOptionsSchema } from '../types/queryOptionsSchema.js';
@@ -32,17 +32,17 @@ export function query({
    */
   options?: QueryOptions;
 }): Query {
-  const parsedExecutable = validateOptions(options);
+  const spawnInfo = validateOptions(options);
 
   const isSingleTurn = typeof prompt === 'string';
 
-  const pathToQwenExecutable =
-    options.pathToQwenExecutable ?? parsedExecutable.executablePath;
+  const pathToQwenExecutable = options.pathToQwenExecutable;
 
   const abortController = options.abortController ?? new AbortController();
 
   const transport = new ProcessTransport({
     pathToQwenExecutable,
+    spawnInfo,
     cwd: options.cwd,
     model: options.model,
     permissionMode: options.permissionMode,
@@ -97,9 +97,7 @@ export function query({
   return queryInstance;
 }
 
-function validateOptions(
-  options: QueryOptions,
-): ReturnType<typeof parseExecutableSpec> {
+function validateOptions(options: QueryOptions): SpawnInfo | undefined {
   const validationResult = QueryOptionsSchema.safeParse(options);
   if (!validationResult.success) {
     const errors = validationResult.error.errors
@@ -108,13 +106,10 @@ function validateOptions(
     throw new Error(`Invalid QueryOptions: ${errors}`);
   }
 
-  let parsedExecutable: ReturnType<typeof parseExecutableSpec>;
   try {
-    parsedExecutable = parseExecutableSpec(options.pathToQwenExecutable);
+    return prepareSpawnInfo(options.pathToQwenExecutable);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid pathToQwenExecutable: ${errorMessage}`);
   }
-
-  return parsedExecutable;
 }

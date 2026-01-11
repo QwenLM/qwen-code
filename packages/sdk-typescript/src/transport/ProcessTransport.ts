@@ -44,7 +44,9 @@ export class ProcessTransport implements Transport {
       const cwd = this.options.cwd ?? process.cwd();
       const env = { ...process.env, ...this.options.env };
 
-      const spawnInfo = prepareSpawnInfo(this.options.pathToQwenExecutable);
+      const spawnInfo =
+        this.options.spawnInfo ??
+        prepareSpawnInfo(this.options.pathToQwenExecutable);
 
       const stderrMode =
         this.options.debug || this.options.stderr ? 'pipe' : 'ignore';
@@ -140,6 +142,7 @@ export class ProcessTransport implements Transport {
       '--output-format',
       'stream-json',
       '--channel=SDK',
+      '--experimental-skills',
     ];
 
     if (this.options.model) {
