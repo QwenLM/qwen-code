@@ -274,14 +274,14 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `--include-tools`   | A comma-separated list of tools to include.                         | all tools included | `--include-tools mytool,othertool`        |
 | `--exclude-tools`   | A comma-separated list of tools to exclude.                         | none               | `--exclude-tools mytool`                  |
 
-#### Listing servers (`qwen mcp list`)
+#### Listing servers (`/mcp list`)
 
 ```bash
-qwen mcp list
+/mcp list
 ```
 
-#### Removing a server (`qwen mcp remove`)
+#### Removing a server (`/mcp remove`)
 
 ```bash
-qwen mcp remove <name>
+/mcp remove <name>
 ```
