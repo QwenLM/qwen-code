@@ -1,25 +1,36 @@
 # Qwen Code Companion
 
-The Qwen Code Companion extension seamlessly integrates [Qwen Code](https://github.com/QwenLM/qwen-code). This extension is compatible with both VS Code and VS Code forks.
+Seamlessly integrate [Qwen Code](https://github.com/QwenLM/qwen-code) into Visual Studio Code with native IDE features and an intuitive interface. This extension bundles everything you need to get started immediately.
 
-# Features
+## Demo
 
-- Open Editor File Context: Qwen Code gains awareness of the files you have open in your editor, providing it with a richer understanding of your project's structure and content.
+<video src="https://cloud.video.taobao.com/vod/IKKwfM-kqNI3OJjM_U8uMCSMAoeEcJhs6VNCQmZxUfk.mp4" controls width="800">
+  Your browser does not support the video tag. You can open the video directly:
+  https://cloud.video.taobao.com/vod/IKKwfM-kqNI3OJjM_U8uMCSMAoeEcJhs6VNCQmZxUfk.mp4
+</video>
 
-- Selection Context: Qwen Code can easily access your cursor's position and selected text within the editor, giving it valuable context directly from your current work.
+## Features
 
-- Native Diffing: Seamlessly view, modify, and accept code changes suggested by Qwen Code directly within the editor.
+- **Native IDE experience**: Dedicated Qwen Code sidebar panel accessed via the Qwen icon
+- **Native diffing**: Review, edit, and accept changes in VS Code's diff view
+- **Auto-accept edits mode**: Automatically apply Qwen's changes as they're made
+- **File management**: @-mention files or attach files and images using the system file picker
+- **Conversation history & multiple sessions**: Access past conversations and run multiple sessions simultaneously
+- **Open file & selection context**: Share active files, cursor position, and selections for more precise help
 
-- Launch Qwen Code: Quickly start a new Qwen Code session from the Command Palette (Cmd+Shift+P or Ctrl+Shift+P) by running the "Qwen Code: Run" command.
+## Requirements
 
-# Requirements
+- Visual Studio Code 1.85.0 or newer
 
-To use this extension, you'll need:
+## Installation
 
-- VS Code version 1.101.0 or newer
-- Qwen Code (installed separately) running within the VS Code integrated terminal
+1. Install from the VS Code Marketplace: https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion
 
-# Development and Debugging
+2. Two ways to use
+   - Chat panel: Click the Qwen icon in the Activity Bar, or run `Qwen Code: Open` from the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
+   - Terminal session (classic): Run `Qwen Code: Run` to launch a session in the integrated terminal (bundled CLI).
+
+## Development and Debugging
 
 To debug and develop this extension locally:
 
@@ -76,6 +87,6 @@ npx vsce package
 pnpm vsce package
 ```
 
-# Terms of Service and Privacy Notice
+## Terms of Service and Privacy Notice
 
 By installing this extension, you agree to the [Terms of Service](https://github.com/QwenLM/qwen-code/blob/main/docs/tos-privacy.md).
