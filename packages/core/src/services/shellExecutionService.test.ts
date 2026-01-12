@@ -818,7 +818,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe on Windows', async () => {
+    it('should use cmd.exe and hide window on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       await simulateExecution('dir "foo bar"', (cp) =>
         cp.emit('exit', 0, null),
@@ -829,7 +829,8 @@ describe('ShellExecutionService child_process fallback', () => {
         [],
         expect.objectContaining({
           shell: true,
-          detached: true,
+          detached: false,
+          windowsHide: true,
         }),
       );
     });
