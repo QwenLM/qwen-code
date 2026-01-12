@@ -8,12 +8,8 @@ export * from './src/index.js';
 export { Storage } from './src/config/storage.js';
 export {
   DEFAULT_QWEN_MODEL,
+  DEFAULT_QWEN_FLASH_MODEL,
   DEFAULT_QWEN_EMBEDDING_MODEL,
-  DEFAULT_GEMINI_MODEL,
-  DEFAULT_GEMINI_MODEL_AUTO,
-  DEFAULT_GEMINI_FLASH_MODEL,
-  DEFAULT_GEMINI_FLASH_LITE_MODEL,
-  DEFAULT_GEMINI_EMBEDDING_MODEL,
 } from './src/config/models.js';
 export {
   serializeTerminalToObject,

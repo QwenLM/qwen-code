@@ -87,6 +87,15 @@ vi.mock('./config/sandboxConfig.js', () => ({
   loadSandboxConfig: vi.fn(),
 }));
 
+vi.mock('./core/initializer.js', () => ({
+  initializeApp: vi.fn().mockResolvedValue({
+    authError: null,
+    themeError: null,
+    shouldOpenAuthDialog: false,
+    geminiMdFileCount: 0,
+  }),
+}));
+
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
@@ -362,7 +371,6 @@ describe('gemini.tsx main function', () => {
     expect(inputArg).toBe('hello stream');
 
     expect(validateAuthSpy).toHaveBeenCalledWith(
-      undefined,
       undefined,
       configStub,
       expect.any(Object),

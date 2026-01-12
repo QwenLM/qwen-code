@@ -45,7 +45,8 @@ export default {
   'Initializing...': 'Initialisierung...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     'Verbindung zu MCP-Servern wird hergestellt... ({{connected}}/{{total}})',
-  'Type your message or @path/to/file': 'Nachricht eingeben oder @Pfad/zur/Datei',
+  'Type your message or @path/to/file':
+    'Nachricht eingeben oder @Pfad/zur/Datei',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Drücken Sie 'i' für den EINFÜGE-Modus und 'Esc' für den NORMAL-Modus.",
   'Cancel operation / Clear input (double press)':
@@ -89,7 +90,8 @@ export default {
   'No tools available': 'Keine Werkzeuge verfügbar',
   'View or change the approval mode for tool usage':
     'Genehmigungsmodus für Werkzeugnutzung anzeigen oder ändern',
-  'View or change the language setting': 'Spracheinstellung anzeigen oder ändern',
+  'View or change the language setting':
+    'Spracheinstellung anzeigen oder ändern',
   'change the theme': 'Design ändern',
   'Select Theme': 'Design auswählen',
   Preview: 'Vorschau',
@@ -213,14 +215,16 @@ export default {
   'All Tools': 'Alle Werkzeuge',
   'Read-only Tools': 'Nur-Lese-Werkzeuge',
   'Read & Edit Tools': 'Lese- und Bearbeitungswerkzeuge',
-  'Read & Edit & Execution Tools': 'Lese-, Bearbeitungs- und Ausführungswerkzeuge',
+  'Read & Edit & Execution Tools':
+    'Lese-, Bearbeitungs- und Ausführungswerkzeuge',
   'All tools selected, including MCP tools':
     'Alle Werkzeuge ausgewählt, einschließlich MCP-Werkzeuge',
   'Selected tools:': 'Ausgewählte Werkzeuge:',
   'Read-only tools:': 'Nur-Lese-Werkzeuge:',
   'Edit tools:': 'Bearbeitungswerkzeuge:',
   'Execution tools:': 'Ausführungswerkzeuge:',
-  'Step {{n}}: Choose Background Color': 'Schritt {{n}}: Hintergrundfarbe wählen',
+  'Step {{n}}: Choose Background Color':
+    'Schritt {{n}}: Hintergrundfarbe wählen',
   'Step {{n}}: Confirm and Save': 'Schritt {{n}}: Bestätigen und Speichern',
   // Agents - Navigation & Instructions
   'Esc to cancel': 'Esc zum Abbrechen',
@@ -245,14 +249,16 @@ export default {
   'e.g., Reviews code for best practices and potential bugs.':
     'z.B. Überprüft Code auf Best Practices und mögliche Fehler.',
   'Description cannot be empty.': 'Beschreibung darf nicht leer sein.',
-  'Failed to launch editor: {{error}}': 'Fehler beim Starten des Editors: {{error}}',
+  'Failed to launch editor: {{error}}':
+    'Fehler beim Starten des Editors: {{error}}',
   'Failed to save and edit subagent: {{error}}':
     'Fehler beim Speichern und Bearbeiten des Unteragenten: {{error}}',
 
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
-  'View and edit Qwen Code settings': 'Qwen Code Einstellungen anzeigen und bearbeiten',
+  'View and edit Qwen Code settings':
+    'Qwen Code Einstellungen anzeigen und bearbeiten',
   Settings: 'Einstellungen',
   '(Use Enter to select{{tabText}})': '(Enter zum Auswählen{{tabText}})',
   ', Tab to change focus': ', Tab zum Fokuswechsel',
@@ -308,7 +314,8 @@ export default {
   'Use Ripgrep': 'Ripgrep verwenden',
   'Use Builtin Ripgrep': 'Integriertes Ripgrep verwenden',
   'Enable Tool Output Truncation': 'Werkzeugausgabe-Kürzung aktivieren',
-  'Tool Output Truncation Threshold': 'Schwellenwert für Werkzeugausgabe-Kürzung',
+  'Tool Output Truncation Threshold':
+    'Schwellenwert für Werkzeugausgabe-Kürzung',
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
   'Vision Model Preview': 'Vision-Modell-Vorschau',
@@ -364,7 +371,8 @@ export default {
   'Failed to parse {{terminalName}} keybindings.json. The file contains invalid JSON. Please fix the file manually or delete it to allow automatic configuration.':
     'Fehler beim Parsen von {{terminalName}} keybindings.json. Die Datei enthält ungültiges JSON. Bitte korrigieren Sie die Datei manuell oder löschen Sie sie, um automatische Konfiguration zu ermöglichen.',
   'Error: {{error}}': 'Fehler: {{error}}',
-  'Shift+Enter binding already exists': 'Umschalt+Enter-Belegung existiert bereits',
+  'Shift+Enter binding already exists':
+    'Umschalt+Enter-Belegung existiert bereits',
   'Ctrl+Enter binding already exists': 'Strg+Enter-Belegung existiert bereits',
   'Existing keybindings detected. Will not modify to avoid conflicts.':
     'Bestehende Tastenbelegungen erkannt. Keine Änderungen, um Konflikte zu vermeiden.',
@@ -398,7 +406,8 @@ export default {
   'Set UI language': 'UI-Sprache festlegen',
   'Set LLM output language': 'LLM-Ausgabesprache festlegen',
   'Usage: /language ui [zh-CN|en-US]': 'Verwendung: /language ui [zh-CN|en-US]',
-  'Usage: /language output <language>': 'Verwendung: /language output <Sprache>',
+  'Usage: /language output <language>':
+    'Verwendung: /language output <Sprache>',
   'Example: /language output 中文': 'Beispiel: /language output Deutsch',
   'Example: /language output English': 'Beispiel: /language output English',
   'Example: /language output 日本語': 'Beispiel: /language output Japanisch',
@@ -419,7 +428,8 @@ export default {
   '  - en-US: English': '  - en-US: Englisch',
   'Set UI language to Simplified Chinese (zh-CN)':
     'UI-Sprache auf Vereinfachtes Chinesisch (zh-CN) setzen',
-  'Set UI language to English (en-US)': 'UI-Sprache auf Englisch (en-US) setzen',
+  'Set UI language to English (en-US)':
+    'UI-Sprache auf Englisch (en-US) setzen',
 
   // ============================================================================
   // Commands - Approval Mode
@@ -427,7 +437,8 @@ export default {
   'Approval Mode': 'Genehmigungsmodus',
   'Current approval mode: {{mode}}': 'Aktueller Genehmigungsmodus: {{mode}}',
   'Available approval modes:': 'Verfügbare Genehmigungsmodi:',
-  'Approval mode changed to: {{mode}}': 'Genehmigungsmodus geändert zu: {{mode}}',
+  'Approval mode changed to: {{mode}}':
+    'Genehmigungsmodus geändert zu: {{mode}}',
   'Approval mode changed to: {{mode}} (saved to {{scope}} settings{{location}})':
     'Genehmigungsmodus geändert zu: {{mode}} (gespeichert in {{scope}} Einstellungen{{location}})',
   'Usage: /approval-mode <mode> [--session|--user|--project]':
@@ -452,14 +463,16 @@ export default {
     'Fehler beim Ändern des Genehmigungsmodus: {{error}}',
   'Apply to current session only (temporary)':
     'Nur auf aktuelle Sitzung anwenden (temporär)',
-  'Persist for this project/workspace': 'Für dieses Projekt/Arbeitsbereich speichern',
+  'Persist for this project/workspace':
+    'Für dieses Projekt/Arbeitsbereich speichern',
   'Persist for this user on this machine':
     'Für diesen Benutzer auf diesem Computer speichern',
   'Analyze only, do not modify files or execute commands':
     'Nur analysieren, keine Dateien ändern oder Befehle ausführen',
   'Require approval for file edits or shell commands':
     'Genehmigung für Dateibearbeitungen oder Shell-Befehle erforderlich',
-  'Automatically approve file edits': 'Dateibearbeitungen automatisch genehmigen',
+  'Automatically approve file edits':
+    'Dateibearbeitungen automatisch genehmigen',
   'Automatically approve all tools': 'Alle Werkzeuge automatisch genehmigen',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',
@@ -475,12 +488,14 @@ export default {
   'Commands for interacting with memory.':
     'Befehle für die Interaktion mit dem Speicher.',
   'Show the current memory contents.': 'Aktuellen Speicherinhalt anzeigen.',
-  'Show project-level memory contents.': 'Projektebene-Speicherinhalt anzeigen.',
+  'Show project-level memory contents.':
+    'Projektebene-Speicherinhalt anzeigen.',
   'Show global memory contents.': 'Globalen Speicherinhalt anzeigen.',
   'Add content to project-level memory.':
     'Inhalt zum Projektebene-Speicher hinzufügen.',
   'Add content to global memory.': 'Inhalt zum globalen Speicher hinzufügen.',
-  'Refresh the memory from the source.': 'Speicher aus der Quelle aktualisieren.',
+  'Refresh the memory from the source.':
+    'Speicher aus der Quelle aktualisieren.',
   'Usage: /memory add --project <text to remember>':
     'Verwendung: /memory add --project <zu merkender Text>',
   'Usage: /memory add --global <text to remember>':
@@ -520,7 +535,8 @@ export default {
     'Konfigurierte MCP-Server und Werkzeuge auflisten',
   'Restarts MCP servers.': 'MCP-Server neu starten.',
   'Config not loaded.': 'Konfiguration nicht geladen.',
-  'Could not retrieve tool registry.': 'Werkzeugregister konnte nicht abgerufen werden.',
+  'Could not retrieve tool registry.':
+    'Werkzeugregister konnte nicht abgerufen werden.',
   'No MCP servers configured with OAuth authentication.':
     'Keine MCP-Server mit OAuth-Authentifizierung konfiguriert.',
   'MCP servers with OAuth authentication:':
@@ -539,7 +555,8 @@ export default {
   // Commands - Chat
   // ============================================================================
   'Manage conversation history.': 'Gesprächsverlauf verwalten.',
-  'List saved conversation checkpoints': 'Gespeicherte Gesprächsprüfpunkte auflisten',
+  'List saved conversation checkpoints':
+    'Gespeicherte Gesprächsprüfpunkte auflisten',
   'No saved conversation checkpoints found.':
     'Keine gespeicherten Gesprächsprüfpunkte gefunden.',
   'List of saved conversations:': 'Liste gespeicherter Gespräche:',
@@ -589,7 +606,8 @@ export default {
     'Kein Chat-Client verfügbar, um Zusammenfassung zu generieren.',
   'Already generating summary, wait for previous request to complete':
     'Zusammenfassung wird bereits generiert, warten Sie auf Abschluss der vorherigen Anfrage',
-  'No conversation found to summarize.': 'Kein Gespräch zum Zusammenfassen gefunden.',
+  'No conversation found to summarize.':
+    'Kein Gespräch zum Zusammenfassen gefunden.',
   'Failed to generate project context summary: {{error}}':
     'Fehler beim Generieren der Projektkontextzusammenfassung: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -605,7 +623,8 @@ export default {
   'Switch the model for this session': 'Modell für diese Sitzung wechseln',
   'Content generator configuration not available.':
     'Inhaltsgenerator-Konfiguration nicht verfügbar.',
-  'Authentication type not available.': 'Authentifizierungstyp nicht verfügbar.',
+  'Authentication type not available.':
+    'Authentifizierungstyp nicht verfügbar.',
   'No models available for the current authentication type ({{authType}}).':
     'Keine Modelle für den aktuellen Authentifizierungstyp ({{authType}}) verfügbar.',
 
@@ -622,7 +641,8 @@ export default {
   // ============================================================================
   'Already compressing, wait for previous request to complete':
     'Komprimierung läuft bereits, warten Sie auf Abschluss der vorherigen Anfrage',
-  'Failed to compress chat history.': 'Fehler beim Komprimieren des Chatverlaufs.',
+  'Failed to compress chat history.':
+    'Fehler beim Komprimieren des Chatverlaufs.',
   'Failed to compress chat history: {{error}}':
     'Fehler beim Komprimieren des Chatverlaufs: {{error}}',
   'Compressing chat history': 'Chatverlauf wird komprimiert',
@@ -644,10 +664,12 @@ export default {
     'Bitte geben Sie mindestens einen Pfad zum Hinzufügen an.',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
     'Der Befehl /directory add wird in restriktiven Sandbox-Profilen nicht unterstützt. Bitte verwenden Sie --include-directories beim Starten der Sitzung.',
-  "Error adding '{{path}}': {{error}}": "Fehler beim Hinzufügen von '{{path}}': {{error}}",
+  "Error adding '{{path}}': {{error}}":
+    "Fehler beim Hinzufügen von '{{path}}': {{error}}",
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     'QWEN.md-Dateien aus folgenden Verzeichnissen erfolgreich hinzugefügt, falls vorhanden:\n- {{directories}}',
-  'Error refreshing memory: {{error}}': 'Fehler beim Aktualisieren des Speichers: {{error}}',
+  'Error refreshing memory: {{error}}':
+    'Fehler beim Aktualisieren des Speichers: {{error}}',
   'Successfully added directories:\n- {{directories}}':
     'Verzeichnisse erfolgreich hinzugefügt:\n- {{directories}}',
   'Current workspace directories:\n{{directories}}':
@@ -677,7 +699,8 @@ export default {
   'Yes, allow always': 'Ja, immer erlauben',
   'Modify with external editor': 'Mit externem Editor bearbeiten',
   'No, suggest changes (esc)': 'Nein, Änderungen vorschlagen (Esc)',
-  "Allow execution of: '{{command}}'?": "Ausführung erlauben von: '{{command}}'?",
+  "Allow execution of: '{{command}}'?":
+    "Ausführung erlauben von: '{{command}}'?",
   'Yes, allow always ...': 'Ja, immer erlauben ...',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
@@ -749,12 +772,14 @@ export default {
   'Qwen OAuth authentication cancelled.':
     'Qwen OAuth-Authentifizierung abgebrochen.',
   'Qwen OAuth Authentication': 'Qwen OAuth-Authentifizierung',
-  'Please visit this URL to authorize:': 'Bitte besuchen Sie diese URL zur Autorisierung:',
+  'Please visit this URL to authorize:':
+    'Bitte besuchen Sie diese URL zur Autorisierung:',
   'Or scan the QR code below:': 'Oder scannen Sie den QR-Code unten:',
   'Waiting for authorization': 'Warten auf Autorisierung',
   'Time remaining:': 'Verbleibende Zeit:',
   '(Press ESC or CTRL+C to cancel)': '(ESC oder STRG+C zum Abbrechen drücken)',
-  'Qwen OAuth Authentication Timeout': 'Qwen OAuth-Authentifizierung abgelaufen',
+  'Qwen OAuth Authentication Timeout':
+    'Qwen OAuth-Authentifizierung abgelaufen',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
     'OAuth-Token abgelaufen (über {{seconds}} Sekunden). Bitte wählen Sie erneut eine Authentifizierungsmethode.',
   'Press any key to return to authentication type selection.':
@@ -767,6 +792,22 @@ export default {
     'Authentifizierung abgelaufen. Bitte versuchen Sie es erneut.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Warten auf Authentifizierung... (ESC oder STRG+C zum Abbrechen drücken)',
+  'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
+    'API-Schlüssel für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie settings.security.auth.apiKey oder die Umgebungsvariable {{envKeyHint}}.',
+  '{{envKeyHint}} environment variable not found.':
+    'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden.',
+  '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
+    'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden. Bitte legen Sie sie in Ihrer .env-Datei oder den Systemumgebungsvariablen fest.',
+  '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
+    'Umgebungsvariable {{envKeyHint}} wurde nicht gefunden (oder setzen Sie settings.security.auth.apiKey). Bitte legen Sie sie in Ihrer .env-Datei oder den Systemumgebungsvariablen fest.',
+  'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
+    'API-Schlüssel für OpenAI-kompatible Authentifizierung fehlt. Setzen Sie die Umgebungsvariable {{envKeyHint}}.',
+  'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
+    'Anthropic-Anbieter fehlt erforderliche baseUrl in modelProviders[].baseUrl.',
+  'ANTHROPIC_BASE_URL environment variable not found.':
+    'Umgebungsvariable ANTHROPIC_BASE_URL wurde nicht gefunden.',
+  'Invalid auth method selected.':
+    'Ungültige Authentifizierungsmethode ausgewählt.',
   'Failed to authenticate. Message: {{message}}':
     'Authentifizierung fehlgeschlagen. Meldung: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
@@ -779,7 +820,8 @@ export default {
   'API Key:': 'API-Schlüssel:',
   'Invalid credentials: {{errorMessage}}':
     'Ungültige Anmeldedaten: {{errorMessage}}',
-  'Failed to validate credentials': 'Anmeldedaten konnten nicht validiert werden',
+  'Failed to validate credentials':
+    'Anmeldedaten konnten nicht validiert werden',
   'Press Enter to continue, Tab/↑↓ to navigate, Esc to cancel':
     'Enter zum Fortfahren, Tab/↑↓ zum Navigieren, Esc zum Abbrechen',
 
@@ -788,6 +830,15 @@ export default {
   // ============================================================================
   'Select Model': 'Modell auswählen',
   '(Press Esc to close)': '(Esc zum Schließen drücken)',
+  'Current (effective) configuration': 'Aktuelle (wirksame) Konfiguration',
+  AuthType: 'Authentifizierungstyp',
+  'API Key': 'API-Schlüssel',
+  unset: 'nicht gesetzt',
+  '(default)': '(Standard)',
+  '(set)': '(gesetzt)',
+  '(not set)': '(nicht gesetzt)',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
+    "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
   'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
     'Das neueste Qwen Coder Modell von Alibaba Cloud ModelStudio (Version: qwen3-coder-plus-2025-09-23)',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
@@ -877,8 +928,10 @@ export default {
   // ============================================================================
   // Exit Screen / Stats
   // ============================================================================
-  'Agent powering down. Goodbye!': 'Agent wird heruntergefahren. Auf Wiedersehen!',
-  'To continue this session, run': 'Um diese Sitzung fortzusetzen, führen Sie aus',
+  'Agent powering down. Goodbye!':
+    'Agent wird heruntergefahren. Auf Wiedersehen!',
+  'To continue this session, run':
+    'Um diese Sitzung fortzusetzen, führen Sie aus',
   'Interaction Summary': 'Interaktionszusammenfassung',
   'Session ID:': 'Sitzungs-ID:',
   'Tool Calls:': 'Werkzeugaufrufe:',

@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { type Content, Type } from '@google/genai';
 import { type BaseLlmClient } from '../core/baseLlmClient.js';
 import { LruCache } from './LruCache.js';
-import { DEFAULT_GEMINI_FLASH_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { promptIdContext } from './promptIdContext.js';
 
 const MAX_CACHE_SIZE = 50;
@@ -149,7 +149,7 @@ export async function FixLLMEditWithInstruction(
     contents,
     schema: SearchReplaceEditSchema,
     abortSignal,
-    model: DEFAULT_GEMINI_FLASH_MODEL,
+    model: DEFAULT_QWEN_FLASH_MODEL,
     systemInstruction: EDIT_SYS_PROMPT,
     promptId,
     maxAttempts: 1,

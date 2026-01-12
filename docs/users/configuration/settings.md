@@ -136,6 +136,95 @@ Settings are organized into categories. All settings should be placed within the
 - `"./custom-logs"` - Logs to `./custom-logs` relative to current directory
 - `"/tmp/openai-logs"` - Logs to absolute path `/tmp/openai-logs`
 
+#### modelProviders
+
+Use `modelProviders` to declare curated model lists per auth type that the `/model` picker can switch between. Keys must be valid auth types (`openai`, `anthropic`, `gemini`, `vertex-ai`, etc.). Each entry requires an `id` and **must include `envKey`**, with optional `name`, `description`, `baseUrl`, and `generationConfig`. Credentials are never persisted in settings; the runtime reads them from `process.env[envKey]`. Qwen OAuth models remain hard-coded and cannot be overridden.
+
+##### Example
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "gpt-4o",
+        "name": "GPT-4o",
+        "envKey": "OPENAI_API_KEY",
+        "baseUrl": "https://api.openai.com/v1",
+        "generationConfig": {
+          "timeout": 60000,
+          "maxRetries": 3,
+          "samplingParams": { "temperature": 0.2 }
+        }
+      }
+    ],
+    "anthropic": [
+      {
+        "id": "claude-3-5-sonnet",
+        "envKey": "ANTHROPIC_API_KEY",
+        "baseUrl": "https://api.anthropic.com/v1"
+      }
+    ],
+    "gemini": [
+      {
+        "id": "gemini-2.0-flash",
+        "name": "Gemini 2.0 Flash",
+        "envKey": "GEMINI_API_KEY",
+        "baseUrl": "https://generativelanguage.googleapis.com"
+      }
+    ],
+    "vertex-ai": [
+      {
+        "id": "gemini-1.5-pro-vertex",
+        "envKey": "GOOGLE_API_KEY",
+        "baseUrl": "https://generativelanguage.googleapis.com"
+      }
+    ]
+  }
+}
+```
+
+> [!note]
+> Only the `/model` command exposes non-default auth types. Anthropic, Gemini, Vertex AI, etc., must be defined via `modelProviders`. The `/auth` command intentionally lists only the built-in Qwen OAuth and OpenAI flows.
+
+##### Resolution layers and atomicity
+
+The effective auth/model/credential values are chosen per field using the following precedence (first present wins). You can combine `--auth-type` with `--model` to point directly at a provider entry; these CLI flags run before other layers.
+
+| Layer (highest → lowest)   | authType                            | model                                           | apiKey                                              | baseUrl                                              | apiKeyEnvKey           | proxy                             |
+| -------------------------- | ----------------------------------- | ----------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------- | ---------------------- | --------------------------------- |
+| Programmatic overrides     | `/auth `                            | `/auth` input                                   | `/auth` input                                       | `/auth` input                                        | —                      | —                                 |
+| Model provider selection   | —                                   | `modelProvider.id`                              | `env[modelProvider.envKey]`                         | `modelProvider.baseUrl`                              | `modelProvider.envKey` | —                                 |
+| CLI arguments              | `--auth-type`                       | `--model`                                       | `--openaiApiKey` (or provider-specific equivalents) | `--openaiBaseUrl` (or provider-specific equivalents) | —                      | —                                 |
+| Environment variables      | —                                   | Provider-specific mapping (e.g. `OPENAI_MODEL`) | Provider-specific mapping (e.g. `OPENAI_API_KEY`)   | Provider-specific mapping (e.g. `OPENAI_BASE_URL`)   | —                      | —                                 |
+| Settings (`settings.json`) | `security.auth.selectedType`        | `model.name`                                    | `security.auth.apiKey`                              | `security.auth.baseUrl`                              | —                      | —                                 |
+| Default / computed         | Falls back to `AuthType.QWEN_OAUTH` | Built-in default (OpenAI ⇒ `qwen3-coder-plus`)  | —                                                   | —                                                    | —                      | `Config.getProxy()` if configured |
+
+\*When present, CLI auth flags override settings. Otherwise, `security.auth.selectedType` or the implicit default determine the auth type. Qwen OAuth and OpenAI are the only auth types surfaced without extra configuration.
+
+Model-provider sourced values are applied atomically: once a provider model is active, every field it defines is protected from lower layers until you manually clear credentials via `/auth`. The final `generationConfig` is the projection across all layers—lower layers only fill gaps left by higher ones, and the provider layer remains impenetrable.
+
+The merge strategy for `modelProviders` is REPLACE: the entire `modelProviders` from project settings will override the corresponding section in user settings, rather than merging the two.
+
+##### Generation config layering
+
+Per-field precedence for `generationConfig`:
+
+1. Programmatic overrides (e.g. runtime `/model`, `/auth` changes)
+2. `modelProviders[authType][].generationConfig`
+3. `settings.model.generationConfig`
+4. Content-generator defaults (`getDefaultGenerationConfig` for OpenAI, `getParameterValue` for Gemini, etc.)
+
+`samplingParams` is treated atomically; provider values replace the entire object. Defaults from the content generator apply last so each provider retains its tuned baseline.
+
+##### Selection persistence and recommendations
+
+> [!important]
+> Define `modelProviders` in the user-scope `~/.qwen/settings.json` whenever possible and avoid persisting credential overrides in any scope. Keeping the provider catalog in user settings prevents merge/override conflicts between project and user scopes and ensures `/auth` and `/model` updates always write back to a consistent scope.
+
+- `/model` and `/auth` persist `model.name` (where applicable) and `security.auth.selectedType` to the closest writable scope that already defines `modelProviders`; otherwise they fall back to the user scope. This keeps workspace/user files in sync with the active provider catalog.
+- Without `modelProviders`, the resolver mixes CLI/env/settings layers, which is fine for single-provider setups but cumbersome when frequently switching. Define provider catalogs whenever multi-model workflows are common so that switches stay atomic, source-attributed, and debuggable.
+
 #### context
 
 | Setting                                           | Type                       | Description                                                                                                                                                                                                                                                                                                                                                           | Default     |

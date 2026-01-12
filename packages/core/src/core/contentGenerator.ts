@@ -12,9 +12,24 @@ import type {
   GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { Config } from '../config/config.js';
 import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
+import type {
+  ConfigSource,
+  ConfigSourceKind,
+  ConfigSources,
+} from '../utils/configResolver.js';
+import {
+  getDefaultApiKeyEnvVar,
+  getDefaultModelEnvVar,
+  MissingAnthropicBaseUrlEnvError,
+  MissingApiKeyError,
+  MissingBaseUrlError,
+  MissingModelError,
+  StrictMissingCredentialsError,
+  StrictMissingModelIdError,
+} from '../models/modelConfigErrors.js';
+import { PROVIDER_SOURCED_FIELDS } from '../models/modelsConfig.js';
 
 /**
  * Interface abstracting the core functionalities for generating content and counting tokens.
@@ -48,6 +63,7 @@ export enum AuthType {
 export type ContentGeneratorConfig = {
   model: string;
   apiKey?: string;
+  apiKeyEnvKey?: string;
   baseUrl?: string;
   vertexai?: boolean;
   authType?: AuthType | undefined;
@@ -77,102 +93,178 @@ export type ContentGeneratorConfig = {
   schemaCompliance?: 'auto' | 'openapi_30';
 };
 
-export function createContentGeneratorConfig(
+// Keep the public ContentGeneratorConfigSources API, but reuse the generic
+// source-tracking types from utils/configResolver to avoid duplication.
+export type ContentGeneratorConfigSourceKind = ConfigSourceKind;
+export type ContentGeneratorConfigSource = ConfigSource;
+export type ContentGeneratorConfigSources = ConfigSources;
+
+export type ResolvedContentGeneratorConfig = {
+  config: ContentGeneratorConfig;
+  sources: ContentGeneratorConfigSources;
+};
+
+function setSource(
+  sources: ContentGeneratorConfigSources,
+  path: string,
+  source: ContentGeneratorConfigSource,
+): void {
+  sources[path] = source;
+}
+
+function getSeedSource(
+  seed: ContentGeneratorConfigSources | undefined,
+  path: string,
+): ContentGeneratorConfigSource | undefined {
+  return seed?.[path];
+}
+
+/**
+ * Resolve ContentGeneratorConfig while tracking the source of each effective field.
+ *
+ * This function now primarily validates and finalizes the configuration that has
+ * already been resolved by ModelConfigResolver. The env fallback logic has been
+ * moved to the unified resolver to eliminate duplication.
+ *
+ * Note: The generationConfig passed here should already be fully resolved with
+ * proper source tracking from the caller (CLI/SDK layer).
+ */
+export function resolveContentGeneratorConfigWithSources(
   config: Config,
   authType: AuthType | undefined,
   generationConfig?: Partial<ContentGeneratorConfig>,
-): ContentGeneratorConfig {
-  let newContentGeneratorConfig: Partial<ContentGeneratorConfig> = {
+  seedSources?: ContentGeneratorConfigSources,
+  options?: { strictModelProvider?: boolean },
+): ResolvedContentGeneratorConfig {
+  const sources: ContentGeneratorConfigSources = { ...(seedSources || {}) };
+  const strictModelProvider = options?.strictModelProvider === true;
+
+  // Build config with computed fields
+  const newContentGeneratorConfig: Partial<ContentGeneratorConfig> = {
     ...(generationConfig || {}),
     authType,
     proxy: config?.getProxy(),
   };
 
-  if (authType === AuthType.QWEN_OAUTH) {
-    // For Qwen OAuth, we'll handle the API key dynamically in createContentGenerator
-    // Set a special marker to indicate this is Qwen OAuth
-    return {
-      ...newContentGeneratorConfig,
-      model: DEFAULT_QWEN_MODEL,
-      apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
-    } as ContentGeneratorConfig;
+  // Set sources for computed fields
+  setSource(sources, 'authType', {
+    kind: 'computed',
+    detail: 'provided by caller',
+  });
+  if (config?.getProxy()) {
+    setSource(sources, 'proxy', {
+      kind: 'computed',
+      detail: 'Config.getProxy()',
+    });
   }
 
-  if (authType === AuthType.USE_OPENAI) {
-    newContentGeneratorConfig = {
-      ...newContentGeneratorConfig,
-      apiKey: newContentGeneratorConfig.apiKey || process.env['OPENAI_API_KEY'],
-      baseUrl:
-        newContentGeneratorConfig.baseUrl || process.env['OPENAI_BASE_URL'],
-      model: newContentGeneratorConfig.model || process.env['OPENAI_MODEL'],
-    };
+  // Preserve seed sources for fields that were passed in
+  const seedOrUnknown = (path: string): ContentGeneratorConfigSource =>
+    getSeedSource(seedSources, path) ?? { kind: 'unknown' };
 
-    if (!newContentGeneratorConfig.apiKey) {
-      throw new Error('OPENAI_API_KEY environment variable not found.');
-    }
-
-    return {
-      ...newContentGeneratorConfig,
-      model: newContentGeneratorConfig?.model || 'qwen3-coder-plus',
-    } as ContentGeneratorConfig;
-  }
-
-  if (authType === AuthType.USE_ANTHROPIC) {
-    newContentGeneratorConfig = {
-      ...newContentGeneratorConfig,
-      apiKey:
-        newContentGeneratorConfig.apiKey || process.env['ANTHROPIC_API_KEY'],
-      baseUrl:
-        newContentGeneratorConfig.baseUrl || process.env['ANTHROPIC_BASE_URL'],
-      model: newContentGeneratorConfig.model || process.env['ANTHROPIC_MODEL'],
-    };
-
-    if (!newContentGeneratorConfig.apiKey) {
-      throw new Error('ANTHROPIC_API_KEY environment variable not found.');
-    }
-
-    if (!newContentGeneratorConfig.baseUrl) {
-      throw new Error('ANTHROPIC_BASE_URL environment variable not found.');
-    }
-
-    if (!newContentGeneratorConfig.model) {
-      throw new Error('ANTHROPIC_MODEL environment variable not found.');
+  for (const field of PROVIDER_SOURCED_FIELDS) {
+    if (generationConfig && field in generationConfig && !sources[field]) {
+      setSource(sources, field, seedOrUnknown(field));
     }
   }
 
-  if (authType === AuthType.USE_GEMINI) {
-    newContentGeneratorConfig = {
-      ...newContentGeneratorConfig,
-      apiKey: newContentGeneratorConfig.apiKey || process.env['GEMINI_API_KEY'],
-      model: newContentGeneratorConfig.model || process.env['GEMINI_MODEL'],
-    };
+  // Validate required fields based on authType. This does not perform any
+  // fallback resolution (resolution is handled by ModelConfigResolver).
+  const validation = validateModelConfig(
+    newContentGeneratorConfig as ContentGeneratorConfig,
+    strictModelProvider,
+  );
+  if (!validation.valid) {
+    throw new Error(validation.errors.map((e) => e.message).join('\n'));
+  }
 
-    if (!newContentGeneratorConfig.apiKey) {
-      throw new Error('GEMINI_API_KEY environment variable not found.');
-    }
+  return {
+    config: newContentGeneratorConfig as ContentGeneratorConfig,
+    sources,
+  };
+}
 
-    if (!newContentGeneratorConfig.model) {
-      throw new Error('GEMINI_MODEL environment variable not found.');
+export interface ModelConfigValidationResult {
+  valid: boolean;
+  errors: Error[];
+}
+
+/**
+ * Validate a resolved model configuration.
+ * This is the single validation entry point used across Core.
+ */
+export function validateModelConfig(
+  config: ContentGeneratorConfig,
+  isStrictModelProvider: boolean = false,
+): ModelConfigValidationResult {
+  const errors: Error[] = [];
+
+  // Qwen OAuth doesn't need validation - it uses dynamic tokens
+  if (config.authType === AuthType.QWEN_OAUTH) {
+    return { valid: true, errors: [] };
+  }
+
+  // API key is required for all other auth types
+  if (!config.apiKey) {
+    if (isStrictModelProvider) {
+      errors.push(
+        new StrictMissingCredentialsError(
+          config.authType,
+          config.model,
+          config.apiKeyEnvKey,
+        ),
+      );
+    } else {
+      const envKey =
+        config.apiKeyEnvKey || getDefaultApiKeyEnvVar(config.authType);
+      errors.push(
+        new MissingApiKeyError({
+          authType: config.authType,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          envKey,
+        }),
+      );
     }
   }
 
-  if (authType === AuthType.USE_VERTEX_AI) {
-    newContentGeneratorConfig = {
-      ...newContentGeneratorConfig,
-      apiKey: newContentGeneratorConfig.apiKey || process.env['GOOGLE_API_KEY'],
-      model: newContentGeneratorConfig.model || process.env['GOOGLE_MODEL'],
-    };
-
-    if (!newContentGeneratorConfig.apiKey) {
-      throw new Error('GOOGLE_API_KEY environment variable not found.');
-    }
-
-    if (!newContentGeneratorConfig.model) {
-      throw new Error('GOOGLE_MODEL environment variable not found.');
+  // Model is required
+  if (!config.model) {
+    if (isStrictModelProvider) {
+      errors.push(new StrictMissingModelIdError(config.authType));
+    } else {
+      const envKey = getDefaultModelEnvVar(config.authType);
+      errors.push(new MissingModelError({ authType: config.authType, envKey }));
     }
   }
 
-  return newContentGeneratorConfig as ContentGeneratorConfig;
+  // Explicit baseUrl is required for Anthropic; Migrated from existing code.
+  if (config.authType === AuthType.USE_ANTHROPIC && !config.baseUrl) {
+    if (isStrictModelProvider) {
+      errors.push(
+        new MissingBaseUrlError({
+          authType: config.authType,
+          model: config.model,
+        }),
+      );
+    } else if (config.authType === AuthType.USE_ANTHROPIC) {
+      errors.push(new MissingAnthropicBaseUrlEnvError());
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+export function createContentGeneratorConfig(
+  config: Config,
+  authType: AuthType | undefined,
+  generationConfig?: Partial<ContentGeneratorConfig>,
+): ContentGeneratorConfig {
+  return resolveContentGeneratorConfigWithSources(
+    config,
+    authType,
+    generationConfig,
+  ).config;
 }
 
 export async function createContentGenerator(
@@ -180,11 +272,12 @@ export async function createContentGenerator(
   gcConfig: Config,
   isInitialAuth?: boolean,
 ): Promise<ContentGenerator> {
-  if (config.authType === AuthType.USE_OPENAI) {
-    if (!config.apiKey) {
-      throw new Error('OPENAI_API_KEY environment variable not found.');
-    }
+  const validation = validateModelConfig(config, false);
+  if (!validation.valid) {
+    throw new Error(validation.errors.map((e) => e.message).join('\n'));
+  }
 
+  if (config.authType === AuthType.USE_OPENAI) {
     // Import OpenAIContentGenerator dynamically to avoid circular dependencies
     const { createOpenAIContentGenerator } = await import(
       './openaiContentGenerator/index.js'
@@ -223,10 +316,6 @@ export async function createContentGenerator(
   }
 
   if (config.authType === AuthType.USE_ANTHROPIC) {
-    if (!config.apiKey) {
-      throw new Error('ANTHROPIC_API_KEY environment variable not found.');
-    }
-
     const { createAnthropicContentGenerator } = await import(
       './anthropicContentGenerator/index.js'
     );

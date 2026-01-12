@@ -786,6 +786,21 @@ export default {
     'Время ожидания авторизации истекло. Пожалуйста, попробуйте снова.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Ожидание авторизации... (Нажмите ESC или CTRL+C для отмены)',
+  'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
+    'Отсутствует API-ключ для аутентификации, совместимой с OpenAI. Укажите settings.security.auth.apiKey или переменную окружения {{envKeyHint}}.',
+  '{{envKeyHint}} environment variable not found.':
+    'Переменная окружения {{envKeyHint}} не найдена.',
+  '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
+    'Переменная окружения {{envKeyHint}} не найдена. Укажите её в файле .env или среди системных переменных.',
+  '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
+    'Переменная окружения {{envKeyHint}} не найдена (или установите settings.security.auth.apiKey). Укажите её в файле .env или среди системных переменных.',
+  'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
+    'Отсутствует API-ключ для аутентификации, совместимой с OpenAI. Установите переменную окружения {{envKeyHint}}.',
+  'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
+    'У провайдера Anthropic отсутствует обязательный baseUrl в modelProviders[].baseUrl.',
+  'ANTHROPIC_BASE_URL environment variable not found.':
+    'Переменная окружения ANTHROPIC_BASE_URL не найдена.',
+  'Invalid auth method selected.': 'Выбран недопустимый метод авторизации.',
   'Failed to authenticate. Message: {{message}}':
     'Не удалось авторизоваться. Сообщение: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
@@ -807,6 +822,15 @@ export default {
   // ============================================================================
   'Select Model': 'Выбрать модель',
   '(Press Esc to close)': '(Нажмите Esc для закрытия)',
+  'Current (effective) configuration': 'Текущая (фактическая) конфигурация',
+  AuthType: 'Тип авторизации',
+  'API Key': 'API-ключ',
+  unset: 'не задано',
+  '(default)': '(по умолчанию)',
+  '(set)': '(установлено)',
+  '(not set)': '(не задано)',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
+    "Не удалось переключиться на модель '{{modelId}}'.\n\n{{error}}",
   'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
     'Последняя модель Qwen Coder от Alibaba Cloud ModelStudio (версия: qwen3-coder-plus-2025-09-23)',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':

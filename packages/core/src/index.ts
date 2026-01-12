@@ -9,6 +9,30 @@ export * from './config/config.js';
 export * from './output/types.js';
 export * from './output/json-formatter.js';
 
+// Export models
+export {
+  type ModelCapabilities,
+  type ModelGenerationConfig,
+  type ModelConfig as ProviderModelConfig,
+  type ModelProvidersConfig,
+  type ResolvedModelConfig,
+  type AvailableModel,
+  type ModelSwitchMetadata,
+  QWEN_OAUTH_MODELS,
+  ModelRegistry,
+  ModelsConfig,
+  type ModelsConfigOptions,
+  type OnModelChangeCallback,
+  // Model configuration resolver
+  resolveModelConfig,
+  validateModelConfig,
+  type ModelConfigSourcesInput,
+  type ModelConfigCliInput,
+  type ModelConfigSettingsInput,
+  type ModelConfigResolutionResult,
+  type ModelConfigValidationResult,
+} from './models/index.js';
+
 // Export Core Logic
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
@@ -20,8 +44,6 @@ export * from './core/turn.js';
 export * from './core/geminiRequest.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/nonInteractiveToolExecutor.js';
-
-export * from './fallback/types.js';
 
 export * from './qwen/qwenOAuth2.js';
 
@@ -54,6 +76,9 @@ export * from './utils/subagentGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
+
+// Config resolution utilities
+export * from './utils/configResolver.js';
 
 // Export services
 export * from './services/fileDiscoveryService.js';
