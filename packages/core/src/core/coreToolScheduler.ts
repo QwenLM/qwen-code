@@ -824,7 +824,6 @@ export class CoreToolScheduler {
              */
             const shouldAutoDeny =
               !this.config.isInteractive() &&
-              !this.config.getIdeMode() &&
               !this.config.getExperimentalZedIntegration() &&
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 

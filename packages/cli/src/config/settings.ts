@@ -344,6 +344,97 @@ const KNOWN_V2_CONTAINERS = new Set(
   Object.values(MIGRATION_MAP).map((path) => path.split('.')[0]),
 );
 
+function getSettingsFileKeyWarnings(
+  settings: Record<string, unknown>,
+  settingsFilePath: string,
+): string[] {
+  const version = settings[SETTINGS_VERSION_KEY];
+  if (typeof version !== 'number' || version < SETTINGS_VERSION) {
+    return [];
+  }
+
+  const warnings: string[] = [];
+  const ignoredLegacyKeys = new Set<string>();
+
+  // Ignored legacy keys (V1 top-level keys that moved to a nested V2 path).
+  for (const [oldKey, newPath] of Object.entries(MIGRATION_MAP)) {
+    if (oldKey === newPath) {
+      continue;
+    }
+    if (!(oldKey in settings)) {
+      continue;
+    }
+
+    const oldValue = settings[oldKey];
+
+    // If this key is a V2 container (like 'model') and it's already an object,
+    // it's likely already in V2 format. Don't warn.
+    if (
+      KNOWN_V2_CONTAINERS.has(oldKey) &&
+      typeof oldValue === 'object' &&
+      oldValue !== null &&
+      !Array.isArray(oldValue)
+    ) {
+      continue;
+    }
+
+    ignoredLegacyKeys.add(oldKey);
+    warnings.push(
+      `⚠️  Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
+    );
+  }
+
+  // Unknown top-level keys.
+  const schemaKeys = new Set(Object.keys(getSettingsSchema()));
+  for (const key of Object.keys(settings)) {
+    if (key === SETTINGS_VERSION_KEY) {
+      continue;
+    }
+    if (ignoredLegacyKeys.has(key)) {
+      continue;
+    }
+    if (schemaKeys.has(key)) {
+      continue;
+    }
+
+    warnings.push(
+      `⚠️  Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
+    );
+  }
+
+  return warnings;
+}
+
+/**
+ * Collects warnings for ignored legacy and unknown settings keys.
+ *
+ * For `$version: 2` settings files, we do not apply implicit migrations.
+ * Instead, we surface actionable, de-duplicated warnings in the terminal UI.
+ */
+export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
+  const warningSet = new Set<string>();
+
+  for (const scope of [SettingScope.User, SettingScope.Workspace]) {
+    const settingsFile = loadedSettings.forScope(scope);
+    if (settingsFile.rawJson === undefined) {
+      continue; // File not present / not loaded.
+    }
+    const settingsObject = settingsFile.originalSettings as unknown as Record<
+      string,
+      unknown
+    >;
+
+    for (const warning of getSettingsFileKeyWarnings(
+      settingsObject,
+      settingsFile.path,
+    )) {
+      warningSet.add(warning);
+    }
+  }
+
+  return [...warningSet];
+}
+
 export function migrateSettingsToV1(
   v2Settings: Record<string, unknown>,
 ): Record<string, unknown> {

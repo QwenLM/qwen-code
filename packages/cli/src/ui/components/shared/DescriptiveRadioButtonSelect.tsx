@@ -11,7 +11,7 @@ import { BaseSelectionList } from './BaseSelectionList.js';
 import type { SelectionListItem } from '../../hooks/useSelectionList.js';
 
 export interface DescriptiveRadioSelectItem<T> extends SelectionListItem<T> {
-  title: string;
+  title: React.ReactNode;
   description: string;
 }
 

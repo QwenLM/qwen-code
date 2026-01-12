@@ -207,6 +207,27 @@ describe('OpenAIContentConverter', () => {
         expect.objectContaining({ text: 'visible text' }),
       );
     });
+
+    it('should not throw when streaming chunk has no delta', () => {
+      const chunk = converter.convertOpenAIChunkToGemini({
+        object: 'chat.completion.chunk',
+        id: 'chunk-2',
+        created: 456,
+        choices: [
+          {
+            index: 0,
+            // Some OpenAI-compatible providers may omit delta entirely.
+            delta: undefined,
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+        model: 'gpt-test',
+      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+      const parts = chunk.candidates?.[0]?.content?.parts;
+      expect(parts).toEqual([]);
+    });
   });
 
   describe('convertGeminiToolsToOpenAI', () => {

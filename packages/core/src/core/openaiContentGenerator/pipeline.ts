@@ -40,10 +40,16 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
+    // For OpenAI-compatible providers, the configured model is the single source of truth.
+    // We intentionally ignore request.model because upstream callers may pass a model string
+    // that is not valid/available for the OpenAI-compatible backend.
+    const effectiveModel = this.contentGeneratorConfig.model;
+    this.converter.setModel(effectiveModel);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       false,
+      effectiveModel,
       async (openaiRequest) => {
         const openaiResponse = (await this.client.chat.completions.create(
           openaiRequest,
@@ -64,10 +70,13 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const effectiveModel = this.contentGeneratorConfig.model;
+    this.converter.setModel(effectiveModel);
     return this.executeWithErrorHandling(
       request,
       userPromptId,
       true,
+      effectiveModel,
       async (openaiRequest, context) => {
         // Stage 1: Create OpenAI stream
         const stream = (await this.client.chat.completions.create(
@@ -224,12 +233,13 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
     streaming: boolean = false,
+    effectiveModel: string,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
     const messages = this.converter.convertGeminiRequestToOpenAI(request);
 
     // Apply provider-specific enhancements
     const baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-      model: this.contentGeneratorConfig.model,
+      model: effectiveModel,
       messages,
       ...this.buildGenerateContentConfig(request),
     };
@@ -317,15 +327,22 @@ export class ContentGenerationPipeline {
   }
 
   private buildReasoningConfig(): Record<string, unknown> {
-    const reasoning = this.contentGeneratorConfig.reasoning;
+    // Reasoning configuration for OpenAI-compatible endpoints is highly fragmented.
+    // For example, across common providers and models:
+    //
+    //   - deepseek-reasoner   — thinking is enabled by default and cannot be disabled
+    //   - glm-4.7             — thinking is enabled by default; can be disabled via `extra_body.thinking.enabled`
+    //   - kimi-k2-thinking    — thinking is enabled by default and cannot be disabled
+    //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
+    //   - qwen3 series        — model-dependent; can be manually disabled via `extra_body.enable_thinking`
+    //
+    // Given this inconsistency, we choose not to set any reasoning config here and
+    // instead rely on each model’s default behavior.
 
-    if (reasoning === false) {
-      return {};
-    }
+    // We plan to introduce provider- and model-specific settings to enable more
+    // fine-grained control over reasoning configuration.
 
-    return {
-      reasoning_effort: reasoning?.effort ?? 'medium',
-    };
+    return {};
   }
 
   /**
@@ -335,18 +352,24 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
     isStreaming: boolean,
+    effectiveModel: string,
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
     ) => Promise<T>,
   ): Promise<T> {
-    const context = this.createRequestContext(userPromptId, isStreaming);
+    const context = this.createRequestContext(
+      userPromptId,
+      isStreaming,
+      effectiveModel,
+    );
 
     try {
       const openaiRequest = await this.buildRequest(
         request,
         userPromptId,
         isStreaming,
+        effectiveModel,
       );
 
       const result = await executor(openaiRequest, context);
@@ -378,10 +401,11 @@ export class ContentGenerationPipeline {
   private createRequestContext(
     userPromptId: string,
     isStreaming: boolean,
+    effectiveModel: string,
   ): RequestContext {
     return {
       userPromptId,
-      model: this.contentGeneratorConfig.model,
+      model: effectiveModel,
       authType: this.contentGeneratorConfig.authType || 'unknown',
       startTime: Date.now(),
       duration: 0,

@@ -10,6 +10,7 @@ import type {
   TelemetrySettings,
   AuthType,
   ChatCompressionSettings,
+  ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -100,6 +101,19 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for MCP servers.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
+  // Model providers configuration grouped by authType
+  modelProviders: {
+    type: 'object',
+    label: 'Model Providers',
+    category: 'Model',
+    requiresRestart: false,
+    default: {} as ModelProvidersConfig,
+    description:
+      'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.REPLACE,
   },
 
   general: {
@@ -202,6 +216,7 @@ const SETTINGS_SCHEMA = {
           { value: 'en', label: 'English' },
           { value: 'zh', label: '中文 (Chinese)' },
           { value: 'ru', label: 'Русский (Russian)' },
+          { value: 'de', label: 'Deutsch (German)' },
         ],
       },
       terminalBell: {

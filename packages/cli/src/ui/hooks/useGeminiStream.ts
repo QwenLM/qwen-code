@@ -912,7 +912,7 @@ export const useGeminiStream = (
       // Reset quota error flag when starting a new query (not a continuation)
       if (!options?.isContinuation) {
         setModelSwitchedFromQuotaError(false);
-        config.setQuotaErrorOccurred(false);
+        // No quota-error / fallback routing mechanism currently; keep state minimal.
       }
 
       abortControllerRef.current = new AbortController();

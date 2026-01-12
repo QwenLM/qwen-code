@@ -6,7 +6,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AuthDialog } from './AuthDialog.js';
-import { LoadedSettings, SettingScope } from '../../config/settings.js';
+import { LoadedSettings } from '../../config/settings.js';
+import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
@@ -43,9 +44,16 @@ const renderAuthDialog = (
   settings: LoadedSettings,
   uiStateOverrides: Partial<UIState> = {},
   uiActionsOverrides: Partial<UIActions> = {},
+  configAuthType: AuthType | undefined = undefined,
+  configApiKey: string | undefined = undefined,
 ) => {
   const uiState = createMockUIState(uiStateOverrides);
   const uiActions = createMockUIActions(uiActionsOverrides);
+
+  const mockConfig = {
+    getAuthType: vi.fn(() => configAuthType),
+    getContentGeneratorConfig: vi.fn(() => ({ apiKey: configApiKey })),
+  } as unknown as Config;
 
   return renderWithProviders(
     <UIStateContext.Provider value={uiState}>
@@ -53,7 +61,7 @@ const renderAuthDialog = (
         <AuthDialog />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
-    { settings },
+    { settings, config: mockConfig },
   );
 };
 
@@ -421,6 +429,7 @@ describe('AuthDialog', () => {
       settings,
       {},
       { handleAuthSelect },
+      undefined, // config.getAuthType() returns undefined
     );
     await wait();
 
@@ -475,6 +484,7 @@ describe('AuthDialog', () => {
       settings,
       { authError: 'Initial error' },
       { handleAuthSelect },
+      undefined, // config.getAuthType() returns undefined
     );
     await wait();
 
@@ -528,6 +538,7 @@ describe('AuthDialog', () => {
       settings,
       {},
       { handleAuthSelect },
+      AuthType.USE_OPENAI, // config.getAuthType() returns USE_OPENAI
     );
     await wait();
 
@@ -536,7 +547,7 @@ describe('AuthDialog', () => {
     await wait();
 
     // Should call handleAuthSelect with undefined to exit
-    expect(handleAuthSelect).toHaveBeenCalledWith(undefined, SettingScope.User);
+    expect(handleAuthSelect).toHaveBeenCalledWith(undefined);
     unmount();
   });
 });

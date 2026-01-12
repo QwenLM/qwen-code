@@ -8,7 +8,6 @@ import { exec, execSync, spawn, type ChildProcess } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { quote, parse } from 'shell-quote';
 import {
@@ -50,16 +49,16 @@ const BUILTIN_SEATBELT_PROFILES = [
 
 /**
  * Determines whether the sandbox container should be run with the current user's UID and GID.
- * This is often necessary on Linux systems (especially Debian/Ubuntu based) when using
- * rootful Docker without userns-remap configured, to avoid permission issues with
+ * This is often necessary on Linux systems when using rootful Docker without userns-remap
+ * configured, to avoid permission issues with
  * mounted volumes.
  *
  * The behavior is controlled by the `SANDBOX_SET_UID_GID` environment variable:
  * - If `SANDBOX_SET_UID_GID` is "1" or "true", this function returns `true`.
  * - If `SANDBOX_SET_UID_GID` is "0" or "false", this function returns `false`.
  * - If `SANDBOX_SET_UID_GID` is not set:
- *   - On Debian/Ubuntu Linux, it defaults to `true`.
- *   - On other OSes, or if OS detection fails, it defaults to `false`.
+ *   - On Linux, it defaults to `true`.
+ *   - On other OSes, it defaults to `false`.
  *
  * For more context on running Docker containers as non-root, see:
  * https://medium.com/redbubble/running-a-docker-container-as-a-non-root-user-7d2e00f8ee15
@@ -76,31 +75,20 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
     return false;
   }
 
-  // If environment variable is not explicitly set, check for Debian/Ubuntu Linux
   if (os.platform() === 'linux') {
-    try {
-      const osReleaseContent = await readFile('/etc/os-release', 'utf8');
-      if (
-        osReleaseContent.includes('ID=debian') ||
-        osReleaseContent.includes('ID=ubuntu') ||
-        osReleaseContent.match(/^ID_LIKE=.*debian.*/m) || // Covers derivatives
-        osReleaseContent.match(/^ID_LIKE=.*ubuntu.*/m) // Covers derivatives
-      ) {
-        // note here and below we use console.error for informational messages on stderr
-        console.error(
-          'INFO: Defaulting to use current user UID/GID for Debian/Ubuntu-based Linux.',
-        );
-        return true;
-      }
-    } catch (_err) {
-      // Silently ignore if /etc/os-release is not found or unreadable.
-      // The default (false) will be applied in this case.
-      console.warn(
-        'Warning: Could not read /etc/os-release to auto-detect Debian/Ubuntu for UID/GID default.',
+    const debugEnv = [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
+      (v) => v === 'true' || v === '1',
+    );
+    if (debugEnv) {
+      // Use stderr so it doesn't clutter normal STDOUT output (e.g. in `--prompt` runs).
+      console.error(
+        'INFO: Using current user UID/GID in Linux sandbox. Set SANDBOX_SET_UID_GID=false to disable.',
       );
     }
+    return true;
   }
-  return false; // Default to false if no other condition is met
+
+  return false;
 }
 
 // docker does not allow container names to contain ':' or '/', so we

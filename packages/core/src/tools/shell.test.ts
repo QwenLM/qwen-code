@@ -248,7 +248,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         '/test/dir',
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -275,7 +275,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -300,7 +300,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -325,7 +325,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         expect.any(String),
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -350,7 +350,7 @@ describe('ShellTool', () => {
         wrappedCommand,
         '/test/dir/subdir',
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -378,7 +378,7 @@ describe('ShellTool', () => {
         'dir',
         '/test/dir',
         expect.any(Function),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         false,
         {},
       );
@@ -471,7 +471,7 @@ describe('ShellTool', () => {
       expect(summarizer.summarizeToolOutput).toHaveBeenCalledWith(
         expect.any(String),
         mockConfig.getGeminiClient(),
-        mockAbortSignal,
+        expect.any(AbortSignal),
         1000,
       );
       expect(result.llmContent).toBe('summarized output');
@@ -580,7 +580,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -610,7 +610,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -640,7 +640,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -699,7 +699,7 @@ describe('ShellTool', () => {
           expect.stringContaining('npm install'),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -728,7 +728,7 @@ describe('ShellTool', () => {
           expect.stringContaining('git commit'),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -758,7 +758,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -794,7 +794,7 @@ describe('ShellTool', () => {
           expect.stringContaining('git commit -m "Initial commit"'),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -831,7 +831,7 @@ describe('ShellTool', () => {
           ),
           expect.any(String),
           expect.any(Function),
-          mockAbortSignal,
+          expect.any(AbortSignal),
           false,
           {},
         );
@@ -960,6 +960,43 @@ spanning multiple lines"`;
       vi.mocked(os.platform).mockReturnValue('linux');
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+    });
+  });
+
+  describe('Windows background execution', () => {
+    it('should clean up trailing ampersand on Windows for background tasks', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      const mockAbortSignal = new AbortController().signal;
+
+      const invocation = shellTool.build({
+        command: 'npm start &',
+        is_background: true,
+      });
+
+      const promise = invocation.execute(mockAbortSignal);
+
+      // Simulate immediate success (process started)
+      resolveExecutionPromise({
+        rawOutput: Buffer.from(''),
+        output: '',
+        exitCode: 0,
+        signal: null,
+        error: null,
+        aborted: false,
+        pid: 12345,
+        executionMethod: 'child_process',
+      });
+
+      await promise;
+
+      expect(mockShellExecutionService).toHaveBeenCalledWith(
+        'npm start',
+        expect.any(String),
+        expect.any(Function),
+        expect.any(AbortSignal),
+        false,
+        {},
+      );
     });
   });
 });

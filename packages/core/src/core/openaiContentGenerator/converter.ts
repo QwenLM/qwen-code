@@ -94,6 +94,14 @@ export class OpenAIContentConverter {
   }
 
   /**
+   * Update the model used for response metadata (modelVersion/logging) and any
+   * model-specific conversion behavior.
+   */
+  setModel(model: string): void {
+    this.model = model;
+  }
+
+  /**
    * Reset streaming tool calls parser for new stream processing
    * This should be called at the beginning of each stream to prevent
    * data pollution from previous incomplete streams
@@ -752,6 +760,8 @@ export class OpenAIContentConverter {
         usage.prompt_tokens_details?.cached_tokens ??
         extendedUsage.cached_tokens ??
         0;
+      const thinkingTokens =
+        usage.completion_tokens_details?.reasoning_tokens || 0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations
@@ -769,6 +779,7 @@ export class OpenAIContentConverter {
         candidatesTokenCount: finalCompletionTokens,
         totalTokenCount: totalTokens,
         cachedContentTokenCount: cachedTokens,
+        thoughtsTokenCount: thinkingTokens,
       };
     }
 
@@ -788,7 +799,7 @@ export class OpenAIContentConverter {
       const parts: Part[] = [];
 
       const reasoningText = (choice.delta as ExtendedCompletionChunkDelta)
-        .reasoning_content;
+        ?.reasoning_content;
       if (reasoningText) {
         parts.push({ text: reasoningText, thought: true });
       }

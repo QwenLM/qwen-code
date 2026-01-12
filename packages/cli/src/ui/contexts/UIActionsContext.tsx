@@ -30,7 +30,6 @@ export interface UIActions {
   ) => void;
   handleAuthSelect: (
     authType: AuthType | undefined,
-    scope: SettingScope,
     credentials?: OpenAICredentials,
   ) => Promise<void>;
   setAuthState: (state: AuthState) => void;

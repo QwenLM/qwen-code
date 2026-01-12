@@ -88,6 +88,9 @@ export default {
   'No tools available': '没有可用工具',
   'View or change the approval mode for tool usage':
     '查看或更改工具使用的审批模式',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    '无效的审批模式 "{{arg}}"。有效模式：{{modes}}',
+  'Approval mode set to "{{mode}}"': '审批模式已设置为 "{{mode}}"',
   'View or change the language setting': '查看或更改语言设置',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
@@ -725,6 +728,21 @@ export default {
   'Authentication timed out. Please try again.': '认证超时。请重试。',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     '正在等待认证...（按 ESC 或 CTRL+C 取消）',
+  'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
+    '缺少 OpenAI 兼容认证的 API 密钥。请设置 settings.security.auth.apiKey 或设置 {{envKeyHint}} 环境变量。',
+  '{{envKeyHint}} environment variable not found.':
+    '未找到 {{envKeyHint}} 环境变量。',
+  '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
+    '未找到 {{envKeyHint}} 环境变量。请在 .env 文件或系统环境变量中进行设置。',
+  '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
+    '未找到 {{envKeyHint}} 环境变量（或设置 settings.security.auth.apiKey）。请在 .env 文件或系统环境变量中进行设置。',
+  'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
+    '缺少 OpenAI 兼容认证的 API 密钥。请设置 {{envKeyHint}} 环境变量。',
+  'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
+    'Anthropic 提供商缺少必需的 baseUrl，请在 modelProviders[].baseUrl 中配置。',
+  'ANTHROPIC_BASE_URL environment variable not found.':
+    '未找到 ANTHROPIC_BASE_URL 环境变量。',
+  'Invalid auth method selected.': '选择了无效的认证方式。',
   'Failed to authenticate. Message: {{message}}': '认证失败。消息：{{message}}',
   'Authenticated successfully with {{authType}} credentials.':
     '使用 {{authType}} 凭据成功认证。',
@@ -744,6 +762,15 @@ export default {
   // ============================================================================
   'Select Model': '选择模型',
   '(Press Esc to close)': '（按 Esc 关闭）',
+  'Current (effective) configuration': '当前（实际生效）配置',
+  AuthType: '认证方式',
+  'API Key': 'API 密钥',
+  unset: '未设置',
+  '(default)': '(默认)',
+  '(set)': '(已设置)',
+  '(not set)': '(未设置)',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
+    "无法切换到模型 '{{modelId}}'.\n\n{{error}}",
   'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
     '来自阿里云 ModelStudio 的最新 Qwen Coder 模型（版本：qwen3-coder-plus-2025-09-23）',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':

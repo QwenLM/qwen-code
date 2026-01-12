@@ -87,6 +87,15 @@ vi.mock('./config/sandboxConfig.js', () => ({
   loadSandboxConfig: vi.fn(),
 }));
 
+vi.mock('./core/initializer.js', () => ({
+  initializeApp: vi.fn().mockResolvedValue({
+    authError: null,
+    themeError: null,
+    shouldOpenAuthDialog: false,
+    geminiMdFileCount: 0,
+  }),
+}));
+
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
@@ -363,7 +372,6 @@ describe('gemini.tsx main function', () => {
 
     expect(validateAuthSpy).toHaveBeenCalledWith(
       undefined,
-      undefined,
       configStub,
       expect.any(Object),
     );
@@ -460,6 +468,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
       allowedTools: undefined,
+      acp: undefined,
       experimentalAcp: undefined,
       experimentalSkills: undefined,
       extensions: undefined,
@@ -638,5 +647,38 @@ describe('startInteractiveUI', () => {
     // We need a small delay to let it execute
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not check for updates when update nag is disabled', async () => {
+    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    const settingsWithUpdateNagDisabled = {
+      merged: {
+        general: {
+          disableUpdateNag: true,
+        },
+        ui: {
+          hideWindowTitle: false,
+        },
+      },
+    } as LoadedSettings;
+
+    await startInteractiveUI(
+      mockConfig,
+      settingsWithUpdateNagDisabled,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(checkForUpdates).not.toHaveBeenCalled();
   });
 });

@@ -13,6 +13,7 @@ import open from 'open';
 import { EventEmitter } from 'events';
 import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
+import { formatFetchErrorForUser } from '../utils/fetch.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -601,8 +602,17 @@ async function authWithQwenDeviceFlow(
       console.log('Waiting for authorization to complete...\n');
     };
 
-    // If browser launch is not suppressed, try to open the URL
-    if (!config.isBrowserLaunchSuppressed()) {
+    // Always show the fallback message in non-interactive environments to ensure
+    // users can see the authorization URL even if browser launching is attempted.
+    // This is critical for headless/remote environments where browser launching
+    // may silently fail without throwing an error.
+    if (config.isBrowserLaunchSuppressed()) {
+      // Browser launch is suppressed, show fallback message
+      showFallbackMessage();
+    } else {
+      // Try to open the URL in browser, but always show the URL as fallback
+      // to handle cases where browser launch silently fails (e.g., headless servers)
+      showFallbackMessage();
       try {
         const childProcess = await open(deviceAuth.verification_uri_complete);
 
@@ -611,19 +621,19 @@ async function authWithQwenDeviceFlow(
         // in a minimal Docker container), it will emit an unhandled 'error' event,
         // causing the entire Node.js process to crash.
         if (childProcess) {
-          childProcess.on('error', () => {
+          childProcess.on('error', (err) => {
             console.debug(
-              'Failed to open browser. Visit this URL to authorize:',
+              'Browser launch failed:',
+              err.message || 'Unknown error',
             );
-            showFallbackMessage();
           });
         }
-      } catch (_err) {
-        showFallbackMessage();
+      } catch (err) {
+        console.debug(
+          'Failed to open browser:',
+          err instanceof Error ? err.message : 'Unknown error',
+        );
       }
-    } else {
-      // Browser launch is suppressed, show fallback message
-      showFallbackMessage();
     }
 
     // Emit auth progress event
@@ -838,8 +848,12 @@ async function authWithQwenDeviceFlow(
     console.error('\n' + timeoutMessage);
     return { success: false, reason: 'timeout', message: timeoutMessage };
   } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const message = `Device authorization flow failed: ${errorMessage}`;
+    const fullErrorMessage = formatFetchErrorForUser(error, {
+      url: QWEN_OAUTH_BASE_URL,
+    });
+    const message = `Device authorization flow failed: ${fullErrorMessage}`;
+
+    qwenOAuth2Events.emit(QwenOAuth2Event.AuthProgress, 'error', message);
     console.error(message);
     return { success: false, reason: 'error', message };
   } finally {

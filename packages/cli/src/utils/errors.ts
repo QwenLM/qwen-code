@@ -11,6 +11,7 @@ import {
   parseAndFormatApiError,
   FatalTurnLimitedError,
   FatalCancellationError,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 
 export function getErrorMessage(error: unknown): string {
@@ -102,10 +103,24 @@ export function handleToolError(
   toolName: string,
   toolError: Error,
   config: Config,
-  _errorCode?: string | number,
+  errorCode?: string | number,
   resultDisplay?: string,
 ): void {
-  // Always just log to stderr; JSON/streaming formatting happens in the tool_result block elsewhere
+  // Check if this is a permission denied error in non-interactive mode
+  const isExecutionDenied = errorCode === ToolErrorType.EXECUTION_DENIED;
+  const isNonInteractive = !config.isInteractive();
+  const isTextMode = config.getOutputFormat() === OutputFormat.TEXT;
+
+  // Show warning for permission denied errors in non-interactive text mode
+  if (isExecutionDenied && isNonInteractive && isTextMode) {
+    const warningMessage =
+      `Warning: Tool "${toolName}" requires user approval but cannot execute in non-interactive mode.\n` +
+      `To enable automatic tool execution, use the -y flag (YOLO mode):\n` +
+      `Example: qwen -p 'your prompt' -y\n\n`;
+    process.stderr.write(warningMessage);
+  }
+
+  // Always log detailed error in debug mode
   if (config.getDebugMode()) {
     console.error(
       `Error executing tool ${toolName}: ${resultDisplay || toolError.message}`,
