@@ -97,6 +97,8 @@ describe('memoryImportProcessor', () => {
     console.warn = vi.fn();
     console.error = vi.fn();
     console.debug = vi.fn();
+    // Mock realpath to return the input path by default (simulating existing file)
+    mockedFs.realpath.mockImplementation(async (p) => p as string);
   });
 
   afterEach(() => {
@@ -703,32 +705,32 @@ describe('memoryImportProcessor', () => {
   });
 
   describe('validateImportPath', () => {
-    it('should reject URLs', () => {
+    it('should reject URLs', async () => {
       const basePath = testPath('base');
       const allowedPath = testPath('allowed');
       expect(
-        validateImportPath('https://example.com/file.md', basePath, [
+        await validateImportPath('https://example.com/file.md', basePath, [
           allowedPath,
         ]),
       ).toBe(false);
       expect(
-        validateImportPath('http://example.com/file.md', basePath, [
+        await validateImportPath('http://example.com/file.md', basePath, [
           allowedPath,
         ]),
       ).toBe(false);
       expect(
-        validateImportPath('file:///path/to/file.md', basePath, [allowedPath]),
+        await validateImportPath('file:///path/to/file.md', basePath, [allowedPath]),
       ).toBe(false);
     });
 
-    it('should allow paths within allowed directories', () => {
+    it('should allow paths within allowed directories', async () => {
       const basePath = path.resolve(testPath('base'));
       const allowedPath = path.resolve(testPath('allowed'));
 
       // Test relative paths - resolve them against basePath
       const relativePath = './file.md';
       path.resolve(basePath, relativePath);
-      expect(validateImportPath(relativePath, basePath, [basePath])).toBe(true);
+      expect(await validateImportPath(relativePath, basePath, [basePath])).toBe(true);
 
       // Test parent directory access (should be allowed if parent is in allowed paths)
       const parentPath = path.dirname(basePath);
@@ -737,29 +739,29 @@ describe('memoryImportProcessor', () => {
         const parentRelativePath = '../file.md';
         path.resolve(basePath, parentRelativePath);
         expect(
-          validateImportPath(parentRelativePath, basePath, [parentPath]),
+          await validateImportPath(parentRelativePath, basePath, [parentPath]),
         ).toBe(true);
 
         path.resolve(basePath, 'sub');
-        const resultSub = validateImportPath('sub', basePath, [basePath]);
+        const resultSub = await validateImportPath('sub', basePath, [basePath]);
         expect(resultSub).toBe(true);
       }
 
       // Test allowed path access - use a file within the allowed directory
       const allowedSubPath = 'nested';
       const allowedFilePath = path.join(allowedPath, allowedSubPath, 'file.md');
-      expect(validateImportPath(allowedFilePath, basePath, [allowedPath])).toBe(
+      expect(await validateImportPath(allowedFilePath, basePath, [allowedPath])).toBe(
         true,
       );
     });
 
-    it('should reject paths outside allowed directories', () => {
+    it('should reject paths outside allowed directories', async () => {
       const basePath = path.resolve(testPath('base'));
       const allowedPath = path.resolve(testPath('allowed'));
       const forbiddenPath = path.resolve(testPath('forbidden'));
 
       // Forbidden path should be blocked
-      expect(validateImportPath(forbiddenPath, basePath, [allowedPath])).toBe(
+      expect(await validateImportPath(forbiddenPath, basePath, [allowedPath])).toBe(
         false,
       );
 
@@ -769,17 +771,17 @@ describe('memoryImportProcessor', () => {
         path.join(forbiddenPath, 'file.md'),
       );
       expect(
-        validateImportPath(relativeToForbidden, basePath, [allowedPath]),
+        await validateImportPath(relativeToForbidden, basePath, [allowedPath]),
       ).toBe(false);
 
       // Path that tries to escape the base directory should be blocked
       const escapingPath = path.join('..', '..', 'sensitive', 'file.md');
-      expect(validateImportPath(escapingPath, basePath, [basePath])).toBe(
+      expect(await validateImportPath(escapingPath, basePath, [basePath])).toBe(
         false,
       );
     });
 
-    it('should handle multiple allowed directories', () => {
+    it('should handle multiple allowed directories', async () => {
       const basePath = path.resolve(testPath('base'));
       const allowed1 = path.resolve(testPath('allowed1'));
       const allowed2 = path.resolve(testPath('allowed2'));
@@ -787,82 +789,82 @@ describe('memoryImportProcessor', () => {
       // File not in any allowed path
       const otherPath = path.resolve(testPath('other', 'file.md'));
       expect(
-        validateImportPath(otherPath, basePath, [allowed1, allowed2]),
+        await validateImportPath(otherPath, basePath, [allowed1, allowed2]),
       ).toBe(false);
 
       // File in first allowed path
       const file1 = path.join(allowed1, 'nested', 'file.md');
-      expect(validateImportPath(file1, basePath, [allowed1, allowed2])).toBe(
+      expect(await validateImportPath(file1, basePath, [allowed1, allowed2])).toBe(
         true,
       );
 
       // File in second allowed path
       const file2 = path.join(allowed2, 'nested', 'file.md');
-      expect(validateImportPath(file2, basePath, [allowed1, allowed2])).toBe(
+      expect(await validateImportPath(file2, basePath, [allowed1, allowed2])).toBe(
         true,
       );
 
       // Test with relative path to allowed directory
       const relativeToAllowed1 = path.relative(basePath, file1);
       expect(
-        validateImportPath(relativeToAllowed1, basePath, [allowed1, allowed2]),
+        await validateImportPath(relativeToAllowed1, basePath, [allowed1, allowed2]),
       ).toBe(true);
     });
 
-    it('should handle relative paths correctly', () => {
+    it('should handle relative paths correctly', async () => {
       const basePath = path.resolve(testPath('base'));
       const parentPath = path.resolve(testPath('parent'));
 
       // Current directory file access
-      expect(validateImportPath('file.md', basePath, [basePath])).toBe(true);
+      expect(await validateImportPath('file.md', basePath, [basePath])).toBe(true);
 
       // Explicit current directory file access
-      expect(validateImportPath('./file.md', basePath, [basePath])).toBe(true);
+      expect(await validateImportPath('./file.md', basePath, [basePath])).toBe(true);
 
       // Parent directory access - should be blocked unless parent is in allowed paths
       const parentFile = path.join(parentPath, 'file.md');
       const relativeToParent = path.relative(basePath, parentFile);
-      expect(validateImportPath(relativeToParent, basePath, [basePath])).toBe(
+      expect(await validateImportPath(relativeToParent, basePath, [basePath])).toBe(
         false,
       );
 
       // Parent directory access when parent is in allowed paths
       expect(
-        validateImportPath(relativeToParent, basePath, [basePath, parentPath]),
+        await validateImportPath(relativeToParent, basePath, [basePath, parentPath]),
       ).toBe(true);
 
       // Nested relative path
       const nestedPath = path.join('nested', 'sub', 'file.md');
-      expect(validateImportPath(nestedPath, basePath, [basePath])).toBe(true);
+      expect(await validateImportPath(nestedPath, basePath, [basePath])).toBe(true);
     });
 
-    it('should handle absolute paths correctly', () => {
+    it('should handle absolute paths correctly', async () => {
       const basePath = path.resolve(testPath('base'));
       const allowedPath = path.resolve(testPath('allowed'));
       const forbiddenPath = path.resolve(testPath('forbidden'));
 
       // Allowed path should work - file directly in allowed directory
       const allowedFilePath = path.join(allowedPath, 'file.md');
-      expect(validateImportPath(allowedFilePath, basePath, [allowedPath])).toBe(
+      expect(await validateImportPath(allowedFilePath, basePath, [allowedPath])).toBe(
         true,
       );
 
       // Allowed path should work - file in subdirectory of allowed directory
       const allowedNestedPath = path.join(allowedPath, 'nested', 'file.md');
       expect(
-        validateImportPath(allowedNestedPath, basePath, [allowedPath]),
+        await validateImportPath(allowedNestedPath, basePath, [allowedPath]),
       ).toBe(true);
 
       // Forbidden path should be blocked
       const forbiddenFilePath = path.join(forbiddenPath, 'file.md');
       expect(
-        validateImportPath(forbiddenFilePath, basePath, [allowedPath]),
+        await validateImportPath(forbiddenFilePath, basePath, [allowedPath]),
       ).toBe(false);
 
       // Relative path to allowed directory should work
       const relativeToAllowed = path.relative(basePath, allowedFilePath);
       expect(
-        validateImportPath(relativeToAllowed, basePath, [allowedPath]),
+        await validateImportPath(relativeToAllowed, basePath, [allowedPath]),
       ).toBe(true);
 
       // Path that resolves to the same file but via different relative segments
@@ -872,7 +874,7 @@ describe('memoryImportProcessor', () => {
         path.basename(allowedPath),
         'file.md',
       );
-      expect(validateImportPath(dotPath, basePath, [allowedPath])).toBe(true);
+      expect(await validateImportPath(dotPath, basePath, [allowedPath])).toBe(true);
     });
   });
 });

@@ -6,7 +6,8 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isSubpath } from './paths.js';
+import { homedir } from 'node:os';
+import { isSubpath, QWEN_DIR } from './paths.js';
 import { marked, type Token } from 'marked';
 
 // Simple console logger for import processing
@@ -269,7 +270,7 @@ export async function processImports(
 
         // Validate import path
         if (
-          !validateImportPath(importPath, fileBasePath, [projectRoot || ''])
+          !(await validateImportPath(importPath, fileBasePath, [projectRoot || '']))
         ) {
           continue;
         }
@@ -340,7 +341,7 @@ export async function processImports(
       continue;
     }
     // Validate import path to prevent path traversal attacks
-    if (!validateImportPath(importPath, basePath, [projectRoot || ''])) {
+    if (!(await validateImportPath(importPath, basePath, [projectRoot || '']))) {
       result += `<!-- Import failed: ${importPath} - Path traversal attempt -->`;
       continue;
     }
@@ -393,11 +394,20 @@ export async function processImports(
   };
 }
 
-export function validateImportPath(
+/**
+ * Validates an import path to prevent path traversal and TOCTOU vulnerabilities.
+ * Ensures the resolved real path is within allowed directories.
+ *
+ * @param importPath - The path to be imported.
+ * @param basePath - The base directory for relative path resolution.
+ * @param allowedDirectories - List of directories where imports are permitted.
+ * @returns A promise that resolves to true if the path is valid, false otherwise.
+ */
+export async function validateImportPath(
   importPath: string,
   basePath: string,
   allowedDirectories: string[],
-): boolean {
+): Promise<boolean> {
   // Reject URLs
   if (/^(file|https?):\/\//.test(importPath)) {
     return false;
@@ -405,7 +415,24 @@ export function validateImportPath(
 
   const resolvedPath = path.resolve(basePath, importPath);
 
-  return allowedDirectories.some((allowedDir) =>
-    isSubpath(allowedDir, resolvedPath),
+  // Resolve real path to handle symlinks
+  let realPath: string;
+  try {
+    realPath = await fs.realpath(resolvedPath);
+  } catch {
+    // If realpath fails, it's often because the path doesn't exist (ENOENT)
+    // or it's a dangling symlink. To prevent Time-of-Check to Time-of-Use
+    // (TOCTOU) vulnerabilities, we must reject paths that cannot be fully
+    // resolved to a real path. It is safer to consider any path that fails
+    // realpath resolution as invalid.
+    return false;
+  }
+
+  // Ensure we always allow the user's global qwen directory
+  const globalQwenDir = path.join(homedir(), QWEN_DIR);
+  const effectiveAllowedDirs = [...allowedDirectories, globalQwenDir];
+
+  return effectiveAllowedDirs.some(
+    (allowedDir) => allowedDir && isSubpath(allowedDir, realPath),
   );
 }
