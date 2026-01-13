@@ -593,12 +593,12 @@ async function authWithQwenDeviceFlow(
     qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, deviceAuth);
 
     const showFallbackMessage = () => {
-      console.log('\n=== Qwen OAuth Device Authorization ===');
-      console.log(
+      process.stdout.write('\n=== Qwen OAuth Device Authorization ===');
+      process.stdout.write(
         'Please visit the following URL in your browser to authorize:',
       );
-      console.log(`\n${deviceAuth.verification_uri_complete}\n`);
-      console.log('Waiting for authorization to complete...\n');
+      process.stdout.write(`\n${deviceAuth.verification_uri_complete}\n`);
+      process.stdout.write('Waiting for authorization to complete...\n');
     };
 
     // Always show the fallback message in non-interactive environments to ensure
