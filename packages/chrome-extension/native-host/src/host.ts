@@ -957,10 +957,17 @@ class AcpConnection {
     }
 
     try {
-      const result = await this.sendAcpRequest('session/prompt', {
-        sessionId: this.sessionId,
-        prompt: [{ type: 'text', text }],
-      });
+      // Large prompts (e.g., network logs) can take longer; allow up to 3 minutes
+      const promptTimeout =
+        typeof text === 'string' && text.length > 20000 ? 180000 : 60000;
+      const result = await this.sendAcpRequest(
+        'session/prompt',
+        {
+          sessionId: this.sessionId,
+          prompt: [{ type: 'text', text }],
+        },
+        promptTimeout,
+      );
 
       return { success: true, data: result };
     } catch (err) {
@@ -1572,6 +1579,27 @@ function startHttpApiServer() {
                 error: cancelResult.error,
               }),
             );
+            return;
+          }
+
+          case 'permission_response': {
+            try {
+              acpConnection.respondToPermission(
+                request.requestId,
+                request.optionId,
+                request.sessionId,
+              );
+              res.writeHead(200);
+              res.end(JSON.stringify({ success: true }));
+            } catch (err) {
+              res.writeHead(200);
+              res.end(
+                JSON.stringify({
+                  success: false,
+                  error: err?.message || String(err),
+                }),
+              );
+            }
             return;
           }
 

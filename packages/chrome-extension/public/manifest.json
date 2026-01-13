@@ -31,7 +31,7 @@
     {
       "matches": ["<all_urls>"],
       "js": ["content/content-script.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
     }
   ],
 

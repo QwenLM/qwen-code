@@ -3,7 +3,7 @@
  * Handles communication between extension components and native host
  */
 
-/* global chrome, console, setTimeout, clearTimeout, fetch, AbortController, EventSource */
+/* global chrome, console, setTimeout, clearTimeout, fetch, AbortController, EventSource, URL */
 
 // Backend HTTP endpoint (replaces Native Messaging)
 const BACKEND_URL = 'http://127.0.0.1:18765';
@@ -13,6 +13,10 @@ let isConnected = false;
 let qwenCliStatus = 'disconnected';
 let pendingRequests = new Map();
 let eventPollerStarted = false;
+// Track permission requests we've already answered (avoid duplicate prompts)
+const handledPermissionRequests = new Set();
+const permissionKey = (reqId, sessionId) =>
+  `${sessionId || 'no-session'}:${reqId}`;
 // Cache the latest available commands so late listeners (e.g. sidepanel opened later)
 // can fetch them via GET_STATUS.
 let lastAvailableCommands = [];
@@ -373,6 +377,14 @@ function handleNativeMessage(message) {
   } else if (message.type === 'permission_request') {
     // Forward permission request from Native Host to UI
     console.log('[Permission Request]', message);
+    const pKey = permissionKey(message.requestId, message.sessionId);
+    if (handledPermissionRequests.has(pKey)) {
+      console.log(
+        '[Permission] request already handled, skip forwarding:',
+        pKey,
+      );
+      return;
+    }
     broadcastToUI({
       type: 'permissionRequest',
       data: {
@@ -691,6 +703,61 @@ async function getBrowserConsoleLogs() {
           resolve({ logs: response.data || [] });
         } else {
           reject(new Error(response?.error || 'Failed to get console logs'));
+        }
+      },
+    );
+  });
+}
+
+// Get captured responses from content script (fetch/xhr hook)
+async function getCapturedResponsesFromPage(filter = {}) {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  const tab = tabs[0];
+
+  if (!tab) {
+    throw new Error('No active tab found');
+  }
+
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    throw new Error('Cannot access browser internal page');
+  }
+
+  // Inject content script if needed
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/content-script.js'],
+    });
+  } catch (injectError) {
+    // Ignore if already injected; only treat non-"already injected" errors as fatal
+    if (
+      !String(injectError?.message || '').includes(
+        'Cannot access a chrome:// URL',
+      )
+    ) {
+      console.log('Script injection skipped:', injectError.message);
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.tabs.sendMessage(
+      tab.id,
+      { type: 'GET_CAPTURED_RESPONSES', ...filter },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else if (response && response.success) {
+          resolve(response.data || []);
+        } else {
+          reject(
+            new Error(response?.error || 'Failed to get captured responses'),
+          );
         }
       },
     );
@@ -1302,18 +1369,77 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               });
               const logs = await getNetworkLogs(null);
               console.log('[Fallback] Network logs count:', logs?.length);
-              const summary = logs.slice(-50).map((log) => ({
-                method: log.method,
-                url: log.params?.request?.url || log.params?.documentURL,
-                status: log.params?.response?.status,
-                timestamp: log.timestamp,
-              }));
+              // Build a requestId -> body map for quick lookup
+              const bodyMap = new Map();
+              for (const log of logs || []) {
+                if (
+                  log.method === 'Network.responseBody' &&
+                  log.params?.requestId
+                ) {
+                  bodyMap.set(log.params.requestId, {
+                    body: log.params.body,
+                    base64Encoded: log.params.base64Encoded,
+                    error: log.params.error,
+                  });
+                }
+              }
+              const buildBodySnippet = (requestId) => {
+                if (!requestId || !bodyMap.has(requestId)) return undefined;
+                const { body, base64Encoded, error } = bodyMap.get(requestId);
+                if (error) return `error: ${error}`;
+                if (typeof body !== 'string') return undefined;
+                const snippet = body.slice(0, 4000); // cap to avoid huge payload
+                return base64Encoded
+                  ? `(base64,len=${body.length}) ${snippet}`
+                  : snippet;
+              };
+              const summary = logs
+                .filter((log) => {
+                  const url =
+                    log.params?.request?.url || log.params?.documentURL;
+                  if (
+                    log.method === 'Network.responseBody' &&
+                    typeof log.params?.error === 'string' &&
+                    log.params.error.includes(
+                      'No resource with given identifier found',
+                    )
+                  ) {
+                    return false; // drop noisy CDP body fetch errors
+                  }
+                  return !shouldIgnoreRequestUrl(url);
+                })
+                .slice(-200)
+                .map((log) => ({
+                  method: log.method,
+                  url: log.params?.request?.url || log.params?.documentURL,
+                  status: log.params?.response?.status,
+                  timestamp: log.timestamp,
+                  requestId: log.params?.requestId,
+                  body:
+                    buildBodySnippet(log.params?.requestId) ||
+                    buildBodySnippet(
+                      log.params?.requestId || log.params?.loaderId,
+                    ),
+                  bodyType:
+                    bodyMap.has(log.params?.requestId) &&
+                    bodyMap.get(log.params?.requestId)?.base64Encoded
+                      ? 'base64'
+                      : undefined,
+                }));
+              // Cap payload size to avoid upstream model length errors
+              let textPayload = `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`;
+              const MAX_TEXT_LEN = 200000; // ~200 KB safety cap
+              if (textPayload.length > MAX_TEXT_LEN) {
+                textPayload =
+                  textPayload.slice(0, MAX_TEXT_LEN) +
+                  `\n...[truncated ${(textPayload.length - MAX_TEXT_LEN).toLocaleString()} chars]`;
+              }
               broadcastToUI({ type: 'streamStart' });
               await sendToNativeHost({
                 type: 'qwen_request',
                 action: 'process_text',
                 data: {
-                  text: `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`,
+                  text: textPayload,
                   context: 'network request logs from browser',
                 },
                 userPrompt: text, // Include user's full request
@@ -1430,13 +1556,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       optionId,
       sessionId || 'no-session',
     );
+    const pKey = permissionKey(reqId, sessionId);
     sendToNativeHost({
       type: 'permission_response',
       requestId: reqId,
       optionId,
       sessionId,
     })
-      .then(() => sendResponse({ success: true }))
+      .then(() => {
+        handledPermissionRequests.add(pKey);
+        sendResponse({ success: true });
+      })
       .catch((error) => {
         console.error('[Permission] Failed to respond:', error);
         sendResponse({ success: false, error: error.message });
@@ -1636,24 +1766,250 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       });
     return true; // Will respond asynchronously
   }
+
+  if (request.type === 'GET_CAPTURED_RESPONSES') {
+    getCapturedResponsesFromPage({
+      urlSubstring: request.urlSubstring,
+      limit: request.limit,
+    })
+      .then((data) => {
+        sendResponse({ success: true, data });
+      })
+      .catch((error) => {
+        sendResponse({ success: false, error: error.message });
+      });
+    return true; // Will respond asynchronously
+  }
 });
 
 // Network logging using both webRequest and debugger APIs
 const networkLogs = new Map(); // Store logs for each tab
-const MAX_LOGS_PER_TAB = 1000; // Limit logs to prevent memory issues
-const MAX_BODIES_PER_FETCH = 20; // Limit body fetches to avoid heavy overhead
+const debuggerAttached = new Map(); // Track debugger attach status per tab
+const MAX_LOGS_PER_TAB = 5000; // Limit logs to prevent memory issues
+const MAX_BODIES_PER_FETCH = 200; // Limit body fetches to avoid heavy overhead (bodies are truncated later)
+let activeTabId = null;
+let activeTabOrigin = null;
+// Track requestIds per tab that already have a fetched body to avoid duplicate getResponseBody (which can cause -32000 errors)
+const bodyFetchedByTab = new Map();
 
-// Initialize network logging for a tab
-async function initNetworkLogging(tabId) {
+function markBodyFetched(tabId, requestId) {
+  if (!tabId || !requestId) return;
+  if (!bodyFetchedByTab.has(tabId)) {
+    bodyFetchedByTab.set(tabId, new Set());
+  }
+  bodyFetchedByTab.get(tabId).add(requestId);
+}
+
+function hasBodyFetched(tabId, requestId) {
+  if (!tabId || !requestId) return false;
+  return bodyFetchedByTab.get(tabId)?.has(requestId) === true;
+}
+
+function clearBodyFetched(tabId) {
+  if (tabId === undefined || tabId === null) return;
+  bodyFetchedByTab.delete(tabId);
+}
+
+function getOrigin(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function rememberActiveTab(tab) {
+  if (!tab || typeof tab.id !== 'number') return;
+  // Skip browser internal pages
+  if (
+    tab.url &&
+    (tab.url.startsWith('chrome://') ||
+      tab.url.startsWith('chrome-extension://') ||
+      tab.url.startsWith('edge://') ||
+      tab.url.startsWith('about:'))
+  ) {
+    activeTabId = tab.id;
+    activeTabOrigin = null;
+    return;
+  }
+  activeTabId = tab.id;
+  activeTabOrigin = getOrigin(tab.url);
+  // Start logging early so requests issued before tool invocation are captured
+  initNetworkLogging(tab.id).catch(() => {});
+}
+
+function refreshActiveTab(tabId) {
+  if (!tabId && tabId !== 0) return;
+  try {
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) return;
+      rememberActiveTab(tab);
+    });
+  } catch {
+    // Ignore errors
+  }
+}
+
+// Prime active tab cache on startup
+try {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (chrome.runtime.lastError) return;
+    if (tabs && tabs[0]) {
+      rememberActiveTab(tabs[0]);
+    }
+  });
+} catch {
+  // Ignore errors
+}
+
+// Track active tab changes to help attribute tabId -1 requests (service workers/prefetch)
+chrome.tabs.onActivated.addListener(({ tabId }) => refreshActiveTab(tabId));
+
+// Initialize debugger early for ALL tabs (not just active) to capture XHR from the start
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  // Initialize debugger as soon as page starts loading (before XHR requests fire)
+  // Use forceReEnable=true to ensure Network is enabled even if tab was previously tracked
+  if (changeInfo.status === 'loading' && tab?.url) {
+    const url = tab.url;
+    // Skip browser internal pages
+    if (
+      !url.startsWith('chrome://') &&
+      !url.startsWith('chrome-extension://') &&
+      !url.startsWith('edge://') &&
+      !url.startsWith('about:')
+    ) {
+      console.log(
+        `[Network] Early init for tab ${tabId} on loading: ${url.slice(0, 80)}`,
+      );
+      initNetworkLogging(tabId, true).catch((e) => {
+        console.warn(
+          `[Network] Early init failed for tab ${tabId}:`,
+          e?.message || e,
+        );
+      });
+    }
+  }
+  // Update active tab tracking
+  if (tab?.active && (changeInfo.url || changeInfo.status === 'complete')) {
+    rememberActiveTab(tab);
+  }
+});
+
+// Also initialize for newly created tabs
+chrome.tabs.onCreated.addListener((tab) => {
+  if (
+    tab?.id &&
+    tab.url &&
+    !tab.url.startsWith('chrome://') &&
+    !tab.url.startsWith('chrome-extension://') &&
+    !tab.url.startsWith('edge://') &&
+    !tab.url.startsWith('about:')
+  ) {
+    console.log(
+      `[Network] Init for new tab ${tab.id}: ${tab.url?.slice(0, 80)}`,
+    );
+    initNetworkLogging(tab.id).catch(() => {});
+  }
+});
+
+function resolveTabIdForRequest(details) {
+  // Use real tabId when available
+  if (typeof details.tabId === 'number' && details.tabId !== -1) {
+    return details.tabId;
+  }
+  // Attribute service-worker/-1 requests to the current active tab when origins match
+  if (activeTabId && activeTabOrigin) {
+    const initiatorOrigin = getOrigin(details.initiator);
+    const documentOrigin = getOrigin(details.documentUrl);
+    if (initiatorOrigin && initiatorOrigin === activeTabOrigin) {
+      return activeTabId;
+    }
+    if (documentOrigin && documentOrigin === activeTabOrigin) {
+      return activeTabId;
+    }
+  }
+  // Fallback: attribute to active tab even if origin is missing (helps SW/opaque requests)
+  if (activeTabId) return activeTabId;
+  return null;
+}
+
+function appendNetworkLog(tabId, entry) {
+  if (tabId === null || tabId === undefined) return;
   if (!networkLogs.has(tabId)) {
     networkLogs.set(tabId, []);
+  }
+  const tabLogs = networkLogs.get(tabId);
+  tabLogs.push(entry);
+  if (tabLogs.length > MAX_LOGS_PER_TAB) {
+    networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
+  }
+}
 
-    // Attach debugger for detailed network information
+// Filter out noisy requests when summarizing (extension bridge, static assets)
+function shouldIgnoreRequestUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const lower = url.toLowerCase();
+  // Ignore extension self-requests
+  if (lower.includes('127.0.0.1:18765')) return true;
+  if (lower.startsWith('chrome-extension://')) return true;
+  // Ignore common static asset suffixes
+  const STATIC_SUFFIXES = [
+    '.png',
+    '.jpg',
+    '.jpeg',
+    '.gif',
+    '.webp',
+    '.svg',
+    '.ico',
+    '.css',
+    '.woff',
+    '.woff2',
+    '.ttf',
+    '.otf',
+    '.map',
+  ];
+  return STATIC_SUFFIXES.some((s) => lower.includes(s));
+}
+
+// Initialize network logging for a tab
+// forceReEnable: if true, re-enable Network even if already initialized (useful on navigation)
+async function initNetworkLogging(tabId, forceReEnable = false) {
+  const isNew = !networkLogs.has(tabId);
+  if (isNew) {
+    networkLogs.set(tabId, []);
+  }
+
+  const alreadyAttached = debuggerAttached.get(tabId) === true;
+
+  // Attach debugger if not already attached
+  if (!alreadyAttached) {
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
-      await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+      debuggerAttached.set(tabId, true);
+      console.log(`[Network] Debugger attached to tab ${tabId}`);
     } catch (error) {
-      console.warn(`Failed to attach debugger to tab ${tabId}:`, error.message);
+      // May already be attached elsewhere or tab doesn't exist; store failure so we can retry later
+      debuggerAttached.set(tabId, false);
+      console.warn(
+        `[Network] Failed to attach debugger to tab ${tabId}:`,
+        error.message,
+      );
+      return;
+    }
+  }
+
+  // Enable Network domain (do this on first init or when forced)
+  if (isNew || forceReEnable || !alreadyAttached) {
+    try {
+      await chrome.debugger.sendCommand({ tabId }, 'Network.enable');
+      console.log(`[Network] Network.enable sent to tab ${tabId}`);
+      debuggerAttached.set(tabId, true);
+    } catch (error) {
+      console.warn(
+        `[Network] Failed to enable Network for tab ${tabId}:`,
+        error.message,
+      );
+      debuggerAttached.set(tabId, false);
     }
   }
 }
@@ -1661,15 +2017,13 @@ async function initNetworkLogging(tabId) {
 // Enhanced network logging using webRequest API for broader coverage (metadata only)
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
-    const tabId = details.tabId;
-    if (tabId === -1) return; // Skip requests not associated with a tab
+    const tabId = resolveTabIdForRequest(details);
+    if (tabId === null) return;
 
-    if (!networkLogs.has(tabId)) {
-      networkLogs.set(tabId, []);
-    }
+    // Ensure debugger is attached as soon as we see traffic
+    initNetworkLogging(tabId).catch(() => {});
 
-    const tabLogs = networkLogs.get(tabId);
-    tabLogs.push({
+    appendNetworkLog(tabId, {
       method: 'Network.requestWillBeSent',
       params: {
         requestId: details.requestId,
@@ -1681,25 +2035,18 @@ chrome.webRequest.onBeforeRequest.addListener(
       },
       timestamp: Date.now(),
     });
-
-    if (tabLogs.length > MAX_LOGS_PER_TAB) {
-      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-    }
   },
   { urls: ['<all_urls>'] },
 );
 
 chrome.webRequest.onCompleted.addListener(
   (details) => {
-    const tabId = details.tabId;
-    if (tabId === -1) return; // Skip requests not associated with a tab
+    const tabId = resolveTabIdForRequest(details);
+    if (tabId === null) return;
 
-    if (!networkLogs.has(tabId)) {
-      networkLogs.set(tabId, []);
-    }
+    initNetworkLogging(tabId).catch(() => {});
 
-    const tabLogs = networkLogs.get(tabId);
-    tabLogs.push({
+    appendNetworkLog(tabId, {
       method: 'Network.responseReceived',
       params: {
         requestId: details.requestId,
@@ -1712,25 +2059,18 @@ chrome.webRequest.onCompleted.addListener(
       },
       timestamp: Date.now(),
     });
-
-    if (tabLogs.length > MAX_LOGS_PER_TAB) {
-      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-    }
   },
   { urls: ['<all_urls>'] },
 );
 
 chrome.webRequest.onErrorOccurred.addListener(
   (details) => {
-    const tabId = details.tabId;
-    if (tabId === -1) return; // Skip requests not associated with a tab
+    const tabId = resolveTabIdForRequest(details);
+    if (tabId === null) return;
 
-    if (!networkLogs.has(tabId)) {
-      networkLogs.set(tabId, []);
-    }
+    initNetworkLogging(tabId).catch(() => {});
 
-    const tabLogs = networkLogs.get(tabId);
-    tabLogs.push({
+    appendNetworkLog(tabId, {
       method: 'Network.loadingFailed',
       params: {
         requestId: details.requestId,
@@ -1739,10 +2079,6 @@ chrome.webRequest.onErrorOccurred.addListener(
       },
       timestamp: Date.now(),
     });
-
-    if (tabLogs.length > MAX_LOGS_PER_TAB) {
-      networkLogs.set(tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
-    }
   },
   { urls: ['<all_urls>'] },
 );
@@ -1766,10 +2102,59 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
     if (tabLogs.length > MAX_LOGS_PER_TAB) {
       networkLogs.set(source.tabId, tabLogs.slice(-MAX_LOGS_PER_TAB));
     }
+
+    // Fetch response body as soon as loading finishes to avoid requestId expiry
+    if (method === 'Network.loadingFinished' && params?.requestId) {
+      const tabId = source.tabId;
+      if (debuggerAttached.get(tabId) === true) {
+        if (hasBodyFetched(tabId, params.requestId)) {
+          return; // already fetched
+        }
+        chrome.debugger
+          .sendCommand({ tabId }, 'Network.getResponseBody', {
+            requestId: params.requestId,
+          })
+          .then((body) => {
+            markBodyFetched(tabId, params.requestId);
+            appendNetworkLog(tabId, {
+              method: 'Network.responseBody',
+              params: {
+                requestId: params.requestId,
+                body: body.body,
+                base64Encoded: body.base64Encoded,
+              },
+              timestamp: Date.now(),
+            });
+          })
+          .catch((err) => {
+            appendNetworkLog(tabId, {
+              method: 'Network.responseBody',
+              params: {
+                requestId: params.requestId,
+                error: err?.message || String(err),
+              },
+              timestamp: Date.now(),
+            });
+          });
+      }
+    }
   }
 });
 
 async function attachResponseBodies(tabId, tabLogs) {
+  // Only attempt to fetch bodies when debugger is attached
+  if (debuggerAttached.get(tabId) !== true) {
+    tabLogs.push({
+      method: 'Network.responseBody',
+      params: {
+        error:
+          'Debugger not attached; response bodies unavailable for this tab.',
+      },
+      timestamp: Date.now(),
+    });
+    return;
+  }
+
   // Collect unique requestIds that have a responseReceived entry
   const requestIds = [];
   for (const log of tabLogs) {
@@ -1785,12 +2170,14 @@ async function attachResponseBodies(tabId, tabLogs) {
   const limitedIds = requestIds.slice(-MAX_BODIES_PER_FETCH);
 
   for (const requestId of limitedIds) {
+    if (hasBodyFetched(tabId, requestId)) continue; // body already fetched
     try {
       const body = await chrome.debugger.sendCommand(
         { tabId },
         'Network.getResponseBody',
         { requestId },
       );
+      markBodyFetched(tabId, requestId);
       tabLogs.push({
         method: 'Network.responseBody',
         params: {
@@ -1827,7 +2214,7 @@ async function getNetworkLogs(tabId) {
 
   const wasInitialized = networkLogs.has(tabId);
   // Initialize network logging for the tab if not already done
-  await initNetworkLogging(tabId);
+  await initNetworkLogging(tabId, true);
 
   const tabLogs = networkLogs.get(tabId) || [];
 
@@ -1867,6 +2254,40 @@ async function getNetworkLogs(tabId) {
     });
   }
 
+  // Merge captured responses from content-script hooks (fetch/xhr) as synthetic logs
+  try {
+    const captured = await getCapturedResponsesFromPage({ limit: 200 });
+    for (const [idx, cap] of (captured || []).entries()) {
+      tabLogs.push({
+        method: 'Captured.responseBody',
+        params: {
+          requestId: cap.requestId || `captured:${idx}`,
+          request: {
+            url: cap.url,
+            method: cap.method,
+            headers: cap.requestHeaders,
+          },
+          response: {
+            status: cap.status,
+            headers: cap.headers,
+          },
+          body: cap.body,
+          base64Encoded: false,
+          source: cap.source,
+        },
+        timestamp: cap.timestamp || Date.now(),
+      });
+    }
+  } catch (e) {
+    tabLogs.push({
+      method: 'Captured.responseBody',
+      params: {
+        error: `Failed to merge captured responses: ${e?.message || e}`,
+      },
+      timestamp: Date.now(),
+    });
+  }
+
   return tabLogs;
 }
 
@@ -1874,6 +2295,8 @@ async function getNetworkLogs(tabId) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   // Remove logs for this tab
   networkLogs.delete(tabId);
+  debuggerAttached.delete(tabId);
+  clearBodyFetched(tabId);
 
   // Detach debugger if attached
   chrome.debugger.detach({ tabId }).catch(() => {
@@ -1888,6 +2311,8 @@ chrome.runtime.onSuspend.addListener(() => {
     chrome.debugger.detach({ tabId }).catch(() => {});
   }
   networkLogs.clear();
+  debuggerAttached.clear();
+  bodyFetchedByTab.clear();
 });
 
 // Listen for extension installation or update

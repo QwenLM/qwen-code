@@ -56,6 +56,7 @@ export const App: React.FC = () => {
   const [isComposing, setIsComposing] = useState(false);
   const [permissionRequest, setPermissionRequest] = useState<{
     requestId: number;
+    sessionId?: string | null;
     options: PermissionOption[];
     toolCall: ToolCall;
   } | null>(null);
@@ -233,6 +234,7 @@ export const App: React.FC = () => {
             message as {
               data: {
                 requestId: number;
+                sessionId?: string | null;
                 options: PermissionOption[];
                 toolCall: ToolCall;
               };
@@ -241,6 +243,7 @@ export const App: React.FC = () => {
           if (permData) {
             setPermissionRequest({
               requestId: permData.requestId,
+              sessionId: permData.sessionId,
               options: permData.options,
               toolCall: permData.toolCall,
             });
