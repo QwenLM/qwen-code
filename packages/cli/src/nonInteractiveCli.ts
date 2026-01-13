@@ -351,19 +351,51 @@ export async function runNonInteractive(
             const taskToolProgressHandler = taskToolProgress?.handler;
 
             // Create output handler for non-Task tools in text mode (for console output)
+            const toolOutputLines: string[] = [];
             const nonTaskOutputHandler =
               !isTaskTool && !adapter
                 ? (callId: string, outputChunk: ToolResultDisplay) => {
+                    const toolRegistry = config.getToolRegistry();
+                    const tool = toolRegistry.getTool(finalRequestInfo.name);
+                    if (tool) {
+                      try {
+                        const invocation = tool.build(finalRequestInfo.args);
+                        const description = invocation.getDescription();
+                        toolOutputLines.push(
+                          `${tool.displayName}: ${description}`,
+                        );
+                        toolOutputLines.push('\n');
+                      } catch {
+                        // If we can't build invocation, just show tool name
+                        toolOutputLines.push(`${tool.displayName}`);
+                        toolOutputLines.push('\n');
+                      }
+                    }
                     // Print tool output to console in text mode
                     if (typeof outputChunk === 'string') {
-                      process.stdout.write(outputChunk);
+                      // Indent output lines to show they're part of the tool execution
+                      const lines = outputChunk.split('\n');
+                      for (let i = 0; i < lines.length; i++) {
+                        if (i === lines.length - 1 && lines[i] === '') {
+                          // Skip trailing empty line
+                          continue;
+                        }
+                        toolOutputLines.push(lines[i]);
+                      }
                     } else if (
                       outputChunk &&
                       typeof outputChunk === 'object' &&
                       'ansiOutput' in outputChunk
                     ) {
-                      // Handle ANSI output - just print as string for now
-                      process.stdout.write(String(outputChunk.ansiOutput));
+                      // Handle ANSI output - indent it similarly
+                      const ansiStr = String(outputChunk.ansiOutput);
+                      const lines = ansiStr.split('\n');
+                      for (let i = 0; i < lines.length; i++) {
+                        if (i === lines.length - 1 && lines[i] === '') {
+                          continue;
+                        }
+                        toolOutputLines.push(lines[i]);
+                      }
                     }
                   }
                 : undefined;
@@ -385,6 +417,11 @@ export async function runNonInteractive(
                   }
                 : undefined,
             );
+
+            if (toolOutputLines.length > 0) {
+              toolOutputLines.forEach((line) => process.stdout.write(line));
+              process.stdout.write('\n');
+            }
 
             // Note: In JSON mode, subagent messages are automatically added to the main
             // adapter's messages array and will be output together on emitResult()

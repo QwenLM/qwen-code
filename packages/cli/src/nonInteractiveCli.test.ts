@@ -1826,7 +1826,7 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('should print tool output to console in text mode (non-Task tools)', async () => {
+  it('should print tool description and output to console in text mode (non-Task tools)', async () => {
     // Test that tool output is printed to stdout in text mode
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
@@ -1838,6 +1838,21 @@ describe('runNonInteractive', () => {
         prompt_id: 'prompt-id-tool-output',
       },
     };
+
+    // Mock the tool registry to return a tool with displayName and build method
+    const mockTool = {
+      displayName: 'Shell',
+      build: (args: Record<string, unknown>) => {
+        // @ts-expect-error - accessing indexed property for test mock
+        const command: string = args.command || '';
+        return {
+          getDescription: () => String(command),
+        };
+      },
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(
+      mockTool as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+    );
 
     // Mock tool execution with outputUpdateHandler being called
     mockCoreExecuteToolCall.mockImplementation(
@@ -1901,8 +1916,15 @@ describe('runNonInteractive', () => {
     );
 
     // Verify tool output was written to stdout
-    expect(processStdoutSpy).toHaveBeenCalledWith('Package outdated\n');
-    expect(processStdoutSpy).toHaveBeenCalledWith('npm@1.0.0 -> npm@2.0.0\n');
+    // First call should be tool description
+    expect(processStdoutSpy).toHaveBeenCalledWith('Shell: npm outdated');
+    expect(processStdoutSpy).toHaveBeenCalledWith('\n');
+    // Then the actual tool output
+    expect(processStdoutSpy).toHaveBeenCalledWith('Package outdated');
+    expect(processStdoutSpy).toHaveBeenCalledWith('npm@1.0.0 -> npm@2.0.0');
+    // Final newline after tool execution
+    expect(processStdoutSpy).toHaveBeenCalledWith('\n');
+    // And the model's response
     expect(processStdoutSpy).toHaveBeenCalledWith('Dependencies checked');
   });
 });
