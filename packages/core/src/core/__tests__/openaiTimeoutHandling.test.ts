@@ -50,6 +50,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
         enableOpenAILogging: false,
       }),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     // Mock OpenAI client
@@ -282,6 +283,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
           enableOpenAILogging: false,
         }),
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const contentGeneratorConfig = {
@@ -319,6 +321,7 @@ describe('OpenAIContentGenerator Timeout Handling', () => {
           enableOpenAILogging: false,
         }),
         getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const contentGeneratorConfig = {

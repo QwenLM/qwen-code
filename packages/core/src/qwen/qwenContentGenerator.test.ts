@@ -323,6 +323,7 @@ describe('QwenContentGenerator', () => {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     // Mock QwenOAuth2Client

@@ -42,6 +42,7 @@ describe('Telemetry SDK', () => {
       getTelemetryOutfile: () => undefined,
       getDebugMode: () => false,
       getSessionId: () => 'test-session',
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
   });
 

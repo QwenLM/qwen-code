@@ -54,6 +54,7 @@ describe('fileUtils', () => {
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
     getTargetDir: () => tempRootDir,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 
   beforeEach(() => {

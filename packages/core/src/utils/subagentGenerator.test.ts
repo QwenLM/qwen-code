@@ -35,6 +35,7 @@ describe('subagentGenerator', () => {
     mockConfig = {
       getBaseLlmClient: vi.fn().mockReturnValue(mockClient),
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
   });
 

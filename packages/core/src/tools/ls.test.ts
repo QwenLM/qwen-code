@@ -44,6 +44,7 @@ describe('LSTool', () => {
       storage: {
         getUserSkillsDir: () => userSkillsBase,
       },
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     lsTool = new LSTool(mockConfig);

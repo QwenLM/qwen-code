@@ -156,6 +156,7 @@ describe('Telemetry Metrics', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should not record metrics if not initialized', () => {
@@ -248,6 +249,7 @@ describe('Telemetry Metrics', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should not record metrics if not initialized', () => {
@@ -363,6 +365,7 @@ describe('Telemetry Metrics', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     describe('recordStartupPerformance', () => {
@@ -371,6 +374,7 @@ describe('Telemetry Metrics', () => {
         const mockConfigDisabled = {
           getSessionId: () => 'test-session-id',
           getTelemetryEnabled: () => false, // Disable telemetry to disable performance monitoring
+          getContextWindowSize: vi.fn().mockReturnValue(-1),
         } as unknown as Config;
 
         initializeMetricsModule(mockConfigDisabled);

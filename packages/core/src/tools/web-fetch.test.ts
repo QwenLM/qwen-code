@@ -36,6 +36,7 @@ describe('WebFetchTool', () => {
       setApprovalMode: vi.fn(),
       getProxy: vi.fn(),
       getGeminiClient: mockGetGeminiClient,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
   });
 
@@ -123,6 +124,7 @@ describe('WebFetchTool', () => {
       const tool = new WebFetchTool({
         ...mockConfig,
         getApprovalMode: () => ApprovalMode.AUTO_EDIT,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config);
       const params = {
         url: 'https://example.com',
@@ -141,6 +143,7 @@ describe('WebFetchTool', () => {
       const testConfig = {
         ...mockConfig,
         setApprovalMode,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const tool = new WebFetchTool(testConfig);
       const params = {

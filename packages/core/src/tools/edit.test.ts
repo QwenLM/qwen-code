@@ -87,6 +87,7 @@ describe('EditTool', () => {
       getGeminiMdFileCount: () => 0,
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     // Reset mocks before each test

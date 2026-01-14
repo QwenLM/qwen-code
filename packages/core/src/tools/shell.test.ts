@@ -69,6 +69,7 @@ describe('ShellTool', () => {
         email: 'qwen-coder@alibabacloud.com',
       }),
       getShouldUseNodePtyShell: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     shellTool = new ShellTool(mockConfig);

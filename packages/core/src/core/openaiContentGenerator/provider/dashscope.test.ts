@@ -57,6 +57,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         disableCacheControl: false,
       }),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     provider = new DashScopeOpenAICompatibleProvider(

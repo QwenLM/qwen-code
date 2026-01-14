@@ -31,6 +31,7 @@ const createMockConfig = (
     getFileService: () => mockFileService,
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 };
 

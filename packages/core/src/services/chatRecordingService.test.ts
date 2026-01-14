@@ -60,6 +60,7 @@ describe('ChatRecordingService', () => {
         }),
       }),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     vi.mocked(randomUUID).mockImplementation(

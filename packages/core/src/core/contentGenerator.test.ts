@@ -22,6 +22,7 @@ describe('createContentGenerator', () => {
       getUsageStatisticsEnabled: () => true,
       getContentGeneratorConfig: () => ({}),
       getCliVersion: () => '1.0.0',
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const mockGenerator = {
@@ -57,6 +58,7 @@ describe('createContentGenerator', () => {
       getUsageStatisticsEnabled: () => false,
       getContentGeneratorConfig: () => ({}),
       getCliVersion: () => '1.0.0',
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
     const mockGenerator = {
       models: {},
@@ -86,6 +88,7 @@ describe('createContentGenerator', () => {
 describe('createContentGeneratorConfig', () => {
   const mockConfig = {
     getProxy: () => undefined,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 
   it('should preserve provided fields and set authType for QWEN_OAUTH', () => {

@@ -174,6 +174,7 @@ describe('loggers', () => {
         getOutputFormat: () => OutputFormat.JSON,
         getToolRegistry: () => undefined,
         getChatRecordingService: () => undefined,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const startSessionEvent = new StartSessionEvent(mockConfig);
@@ -213,6 +214,7 @@ describe('loggers', () => {
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should log a user prompt', () => {
@@ -246,6 +248,7 @@ describe('loggers', () => {
         getTelemetryLogPromptsEnabled: () => false,
         getTargetDir: () => 'target-dir',
         getUsageStatisticsEnabled: () => true,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const event = new UserPromptEvent(
         11,
@@ -278,6 +281,7 @@ describe('loggers', () => {
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const mockMetrics = {
@@ -364,6 +368,7 @@ describe('loggers', () => {
       getUsageStatisticsEnabled: () => true,
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should log an API request with request_text', () => {
@@ -410,6 +415,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should log flash fallback event', () => {
@@ -433,6 +439,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     beforeEach(() => {
@@ -512,6 +519,7 @@ describe('loggers', () => {
       getToolRegistry: () => new ToolRegistry(cfg1),
       getFullContext: () => false,
       getUserMemory: () => 'user-memory',
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const mockGeminiClient = new GeminiClient(cfg2);
@@ -523,6 +531,7 @@ describe('loggers', () => {
       getTelemetryEnabled: () => true,
       getTelemetryLogPromptsEnabled: () => true,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const mockMetrics = {
@@ -1100,6 +1109,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should log a tool output truncated event', () => {
@@ -1135,6 +1145,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     beforeEach(() => {
@@ -1178,6 +1189,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     beforeEach(() => {
@@ -1214,6 +1226,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     beforeEach(() => {
@@ -1250,6 +1263,7 @@ describe('loggers', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     beforeEach(() => {

@@ -19,6 +19,7 @@ describe('WebSearchTool', () => {
       getApprovalMode: vi.fn(() => ApprovalMode.AUTO_EDIT),
       setApprovalMode: vi.fn(),
       getWebSearchConfig: vi.fn(),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
   });
 

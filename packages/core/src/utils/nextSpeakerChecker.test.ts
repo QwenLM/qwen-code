@@ -77,6 +77,7 @@ describe('checkNextSpeaker', () => {
       storage: {
         getProjectTempDir: vi.fn().mockReturnValue('/test/temp'),
       },
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     // GeminiChat will receive the mocked instances via the mocked GoogleGenAI constructor

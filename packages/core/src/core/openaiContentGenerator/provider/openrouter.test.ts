@@ -31,6 +31,7 @@ describe('OpenRouterOpenAICompatibleProvider', () => {
     // Mock Config
     mockCliConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     provider = new OpenRouterOpenAICompatibleProvider(

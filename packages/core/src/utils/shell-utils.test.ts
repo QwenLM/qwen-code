@@ -46,6 +46,7 @@ beforeEach(() => {
     getCoreTools: () => [],
     getExcludeTools: () => [],
     getAllowedTools: () => [],
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 });
 

@@ -49,6 +49,7 @@ function createConfigStub({
   return {
     getTargetDir: () => resolvedTargetDir,
     getWorkspaceContext: () => workspaceContext,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 }
 

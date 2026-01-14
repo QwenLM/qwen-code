@@ -21,6 +21,7 @@ describe('ExitPlanModeTool', () => {
       setApprovalMode: vi.fn((mode: ApprovalMode) => {
         approvalMode = mode;
       }),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);

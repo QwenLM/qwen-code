@@ -38,6 +38,7 @@ describe('GlobTool', () => {
       getGlobExcludes: () => [],
     }),
     getTruncateToolOutputLines: () => 1000,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 
   beforeEach(async () => {
@@ -232,6 +233,7 @@ describe('GlobTool', () => {
         getTargetDir: () => mismatchedRootDir,
         getWorkspaceContext: () =>
           createMockWorkspaceContext(mismatchedRootDir),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const mismatchedGlobTool = new GlobTool(mismatchedConfig);

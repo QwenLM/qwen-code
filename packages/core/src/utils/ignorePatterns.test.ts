@@ -149,6 +149,7 @@ describe('FileExclusions', () => {
     it('should use config custom excludes when available', () => {
       const mockConfig = {
         getCustomExcludes: vi.fn(() => ['**/config-exclude/**']),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const excluder = new FileExclusions(mockConfig);
@@ -172,6 +173,7 @@ describe('FileExclusions', () => {
     it('should include config custom excludes in glob patterns', () => {
       const mockConfig = {
         getCustomExcludes: vi.fn(() => ['**/config-glob/**']),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const excluder = new FileExclusions(mockConfig);

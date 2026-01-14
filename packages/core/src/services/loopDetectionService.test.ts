@@ -34,6 +34,7 @@ describe('LoopDetectionService', () => {
   beforeEach(() => {
     mockConfig = {
       getTelemetryEnabled: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
     service = new LoopDetectionService(mockConfig);
     vi.clearAllMocks();
@@ -646,6 +647,7 @@ describe('LoopDetectionService LLM Checks', () => {
       getDebugMode: () => false,
       getTelemetryEnabled: () => true,
       getModel: () => 'test-model',
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     service = new LoopDetectionService(mockConfig);

@@ -50,6 +50,7 @@ describe('McpClientManager', () => {
     );
     await manager.discoverAllMcpTools({
       isTrustedFolder: () => true,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config);
     expect(mockedMcpClient.connect).toHaveBeenCalledOnce();
     expect(mockedMcpClient.discover).toHaveBeenCalledOnce();
@@ -77,6 +78,7 @@ describe('McpClientManager', () => {
     );
     await manager.discoverAllMcpTools({
       isTrustedFolder: () => false,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config);
     expect(mockedMcpClient.connect).not.toHaveBeenCalled();
     expect(mockedMcpClient.discover).not.toHaveBeenCalled();

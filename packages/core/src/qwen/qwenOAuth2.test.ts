@@ -751,6 +751,7 @@ describe('getQwenOAuthClient', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1007,6 +1008,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1202,6 +1204,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1405,6 +1408,7 @@ describe('Browser Launch and Error Handling', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -2043,6 +2047,7 @@ describe('SharedTokenManager Integration in QwenOAuth2Client', () => {
   it('should handle TokenManagerError types correctly in getQwenOAuthClient', async () => {
     const mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     // Test different TokenManagerError types

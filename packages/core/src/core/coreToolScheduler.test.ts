@@ -257,6 +257,7 @@ describe('CoreToolScheduler', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -335,6 +336,7 @@ describe('CoreToolScheduler', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -375,6 +377,7 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null, // No client needed for these tests
         getExcludeTools: () => undefined,
         isInteractive: () => true,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
@@ -419,6 +422,7 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
         isInteractive: () => false, // Value doesn't matter, but included for completeness
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       // Create scheduler
@@ -449,6 +453,7 @@ describe('CoreToolScheduler', () => {
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit'],
         isInteractive: () => false, // Value doesn't matter
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       // Create scheduler
@@ -514,6 +519,7 @@ describe('CoreToolScheduler', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -601,6 +607,7 @@ describe('CoreToolScheduler', () => {
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const scheduler = new CoreToolScheduler({
@@ -694,6 +701,7 @@ describe('CoreToolScheduler with payload', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1018,6 +1026,7 @@ describe('CoreToolScheduler edit cancellation', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1125,6 +1134,7 @@ describe('CoreToolScheduler YOLO mode', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1266,6 +1276,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
         terminalHeight: 30,
       }),
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1367,6 +1378,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1500,6 +1512,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1603,6 +1616,7 @@ describe('CoreToolScheduler request queueing', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1679,6 +1693,7 @@ describe('CoreToolScheduler request queueing', () => {
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const testTool = new TestApprovalTool(mockConfig);
@@ -1871,6 +1886,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -1992,6 +2008,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({

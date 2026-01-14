@@ -63,6 +63,7 @@ describe('executeToolCall', () => {
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     abortController = new AbortController();
