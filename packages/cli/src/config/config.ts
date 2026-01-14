@@ -1027,6 +1027,7 @@ export async function loadCliConfig(
     model: resolvedModel,
     extensionContextFilePaths,
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
+    contextWindowSize: settings.model?.contextWindowSize ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,

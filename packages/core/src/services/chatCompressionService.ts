@@ -110,7 +110,13 @@ export class ChatCompressionService {
 
     // Don't compress if not forced and we are under the limit.
     if (!force) {
-      if (originalTokenCount < threshold * tokenLimit(model)) {
+      const configuredLimit = config.getContextWindowSize();
+      const contextLimit = tokenLimit(
+        model,
+        'input',
+        configuredLimit > 0 ? configuredLimit : undefined,
+      );
+      if (originalTokenCount < threshold * contextLimit) {
         return {
           newHistory: null,
           info: {

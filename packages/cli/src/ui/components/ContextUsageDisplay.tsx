@@ -12,12 +12,17 @@ export const ContextUsageDisplay = ({
   promptTokenCount,
   model,
   terminalWidth,
+  contextWindowSize,
 }: {
   promptTokenCount: number;
   model: string;
   terminalWidth: number;
+  contextWindowSize?: number;
 }) => {
-  const percentage = promptTokenCount / tokenLimit(model);
+  const configuredLimit =
+    contextWindowSize && contextWindowSize > 0 ? contextWindowSize : undefined;
+  const percentage =
+    promptTokenCount / tokenLimit(model, 'input', configuredLimit);
   const percentageLeft = ((1 - percentage) * 100).toFixed(0);
 
   const label = terminalWidth < 100 ? '%' : '% context left';

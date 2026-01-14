@@ -312,6 +312,7 @@ export interface ConfigParameters {
   extensionContextFilePaths?: string[];
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
+  contextWindowSize?: number;
   experimentalSkills?: boolean;
   experimentalZedIntegration?: boolean;
   listExtensions?: boolean;
@@ -463,6 +464,7 @@ export class Config {
 
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
+  private readonly contextWindowSize: number;
   private readonly listExtensions: boolean;
   private readonly _extensions: GeminiCLIExtension[];
   private readonly _blockedMcpServers: Array<{
@@ -572,6 +574,7 @@ export class Config {
     this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
+    this.contextWindowSize = params.contextWindowSize ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.experimentalSkills = params.experimentalSkills ?? false;
@@ -933,6 +936,10 @@ export class Config {
 
   getSessionTokenLimit(): number {
     return this.sessionTokenLimit;
+  }
+
+  getContextWindowSize(): number {
+    return this.contextWindowSize;
   }
 
   getEmbeddingModel(): string {

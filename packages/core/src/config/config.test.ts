@@ -1316,3 +1316,66 @@ describe('BaseLlmClient Lifecycle', () => {
     );
   });
 });
+
+describe('Context Window Size Configuration', () => {
+  const MODEL = 'qwen3-coder-plus';
+  const SANDBOX: SandboxConfig = {
+    command: 'docker',
+    image: 'qwen-code-sandbox',
+  };
+  const TARGET_DIR = '/path/to/target';
+  const baseParams: ConfigParameters = {
+    cwd: '/tmp',
+    embeddingModel: 'gemini-embedding',
+    sandbox: SANDBOX,
+    targetDir: TARGET_DIR,
+    debugMode: false,
+    question: 'test question',
+    fullContext: false,
+    userMemory: 'Test User Memory',
+    telemetry: { enabled: false },
+    model: MODEL,
+    usageStatisticsEnabled: false,
+  };
+
+  it('should default contextWindowSize to -1 when not provided', () => {
+    const config = new Config(baseParams);
+    expect(config.getContextWindowSize()).toBe(-1);
+  });
+
+  it('should set contextWindowSize when provided', () => {
+    const paramsWithContextWindow: ConfigParameters = {
+      ...baseParams,
+      contextWindowSize: 102400,
+    };
+    const config = new Config(paramsWithContextWindow);
+    expect(config.getContextWindowSize()).toBe(102400);
+  });
+
+  it('should handle contextWindowSize of 0', () => {
+    const paramsWithZero: ConfigParameters = {
+      ...baseParams,
+      contextWindowSize: 0,
+    };
+    const config = new Config(paramsWithZero);
+    expect(config.getContextWindowSize()).toBe(0);
+  });
+
+  it('should handle large contextWindowSize values', () => {
+    const paramsWithLargeValue: ConfigParameters = {
+      ...baseParams,
+      contextWindowSize: 1048576, // 1M tokens
+    };
+    const config = new Config(paramsWithLargeValue);
+    expect(config.getContextWindowSize()).toBe(1048576);
+  });
+
+  it('should return -1 when contextWindowSize is undefined', () => {
+    const paramsWithUndefined: ConfigParameters = {
+      ...baseParams,
+      contextWindowSize: undefined,
+    };
+    const config = new Config(paramsWithUndefined);
+    expect(config.getContextWindowSize()).toBe(-1);
+  });
+});

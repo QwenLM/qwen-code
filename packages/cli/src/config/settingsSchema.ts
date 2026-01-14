@@ -585,6 +585,19 @@ const SETTINGS_SCHEMA = {
         description: 'The maximum number of tokens allowed in a session.',
         showInDialog: false,
       },
+      contextWindowSize: {
+        type: 'number',
+        label: 'Context Window Size',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as number | undefined,
+        description:
+          'Override the default context window size (in tokens) for the model. ' +
+          'This is useful for custom or privately deployed models that are not recognized by the built-in model detection. ' +
+          'If not set, the system will attempt to detect the context window size based on the model name, ' +
+          'or fall back to the default of 128K tokens (131,072).',
+        showInDialog: false,
+      },
       skipNextSpeakerCheck: {
         type: 'boolean',
         label: 'Skip Next Speaker Check',

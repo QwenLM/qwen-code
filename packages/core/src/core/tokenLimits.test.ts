@@ -378,3 +378,92 @@ describe('tokenLimit with output type', () => {
     });
   });
 });
+
+describe('tokenLimit with configuredLimit parameter', () => {
+  describe('Input token limits with user configuration', () => {
+    it('should use configuredLimit when provided for input type', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input', 200000)).toBe(200000);
+      expect(tokenLimit('gpt-4o', 'input', 50000)).toBe(50000);
+      expect(tokenLimit('claude-3.5-sonnet', 'input', 150000)).toBe(150000);
+    });
+
+    it('should use configuredLimit even when it is smaller than model default', () => {
+      // qwen3-coder-plus default is 1M, but user configures 100K
+      expect(tokenLimit('qwen3-coder-plus', 'input', 102400)).toBe(102400);
+      // gpt-4o default is 128K, but user configures 64K
+      expect(tokenLimit('gpt-4o', 'input', 65536)).toBe(65536);
+    });
+
+    it('should use configuredLimit even when it is larger than model default', () => {
+      // gpt-4o default is 128K, but user configures 256K
+      expect(tokenLimit('gpt-4o', 'input', 262144)).toBe(262144);
+    });
+
+    it('should fall back to model default when configuredLimit is 0', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input', 0)).toBe(1048576);
+      expect(tokenLimit('gpt-4o', 'input', 0)).toBe(131072);
+    });
+
+    it('should fall back to model default when configuredLimit is negative', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input', -1)).toBe(1048576);
+      expect(tokenLimit('gpt-4o', 'input', -100)).toBe(131072);
+    });
+
+    it('should fall back to model default when configuredLimit is undefined', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input', undefined)).toBe(1048576);
+      expect(tokenLimit('gpt-4o', 'input', undefined)).toBe(131072);
+    });
+  });
+
+  describe('Output token limits should ignore configuredLimit', () => {
+    it('should ignore configuredLimit for output type', () => {
+      // configuredLimit should only affect input tokens
+      expect(tokenLimit('qwen3-coder-plus', 'output', 200000)).toBe(65536);
+      expect(tokenLimit('qwen-vl-max-latest', 'output', 100000)).toBe(8192);
+    });
+
+    it('should use default output limit when configuredLimit is provided', () => {
+      expect(tokenLimit('gpt-4o', 'output', 200000)).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit('claude-3.5-sonnet', 'output', 150000)).toBe(
+        DEFAULT_OUTPUT_TOKEN_LIMIT,
+      );
+    });
+  });
+
+  describe('Unknown models with configuredLimit', () => {
+    it('should use configuredLimit for unknown models when provided', () => {
+      expect(tokenLimit('unknown-model-v1', 'input', 100000)).toBe(100000);
+      expect(tokenLimit('custom-model', 'input', 50000)).toBe(50000);
+    });
+
+    it('should fall back to default for unknown models when configuredLimit is not valid', () => {
+      expect(tokenLimit('unknown-model-v1', 'input', 0)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit('unknown-model-v1', 'input', -1)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+      expect(tokenLimit('unknown-model-v1', 'input', undefined)).toBe(
+        DEFAULT_TOKEN_LIMIT,
+      );
+    });
+  });
+
+  describe('Edge cases', () => {
+    it('should handle very large configuredLimit values', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input', 10000000)).toBe(10000000);
+    });
+
+    it('should handle configuredLimit of 1', () => {
+      expect(tokenLimit('qwen3-coder-plus', 'input', 1)).toBe(1);
+    });
+
+    it('should prioritize configuredLimit over any model detection', () => {
+      // Even for well-known models, user configuration takes precedence
+      expect(tokenLimit('gemini-1.5-pro', 'input', 500000)).toBe(500000);
+      expect(tokenLimit('claude-opus-4', 'input', 300000)).toBe(300000);
+    });
+  });
+});

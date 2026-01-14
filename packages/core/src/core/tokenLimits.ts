@@ -226,12 +226,23 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
  *
  * @param model - The model name to get the token limit for
  * @param type - The type of token limit ('input' for context window, 'output' for generation)
+ * @param configuredLimit - Optional user-configured context window size that overrides auto-detection
  * @returns The maximum number of tokens allowed for this model and type
  */
 export function tokenLimit(
   model: Model,
   type: TokenLimitType = 'input',
+  configuredLimit?: TokenCount,
 ): TokenCount {
+  // If user has configured a context window size for input tokens, use it
+  if (
+    type === 'input' &&
+    configuredLimit !== undefined &&
+    configuredLimit > 0
+  ) {
+    return configuredLimit;
+  }
+
   const norm = normalize(model);
 
   // Choose the appropriate patterns based on token type

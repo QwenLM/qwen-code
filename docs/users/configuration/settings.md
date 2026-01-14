@@ -99,22 +99,23 @@ Settings are organized into categories. All settings should be placed within the
 
 #### model
 
-| Setting                                            | Type    | Description                                                                                                                                                                                                                                                                                                                                                            | Default     |
-| -------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `model.name`                                       | string  | The Qwen model to use for conversations.                                                                                                                                                                                                                                                                                                                               | `undefined` |
-| `model.maxSessionTurns`                            | number  | Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.                                                                                                                                                                                                                                                                                      | `-1`        |
-| `model.summarizeToolOutput`                        | object  | Enables or disables the summarization of tool output. You can specify the token budget for the summarization using the `tokenBudget` setting. Note: Currently only the `run_shell_command` tool is supported. For example `{"run_shell_command": {"tokenBudget": 2000}}`                                                                                               | `undefined` |
-| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.                                                                 | `undefined` |
-| `model.chatCompression.contextPercentageThreshold` | number  | Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely. | `0.7`       |
-| `model.skipNextSpeakerCheck`                       | boolean | Skip the next speaker check.                                                                                                                                                                                                                                                                                                                                           | `false`     |
-| `model.skipLoopDetection`                          | boolean | Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.                                                                                                                | `false`     |
-| `model.skipStartupContext`                         | boolean | Skips sending the startup workspace context (environment summary and acknowledgement) at the beginning of each session. Enable this if you prefer to provide context manually or want to save tokens on startup.                                                                                                                                                       | `false`     |
-| `model.enableOpenAILogging`                        | boolean | Enables logging of OpenAI API calls for debugging and analysis. When enabled, API requests and responses are logged to JSON files.                                                                                                                                                                                                                                     | `false`     |
-| `model.openAILoggingDir`                           | string  | Custom directory path for OpenAI API logs. If not specified, defaults to `logs/openai` in the current working directory. Supports absolute paths, relative paths (resolved from current working directory), and `~` expansion (home directory).                                                                                                                        | `undefined` |
+| Setting                                            | Type    | Description                                                                                                                                                                                                                                                                                                                                                                      | Default     |
+| -------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `model.name`                                       | string  | The Qwen model to use for conversations.                                                                                                                                                                                                                                                                                                                                         | `undefined` |
+| `model.contextWindowSize`                          | number  | Override the default context window size (in tokens) for the model. This is useful for custom or privately deployed models that are not recognized by the built-in model detection. If not set, the system will attempt to detect the context window size based on the model name, or fall back to the default of 128K tokens (131,072). Set to `-1` to use automatic detection. | `-1`        |
+| `model.maxSessionTurns`                            | number  | Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.                                                                                                                                                                                                                                                                                                | `-1`        |
+| `model.summarizeToolOutput`                        | object  | Enables or disables the summarization of tool output. You can specify the token budget for the summarization using the `tokenBudget` setting. Note: Currently only the `run_shell_command` tool is supported. For example `{"run_shell_command": {"tokenBudget": 2000}}`                                                                                                         | `undefined` |
+| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.                                                                           | `undefined` |
+| `model.chatCompression.contextPercentageThreshold` | number  | Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely.           | `0.7`       |
+| `model.skipNextSpeakerCheck`                       | boolean | Skip the next speaker check.                                                                                                                                                                                                                                                                                                                                                     | `false`     |
+| `model.skipLoopDetection`                          | boolean | Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.                                                                                                                          | `false`     |
+| `model.skipStartupContext`                         | boolean | Skips sending the startup workspace context (environment summary and acknowledgement) at the beginning of each session. Enable this if you prefer to provide context manually or want to save tokens on startup.                                                                                                                                                                 | `false`     |
+| `model.enableOpenAILogging`                        | boolean | Enables logging of OpenAI API calls for debugging and analysis. When enabled, API requests and responses are logged to JSON files.                                                                                                                                                                                                                                               | `false`     |
+| `model.openAILoggingDir`                           | string  | Custom directory path for OpenAI API logs. If not specified, defaults to `logs/openai` in the current working directory. Supports absolute paths, relative paths (resolved from current working directory), and `~` expansion (home directory).                                                                                                                                  | `undefined` |
 
 **Example model.generationConfig:**
 
-```
+```json
 {
   "model": {
     "generationConfig": {
@@ -129,6 +130,26 @@ Settings are organized into categories. All settings should be placed within the
   }
 }
 ```
+
+**Example model.contextWindowSize:**
+
+```json
+{
+  "model": {
+    "contextWindowSize": 200000
+  }
+}
+```
+
+> [!note]
+> **Common use cases for contextWindowSize:**
+>
+> - **Custom models**: Set `contextWindowSize` when using models not recognized by built-in detection
+> - **Private deployments**: Override detected values for privately deployed models with different configurations
+> - **Accurate UI display**: Ensures the context usage percentage is calculated correctly
+> - **Compression timing**: Affects when automatic chat history compression is triggered
+>
+> **Example scenario:** A custom model with 200K context window that is not automatically recognized by the system.
 
 **model.openAILoggingDir examples:**
 
