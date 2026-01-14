@@ -69,6 +69,7 @@ const mockConfig = {
   getGeminiClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
   getChatRecordingService: () => undefined,
+  getContextWindowSize: vi.fn().mockReturnValue(-1),
 } as unknown as Config;
 
 const mockTool = new MockTool({

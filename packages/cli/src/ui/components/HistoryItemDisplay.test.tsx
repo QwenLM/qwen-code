@@ -25,6 +25,7 @@ vi.mock('./messages/ToolGroupMessage.js', () => ({
 describe('<HistoryItemDisplay />', () => {
   const mockConfig = {
     getChatRecordingService: () => undefined,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
   const baseItem = {
     id: 1,

@@ -30,6 +30,7 @@ describe('HistoryReplayer', () => {
       sessionId: 'test-session-id',
       config: {
         getToolRegistry: () => mockToolRegistry,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config,
       sendUpdate: sendUpdateSpy,
     };

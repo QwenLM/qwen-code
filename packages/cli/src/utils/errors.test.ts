@@ -95,6 +95,7 @@ describe('errors', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({ authType: 'test' }),
       getDebugMode: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
   });
 

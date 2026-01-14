@@ -18,6 +18,7 @@ describe('ToolConfirmationMessage', () => {
   const mockConfig = {
     isTrustedFolder: () => true,
     getIdeMode: () => false,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 
   it('should not display urls if prompt and url are the same', () => {
@@ -155,6 +156,7 @@ describe('ToolConfirmationMessage', () => {
         const mockConfig = {
           isTrustedFolder: () => true,
           getIdeMode: () => false,
+          getContextWindowSize: vi.fn().mockReturnValue(-1),
         } as unknown as Config;
 
         const { lastFrame } = renderWithProviders(
@@ -173,6 +175,7 @@ describe('ToolConfirmationMessage', () => {
         const mockConfig = {
           isTrustedFolder: () => false,
           getIdeMode: () => false,
+          getContextWindowSize: vi.fn().mockReturnValue(-1),
         } as unknown as Config;
 
         const { lastFrame } = renderWithProviders(
@@ -205,6 +208,7 @@ describe('ToolConfirmationMessage', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const { lastFrame } = renderWithProviders(
@@ -228,6 +232,7 @@ describe('ToolConfirmationMessage', () => {
       const mockConfig = {
         isTrustedFolder: () => true,
         getIdeMode: () => false,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const { lastFrame } = renderWithProviders(

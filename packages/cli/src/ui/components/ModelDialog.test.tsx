@@ -69,6 +69,7 @@ const renderComponent = (
 
         // --- Spread test-specific overrides ---
         ...contextValue,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config)
     : undefined;
 
@@ -308,6 +309,7 @@ describe('<ModelDialog />', () => {
             {
               getModel: mockGetModel,
               getAuthType: mockGetAuthType,
+              getContextWindowSize: vi.fn().mockReturnValue(-1),
             } as unknown as Config
           }
         >
@@ -322,6 +324,7 @@ describe('<ModelDialog />', () => {
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     rerender(

@@ -101,6 +101,7 @@ describe('availableModels', () => {
           .mockReturnValue([
             { id: 'custom', label: 'Custom', authType: AuthType.QWEN_OAUTH },
           ]),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const models = getAvailableModelsForAuthType(
@@ -139,6 +140,7 @@ describe('availableModels', () => {
       process.env['OPENAI_MODEL'] = 'fallback-model';
       const mockConfig = {
         getAvailableModelsForAuthType: vi.fn().mockReturnValue([]),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const models = getAvailableModelsForAuthType(
@@ -155,6 +157,7 @@ describe('availableModels', () => {
         getAvailableModelsForAuthType: vi.fn().mockImplementation(() => {
           throw new Error('Registry not initialized');
         }),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const models = getAvailableModelsForAuthType(

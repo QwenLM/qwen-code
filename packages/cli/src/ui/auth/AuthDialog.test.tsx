@@ -53,6 +53,7 @@ const renderAuthDialog = (
   const mockConfig = {
     getAuthType: vi.fn(() => configAuthType),
     getContentGeneratorConfig: vi.fn(() => ({ apiKey: configApiKey })),
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 
   return renderWithProviders(

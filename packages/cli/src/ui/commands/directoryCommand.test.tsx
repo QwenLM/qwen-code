@@ -48,6 +48,7 @@ describe('directoryCommand', () => {
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
       setUserMemory: vi.fn(),
       setGeminiMdFileCount: vi.fn(),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     mockContext = {

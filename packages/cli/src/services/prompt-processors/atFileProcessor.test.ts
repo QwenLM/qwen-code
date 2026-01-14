@@ -31,6 +31,7 @@ describe('AtFileProcessor', () => {
 
     mockConfig = {
       // The processor only passes the config through, so we don't need a full mock.
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     context = createMockCommandContext({

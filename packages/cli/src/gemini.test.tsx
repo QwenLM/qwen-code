@@ -46,6 +46,7 @@ vi.mock('./config/config.js', () => ({
     getSandbox: vi.fn(() => false),
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
@@ -169,6 +170,7 @@ describe('gemini.tsx main function', () => {
         getGeminiMdFileCount: () => 0,
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -339,6 +341,7 @@ describe('gemini.tsx main function', () => {
       getProjectRoot: () => '/',
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
@@ -436,6 +439,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],

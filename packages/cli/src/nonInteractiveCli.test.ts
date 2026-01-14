@@ -145,6 +145,7 @@ describe('runNonInteractive', () => {
       }),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     mockSettings = {

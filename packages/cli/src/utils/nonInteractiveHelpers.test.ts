@@ -518,6 +518,7 @@ describe('buildSystemMessage', () => {
       getModel: vi.fn().mockReturnValue('test-model'),
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getDebugMode: vi.fn().mockReturnValue(false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
   });
 
@@ -553,6 +554,7 @@ describe('buildSystemMessage', () => {
     const config = {
       ...mockConfig,
       getToolRegistry: vi.fn().mockReturnValue(null),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const result = await buildSystemMessage(
@@ -569,6 +571,7 @@ describe('buildSystemMessage', () => {
     const config = {
       ...mockConfig,
       getMcpServers: vi.fn().mockReturnValue(null),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const result = await buildSystemMessage(
@@ -585,6 +588,7 @@ describe('buildSystemMessage', () => {
     const config = {
       ...mockConfig,
       getCliVersion: vi.fn().mockReturnValue(null),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     const result = await buildSystemMessage(
@@ -633,6 +637,7 @@ describe('createTaskToolProgressHandler', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
       getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     mockAdapter = {

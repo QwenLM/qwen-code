@@ -50,6 +50,7 @@ describe('useAtCompletion', () => {
       })),
       getEnableRecursiveFileSearch: () => true,
       getFileFilteringDisableFuzzySearch: () => false,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
     vi.clearAllMocks();
   });
@@ -480,6 +481,7 @@ describe('useAtCompletion', () => {
           respectQwenIgnore: true,
         })),
         getFileFilteringDisableFuzzySearch: () => false,
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const { result } = renderHook(() =>

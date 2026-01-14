@@ -162,6 +162,7 @@ describe('McpPromptLoader', () => {
       getMcpServers: () => ({
         'test-server': { httpUrl: 'https://test-server.com' },
       }),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     it('should load prompts as slash commands', async () => {

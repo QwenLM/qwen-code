@@ -235,6 +235,7 @@ describe('useGeminiStream', () => {
         .mockReturnValue(contentGeneratorConfig),
       getMaxSessionTurns: vi.fn(() => 50),
       getUseSmartEdit: () => false,
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -1338,6 +1339,7 @@ describe('useGeminiStream', () => {
           authType: mockAuthType,
         })),
         getModel: vi.fn(() => 'gemini-2.5-pro'),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
 
       const { result } = renderHook(() =>

@@ -187,6 +187,7 @@ describe('InputPrompt', () => {
         getWorkspaceContext: () => ({
           getDirectories: () => ['/test/project/src'],
         }),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config,
       slashCommands: mockSlashCommands,
       commandContext: mockCommandContext,

@@ -25,6 +25,7 @@ function createMockConfig(overrides?: Partial<Config>): Config {
       getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
     },
     ...overrides,
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 }
 

@@ -46,6 +46,7 @@ describe('restoreCommand', () => {
       getGeminiClient: vi.fn().mockReturnValue({
         setHistory: mockSetHistory,
       }),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     mockContext = createMockCommandContext({

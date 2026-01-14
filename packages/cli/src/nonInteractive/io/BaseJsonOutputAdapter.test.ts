@@ -163,6 +163,7 @@ function createMockConfig(): Config {
   return {
     getSessionId: vi.fn().mockReturnValue('test-session-id'),
     getModel: vi.fn().mockReturnValue('test-model'),
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   } as unknown as Config;
 }
 

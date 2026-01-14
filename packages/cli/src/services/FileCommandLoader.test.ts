@@ -226,6 +226,7 @@ describe('FileCommandLoader', () => {
       getExtensions: vi.fn(() => []),
       getFolderTrustFeature: vi.fn(() => false),
       getFolderTrust: vi.fn(() => false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
     const loader = new FileCommandLoader(mockConfig);
     const commands = await loader.loadCommands(signal);
@@ -271,6 +272,7 @@ describe('FileCommandLoader', () => {
       getExtensions: vi.fn(() => []),
       getFolderTrustFeature: vi.fn(() => false),
       getFolderTrust: vi.fn(() => false),
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
     const loader = new FileCommandLoader(mockConfig);
     const commands = await loader.loadCommands(signal);
@@ -562,6 +564,7 @@ describe('FileCommandLoader', () => {
         ]),
         getFolderTrustFeature: vi.fn(() => false),
         getFolderTrust: vi.fn(() => false),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const loader = new FileCommandLoader(mockConfig);
       const commands = await loader.loadCommands(signal);
@@ -615,6 +618,7 @@ describe('FileCommandLoader', () => {
         ]),
         getFolderTrustFeature: vi.fn(() => false),
         getFolderTrust: vi.fn(() => false),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const loader = new FileCommandLoader(mockConfig);
       const commands = await loader.loadCommands(signal);
@@ -724,6 +728,7 @@ describe('FileCommandLoader', () => {
         ]),
         getFolderTrustFeature: vi.fn(() => false),
         getFolderTrust: vi.fn(() => false),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const loader = new FileCommandLoader(mockConfig);
       const commands = await loader.loadCommands(signal);
@@ -762,6 +767,7 @@ describe('FileCommandLoader', () => {
         ]),
         getFolderTrustFeature: vi.fn(() => false),
         getFolderTrust: vi.fn(() => false),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const loader = new FileCommandLoader(mockConfig);
       const commands = await loader.loadCommands(signal);
@@ -796,6 +802,7 @@ describe('FileCommandLoader', () => {
         ]),
         getFolderTrustFeature: vi.fn(() => false),
         getFolderTrust: vi.fn(() => false),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const loader = new FileCommandLoader(mockConfig);
       const commands = await loader.loadCommands(signal);
@@ -1191,6 +1198,7 @@ describe('FileCommandLoader', () => {
         getExtensions: vi.fn(() => []),
         getFolderTrustFeature: vi.fn(() => true),
         getFolderTrust: vi.fn(() => true),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const userCommandsDir = Storage.getUserCommandsDir();
       mock({
@@ -1212,6 +1220,7 @@ describe('FileCommandLoader', () => {
         getExtensions: vi.fn(() => []),
         getFolderTrustFeature: vi.fn(() => true),
         getFolderTrust: vi.fn(() => false),
+        getContextWindowSize: vi.fn().mockReturnValue(-1),
       } as unknown as Config;
       const userCommandsDir = Storage.getUserCommandsDir();
       mock({

@@ -70,6 +70,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getApprovalMode: () => 'auto',
     getOutputFormat: () => 'stream-json',
     initialize: vi.fn(),
+    getContextWindowSize: vi.fn().mockReturnValue(-1),
   };
   return { ...base, ...overrides } as unknown as Config;
 }

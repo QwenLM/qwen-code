@@ -37,6 +37,7 @@ describe('handleSlashCommand', () => {
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       storage: {},
+      getContextWindowSize: vi.fn().mockReturnValue(-1),
     } as unknown as Config;
 
     mockSettings = {
