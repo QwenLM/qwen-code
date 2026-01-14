@@ -93,6 +93,21 @@ describe('MemoryTool', () => {
       expect(getCurrentGeminiMdFilename()).toBe('CUSTOM_CONTEXT.md');
       expect(getAllGeminiMdFilenames()).toEqual(newNames);
     });
+
+    it('should throw an error if the new name contains path separators or is "." or ".."', () => {
+      expect(() => setGeminiMdFilename('path/to/file.md')).toThrow(
+        /Invalid GEMINI.md filename: path\/to\/file.md/,
+      );
+      expect(() => setGeminiMdFilename('path\\to\\file.md')).toThrow(
+        /Invalid GEMINI.md filename: path\\to\\file.md/,
+      );
+      expect(() => setGeminiMdFilename('.')).toThrow(
+        /Invalid GEMINI.md filename: \./,
+      );
+      expect(() => setGeminiMdFilename('..')).toThrow(
+        /Invalid GEMINI.md filename: \.\./,
+      );
+    });
   });
 
   describe('performAddMemoryEntry (static method)', () => {
