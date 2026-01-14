@@ -105,7 +105,7 @@ Settings are organized into categories. All settings should be placed within the
 | `model.contextWindowSize`                          | number  | Override the default context window size (in tokens) for the model. This is useful for custom or privately deployed models that are not recognized by the built-in model detection. If not set, the system will attempt to detect the context window size based on the model name, or fall back to the default of 128K tokens (131,072). Set to `-1` to use automatic detection. | `-1`        |
 | `model.maxSessionTurns`                            | number  | Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.                                                                                                                                                                                                                                                                                                | `-1`        |
 | `model.summarizeToolOutput`                        | object  | Enables or disables the summarization of tool output. You can specify the token budget for the summarization using the `tokenBudget` setting. Note: Currently only the `run_shell_command` tool is supported. For example `{"run_shell_command": {"tokenBudget": 2000}}`                                                                                                         | `undefined` |
-| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.                                                                           | `undefined` |
+| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, `disableCacheControl`, and `customHeaders` (custom HTTP headers for API requests), along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.                   | `undefined` |
 | `model.chatCompression.contextPercentageThreshold` | number  | Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely.           | `0.7`       |
 | `model.skipNextSpeakerCheck`                       | boolean | Skip the next speaker check.                                                                                                                                                                                                                                                                                                                                                     | `false`     |
 | `model.skipLoopDetection`                          | boolean | Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.                                                                                                                          | `false`     |
@@ -121,6 +121,10 @@ Settings are organized into categories. All settings should be placed within the
     "generationConfig": {
       "timeout": 60000,
       "disableCacheControl": false,
+      "customHeaders": {
+        "X-Request-ID": "req-123",
+        "X-User-ID": "user-456"
+      },
       "samplingParams": {
         "temperature": 0.2,
         "top_p": 0.8,
@@ -131,11 +135,14 @@ Settings are organized into categories. All settings should be placed within the
 }
 ```
 
+The `customHeaders` field allows you to add custom HTTP headers to all API requests. This is useful for request tracing, monitoring, API gateway routing, or when different models require different headers. If `customHeaders` is defined in `modelProviders[].generationConfig.customHeaders`, it will be used directly; otherwise, headers from `model.generationConfig.customHeaders` will be used. No merging occurs between the two levels.
+
 **Example model.contextWindowSize:**
 
 ```json
 {
   "model": {
+    "name": "my-custom-model",
     "contextWindowSize": 200000
   }
 }
@@ -175,6 +182,10 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
         "generationConfig": {
           "timeout": 60000,
           "maxRetries": 3,
+          "customHeaders": {
+            "X-Model-Version": "v1.0",
+            "X-Request-Priority": "high"
+          },
           "samplingParams": { "temperature": 0.2 }
         }
       }
@@ -236,7 +247,7 @@ Per-field precedence for `generationConfig`:
 3. `settings.model.generationConfig`
 4. Content-generator defaults (`getDefaultGenerationConfig` for OpenAI, `getParameterValue` for Gemini, etc.)
 
-`samplingParams` is treated atomically; provider values replace the entire object. Defaults from the content generator apply last so each provider retains its tuned baseline.
+`samplingParams` and `customHeaders` are both treated atomically; provider values replace the entire object. If `modelProviders[].generationConfig` defines these fields, they are used directly; otherwise, values from `model.generationConfig` are used. No merging occurs between provider and global configuration levels. Defaults from the content generator apply last so each provider retains its tuned baseline.
 
 ##### Selection persistence and recommendations
 
@@ -491,7 +502,7 @@ Arguments passed directly when running the CLI can override other configurations
 | `--telemetry-otlp-protocol`  |       | Sets the OTLP protocol for telemetry (`grpc` or `http`).                                                                                                                                |                                        | Defaults to `grpc`. See [telemetry](../../developers/development/telemetry) for more information.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `--telemetry-log-prompts`    |       | Enables logging of prompts for telemetry.                                                                                                                                               |                                        | See [telemetry](../../developers/development/telemetry) for more information.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `--checkpointing`            |       | Enables [checkpointing](../features/checkpointing).                                                                                                                                     |                                        |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `--acp`                      |       | Enables ACP mode (Agent Control Protocol). Useful for IDE/editor integrations like [Zed](../integration-zed).                                                                           |                                        | Stable. Replaces the deprecated `--experimental-acp` flag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `--acp`                      |       | Enables ACP mode (Agent Client Protocol). Useful for IDE/editor integrations like [Zed](../integration-zed).                                                                            |                                        | Stable. Replaces the deprecated `--experimental-acp` flag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `--experimental-skills`      |       | Enables experimental [Agent Skills](../features/skills) (registers the `skill` tool and loads Skills from `.qwen/skills/` and `~/.qwen/skills/`).                                       |                                        | Experimental.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `--extensions`               | `-e`  | Specifies a list of extensions to use for the session.                                                                                                                                  | Extension names                        | If not provided, all available extensions are used. Use the special term `qwen -e none` to disable all extensions. Example: `qwen -e my-extension -e my-other-extension`                                                                                                                                                                                                                                                                                                                                                                                        |
 | `--list-extensions`          | `-l`  | Lists all available extensions and exits.                                                                                                                                               |                                        |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |

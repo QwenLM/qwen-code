@@ -83,11 +83,25 @@ export const useAuthCommand = (
     async (authType: AuthType, credentials?: OpenAICredentials) => {
       try {
         const authTypeScope = getPersistScopeForModelSelection(settings);
+
+        // Persist authType
         settings.setValue(
           authTypeScope,
           'security.auth.selectedType',
           authType,
         );
+
+        // Persist model from ContentGenerator config (handles fallback cases)
+        // This ensures that when syncAfterAuthRefresh falls back to default model,
+        // it gets persisted to settings.json
+        const contentGeneratorConfig = config.getContentGeneratorConfig();
+        if (contentGeneratorConfig?.model) {
+          settings.setValue(
+            authTypeScope,
+            'model.name',
+            contentGeneratorConfig.model,
+          );
+        }
 
         // Only update credentials if not switching to QWEN_OAUTH,
         // so that OpenAI credentials are preserved when switching to QWEN_OAUTH.
@@ -105,9 +119,6 @@ export const useAuthCommand = (
               'security.auth.baseUrl',
               credentials.baseUrl,
             );
-          }
-          if (credentials?.model != null) {
-            settings.setValue(authTypeScope, 'model.name', credentials.model);
           }
         }
       } catch (error) {

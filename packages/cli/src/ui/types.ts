@@ -201,10 +201,19 @@ export interface ToolDefinition {
   description?: string;
 }
 
+export interface SkillDefinition {
+  name: string;
+}
+
 export type HistoryItemToolsList = HistoryItemBase & {
   type: 'tools_list';
   tools: ToolDefinition[];
   showDescriptions: boolean;
+};
+
+export type HistoryItemSkillsList = HistoryItemBase & {
+  type: 'skills_list';
+  skills: SkillDefinition[];
 };
 
 // JSON-friendly types for using as a simple data model showing info about an
@@ -268,6 +277,7 @@ export type HistoryItemWithoutId =
   | HistoryItemCompression
   | HistoryItemExtensionsList
   | HistoryItemToolsList
+  | HistoryItemSkillsList
   | HistoryItemMcpStatus;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
@@ -289,6 +299,7 @@ export enum MessageType {
   SUMMARY = 'summary',
   EXTENSIONS_LIST = 'extensions_list',
   TOOLS_LIST = 'tools_list',
+  SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
 }
 

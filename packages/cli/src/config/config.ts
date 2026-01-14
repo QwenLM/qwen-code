@@ -170,7 +170,17 @@ function normalizeOutputFormat(
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
-  const rawArgv = hideBin(process.argv);
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
+  }
+
   const yargsInstance = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')

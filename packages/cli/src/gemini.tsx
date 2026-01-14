@@ -346,6 +346,7 @@ export async function main() {
       extensionEnablementManager,
       argv,
     );
+    registerCleanup(() => config.shutdown());
 
     if (config.getListExtensions()) {
       console.log('Installed extensions:');

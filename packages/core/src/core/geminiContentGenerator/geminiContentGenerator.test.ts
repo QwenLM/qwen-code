@@ -39,6 +39,41 @@ describe('GeminiContentGenerator', () => {
     mockGoogleGenAI = vi.mocked(GoogleGenAI).mock.results[0].value;
   });
 
+  it('should merge customHeaders into existing httpOptions.headers', async () => {
+    vi.mocked(GoogleGenAI).mockClear();
+
+    void new GeminiContentGenerator(
+      {
+        apiKey: 'test-api-key',
+        httpOptions: {
+          headers: {
+            'X-Base': 'base',
+            'X-Override': 'base',
+          },
+        },
+      },
+      {
+        customHeaders: {
+          'X-Custom': 'custom',
+          'X-Override': 'custom',
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    expect(vi.mocked(GoogleGenAI)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(GoogleGenAI)).toHaveBeenCalledWith({
+      apiKey: 'test-api-key',
+      httpOptions: {
+        headers: {
+          'X-Base': 'base',
+          'X-Custom': 'custom',
+          'X-Override': 'custom',
+        },
+      },
+    });
+  });
+
   it('should call generateContent on the underlying model', async () => {
     const request = { model: 'gemini-1.5-flash', contents: [] };
     const expectedResponse = { responseId: 'test-id' };

@@ -17,6 +17,7 @@ import {
 import { WebViewProvider } from './webview/WebViewProvider.js';
 import { registerNewCommands } from './commands/index.js';
 import { ReadonlyFileSystemProvider } from './services/readonlyFileSystemProvider.js';
+import { isWindows } from './utils/platform.js';
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
@@ -312,13 +313,38 @@ export async function activate(context: vscode.ExtensionContext) {
             'qwen-cli',
             'cli.js',
           ).fsPath;
-          const quote = (s: string) => `"${s.replaceAll('"', '\\"')}"`;
-          const qwenCmd = `${quote(process.execPath)} ${quote(cliEntry)}`;
-          const terminal = vscode.window.createTerminal({
+          const execPath = process.execPath;
+          const lowerExecPath = execPath.toLowerCase();
+          const needsElectronRunAsNode =
+            lowerExecPath.includes('code') ||
+            lowerExecPath.includes('electron');
+
+          let qwenCmd: string;
+          const terminalOptions: vscode.TerminalOptions = {
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
             location,
-          });
+          };
+
+          if (isWindows) {
+            // Use system Node via cmd.exe; avoid PowerShell parsing issues
+            const quoteCmd = (s: string) => `"${s.replace(/"/g, '""')}"`;
+            const cliQuoted = quoteCmd(cliEntry);
+            // TODO: @yiliang114, temporarily run through node, and later hope to decouple from the local node
+            qwenCmd = `node ${cliQuoted}`;
+            terminalOptions.shellPath = process.env.ComSpec;
+          } else {
+            const quotePosix = (s: string) => `"${s.replace(/"/g, '\\"')}"`;
+            const baseCmd = `${quotePosix(execPath)} ${quotePosix(cliEntry)}`;
+            if (needsElectronRunAsNode) {
+              // macOS Electron helper needs ELECTRON_RUN_AS_NODE=1;
+              qwenCmd = `ELECTRON_RUN_AS_NODE=1 ${baseCmd}`;
+            } else {
+              qwenCmd = baseCmd;
+            }
+          }
+
+          const terminal = vscode.window.createTerminal(terminalOptions);
           terminal.show();
           terminal.sendText(qwenCmd);
         }

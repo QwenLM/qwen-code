@@ -676,6 +676,7 @@ export class Config {
     this.promptRegistry = new PromptRegistry();
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
+    await this.skillManager.startWatching();
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
@@ -774,6 +775,13 @@ export class Config {
 
   getSessionId(): string {
     return this.sessionId;
+  }
+
+  /**
+   * Releases resources owned by the config instance.
+   */
+  async shutdown(): Promise<void> {
+    this.skillManager?.stopWatching();
   }
 
   /**

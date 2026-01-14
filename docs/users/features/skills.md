@@ -27,6 +27,14 @@ Agent Skills package expertise into discoverable capabilities. Each Skill consis
 
 Skills are **model-invoked** — the model autonomously decides when to use them based on your request and the Skill’s description. This is different from slash commands, which are **user-invoked** (you explicitly type `/command`).
 
+If you want to invoke a Skill explicitly, use the `/skills` slash command:
+
+```bash
+/skills <skill-name>
+```
+
+The `/skills` command is only available when you run with `--experimental-skills`. Use autocomplete to browse available Skills and descriptions.
+
 ### Benefits
 
 - Extend Qwen Code for your workflows

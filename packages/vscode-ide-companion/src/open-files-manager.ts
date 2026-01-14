@@ -9,9 +9,23 @@ import type {
   File,
   IdeContext,
 } from '@qwen-code/qwen-code-core/src/ide/types.js';
-
-export const MAX_FILES = 10;
-const MAX_SELECTED_TEXT_LENGTH = 16384; // 16 KiB limit
+import {
+  isFileUri,
+  isNotebookFileUri,
+  isNotebookCellUri,
+  removeFile,
+  renameFile,
+  getNotebookUriFromCellUri,
+} from './services/open-files-manager/utils.js';
+import {
+  addOrMoveToFront,
+  updateActiveContext,
+} from './services/open-files-manager/text-handler.js';
+import {
+  addOrMoveToFrontNotebook,
+  updateNotebookActiveContext,
+  updateNotebookCellSelection,
+} from './services/open-files-manager/notebook-handler.js';
 
 /**
  * Keeps track of the workspace state, including open files, cursor position, and selected text.
@@ -25,33 +39,102 @@ export class OpenFilesManager {
   constructor(private readonly context: vscode.ExtensionContext) {
     const editorWatcher = vscode.window.onDidChangeActiveTextEditor(
       (editor) => {
-        if (editor && this.isFileUri(editor.document.uri)) {
-          this.addOrMoveToFront(editor);
+        if (editor && isFileUri(editor.document.uri)) {
+          addOrMoveToFront(this.openFiles, editor);
           this.fireWithDebounce();
+        } else if (editor && isNotebookCellUri(editor.document.uri)) {
+          // Handle when a notebook cell becomes active (which indicates the notebook is active)
+          const notebookUri = getNotebookUriFromCellUri(editor.document.uri);
+          if (notebookUri && isNotebookFileUri(notebookUri)) {
+            // Find the notebook editor for this cell
+            const notebookEditor = vscode.window.visibleNotebookEditors.find(
+              (nbEditor) =>
+                nbEditor.notebook.uri.toString() === notebookUri.toString(),
+            );
+            if (notebookEditor) {
+              addOrMoveToFrontNotebook(this.openFiles, notebookEditor);
+              this.fireWithDebounce();
+            }
+          }
         }
       },
     );
+
+    // Watch for when notebook editors gain focus by monitoring focus changes
+    // Since VS Code doesn't have a direct onDidChangeActiveNotebookEditor event,
+    // we monitor when visible notebook editors change and assume the last one shown is active
+    let notebookFocusWatcher: vscode.Disposable | undefined;
+    if (vscode.window.onDidChangeVisibleNotebookEditors) {
+      notebookFocusWatcher = vscode.window.onDidChangeVisibleNotebookEditors(
+        () => {
+          // When visible notebook editors change, the currently focused one is likely the active one
+          const activeNotebookEditor = vscode.window.activeNotebookEditor;
+          if (
+            activeNotebookEditor &&
+            isNotebookFileUri(activeNotebookEditor.notebook.uri)
+          ) {
+            addOrMoveToFrontNotebook(this.openFiles, activeNotebookEditor);
+            this.fireWithDebounce();
+          }
+        },
+      );
+    }
 
     const selectionWatcher = vscode.window.onDidChangeTextEditorSelection(
       (event) => {
-        if (this.isFileUri(event.textEditor.document.uri)) {
-          this.updateActiveContext(event.textEditor);
+        if (isFileUri(event.textEditor.document.uri)) {
+          updateActiveContext(this.openFiles, event.textEditor);
+          this.fireWithDebounce();
+        } else if (isNotebookCellUri(event.textEditor.document.uri)) {
+          // Handle text selections within notebook cells
+          updateNotebookCellSelection(
+            this.openFiles,
+            event.textEditor,
+            event.selections,
+          );
           this.fireWithDebounce();
         }
       },
     );
 
+    // Add notebook cell selection watcher for .ipynb files if the API is available
+    let notebookCellSelectionWatcher: vscode.Disposable | undefined;
+    if (vscode.window.onDidChangeNotebookEditorSelection) {
+      notebookCellSelectionWatcher =
+        vscode.window.onDidChangeNotebookEditorSelection((event) => {
+          if (isNotebookFileUri(event.notebookEditor.notebook.uri)) {
+            // Ensure the notebook is added to the active list if selected
+            addOrMoveToFrontNotebook(this.openFiles, event.notebookEditor);
+            updateNotebookActiveContext(this.openFiles, event.notebookEditor);
+            this.fireWithDebounce();
+          }
+        });
+    }
+
     const closeWatcher = vscode.workspace.onDidCloseTextDocument((document) => {
-      if (this.isFileUri(document.uri)) {
-        this.remove(document.uri);
+      if (isFileUri(document.uri)) {
+        removeFile(this.openFiles, document.uri);
         this.fireWithDebounce();
       }
     });
 
+    // Add notebook close watcher if the API is available
+    let notebookCloseWatcher: vscode.Disposable | undefined;
+    if (vscode.workspace.onDidCloseNotebookDocument) {
+      notebookCloseWatcher = vscode.workspace.onDidCloseNotebookDocument(
+        (document) => {
+          if (isNotebookFileUri(document.uri)) {
+            removeFile(this.openFiles, document.uri);
+            this.fireWithDebounce();
+          }
+        },
+      );
+    }
+
     const deleteWatcher = vscode.workspace.onDidDeleteFiles((event) => {
       for (const uri of event.files) {
-        if (this.isFileUri(uri)) {
-          this.remove(uri);
+        if (isFileUri(uri) || isNotebookFileUri(uri)) {
+          removeFile(this.openFiles, uri);
         }
       }
       this.fireWithDebounce();
@@ -59,12 +142,12 @@ export class OpenFilesManager {
 
     const renameWatcher = vscode.workspace.onDidRenameFiles((event) => {
       for (const { oldUri, newUri } of event.files) {
-        if (this.isFileUri(oldUri)) {
-          if (this.isFileUri(newUri)) {
-            this.rename(oldUri, newUri);
+        if (isFileUri(oldUri) || isNotebookFileUri(oldUri)) {
+          if (isFileUri(newUri) || isNotebookFileUri(newUri)) {
+            renameFile(this.openFiles, oldUri, newUri);
           } else {
             // The file was renamed to a non-file URI, so we should remove it.
-            this.remove(oldUri);
+            removeFile(this.openFiles, oldUri);
           }
         }
       }
@@ -79,87 +162,37 @@ export class OpenFilesManager {
       renameWatcher,
     );
 
+    // Conditionally add notebook-specific watchers if they were created
+    if (notebookCellSelectionWatcher) {
+      context.subscriptions.push(notebookCellSelectionWatcher);
+    }
+
+    if (notebookCloseWatcher) {
+      context.subscriptions.push(notebookCloseWatcher);
+    }
+
+    if (notebookFocusWatcher) {
+      context.subscriptions.push(notebookFocusWatcher);
+    }
+
     // Just add current active file on start-up.
     if (
       vscode.window.activeTextEditor &&
-      this.isFileUri(vscode.window.activeTextEditor.document.uri)
+      isFileUri(vscode.window.activeTextEditor.document.uri)
     ) {
-      this.addOrMoveToFront(vscode.window.activeTextEditor);
-    }
-  }
-
-  private isFileUri(uri: vscode.Uri): boolean {
-    return uri.scheme === 'file';
-  }
-
-  private addOrMoveToFront(editor: vscode.TextEditor) {
-    // Deactivate previous active file
-    const currentActive = this.openFiles.find((f) => f.isActive);
-    if (currentActive) {
-      currentActive.isActive = false;
-      currentActive.cursor = undefined;
-      currentActive.selectedText = undefined;
+      addOrMoveToFront(this.openFiles, vscode.window.activeTextEditor);
     }
 
-    // Remove if it exists
-    const index = this.openFiles.findIndex(
-      (f) => f.path === editor.document.uri.fsPath,
-    );
-    if (index !== -1) {
-      this.openFiles.splice(index, 1);
+    // Also add current active notebook if applicable and the API is available
+    if (
+      vscode.window.activeNotebookEditor &&
+      isNotebookFileUri(vscode.window.activeNotebookEditor.notebook.uri)
+    ) {
+      addOrMoveToFrontNotebook(
+        this.openFiles,
+        vscode.window.activeNotebookEditor,
+      );
     }
-
-    // Add to the front as active
-    this.openFiles.unshift({
-      path: editor.document.uri.fsPath,
-      timestamp: Date.now(),
-      isActive: true,
-    });
-
-    // Enforce max length
-    if (this.openFiles.length > MAX_FILES) {
-      this.openFiles.pop();
-    }
-
-    this.updateActiveContext(editor);
-  }
-
-  private remove(uri: vscode.Uri) {
-    const index = this.openFiles.findIndex((f) => f.path === uri.fsPath);
-    if (index !== -1) {
-      this.openFiles.splice(index, 1);
-    }
-  }
-
-  private rename(oldUri: vscode.Uri, newUri: vscode.Uri) {
-    const index = this.openFiles.findIndex((f) => f.path === oldUri.fsPath);
-    if (index !== -1) {
-      this.openFiles[index].path = newUri.fsPath;
-    }
-  }
-
-  private updateActiveContext(editor: vscode.TextEditor) {
-    const file = this.openFiles.find(
-      (f) => f.path === editor.document.uri.fsPath,
-    );
-    if (!file || !file.isActive) {
-      return;
-    }
-
-    file.cursor = editor.selection.active
-      ? {
-          line: editor.selection.active.line + 1,
-          character: editor.selection.active.character,
-        }
-      : undefined;
-
-    let selectedText: string | undefined =
-      editor.document.getText(editor.selection) || undefined;
-    if (selectedText && selectedText.length > MAX_SELECTED_TEXT_LENGTH) {
-      selectedText =
-        selectedText.substring(0, MAX_SELECTED_TEXT_LENGTH) + '... [TRUNCATED]';
-    }
-    file.selectedText = selectedText;
   }
 
   private fireWithDebounce() {
