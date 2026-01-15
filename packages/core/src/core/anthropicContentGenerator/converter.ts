@@ -29,14 +29,27 @@ import {
 type AnthropicMessageParam = Anthropic.MessageParam;
 type AnthropicToolParam = Anthropic.Tool;
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
+type AnthropicTextBlockParam = Anthropic.TextBlockParam;
+type AnthropicImageBlockParam = Anthropic.ImageBlockParam;
 
 type ThoughtPart = { text: string; signature?: string };
+
+interface MediaPart {
+  type: 'image' | 'audio' | 'file';
+  mimeType: string;
+  data: string;
+}
+
+interface FunctionResponseWithMedia {
+  response: FunctionResponse;
+  mediaParts: MediaPart[];
+}
 
 interface ParsedParts {
   thoughtParts: ThoughtPart[];
   contentParts: string[];
   functionCalls: FunctionCall[];
-  functionResponses: FunctionResponse[];
+  functionResponsesWithMedia: FunctionResponseWithMedia[];
 }
 
 export class AnthropicContentConverter {
@@ -231,18 +244,65 @@ export class AnthropicContentConverter {
 
     const parsed = this.parseParts(content.parts || []);
 
-    if (parsed.functionResponses.length > 0) {
-      for (const response of parsed.functionResponses) {
-        messages.push({
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: response.id || '',
-              content: this.extractFunctionResponseContent(response.response),
-            },
-          ],
-        });
+    if (parsed.functionResponsesWithMedia.length > 0) {
+      for (const { response, mediaParts } of parsed.functionResponsesWithMedia) {
+        const textContent = this.extractFunctionResponseContent(
+          response.response,
+        );
+
+        // Filter to only image types (Anthropic supports image/jpeg, image/png, image/gif, image/webp)
+        const imageParts = mediaParts.filter((part) => part.type === 'image');
+
+        // If there are image parts for this specific tool result, include them
+        if (imageParts.length > 0) {
+          const contentBlocks: Array<
+            AnthropicTextBlockParam | AnthropicImageBlockParam
+          > = [];
+
+          // Add text content first
+          if (textContent) {
+            contentBlocks.push({ type: 'text', text: textContent });
+          }
+
+          // Add image content blocks (Claude API format)
+          for (const imagePart of imageParts) {
+            contentBlocks.push({
+              type: 'image',
+              source: {
+                type: 'base64',
+                media_type: imagePart.mimeType as
+                  | 'image/jpeg'
+                  | 'image/png'
+                  | 'image/gif'
+                  | 'image/webp',
+                data: imagePart.data,
+              },
+            });
+          }
+
+          messages.push({
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: response.id || '',
+                content: contentBlocks,
+              },
+            ],
+          });
+        } else {
+          // No images, use simple string content
+          messages.push({
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: response.id || '',
+                content: textContent,
+              },
+            ],
+          });
+        }
       }
       return;
     }
@@ -265,7 +325,7 @@ export class AnthropicContentConverter {
           type: 'tool_use',
           id: call.id || `tool_${index}`,
           name: call.name || '',
-          input: (call.args as Record<string, unknown>) || {},
+          input: this.safeInputToArgs(call.args),
         }),
       );
 
@@ -287,16 +347,16 @@ export class AnthropicContentConverter {
     const thinkingBlocks: AnthropicContentBlockParam[] =
       role === 'assistant'
         ? parsed.thoughtParts.map((part) => {
-            const thinkingBlock: unknown = {
-              type: 'thinking',
-              thinking: part.text,
-            };
-            if (part.signature) {
-              (thinkingBlock as { signature?: string }).signature =
-                part.signature;
-            }
-            return thinkingBlock as AnthropicContentBlockParam;
-          })
+          const thinkingBlock: unknown = {
+            type: 'thinking',
+            thinking: part.text,
+          };
+          if (part.signature) {
+            (thinkingBlock as { signature?: string }).signature =
+              part.signature;
+          }
+          return thinkingBlock as AnthropicContentBlockParam;
+        })
         : [];
     const textBlocks: AnthropicContentBlockParam[] = [
       ...thinkingBlocks,
@@ -314,7 +374,10 @@ export class AnthropicContentConverter {
     const thoughtParts: ThoughtPart[] = [];
     const contentParts: string[] = [];
     const functionCalls: FunctionCall[] = [];
-    const functionResponses: FunctionResponse[] = [];
+    const functionResponsesWithMedia: FunctionResponseWithMedia[] = [];
+
+    // Track the current functionResponse to associate inlineData with it
+    let currentFunctionResponse: FunctionResponseWithMedia | null = null;
 
     for (const part of parts) {
       if (typeof part === 'string') {
@@ -330,14 +393,31 @@ export class AnthropicContentConverter {
           text: part.text || '',
           signature:
             'thoughtSignature' in part &&
-            typeof part.thoughtSignature === 'string'
+              typeof part.thoughtSignature === 'string'
               ? part.thoughtSignature
               : undefined,
         });
       } else if ('functionCall' in part && part.functionCall) {
         functionCalls.push(part.functionCall);
       } else if ('functionResponse' in part && part.functionResponse) {
-        functionResponses.push(part.functionResponse);
+        // Start a new functionResponse entry
+        currentFunctionResponse = {
+          response: part.functionResponse,
+          mediaParts: [],
+        };
+        functionResponsesWithMedia.push(currentFunctionResponse);
+      } else if ('inlineData' in part && part.inlineData) {
+        // Collect all media types (like OpenAI converter)
+        // Filtering to supported types happens when sending
+        const inlineData = part.inlineData;
+        if (inlineData.mimeType && inlineData.data && currentFunctionResponse) {
+          const mediaType = this.getMediaType(inlineData.mimeType);
+          currentFunctionResponse.mediaParts.push({
+            type: mediaType,
+            mimeType: inlineData.mimeType,
+            data: inlineData.data,
+          });
+        }
       }
     }
 
@@ -345,8 +425,17 @@ export class AnthropicContentConverter {
       thoughtParts,
       contentParts,
       functionCalls,
-      functionResponses,
+      functionResponsesWithMedia,
     };
+  }
+
+  /**
+   * Determine media type from MIME type (same as OpenAI converter)
+   */
+  private getMediaType(mimeType: string): 'image' | 'audio' | 'file' {
+    if (mimeType.startsWith('image/')) return 'image';
+    if (mimeType.startsWith('audio/')) return 'audio';
+    return 'file';
   }
 
   private extractTextFromContentUnion(contentUnion: unknown): string {

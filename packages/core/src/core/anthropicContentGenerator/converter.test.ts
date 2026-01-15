@@ -208,6 +208,179 @@ describe('AnthropicContentConverter', () => {
         ],
       });
     });
+
+    it('converts function response with inlineData image parts into tool_result with images', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-1',
+                  name: 'Read',
+                  response: { output: 'Image content' },
+                },
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: 'base64encodeddata',
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'call-1',
+              content: [
+                { type: 'text', text: 'Image content' },
+                {
+                  type: 'image',
+                  source: {
+                    type: 'base64',
+                    media_type: 'image/png',
+                    data: 'base64encodeddata',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('ignores non-image inlineData like PDF (only image types are supported by Anthropic)', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-1',
+                  name: 'Read',
+                  response: { output: 'PDF content' },
+                },
+              },
+              {
+                inlineData: {
+                  mimeType: 'application/pdf',
+                  data: 'pdfbase64data',
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      // PDF should be ignored, only text content returned
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'call-1',
+              content: 'PDF content',
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('associates each image with its preceding functionResponse', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              // Tool 1 with image 1
+              {
+                functionResponse: {
+                  id: 'call-1',
+                  name: 'Read',
+                  response: { output: 'File 1' },
+                },
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/png',
+                  data: 'image1data',
+                },
+              },
+              // Tool 2 with image 2
+              {
+                functionResponse: {
+                  id: 'call-2',
+                  name: 'Read',
+                  response: { output: 'File 2' },
+                },
+              },
+              {
+                inlineData: {
+                  mimeType: 'image/jpeg',
+                  data: 'image2data',
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      // Each tool_result should only have its own image, not all images
+      expect(messages).toHaveLength(2);
+      expect(messages[0]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-1',
+            content: [
+              { type: 'text', text: 'File 1' },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/png',
+                  data: 'image1data',
+                },
+              },
+            ],
+          },
+        ],
+      });
+      expect(messages[1]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-2',
+            content: [
+              { type: 'text', text: 'File 2' },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/jpeg',
+                  data: 'image2data',
+                },
+              },
+            ],
+          },
+        ],
+      });
+    });
   });
 
   describe('convertGeminiToolsToAnthropic', () => {
