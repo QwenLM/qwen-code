@@ -30807,9 +30807,7 @@ function il() {
     [i, a] = (0, _.useState)(null),
     o = (0, _.useRef)(null),
     s = (0, _.useRef)(null),
-    c = (0, _.useRef)(null),
-    l = (0, _.useRef)(null),
-    u = (0, _.useRef)(null);
+    c = (0, _.useRef)(null);
   ((0, _.useEffect)(() => {
     (async () => {
       try {
@@ -30826,12 +30824,12 @@ function il() {
   }, []),
     (0, _.useEffect)(() => {
       if (!e || !o.current) return;
-      c.current && c.current.destroy();
+      s.current && s.current.destroy();
       let t = Array.from({ length: 24 }, (e, t) => `${t}:00`),
         n = t.map((t, n) => e.activeHours[n] || 0),
         r = o.current.getContext(`2d`);
       r &&
-        (c.current = new Uo(r, {
+        (s.current = new Uo(r, {
           type: `bar`,
           data: {
             labels: t,
@@ -30853,59 +30851,14 @@ function il() {
             plugins: { legend: { display: !1 } },
           },
         }));
-    }, [e]),
-    (0, _.useEffect)(() => {
-      if (!e || !s.current) return;
-      l.current && l.current.destroy();
-      let t = Object.keys(e.tokenUsage).slice(-15),
-        n = t.map((t) => e.tokenUsage[t]?.input || 0),
-        r = t.map((t) => e.tokenUsage[t]?.output || 0),
-        i = t.map((t) => e.tokenUsage[t]?.total || 0),
-        a = s.current.getContext(`2d`);
-      a &&
-        (l.current = new Uo(a, {
-          type: `line`,
-          data: {
-            labels: t,
-            datasets: [
-              {
-                label: `Input Tokens`,
-                data: n,
-                borderColor: `#3498db`,
-                backgroundColor: `rgba(52, 152, 219, 0.1)`,
-                tension: 0.1,
-              },
-              {
-                label: `Output Tokens`,
-                data: r,
-                borderColor: `#2ecc71`,
-                backgroundColor: `rgba(46, 204, 113, 0.1)`,
-                tension: 0.1,
-              },
-              {
-                label: `Total Tokens`,
-                data: i,
-                borderColor: `#9b59b6`,
-                backgroundColor: `rgba(155, 89, 182, 0.1)`,
-                tension: 0.1,
-              },
-            ],
-          },
-          options: {
-            responsive: !0,
-            maintainAspectRatio: !1,
-            plugins: { title: { display: !0, text: `Token Usage Over Time` } },
-            scales: { y: { beginAtZero: !0 } },
-          },
-        }));
     }, [e]));
-  let d = async () => {
-    if (u.current)
+  let l = async () => {
+    if (c.current)
       try {
         let e = document.getElementById(`export-btn`);
         e.style.display = `none`;
         let t = (
-            await (0, rl.default)(u.current, {
+            await (0, rl.default)(c.current, {
               scale: 2,
               useCORS: !0,
               logging: !1,
@@ -30955,12 +30908,12 @@ function il() {
         ],
       }),
     });
-  let f = Object.entries(e.heatmap).map(([e, t]) => ({ date: e, count: t })),
-    p = `glass-card p-6`,
-    m = `text-lg font-semibold tracking-tight text-slate-900`;
+  let u = Object.entries(e.heatmap).map(([e, t]) => ({ date: e, count: t })),
+    d = `glass-card p-6`,
+    f = `text-lg font-semibold tracking-tight text-slate-900`;
   return (0, J.jsx)(`div`, {
     className: `min-h-screen`,
-    ref: u,
+    ref: c,
     children: (0, J.jsxs)(`div`, {
       className: `mx-auto max-w-6xl px-6 py-10 md:py-12`,
       children: [
@@ -30984,68 +30937,44 @@ function il() {
         (0, J.jsxs)(`div`, {
           className: `grid gap-4 md:grid-cols-3 md:gap-6`,
           children: [
-            (0, J.jsxs)(`div`, {
-              className: `${p} h-full space-y-4`,
-              children: [
-                (0, J.jsxs)(`div`, {
-                  className: `flex items-start justify-between`,
-                  children: [
-                    (0, J.jsxs)(`div`, {
-                      children: [
-                        (0, J.jsx)(`p`, {
-                          className: `text-sm font-medium text-slate-500`,
-                          children: `Current Streak`,
-                        }),
-                        (0, J.jsxs)(`p`, {
-                          className: `mt-1 text-4xl font-bold text-slate-900`,
-                          children: [
-                            e.currentStreak,
-                            (0, J.jsx)(`span`, {
-                              className: `ml-2 text-base font-semibold text-slate-500`,
-                              children: `days`,
-                            }),
-                          ],
-                        }),
-                      ],
-                    }),
-                    (0, J.jsxs)(`span`, {
-                      className: `rounded-full bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700`,
-                      children: [`Longest `, e.longestStreak, `d`],
-                    }),
-                  ],
-                }),
-                (0, J.jsxs)(`div`, {
-                  className: `rounded-xl bg-slate-900 px-4 py-3 text-white`,
-                  children: [
-                    (0, J.jsx)(`div`, {
-                      className: `text-sm text-slate-200`,
-                      children: `Longest work session`,
-                    }),
-                    (0, J.jsxs)(`div`, {
-                      className: `mt-1 flex items-baseline gap-2`,
-                      children: [
-                        (0, J.jsx)(`span`, {
-                          className: `text-2xl font-semibold`,
-                          children: e.longestWorkDuration,
-                        }),
-                        (0, J.jsx)(`span`, {
-                          className: `text-sm text-slate-300`,
-                          children: `minutes`,
-                        }),
-                      ],
-                    }),
-                  ],
-                }),
-              ],
+            (0, J.jsx)(`div`, {
+              className: `${d} h-full`,
+              children: (0, J.jsxs)(`div`, {
+                className: `flex items-start justify-between`,
+                children: [
+                  (0, J.jsxs)(`div`, {
+                    children: [
+                      (0, J.jsx)(`p`, {
+                        className: `text-sm font-medium text-slate-500`,
+                        children: `Current Streak`,
+                      }),
+                      (0, J.jsxs)(`p`, {
+                        className: `mt-1 text-4xl font-bold text-slate-900`,
+                        children: [
+                          e.currentStreak,
+                          (0, J.jsx)(`span`, {
+                            className: `ml-2 text-base font-semibold text-slate-500`,
+                            children: `days`,
+                          }),
+                        ],
+                      }),
+                    ],
+                  }),
+                  (0, J.jsxs)(`span`, {
+                    className: `rounded-full bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700`,
+                    children: [`Longest `, e.longestStreak, `d`],
+                  }),
+                ],
+              }),
             }),
             (0, J.jsxs)(`div`, {
-              className: `${p} h-full`,
+              className: `${d} h-full`,
               children: [
                 (0, J.jsxs)(`div`, {
                   className: `flex items-center justify-between`,
                   children: [
                     (0, J.jsx)(`h3`, {
-                      className: m,
+                      className: f,
                       children: `Active Hours`,
                     }),
                     (0, J.jsx)(`span`, {
@@ -31061,9 +30990,9 @@ function il() {
               ],
             }),
             (0, J.jsxs)(`div`, {
-              className: `${p} h-full space-y-3`,
+              className: `${d} h-full space-y-3`,
               children: [
-                (0, J.jsx)(`h3`, { className: m, children: `Work Session` }),
+                (0, J.jsx)(`h3`, { className: f, children: `Work Session` }),
                 (0, J.jsxs)(`div`, {
                   className: `grid grid-cols-2 gap-3 text-sm text-slate-700`,
                   children: [
@@ -31113,13 +31042,13 @@ function il() {
           ],
         }),
         (0, J.jsxs)(`div`, {
-          className: `${p} mt-4 space-y-4 md:mt-6`,
+          className: `${d} mt-4 space-y-4 md:mt-6`,
           children: [
             (0, J.jsxs)(`div`, {
               className: `flex items-center justify-between`,
               children: [
                 (0, J.jsx)(`h3`, {
-                  className: m,
+                  className: f,
                   children: `Activity Heatmap`,
                 }),
                 (0, J.jsx)(`span`, {
@@ -31133,7 +31062,7 @@ function il() {
               children: (0, J.jsx)(`div`, {
                 className: `min-w-[720px] rounded-xl border border-slate-100 bg-white/70 p-4 shadow-inner shadow-slate-100`,
                 children: (0, J.jsx)(nl, {
-                  value: f,
+                  value: u,
                   width: 1e3,
                   style: { color: `#0f172a` },
                   startDate: new Date(
@@ -31155,32 +31084,72 @@ function il() {
             }),
           ],
         }),
-        (0, J.jsxs)(`div`, {
-          className: `${p} mt-4 space-y-4 md:mt-6`,
-          children: [
-            (0, J.jsxs)(`div`, {
-              className: `flex items-center justify-between`,
-              children: [
-                (0, J.jsx)(`h3`, { className: m, children: `Token Usage` }),
-                (0, J.jsx)(`span`, {
-                  className: `text-xs font-semibold text-slate-500`,
-                  children: `Recent 15 days`,
-                }),
-              ],
-            }),
-            (0, J.jsx)(`div`, {
-              className: `h-80 w-full`,
-              children: (0, J.jsx)(`canvas`, { ref: s }),
-            }),
-          ],
+        (0, J.jsx)(`div`, {
+          className: `${d} mt-4 md:mt-6`,
+          children: (0, J.jsxs)(`div`, {
+            className: `space-y-3`,
+            children: [
+              (0, J.jsx)(`h3`, { className: f, children: `Token Usage` }),
+              (0, J.jsxs)(`div`, {
+                className: `grid grid-cols-3 gap-3`,
+                children: [
+                  (0, J.jsxs)(`div`, {
+                    className: `rounded-xl bg-slate-50 px-4 py-3`,
+                    children: [
+                      (0, J.jsx)(`p`, {
+                        className: `text-xs font-semibold uppercase tracking-wide text-slate-500`,
+                        children: `Input`,
+                      }),
+                      (0, J.jsx)(`p`, {
+                        className: `mt-1 text-2xl font-bold text-slate-900`,
+                        children: Object.values(e.tokenUsage)
+                          .reduce((e, t) => e + t.input, 0)
+                          .toLocaleString(),
+                      }),
+                    ],
+                  }),
+                  (0, J.jsxs)(`div`, {
+                    className: `rounded-xl bg-slate-50 px-4 py-3`,
+                    children: [
+                      (0, J.jsx)(`p`, {
+                        className: `text-xs font-semibold uppercase tracking-wide text-slate-500`,
+                        children: `Output`,
+                      }),
+                      (0, J.jsx)(`p`, {
+                        className: `mt-1 text-2xl font-bold text-slate-900`,
+                        children: Object.values(e.tokenUsage)
+                          .reduce((e, t) => e + t.output, 0)
+                          .toLocaleString(),
+                      }),
+                    ],
+                  }),
+                  (0, J.jsxs)(`div`, {
+                    className: `rounded-xl bg-slate-50 px-4 py-3`,
+                    children: [
+                      (0, J.jsx)(`p`, {
+                        className: `text-xs font-semibold uppercase tracking-wide text-slate-500`,
+                        children: `Total`,
+                      }),
+                      (0, J.jsx)(`p`, {
+                        className: `mt-1 text-2xl font-bold text-slate-900`,
+                        children: Object.values(e.tokenUsage)
+                          .reduce((e, t) => e + t.total, 0)
+                          .toLocaleString(),
+                      }),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
         }),
         (0, J.jsxs)(`div`, {
-          className: `${p} mt-4 space-y-4 md:mt-6`,
+          className: `${d} mt-4 space-y-4 md:mt-6`,
           children: [
             (0, J.jsxs)(`div`, {
               className: `flex items-center justify-between`,
               children: [
-                (0, J.jsx)(`h3`, { className: m, children: `Achievements` }),
+                (0, J.jsx)(`h3`, { className: f, children: `Achievements` }),
                 (0, J.jsxs)(`span`, {
                   className: `text-xs font-semibold text-slate-500`,
                   children: [e.achievements.length, ` total`],
@@ -31221,7 +31190,7 @@ function il() {
           children: (0, J.jsxs)(`button`, {
             id: `export-btn`,
             className: `group inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-soft transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 hover:-translate-y-[1px] hover:shadow-lg active:translate-y-[1px]`,
-            onClick: d,
+            onClick: l,
             children: [
               `Export as Image`,
               (0, J.jsx)(`span`, {
