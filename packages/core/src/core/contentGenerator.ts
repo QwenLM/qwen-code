@@ -58,6 +58,7 @@ export enum AuthType {
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
   USE_ANTHROPIC = 'anthropic',
+  USE_OLLAMA = 'ollama',
 }
 
 export type ContentGeneratorConfig = {
@@ -206,6 +207,20 @@ export function validateModelConfig(
     return { valid: true, errors: [] };
   }
 
+  // Ollama is a local service that doesn't require API keys
+  if (config.authType === AuthType.USE_OLLAMA) {
+    // Only require model for Ollama
+    if (!config.model) {
+      if (isStrictModelProvider) {
+        errors.push(new StrictMissingModelIdError(config.authType));
+      } else {
+        const envKey = getDefaultModelEnvVar(config.authType);
+        errors.push(new MissingModelError({ authType: config.authType, envKey }));
+      }
+    }
+    return { valid: errors.length === 0, errors };
+  }
+
   // API key is required for all other auth types
   if (!config.apiKey) {
     if (isStrictModelProvider) {
@@ -287,6 +302,12 @@ export async function createContentGenerator(
   let baseGenerator: ContentGenerator;
 
   if (authType === AuthType.USE_OPENAI) {
+    const { createOpenAIContentGenerator } = await import(
+      './openaiContentGenerator/index.js'
+    );
+    baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+  } else if (authType === AuthType.USE_OLLAMA) {
+    // Ollama uses OpenAI-compatible API, so we can reuse the OpenAI generator
     const { createOpenAIContentGenerator } = await import(
       './openaiContentGenerator/index.js'
     );

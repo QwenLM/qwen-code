@@ -169,6 +169,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
+      AuthType.USE_OLLAMA,
     ];
 
     // Filter to only include authTypes that have models

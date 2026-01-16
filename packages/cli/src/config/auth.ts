@@ -219,5 +219,23 @@ export function validateAuthMethod(
     return null;
   }
 
+  if (authMethod === AuthType.USE_OLLAMA) {
+    // Ollama is a local service that doesn't require API keys
+    // Only validate baseUrl if configured
+    const modelProviders = settings.merged.modelProviders as
+      | ModelProvidersConfig
+      | undefined;
+    const modelId =
+      config?.modelsConfig.getModel() ?? settings.merged.model?.name;
+    const modelConfig = findModelConfig(modelProviders, authMethod, modelId);
+
+    if (modelConfig && !modelConfig.baseUrl) {
+      return t(
+        'Ollama provider missing required baseUrl in modelProviders[].baseUrl.',
+      );
+    }
+    return null;
+  }
+
   return t('Invalid auth method selected.');
 }

@@ -8,6 +8,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
+import { AuthType } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import {
@@ -15,6 +16,7 @@ import {
   DeepSeekOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   OpenRouterOpenAICompatibleProvider,
+  OllamaOpenAICompatibleProvider,
   type OpenAICompatibleProvider,
   DefaultOpenAICompatibleProvider,
 } from './provider/index.js';
@@ -55,6 +57,14 @@ export function determineProvider(
 ): OpenAICompatibleProvider {
   const config =
     contentGeneratorConfig || cliConfig.getContentGeneratorConfig();
+
+  // Check for Ollama provider (by authType)
+  if (config.authType === AuthType.USE_OLLAMA) {
+    return new OllamaOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
 
   // Check for DashScope provider
   if (DashScopeOpenAICompatibleProvider.isDashScopeProvider(config)) {

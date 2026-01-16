@@ -1,0 +1,30 @@
+{
+  "modelProviders": {
+    "ollama": [
+      {
+        "id": "mistral",
+        "name": "Mistral",
+        "description": "Mistral 7B model from Ollama",
+        "baseUrl": "http://localhost:11434"
+      },
+      {
+        "id": "llama2",
+        "name": "Llama 2",
+        "description": "Llama 2 model from Ollama",
+        "baseUrl": "http://localhost:11434"
+      },
+      {
+        "id": "neural-chat",
+        "name": "Neural Chat",
+        "description": "Neural Chat model from Ollama",
+        "baseUrl": "http://localhost:11434"
+      },
+      {
+        "id": "phi",
+        "name": "Phi",
+        "description": "Phi model from Ollama",
+        "baseUrl": "http://localhost:11434"
+      }
+    ]
+  }
+}

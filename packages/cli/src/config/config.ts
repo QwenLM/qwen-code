@@ -990,6 +990,11 @@ export async function loadCliConfig(
   }
 
   const modelProvidersConfig = settings.modelProviders;
+  
+  if (debugMode) {
+    console.log('[DEBUG] modelProvidersConfig:', JSON.stringify(modelProvidersConfig, null, 2));
+    console.log('[DEBUG] settings keys:', Object.keys(settings));
+  }
 
   return new Config({
     sessionId,

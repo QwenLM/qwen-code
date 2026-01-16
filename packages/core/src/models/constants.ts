@@ -83,6 +83,11 @@ export const AUTH_ENV_MAPPINGS = {
     baseUrl: [],
     model: [],
   },
+  ollama: {
+    apiKey: [],
+    baseUrl: ['OLLAMA_BASE_URL'],
+    model: ['OLLAMA_MODEL'],
+  },
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {

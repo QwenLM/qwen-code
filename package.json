@@ -2,7 +2,11 @@
   "name": "@qwen-code/qwen-code",
   "version": "0.7.1",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.17.0"
+  },
+  "volta": {
+    "node": "22.9.0",
+    "npm": "11.4.2"
   },
   "type": "module",
   "workspaces": [
