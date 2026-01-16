@@ -71,8 +71,14 @@ if (!BASE_DIR) {
   process.exit(1);
 }
 
+// Serve static assets from the views/assets directory
+app.use(
+  '/assets',
+  express.static(path.join(__dirname, 'insight-page', 'views', 'assets')),
+);
+
 app.get('/', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'index.html'));
+  res.sendFile(path.join(__dirname, 'insight-page', 'views', 'index.html'));
 });
 
 // API endpoint to get insight data
@@ -80,9 +86,6 @@ app.get('/api/insights', async (_req, res) => {
   try {
     debugLog('Received request for insights data');
     const insights = await generateInsights(BASE_DIR);
-    debugLog(
-      `Returning insights data, heatmap size: ${Object.keys(insights.heatmap).length}`,
-    );
     res.json(insights);
   } catch (error) {
     debugLog(`Error generating insights: ${error}`);
@@ -131,9 +134,6 @@ async function generateInsights(baseDir: string): Promise<InsightData> {
         for (const file of chatFiles) {
           const filePath = path.join(chatsDir, file);
           const records = await read<ChatRecord>(filePath);
-          debugLog(
-            `Processing file: ${filePath}, records count: ${records.length}`,
-          );
 
           // Process each record
           for (const record of records) {

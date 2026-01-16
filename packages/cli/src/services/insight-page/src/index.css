@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 text-slate-900 antialiased;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply rounded-2xl border border-slate-200 bg-white/80 shadow-soft backdrop-blur;
+  }
+}
