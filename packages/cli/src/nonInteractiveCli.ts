@@ -105,38 +105,60 @@ function formatToolHeader(
 ): string {
   // For Shell tool, show the command
   if (
-    (toolName === 'Shell' ||
-      toolName === 'run_in_terminal' ||
-      toolName === 'run_shell_command') &&
+    (toolName === 'run_shell_command' || toolName === 'Shell') &&
     typeof args['command'] === 'string'
   ) {
     return `${toolName} ${args['command']}\n`;
   }
 
   // For Read tool, show the file path
-  if (toolName === 'Read' && typeof args['file_path'] === 'string') {
+  if (
+    (toolName === 'read_file' || toolName === 'Read') &&
+    typeof args['file_path'] === 'string'
+  ) {
     return `${toolName} ${args['file_path']}\n`;
   }
 
-  // For Edit/Write tools, show the file path
+  // For Edit tool, show the file path
   if (
-    (toolName === 'Edit' || toolName === 'Write') &&
+    (toolName === 'edit' || toolName === 'Edit') &&
+    typeof args['file_path'] === 'string'
+  ) {
+    return `${toolName} ${args['file_path']}\n`;
+  }
+
+  // For Write tool, show the file path
+  if (
+    (toolName === 'write_file' || toolName === 'Write') &&
     typeof args['file_path'] === 'string'
   ) {
     return `${toolName} ${args['file_path']}\n`;
   }
 
   // For Glob tool, show the pattern
-  if (toolName === 'Glob' && typeof args['pattern'] === 'string') {
+  if (
+    (toolName === 'glob' || toolName === 'Glob') &&
+    typeof args['pattern'] === 'string'
+  ) {
     return `${toolName} ${args['pattern']}\n`;
   }
 
   // For Grep tool, show the pattern
-  if (toolName === 'Grep' && typeof args['pattern'] === 'string') {
+  if (
+    (toolName === 'grep_search' || toolName === 'Grep') &&
+    typeof args['pattern'] === 'string'
+  ) {
     return `${toolName} ${args['pattern']}\n`;
   }
 
-  // For other tools, just show the tool name
+  // Fallback: show tool name with first string arg if available
+  const firstStringArg = Object.values(args).find(
+    (v) => typeof v === 'string',
+  );
+  if (typeof firstStringArg === 'string' && firstStringArg.length < 200) {
+    return `${toolName} ${firstStringArg}\n`;
+  }
+
   return `${toolName}\n`;
 }
 
