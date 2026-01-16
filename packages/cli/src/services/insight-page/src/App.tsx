@@ -57,9 +57,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const hourChartRef = useRef<HTMLCanvasElement>(null);
-  const tokenChartRef = useRef<HTMLCanvasElement>(null);
   const hourChartInstance = useRef<Chart | null>(null);
-  const tokenChartInstance = useRef<Chart | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Load insights data
@@ -126,75 +124,6 @@ function App() {
         plugins: {
           legend: {
             display: false,
-          },
-        },
-      } as ChartConfiguration['options'],
-    });
-  }, [insights]);
-
-  // Create token chart when insights change
-  useEffect(() => {
-    if (!insights || !tokenChartRef.current) return;
-
-    // Destroy existing chart if it exists
-    if (tokenChartInstance.current) {
-      tokenChartInstance.current.destroy();
-    }
-
-    const labels = Object.keys(insights.tokenUsage).slice(-15);
-    const inputData = labels.map(
-      (date) => insights.tokenUsage[date]?.input || 0,
-    );
-    const outputData = labels.map(
-      (date) => insights.tokenUsage[date]?.output || 0,
-    );
-    const totalData = labels.map(
-      (date) => insights.tokenUsage[date]?.total || 0,
-    );
-
-    const ctx = tokenChartRef.current.getContext('2d');
-    if (!ctx) return;
-
-    tokenChartInstance.current = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          {
-            label: 'Input Tokens',
-            data: inputData,
-            borderColor: '#3498db',
-            backgroundColor: 'rgba(52, 152, 219, 0.1)',
-            tension: 0.1,
-          },
-          {
-            label: 'Output Tokens',
-            data: outputData,
-            borderColor: '#2ecc71',
-            backgroundColor: 'rgba(46, 204, 113, 0.1)',
-            tension: 0.1,
-          },
-          {
-            label: 'Total Tokens',
-            data: totalData,
-            borderColor: '#9b59b6',
-            backgroundColor: 'rgba(155, 89, 182, 0.1)',
-            tension: 0.1,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          title: {
-            display: true,
-            text: 'Token Usage Over Time',
-          },
-        },
-        scales: {
-          y: {
-            beginAtZero: true,
           },
         },
       } as ChartConfiguration['options'],
@@ -284,7 +213,7 @@ function App() {
         </header>
 
         <div className="grid gap-4 md:grid-cols-3 md:gap-6">
-          <div className={`${cardClass} h-full space-y-4`}>
+          <div className={`${cardClass} h-full`}>
             <div className="flex items-start justify-between">
               <div>
                 <p className={captionClass}>Current Streak</p>
@@ -298,15 +227,6 @@ function App() {
               <span className="rounded-full bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
                 Longest {insights.longestStreak}d
               </span>
-            </div>
-            <div className="rounded-xl bg-slate-900 px-4 py-3 text-white">
-              <div className="text-sm text-slate-200">Longest work session</div>
-              <div className="mt-1 flex items-baseline gap-2">
-                <span className="text-2xl font-semibold">
-                  {insights.longestWorkDuration}
-                </span>
-                <span className="text-sm text-slate-300">minutes</span>
-              </div>
             </div>
           </div>
 
@@ -387,15 +307,41 @@ function App() {
           </div>
         </div>
 
-        <div className={`${cardClass} mt-4 space-y-4 md:mt-6`}>
-          <div className="flex items-center justify-between">
+        <div className={`${cardClass} mt-4 md:mt-6`}>
+          <div className="space-y-3">
             <h3 className={sectionTitleClass}>Token Usage</h3>
-            <span className="text-xs font-semibold text-slate-500">
-              Recent 15 days
-            </span>
-          </div>
-          <div className="h-80 w-full">
-            <canvas ref={tokenChartRef}></canvas>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-xl bg-slate-50 px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Input
+                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-900">
+                  {Object.values(insights.tokenUsage)
+                    .reduce((acc, usage) => acc + usage.input, 0)
+                    .toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-50 px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Output
+                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-900">
+                  {Object.values(insights.tokenUsage)
+                    .reduce((acc, usage) => acc + usage.output, 0)
+                    .toLocaleString()}
+                </p>
+              </div>
+              <div className="rounded-xl bg-slate-50 px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Total
+                </p>
+                <p className="mt-1 text-2xl font-bold text-slate-900">
+                  {Object.values(insights.tokenUsage)
+                    .reduce((acc, usage) => acc + usage.total, 0)
+                    .toLocaleString()}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 
