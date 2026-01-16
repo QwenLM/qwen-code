@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Qwen Code Insights</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+      body {
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        margin: 0;
+        padding: 20px;
+        background-color: #f5f7fa;
+        color: #333;
+      }
+      .container {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+      header {
+        text-align: center;
+        margin-bottom: 30px;
+      }
+      h1 {
+        color: #2c3e50;
+      }
+      .dashboard {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 20px;
+        margin-bottom: 30px;
+      }
+      .card {
+        background: white;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        padding: 20px;
+        text-align: center;
+      }
+      .card h3 {
+        margin-top: 0;
+        color: #3498db;
+      }
+      .streaks {
+        display: flex;
+        justify-content: space-around;
+        margin: 20px 0;
+      }
+      .streak-box {
+        text-align: center;
+      }
+      .streak-value {
+        font-size: 2em;
+        font-weight: bold;
+        color: #2ecc71;
+      }
+      .heatmap-container {
+        height: 300px;
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-around;
+        margin: 20px 0;
+        padding: 20px;
+        background: white;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      }
+      .day-bar {
+        width: 12px;
+        background: #3498db;
+        margin: 0 2px;
+        border-radius: 3px 3px 0 0;
+        position: relative;
+      }
+      .day-label {
+        position: absolute;
+        bottom: -20px;
+        left: 50%;
+        transform: translateX(-50%);
+        font-size: 10px;
+        white-space: nowrap;
+      }
+      .achievement {
+        background: #f8f9fa;
+        border-left: 4px solid #3498db;
+        padding: 10px;
+        margin: 10px 0;
+        border-radius: 0 4px 4px 0;
+      }
+      .token-chart-container {
+        height: 300px;
+      }
+      .export-btn {
+        display: block;
+        margin: 20px auto;
+        padding: 10px 20px;
+        background: #3498db;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 16px;
+      }
+      .export-btn:hover {
+        background: #2980b9;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header>
+        <h1>Qwen Code Insights</h1>
+        <p>Your personalized coding journey and patterns</p>
+      </header>
+
+      <div class="dashboard">
+        <div class="card">
+          <h3>Current Streak</h3>
+          <div class="streaks">
+            <div class="streak-box">
+              <div class="streak-value" id="current-streak">0</div>
+              <div>Days</div>
+            </div>
+            <div class="streak-box">
+              <div class="streak-value" id="longest-streak">0</div>
+              <div>Longest</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Active Hours</h3>
+          <canvas id="hourChart" width="400" height="200"></canvas>
+        </div>
+
+        <div class="card">
+          <h3>Work Session</h3>
+          <div>Longest: <span id="longest-work-duration">0</span> min</div>
+          <div>Date: <span id="longest-work-date">-</span></div>
+          <div>Last Active: <span id="latest-active-time">-</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Activity Heatmap</h3>
+        <div class="heatmap-container" id="heatmap-container">
+          <!-- Heatmap bars will be populated by JavaScript -->
+        </div>
+      </div>
+
+      <div class="card token-chart-container">
+        <h3>Token Usage</h3>
+        <canvas id="tokenChart"></canvas>
+      </div>
+
+      <div class="card">
+        <h3>Achievements</h3>
+        <div id="achievements-container">
+          <!-- Achievements will be populated by JavaScript -->
+        </div>
+      </div>
+
+      <button class="export-btn" id="export-btn">Export as Image</button>
+    </div>
+
+    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+    <script>
+      // Fetch insights data from API
+      async function loadInsights() {
+        try {
+          const response = await fetch('/api/insights');
+          const data = await response.json();
+
+          console.log('🚀 ~ loadInsights ~ data:', data);
+
+          updateDashboard(data);
+        } catch (error) {
+          console.error('Error loading insights:', error);
+          document.body.innerHTML =
+            '<div class="container"><h2>Error loading insights</h2><p>Please try again later.</p></div>';
+        }
+      }
+
+      function updateDashboard(data) {
+        // Update streaks
+        document.getElementById('current-streak').textContent =
+          data.currentStreak;
+        document.getElementById('longest-streak').textContent =
+          data.longestStreak;
+
+        // Update work session data
+        document.getElementById('longest-work-duration').textContent =
+          data.longestWorkDuration;
+        document.getElementById('longest-work-date').textContent =
+          data.longestWorkDate || '-';
+        document.getElementById('latest-active-time').textContent =
+          data.latestActiveTime || '-';
+
+        // Create heatmap
+        createHeatmap(data.heatmap);
+
+        // Create token usage chart
+        createTokenChart(data.tokenUsage);
+
+        // Create hour activity chart
+        createHourChart(data.activeHours);
+
+        // Display achievements
+        displayAchievements(data.achievements);
+      }
+
+      function createHeatmap(heatmapData) {
+        const container = document.getElementById('heatmap-container');
+        container.innerHTML = ''; // Clear existing content
+
+        // Get the last 30 days of data
+        const dates = Object.keys(heatmapData).sort().slice(-30);
+
+        // Calculate max value for scaling
+        const maxValue = Math.max(...Object.values(heatmapData));
+
+        dates.forEach((date) => {
+          const value = heatmapData[date] || 0;
+          const height = maxValue > 0 ? (value / maxValue) * 200 : 0;
+
+          const barContainer = document.createElement('div');
+          barContainer.style.position = 'relative';
+          barContainer.style.height = '250px';
+          barContainer.style.display = 'flex';
+          barContainer.style.alignItems = 'flex-end';
+
+          const bar = document.createElement('div');
+          bar.className = 'day-bar';
+          bar.style.height = `${height}px`;
+          // Color intensity based on activity
+          const intensity = value / maxValue;
+          const r = 52;
+          const g = Math.floor(152 - 152 * intensity);
+          const b = Math.floor(100 + 100 * intensity);
+          bar.style.backgroundColor = `rgb(${r}, ${g}, ${b})`;
+
+          const label = document.createElement('div');
+          label.className = 'day-label';
+          label.textContent = new Date(date).toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+          });
+
+          barContainer.appendChild(bar);
+          barContainer.appendChild(label);
+          container.appendChild(barContainer);
+        });
+      }
+
+      function createTokenChart(tokenData) {
+        const ctx = document.getElementById('tokenChart').getContext('2d');
+
+        // Prepare data for chart
+        const labels = Object.keys(tokenData).slice(-15); // Last 15 days
+        const inputData = labels.map((date) => tokenData[date]?.input || 0);
+        const outputData = labels.map((date) => tokenData[date]?.output || 0);
+        const totalData = labels.map((date) => tokenData[date]?.total || 0);
+
+        new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: 'Input Tokens',
+                data: inputData,
+                borderColor: '#3498db',
+                backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                tension: 0.1,
+              },
+              {
+                label: 'Output Tokens',
+                data: outputData,
+                borderColor: '#2ecc71',
+                backgroundColor: 'rgba(46, 204, 113, 0.1)',
+                tension: 0.1,
+              },
+              {
+                label: 'Total Tokens',
+                data: totalData,
+                borderColor: '#9b59b6',
+                backgroundColor: 'rgba(155, 89, 182, 0.1)',
+                tension: 0.1,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            plugins: {
+              title: {
+                display: true,
+                text: 'Token Usage Over Time',
+              },
+            },
+            scales: {
+              y: {
+                beginAtZero: true,
+              },
+            },
+          },
+        });
+      }
+
+      function createHourChart(hourData) {
+        const ctx = document.getElementById('hourChart').getContext('2d');
+
+        // Prepare data for chart - use all 24 hours
+        const labels = Array.from({ length: 24 }, (_, i) => `${i}:00`);
+        const data = labels.map((_, i) => hourData[i] || 0);
+
+        new Chart(ctx, {
+          type: 'bar',
+          data: {
+            labels: labels,
+            datasets: [
+              {
+                label: 'Activity per Hour',
+                data: data,
+                backgroundColor: 'rgba(52, 152, 219, 0.7)',
+                borderColor: 'rgba(52, 152, 219, 1)',
+                borderWidth: 1,
+              },
+            ],
+          },
+          options: {
+            indexAxis: 'y',
+            scales: {
+              x: {
+                beginAtZero: true,
+              },
+            },
+            plugins: {
+              legend: {
+                display: false,
+              },
+            },
+          },
+        });
+      }
+
+      function displayAchievements(achievements) {
+        const container = document.getElementById('achievements-container');
+
+        if (achievements.length === 0) {
+          container.innerHTML = '<p>No achievements yet. Keep coding!</p>';
+          return;
+        }
+
+        container.innerHTML = '';
+        achievements.forEach((achievement) => {
+          const achievementEl = document.createElement('div');
+          achievementEl.className = 'achievement';
+          achievementEl.innerHTML = `
+                    <strong>${achievement.name}</strong>
+                    <p>${achievement.description}</p>
+                `;
+          container.appendChild(achievementEl);
+        });
+      }
+
+      // Export functionality
+      document
+        .getElementById('export-btn')
+        .addEventListener('click', function () {
+          // Hide the button temporarily
+          const exportBtn = document.getElementById('export-btn');
+          exportBtn.style.display = 'none';
+
+          // Use html2canvas to capture the dashboard
+          html2canvas(document.querySelector('.container'), {
+            scale: 2, // Higher resolution
+            useCORS: true,
+            logging: false,
+          })
+            .then((canvas) => {
+              // Convert canvas to data URL
+              const imgData = canvas.toDataURL('image/png');
+
+              // Create download link
+              const link = document.createElement('a');
+              link.href = imgData;
+              link.download = `qwen-insights-${new Date().toISOString().slice(0, 10)}.png`;
+              link.click();
+
+              // Show the button again
+              exportBtn.style.display = 'block';
+            })
+            .catch((err) => {
+              console.error('Error capturing image:', err);
+              alert('Failed to export image. Please try again.');
+              exportBtn.style.display = 'block';
+            });
+        });
+
+      // Load insights when page loads
+      window.onload = loadInsights;
+    </script>
+  </body>
+</html>
