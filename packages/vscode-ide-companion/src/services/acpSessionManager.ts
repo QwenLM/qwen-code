@@ -19,6 +19,7 @@ import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { AGENT_METHODS } from '../constants/acpSchema.js';
 import type { PendingRequest } from '../types/connectionTypes.js';
 import type { ChildProcess } from 'child_process';
+import { isWindows } from '../utils/platform.js';
 
 /**
  * ACP Session Manager Class
@@ -102,7 +103,7 @@ export class AcpSessionManager {
   ): void {
     if (child?.stdin) {
       const jsonString = JSON.stringify(message);
-      const lineEnding = process.platform === 'win32' ? '\r\n' : '\n';
+      const lineEnding = isWindows ? '\r\n' : '\n';
       child.stdin.write(jsonString + lineEnding);
     }
   }

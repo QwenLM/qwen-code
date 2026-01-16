@@ -17,10 +17,24 @@ import {
 import { WebViewProvider } from './webview/WebViewProvider.js';
 import { registerNewCommands } from './commands/index.js';
 import { ReadonlyFileSystemProvider } from './services/readonlyFileSystemProvider.js';
+import { isWindows } from './utils/platform.js';
+import { execSync } from 'child_process';
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
 export const DIFF_SCHEME = 'qwen-diff';
+
+/**
+ * Check if Node.js is available in the system PATH
+ */
+function isNodeAvailable(): boolean {
+  try {
+    execSync(isWindows ? 'where node' : 'which node', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * IDE environments where the installation greeting is hidden.  In these
@@ -312,8 +326,27 @@ export async function activate(context: vscode.ExtensionContext) {
             'qwen-cli',
             'cli.js',
           ).fsPath;
-          const quote = (s: string) => `"${s.replaceAll('"', '\\"')}"`;
-          const qwenCmd = `${quote(process.execPath)} ${quote(cliEntry)}`;
+          const quote = (s: string) => `"${s.replace(/"/g, '\\"')}"`;
+
+          let qwenCmd: string;
+          if (isNodeAvailable()) {
+            // Prefer system Node.js
+            qwenCmd = `node ${quote(cliEntry)}`;
+          } else {
+            // Fallback to VS Code's bundled Node.js runtime
+            const execPath = process.execPath;
+            const baseCmd = `${quote(execPath)} ${quote(cliEntry)}`;
+            if (isWindows) {
+              // PowerShell requires & call operator for quoted paths
+              qwenCmd = `& ${baseCmd}`;
+            } else if (execPath.toLowerCase().includes('code helper')) {
+              // macOS Electron helper needs ELECTRON_RUN_AS_NODE=1
+              qwenCmd = `ELECTRON_RUN_AS_NODE=1 ${baseCmd}`;
+            } else {
+              qwenCmd = baseCmd;
+            }
+          }
+
           const terminal = vscode.window.createTerminal({
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
