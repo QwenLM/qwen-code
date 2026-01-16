@@ -26,6 +26,7 @@ export default tseslint.config(
       'dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
+      'packages/cli/src/services/insight-page/**',
     ],
   },
   eslint.configs.recommended,
