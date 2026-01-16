@@ -105,7 +105,9 @@ function formatToolHeader(
 ): string {
   // For Shell tool, show the command
   if (
-    (toolName === 'Shell' || toolName === 'run_in_terminal') &&
+    (toolName === 'Shell' ||
+      toolName === 'run_in_terminal' ||
+      toolName === 'run_shell_command') &&
     typeof args['command'] === 'string'
   ) {
     return `${toolName} ${args['command']}\n`;
