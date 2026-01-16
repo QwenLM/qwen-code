@@ -1967,7 +1967,7 @@ describe('runNonInteractive', () => {
     // Verify tool header is printed before tool output
     const calls = processStdoutSpy.mock.calls.map((call) => call[0]);
     const headerIndex = calls.findIndex(
-      (s) => typeof s === 'string' && s.includes('Shell find . -type f'),
+      (s) => typeof s === 'string' && s.includes('Shell: find . -type f'),
     );
     const outputIndex = calls.findIndex(
       (s) => typeof s === 'string' && s.includes('692'),
@@ -2030,7 +2030,7 @@ describe('runNonInteractive', () => {
 
     // Verify tool header includes file path
     expect(processStdoutSpy).toHaveBeenCalledWith(
-      'Read /path/to/file.txt\n',
+      'Read: /path/to/file.txt\n',
     );
   });
 
@@ -2091,7 +2091,7 @@ describe('runNonInteractive', () => {
     // In JSON mode, the plain text header should NOT appear
     const calls = processStdoutSpy.mock.calls.map((call) => call[0]);
     const hasPlainHeader = calls.some(
-      (s) => typeof s === 'string' && s === 'Shell echo hello\n',
+      (s) => typeof s === 'string' && s === 'Shell: echo hello\n',
     );
     expect(hasPlainHeader).toBe(false);
   });
