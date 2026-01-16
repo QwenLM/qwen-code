@@ -1905,4 +1905,194 @@ describe('runNonInteractive', () => {
     expect(processStdoutSpy).toHaveBeenCalledWith('npm@1.0.0 -> npm@2.0.0\n');
     expect(processStdoutSpy).toHaveBeenCalledWith('Dependencies checked');
   });
+
+  it('should print tool header before tool output in text mode for Shell tool', async () => {
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'Shell',
+        args: { command: 'find . -type f | wc -l' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-header',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, _request, _signal, options) => {
+        if (options?.outputUpdateHandler) {
+          options.outputUpdateHandler('tool-1', '692\n');
+        }
+        return {
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-1',
+                name: 'Shell',
+                response: { output: '692' },
+              },
+            },
+          ],
+        };
+      },
+    );
+
+    const firstCallEvents: ServerGeminiStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+      },
+    ];
+
+    const secondCallEvents: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Found 692 files' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
+      },
+    ];
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Count files',
+      'prompt-id-header',
+    );
+
+    // Verify tool header is printed before tool output
+    const calls = processStdoutSpy.mock.calls.map((call) => call[0]);
+    const headerIndex = calls.findIndex(
+      (s) => typeof s === 'string' && s.includes('Shell find . -type f'),
+    );
+    const outputIndex = calls.findIndex(
+      (s) => typeof s === 'string' && s.includes('692'),
+    );
+
+    expect(headerIndex).toBeGreaterThanOrEqual(0);
+    expect(outputIndex).toBeGreaterThan(headerIndex);
+  });
+
+  it('should print tool header for Read tool with file path', async () => {
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'Read',
+        args: { file_path: '/path/to/file.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-read',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-1',
+            name: 'Read',
+            response: { output: 'file contents' },
+          },
+        },
+      ],
+    });
+
+    const firstCallEvents: ServerGeminiStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+      },
+    ];
+
+    const secondCallEvents: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Here is the file' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
+      },
+    ];
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Read file',
+      'prompt-id-read',
+    );
+
+    // Verify tool header includes file path
+    expect(processStdoutSpy).toHaveBeenCalledWith(
+      'Read /path/to/file.txt\n',
+    );
+  });
+
+  it('should not print tool header in JSON output mode', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
+    setupMetricsMock();
+
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'Shell',
+        args: { command: 'echo hello' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-json',
+      },
+    };
+
+    mockCoreExecuteToolCall.mockResolvedValue({
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-1',
+            name: 'Shell',
+            response: { output: 'hello' },
+          },
+        },
+      ],
+    });
+
+    const firstCallEvents: ServerGeminiStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+      },
+    ];
+
+    const secondCallEvents: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Done' },
+      {
+        type: GeminiEventType.Finished,
+        value: { reason: undefined, usageMetadata: { totalTokenCount: 3 } },
+      },
+    ];
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents(firstCallEvents))
+      .mockReturnValueOnce(createStreamFromEvents(secondCallEvents));
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Run command',
+      'prompt-id-json',
+    );
+
+    // In JSON mode, the plain text header should NOT appear
+    const calls = processStdoutSpy.mock.calls.map((call) => call[0]);
+    const hasPlainHeader = calls.some(
+      (s) => typeof s === 'string' && s === 'Shell echo hello\n',
+    );
+    expect(hasPlainHeader).toBe(false);
+  });
 });

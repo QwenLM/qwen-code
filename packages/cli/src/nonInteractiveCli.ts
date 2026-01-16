@@ -96,6 +96,49 @@ async function emitNonInteractiveFinalMessage(params: {
 }
 
 /**
+ * Formats a tool header for display in text mode.
+ * Shows the tool name and relevant arguments (e.g., command for Shell tool).
+ */
+function formatToolHeader(
+  toolName: string,
+  args: Record<string, unknown>,
+): string {
+  // For Shell tool, show the command
+  if (
+    (toolName === 'Shell' || toolName === 'run_in_terminal') &&
+    typeof args['command'] === 'string'
+  ) {
+    return `${toolName} ${args['command']}\n`;
+  }
+
+  // For Read tool, show the file path
+  if (toolName === 'Read' && typeof args['file_path'] === 'string') {
+    return `${toolName} ${args['file_path']}\n`;
+  }
+
+  // For Edit/Write tools, show the file path
+  if (
+    (toolName === 'Edit' || toolName === 'Write') &&
+    typeof args['file_path'] === 'string'
+  ) {
+    return `${toolName} ${args['file_path']}\n`;
+  }
+
+  // For Glob tool, show the pattern
+  if (toolName === 'Glob' && typeof args['pattern'] === 'string') {
+    return `${toolName} ${args['pattern']}\n`;
+  }
+
+  // For Grep tool, show the pattern
+  if (toolName === 'Grep' && typeof args['pattern'] === 'string') {
+    return `${toolName} ${args['pattern']}\n`;
+  }
+
+  // For other tools, just show the tool name
+  return `${toolName}\n`;
+}
+
+/**
  * Provides optional overrides for `runNonInteractive` execution.
  *
  * @param abortController - Optional abort controller for cancellation.
@@ -349,6 +392,15 @@ export async function runNonInteractive(
                 )
               : undefined;
             const taskToolProgressHandler = taskToolProgress?.handler;
+
+            // Print tool header in text mode before execution
+            if (!adapter && !isTaskTool) {
+              const toolHeader = formatToolHeader(
+                finalRequestInfo.name,
+                finalRequestInfo.args,
+              );
+              process.stdout.write(toolHeader);
+            }
 
             // Create output handler for non-Task tools in text mode (for console output)
             const nonTaskOutputHandler =
