@@ -127,9 +127,17 @@
     "package": "vsce package --no-dependencies",
     "test": "vitest run",
     "test:ci": "vitest run --coverage",
+    "test:integration": "node ./test/runTest.cjs",
+    "test:e2e": "playwright test -c e2e/playwright.config.ts",
+    "test:e2e:vscode": "playwright test -c e2e-vscode/playwright.config.ts",
+    "test:all": "npm run test && npm run test:integration && npm run test:e2e",
+    "test:all:full": "npm run test:all && npm run test:e2e:vscode",
     "validate:notices": "node ./scripts/validate-notices.js"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/markdown-it": "^14.1.2",
@@ -140,6 +148,7 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.6.0",
     "autoprefixer": "^10.4.22",
     "esbuild": "^0.25.3",
@@ -152,13 +161,13 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "semver": "^7.7.2",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "markdown-it": "^14.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "semver": "^7.7.2",
     "zod": "^3.25.76"
   }
 }
