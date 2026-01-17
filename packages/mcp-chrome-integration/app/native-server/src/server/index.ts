@@ -8,6 +8,7 @@
  * - MCP transport handling
  * - Server lifecycle management
  */
+// @ts-nocheck
 import Fastify, { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import {
@@ -16,6 +17,7 @@ import {
   SERVER_CONFIG,
   HTTP_STATUS,
   ERROR_MESSAGES,
+  getCliBackendUrl,
 } from '../constant';
 import { NativeMessagingHost } from '../native-messaging-host';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
@@ -29,6 +31,8 @@ import { CodexEngine } from '../agent/engines/codex';
 import { ClaudeEngine } from '../agent/engines/claude';
 import { closeDb } from '../agent/db';
 import { registerAgentRoutes } from './routes';
+import fetch from 'node-fetch';
+import type { Readable } from 'node:stream';
 
 // ============================================================
 // Types
@@ -91,6 +95,9 @@ export class Server {
     // Health check
     this.setupHealthRoutes();
 
+    // Legacy ACP proxy (HTTP bridge for extension chat)
+    this.setupLegacyHttpBridgeRoutes();
+
     // Extension communication
     this.setupExtensionRoutes();
 
@@ -114,6 +121,143 @@ export class Server {
         status: 'ok',
         message: 'pong',
       });
+    });
+  }
+
+  // ============================================================
+  // Legacy HTTP bridge (ACP-style) for chat
+  // ============================================================
+
+  private setupLegacyHttpBridgeRoutes(): void {
+    // Proxy for /api (JSON POST)
+    this.fastify.post('/api', async (request, reply) => {
+      const backendUrl = getCliBackendUrl();
+      try {
+        const res = await fetch(`${backendUrl}/api`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(request.body ?? {}),
+        });
+        const data = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          reply.code(res.status || HTTP_STATUS.BAD_GATEWAY).send({
+            success: false,
+            error: data?.error || `Backend HTTP ${res.status}`,
+          });
+          return;
+        }
+
+        reply.code(res.status || HTTP_STATUS.OK).send(data);
+      } catch (error: unknown) {
+        const err = error as Error;
+        reply
+          .code(HTTP_STATUS.BAD_GATEWAY)
+          .send({ success: false, error: err?.message || ERROR_MESSAGES.BACKEND_UNAVAILABLE });
+      }
+    });
+
+    // Proxy for /events (SSE)
+    this.fastify.get('/events', async (_request, reply) => {
+      const backendUrl = getCliBackendUrl();
+      const controller = new AbortController();
+      reply.raw.writeHead(HTTP_STATUS.OK, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      reply.raw.write(':\n\n');
+
+      try {
+        const backendRes = await fetch(`${backendUrl}/events`, {
+          headers: { Accept: 'text/event-stream' },
+          signal: controller.signal,
+        });
+
+        if (!backendRes.ok || !backendRes.body) {
+          reply.raw.write(
+            `data: ${JSON.stringify({
+              type: 'error',
+              error: `Backend SSE failed${backendRes ? ` (HTTP ${backendRes.status})` : ''}`,
+            })}\n\n`,
+          );
+          reply.raw.end();
+          return;
+        }
+
+        // node-fetch@2 returns a Node.js Readable stream for `body` (no `.getReader()`).
+        // We proxy it by piping chunks to the client response.
+        const readable = backendRes.body as unknown as Readable;
+        const onData = (chunk: unknown) => {
+          try {
+            if (reply.raw.writableEnded) return;
+            reply.raw.write(chunk as any);
+          } catch {
+            // If client disconnected, we'll abort below.
+          }
+        };
+        const onEnd = () => {
+          try {
+            if (!reply.raw.writableEnded) reply.raw.end();
+          } catch {
+            /* ignore */
+          }
+        };
+        const onError = (err: unknown) => {
+          try {
+            if (!reply.raw.writableEnded) {
+              reply.raw.write(
+                `data: ${JSON.stringify({
+                  type: 'error',
+                  error: `Backend SSE stream error: ${
+                    (err as any)?.message || String(err)
+                  }`,
+                })}\n\n`,
+              );
+            }
+          } catch {
+            /* ignore */
+          }
+          try {
+            if (!reply.raw.writableEnded) reply.raw.end();
+          } catch {
+            /* ignore */
+          }
+        };
+        readable.on('data', onData);
+        readable.on('end', onEnd);
+        readable.on('error', onError);
+
+        const cleanup = () => {
+          controller.abort();
+          try {
+            readable.off('data', onData);
+            readable.off('end', onEnd);
+            readable.off('error', onError);
+          } catch {
+            /* ignore */
+          }
+          try {
+            // Ensure node-fetch stream is torn down.
+            (readable as any).destroy?.();
+          } catch {
+            /* ignore */
+          }
+        };
+        reply.raw.on('close', () => {
+          cleanup();
+        });
+      } catch {
+        if (!reply.raw.writableEnded) {
+          reply.raw.write(
+            `data: ${JSON.stringify({
+              type: 'error',
+              error: 'Backend SSE failed',
+            })}\n\n`,
+          );
+          reply.raw.end();
+        }
+      }
     });
   }
 

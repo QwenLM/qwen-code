@@ -3,9 +3,9 @@
 /* global process, console */
 
 /**
- * 将源代码同步到目标扩展目录（默认 dist/extension 或通过 EXTENSION_OUT_DIR/--target 指定）。
+ * 将静态资源同步到目标扩展目录（默认 dist/extension 或通过 EXTENSION_OUT_DIR/--target 指定）。
  * - 复制 public 下的静态资源（排除 sidepanel/dist 旧构建）
- * - 用 src/ 下的 background、content 覆盖对应目录
+ * - 背景/内容脚本由 esbuild 输出到目标目录，此脚本不再复制 src/ 下的 JS/TS。
  * 支持 --watch 监听变更（不清空输出，便于与 esbuild --watch 共存）。
  */
 
@@ -25,15 +25,10 @@ const targetDir = path.resolve(
   projectRoot,
   targetArg
     ? targetArg.split('=')[1]
-    : process.env.EXTENSION_OUT_DIR || 'extension',
+    : process.env.EXTENSION_OUT_DIR || 'dist/extension',
 );
 
 const staticSrcDir = path.join(projectRoot, 'public');
-const copyPairs = [
-  ['src/background', 'background'],
-  ['src/content', 'content'],
-];
-
 async function copyStatic(clean = false) {
   if (clean) {
     await fs.rm(targetDir, { recursive: true, force: true });
@@ -52,30 +47,13 @@ async function copyStatic(clean = false) {
   );
 }
 
-async function copySources() {
-  for (const [src, destRelative] of copyPairs) {
-    const srcPath = path.join(projectRoot, src);
-    const destPath = path.join(targetDir, destRelative);
-    await fs.mkdir(destPath, { recursive: true });
-    await fs.cp(srcPath, destPath, {
-      recursive: true,
-      // Skip TypeScript sources so the built JS (via esbuild) is the only output
-      filter: (entry) => !entry.endsWith('.ts') && !entry.endsWith('.tsx'),
-    });
-    console.log(`Synced ${src} -> ${path.relative(projectRoot, destPath)}`);
-  }
-}
-
 async function syncAll({ clean } = { clean: false }) {
   await copyStatic(clean);
-  await copySources();
 }
 
 function startWatchers() {
   const watchTargets = [
     path.join(projectRoot, 'public'),
-    path.join(projectRoot, 'src', 'background'),
-    path.join(projectRoot, 'src', 'content'),
   ];
 
   let syncing = false;

@@ -34,6 +34,7 @@ export const HTTP_STATUS = {
   CREATED: 201,
   NO_CONTENT: 204,
   BAD_REQUEST: 400,
+  BAD_GATEWAY: 502,
   NOT_FOUND: 404,
   INTERNAL_SERVER_ERROR: 500,
   GATEWAY_TIMEOUT: 504,
@@ -50,6 +51,7 @@ export const ERROR_MESSAGES = {
   MCP_SESSION_DELETION_ERROR: 'Internal server error during MCP session deletion.',
   MCP_REQUEST_PROCESSING_ERROR: 'Internal server error during MCP request processing.',
   INVALID_SSE_SESSION: 'Invalid or missing MCP session ID for SSE.',
+  BACKEND_UNAVAILABLE: 'Local Qwen Code backend is not available.',
 } as const;
 
 // ============================================================
@@ -79,4 +81,22 @@ export function getChromeMcpPort(): number {
  */
 export function getChromeMcpUrl(): string {
   return `http://${SERVER_CONFIG.HOST}:${getChromeMcpPort()}/mcp`;
+}
+
+// ============================================================
+// Legacy HTTP backend (Qwen Code CLI) proxy configuration
+// ============================================================
+
+const DEFAULT_CLI_BACKEND_URL = 'http://127.0.0.1:18765';
+export const CLI_BACKEND_URL_ENV = 'CLI_BACKEND_URL';
+
+/**
+ * Get the target HTTP backend URL for proxying /api and /events (legacy ACP path).
+ */
+export function getCliBackendUrl(): string {
+  const envUrl = process.env[CLI_BACKEND_URL_ENV];
+  if (envUrl && typeof envUrl === 'string' && envUrl.trim()) {
+    return envUrl.replace(/\/$/, '');
+  }
+  return DEFAULT_CLI_BACKEND_URL;
 }

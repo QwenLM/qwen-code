@@ -16,7 +16,7 @@ const projectRoot = path.resolve(__dirname, '..');
 
 const isWatch = process.argv.includes('--watch');
 const isProduction = process.argv.includes('--production');
-const outDir = process.env.EXTENSION_OUT_DIR || 'extension';
+const outDir = process.env.EXTENSION_OUT_DIR || 'dist/extension';
 
 // Resolve an entry point, preferring .ts when present (fallback to .js)
 function resolveEntry(relativePathWithoutExt) {

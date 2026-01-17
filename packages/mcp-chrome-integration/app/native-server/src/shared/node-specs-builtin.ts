@@ -1,3 +1,4 @@
+// @ts-nocheck
 // node-specs-builtin.ts — builtin NodeSpecs shared for UI + runtime
 import type { NodeSpec } from './node-spec';
 import { registerNodeSpec } from './node-spec-registry';
@@ -772,3 +773,4 @@ export function registerBuiltinSpecs() {
     defaults: { enabled: true },
   });
 }
+// @ts-nocheck

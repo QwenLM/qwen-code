@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,

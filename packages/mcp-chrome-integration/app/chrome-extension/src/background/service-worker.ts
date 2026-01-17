@@ -1,17 +1,14 @@
-/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/ban-ts-comment */
+/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any, @typescript-eslint/ban-ts-comment */
 // @ts-nocheck
 /**
  * Background Service Worker for Qwen CLI Chrome Extension
  * Handles communication between extension components and native host
  */
 
-/* global chrome, console, setTimeout, clearTimeout */
+/* global chrome, console, setTimeout, clearTimeout, EventSource, fetch, AbortController */
 
-// Import Native Messaging layer
-importScripts('native-messaging.js');
-
-// Legacy HTTP endpoint (NO LONGER USED - Using Native Messaging instead)
-// const BACKEND_URL = 'http://127.0.0.1:18765';
+// Legacy HTTP endpoint (ACP over HTTP, proxied by native-server)
+const BACKEND_URL = 'http://127.0.0.1:12306';
 
 // Connection state
 let isConnected = false;
@@ -225,58 +222,135 @@ function buildToolIntentHint(text) {
   return hints.length ? hints.join('\n') : '';
 }
 
-// Send message to Native Host via Native Messaging
+// Send message to backend (HTTP proxy -> Qwen Code)
 async function callBackend(message) {
   try {
-    // Use Native Messaging instead of HTTP
-    const response =
-      await self.NativeMessaging.sendMessageWithResponse(message);
-    return response;
+    const res = await fetch(`${BACKEND_URL}/api`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message || {}),
+    });
+    const data = await res.json();
+    if (!res.ok || data?.success === false) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
+    return data?.data ?? data;
   } catch (error) {
-    console.error('Failed to call native host:', error);
+    console.error('Failed to call backend:', error);
     throw error;
   }
 }
 
-// Connection management (Native Messaging)
+// HTTP connection management (ACP over HTTP)
 async function connectToNativeHost() {
   if (isConnected) return true;
-  console.log('Attempting to connect via Native Messaging...');
+  console.log('Attempting to connect via HTTP backend...', BACKEND_URL);
 
   try {
-    // Connect using Native Messaging
-    const connected = self.NativeMessaging.connect();
+    // Fire-and-forget ping to warm up backend; ignore result
+    fetch(`${BACKEND_URL}/ping`).catch(() => {});
 
-    if (connected) {
-      isConnected = true;
-      qwenCliStatus = 'connected';
+    isConnected = true;
+    qwenCliStatus = 'connected';
 
-      // Notify UI
-      chrome.runtime
-        .sendMessage({
-          type: 'STATUS_UPDATE',
-          status: qwenCliStatus,
-          connected: true,
-        })
-        .catch(() => {});
+    // Notify UI
+    chrome.runtime
+      .sendMessage({
+        type: 'STATUS_UPDATE',
+        status: qwenCliStatus,
+        connected: true,
+      })
+      .catch(() => {});
 
-      return true;
-    }
-
-    throw new Error('Failed to connect to native host');
+    // Start SSE polling
+    startEventPolling();
+    return true;
   } catch (error) {
-    console.error('Failed to connect to native host:', error);
+    console.error('Failed to connect to HTTP backend:', error);
     isConnected = false;
     qwenCliStatus = 'disconnected';
     throw error;
   }
 }
 
-// Native Messaging uses push-based messaging, no need for polling
-// Events are received via NativeMessaging onMessage callback
+// Event polling via SSE with fallback
 async function startEventPolling() {
-  // No longer needed - Native Messaging handles this automatically
-  console.log('Event polling not needed with Native Messaging');
+  console.log('Starting SSE event polling via HTTP backend...');
+
+  try {
+    const es = new EventSource(`${BACKEND_URL}/events`);
+    es.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleNativeMessage(data);
+      } catch (err) {
+        console.error('Failed to parse SSE message:', err, event.data);
+      }
+    };
+    es.onerror = (err) => {
+      console.warn('SSE error, closing and falling back to poll:', err);
+      try {
+        es.close();
+      } catch {
+        // ignore
+      }
+      pollEventsWithBackoff();
+    };
+  } catch (err) {
+    console.warn('SSE not available, fallback to poll:', err);
+    pollEventsWithBackoff();
+  }
+}
+
+async function pollEventsWithBackoff() {
+  let delay = 1000;
+  const maxDelay = 10000;
+  while (true) {
+    try {
+      await pollEventsOnce();
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelay);
+    } catch (err) {
+      console.warn('Event poll error, retrying:', err);
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelay);
+    }
+  }
+}
+
+// Fallback single poll for events (used if EventSource ctor fails)
+async function pollEventsOnce() {
+  const res = await fetch(`${BACKEND_URL}/events`, {
+    method: 'GET',
+    headers: { Accept: 'text/event-stream, application/json' },
+  });
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('text/event-stream')) {
+    // naive SSE parse for one line
+    const text = await res.text();
+    text
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .forEach((l) => {
+        const data = l.replace(/^data:\s*/, '');
+        try {
+          handleNativeMessage(JSON.parse(data));
+        } catch (err) {
+          console.error('Failed to parse fallback SSE data:', err, data);
+        }
+      });
+    return;
+  }
+  const data = await res.json();
+  if (data && Array.isArray(data.messages)) {
+    data.messages.forEach((msg) => {
+      try {
+        handleNativeMessage(msg);
+      } catch (err) {
+        console.error('Failed to handle polled message:', err, msg);
+      }
+    });
+  }
 }
 
 // Handle messages from native host
@@ -372,16 +446,22 @@ async function sendToNativeHost(message) {
     timeoutMs = 180000;
   }
 
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    // Use Native Messaging instead of HTTP
-    const response = await self.NativeMessaging.sendMessageWithResponse(
-      message,
-      timeoutMs,
-    );
-
+    const res = await fetch(`${BACKEND_URL}/api`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(message || {}),
+      signal: controller.signal,
+    });
+    const data = await res.json();
+    if (!res.ok || data?.success === false) {
+      throw new Error(data?.error || `HTTP ${res.status}`);
+    }
     // When streaming completes, signal UI to end loader
     try {
-      const payload = response?.data ?? response;
+      const payload = data?.data ?? data;
       const inner = payload?.data ?? payload;
       const stopReason =
         inner?.stopReason || inner?.stop_reason || inner?.status === 'done';
@@ -391,11 +471,9 @@ async function sendToNativeHost(message) {
     } catch {
       // ignore
     }
-
-    return response?.data ?? response;
-  } catch (error) {
-    console.error('Failed to send message to native host:', error);
-    throw error;
+    return data?.data ?? data;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -2366,14 +2444,11 @@ chrome.webNavigation?.onDOMContentLoaded?.addListener((details) => {
   }
 });
 
-// ==================== Initialize Native Messaging ====================
-// Initialize Native Messaging on service worker startup
-console.log('[ServiceWorker] Initializing Native Messaging...');
-self.NativeMessaging.init();
+// ==================== Initialize HTTP backend bridge ====================
+console.log('[ServiceWorker] Initializing HTTP backend bridge...');
 
-// Auto-connect on startup
 connectToNativeHost().catch((error) => {
   console.error('[ServiceWorker] Initial connection failed:', error);
 });
 
-console.log('[ServiceWorker] Initialized with Native Messaging support');
+console.log('[ServiceWorker] Initialized with HTTP backend support');
