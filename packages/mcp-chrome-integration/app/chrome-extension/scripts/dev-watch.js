@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+/* global process, console */
+
 /**
  * 开发模式：同步资源 + esbuild watch 到 dist/extension（可通过 EXTENSION_OUT_DIR 覆盖）。
  */
@@ -54,6 +56,7 @@ async function main() {
       '--watch',
       `--target=${outDir}`,
     ]),
+    startProcess('node', ['config/esbuild.background.config.js', '--watch']),
     startProcess('node', ['config/esbuild.config.js', '--watch']),
     startProcess('npm', ['--prefix', 'native-host', 'run', 'dev']),
   ];

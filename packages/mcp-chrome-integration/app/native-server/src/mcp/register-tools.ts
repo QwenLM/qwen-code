@@ -5,17 +5,22 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import nativeMessagingHostInstance from '../native-messaging-host';
-import { NativeMessageType, TOOL_SCHEMAS } from 'chrome-mcp-shared';
+import { NativeMessageType, TOOL_SCHEMAS } from '../shared';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
 async function listDynamicFlowTools(): Promise<Tool[]> {
   try {
-    const response = await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
-      {},
-      'rr_list_published_flows',
-      20000,
-    );
-    if (response && response.status === 'success' && Array.isArray(response.items)) {
+    const response =
+      await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+        {},
+        'rr_list_published_flows',
+        20000,
+      );
+    if (
+      response &&
+      response.status === 'success' &&
+      Array.isArray(response.items)
+    ) {
       const tools: Tool[] = [];
       for (const item of response.items) {
         const name = `flow.${item.slug}`;
@@ -23,17 +28,18 @@ async function listDynamicFlowTools(): Promise<Tool[]> {
           (item.meta && item.meta.tool && item.meta.tool.description) ||
           item.description ||
           'Recorded flow';
-        const properties: Record<string, any> = {};
+        const properties: Record<string, { [key: string]: unknown }> = {};
         const required: string[] = [];
         for (const v of item.variables || []) {
           const desc = v.label || v.key;
           const typ = (v.type || 'string').toLowerCase();
-          const prop: any = { description: desc };
+          const prop: { [key: string]: unknown } = { description: desc };
           if (typ === 'boolean') prop.type = 'boolean';
           else if (typ === 'number') prop.type = 'number';
           else if (typ === 'enum') {
             prop.type = 'string';
-            if (v.rules && Array.isArray(v.rules.enum)) prop.enum = v.rules.enum;
+            if (v.rules && Array.isArray(v.rules.enum))
+              prop.enum = v.rules.enum;
           } else if (typ === 'array') {
             // default array of strings; can extend with itemType later
             prop.type = 'array';
@@ -46,7 +52,11 @@ async function listDynamicFlowTools(): Promise<Tool[]> {
           properties[v.key] = prop;
         }
         // Run options
-        properties['tabTarget'] = { type: 'string', enum: ['current', 'new'], default: 'current' };
+        properties['tabTarget'] = {
+          type: 'string',
+          enum: ['current', 'new'],
+          default: 'current',
+        };
         properties['refresh'] = { type: 'boolean', default: false };
         properties['captureNetwork'] = { type: 'boolean', default: false };
         properties['returnLogs'] = { type: 'boolean', default: false };
@@ -61,7 +71,7 @@ async function listDynamicFlowTools(): Promise<Tool[]> {
       return tools;
     }
     return [];
-  } catch (e) {
+  } catch {
     return [];
   }
 }
@@ -79,38 +89,50 @@ export const setupTools = (server: Server) => {
   );
 };
 
-const handleToolCall = async (name: string, args: any): Promise<CallToolResult> => {
+const handleToolCall = async (
+  name: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> => {
   try {
     // If calling a dynamic flow tool (name starts with flow.), proxy to common flow-run tool
     if (name && name.startsWith('flow.')) {
       // We need to resolve flow by slug to ID
       try {
-        const resp = await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
-          {},
-          'rr_list_published_flows',
-          20000,
-        );
+        const resp =
+          await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+            {},
+            'rr_list_published_flows',
+            20000,
+          );
         const items = (resp && resp.items) || [];
         const slug = name.slice('flow.'.length);
-        const match = items.find((it: any) => it.slug === slug);
+        const match = items.find(
+          (it: { slug: string; id: string }) => it.slug === slug,
+        );
         if (!match) throw new Error(`Flow not found for tool ${name}`);
         const flowArgs = { flowId: match.id, args };
-        const proxyRes = await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
-          { name: 'record_replay_flow_run', args: flowArgs },
-          NativeMessageType.CALL_TOOL,
-          120000,
-        );
+        const proxyRes =
+          await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+            { name: 'record_replay_flow_run', args: flowArgs },
+            NativeMessageType.CALL_TOOL,
+            120000,
+          );
         if (proxyRes.status === 'success') return proxyRes.data;
-        return {
-          content: [{ type: 'text', text: `Error calling dynamic flow tool: ${proxyRes.error}` }],
-          isError: true,
-        };
-      } catch (err: any) {
         return {
           content: [
             {
               type: 'text',
-              text: `Error resolving dynamic flow tool: ${err?.message || String(err)}`,
+              text: `Error calling dynamic flow tool: ${proxyRes.error}`,
+            },
+          ],
+          isError: true,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error resolving dynamic flow tool: ${(err as Error)?.message || String(err)}`,
             },
           ],
           isError: true,
@@ -118,14 +140,15 @@ const handleToolCall = async (name: string, args: any): Promise<CallToolResult> 
       }
     }
     // 发送请求到Chrome扩展并等待响应
-    const response = await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
-      {
-        name,
-        args,
-      },
-      NativeMessageType.CALL_TOOL,
-      120000, // 延长到 120 秒，避免性能分析等长任务超时
-    );
+    const response =
+      await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+        {
+          name,
+          args,
+        },
+        NativeMessageType.CALL_TOOL,
+        120000, // 延长到 120 秒，避免性能分析等长任务超时
+      );
     if (response.status === 'success') {
       return response.data;
     } else {
@@ -139,12 +162,12 @@ const handleToolCall = async (name: string, args: any): Promise<CallToolResult> 
         isError: true,
       };
     }
-  } catch (error: any) {
+  } catch (error) {
     return {
       content: [
         {
           type: 'text',
-          text: `Error calling tool: ${error.message}`,
+          text: `Error calling tool: ${(error as Error).message || String(error)}`,
         },
       ],
       isError: true,

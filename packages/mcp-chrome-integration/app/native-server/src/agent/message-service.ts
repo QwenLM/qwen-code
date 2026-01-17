@@ -8,7 +8,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { eq, asc, and, count } from 'drizzle-orm';
-import type { AgentRole, AgentStoredMessage } from 'chrome-mcp-shared';
+import type { AgentRole, AgentStoredMessage } from '../shared';
 import { getDb, messages, type MessageRow } from './db';
 
 // ============================================================
@@ -90,7 +90,9 @@ export async function getMessagesByProjectId(
 /**
  * Get the total count of messages for a project.
  */
-export async function getMessagesCountByProjectId(projectId: string): Promise<number> {
+export async function getMessagesCountByProjectId(
+  projectId: string,
+): Promise<number> {
   const db = getDb();
   const result = await db
     .select({ count: count() })
@@ -159,7 +161,12 @@ export async function deleteMessagesByProjectId(
   if (conversationId) {
     await db
       .delete(messages)
-      .where(and(eq(messages.projectId, projectId), eq(messages.conversationId, conversationId)));
+      .where(
+        and(
+          eq(messages.projectId, projectId),
+          eq(messages.conversationId, conversationId),
+        ),
+      );
   } else {
     await db.delete(messages).where(eq(messages.projectId, projectId));
   }
@@ -204,7 +211,9 @@ export async function getMessagesBySessionId(
 /**
  * Get count of messages by session ID.
  */
-export async function getMessagesCountBySessionId(sessionId: string): Promise<number> {
+export async function getMessagesCountBySessionId(
+  sessionId: string,
+): Promise<number> {
   const db = getDb();
   const result = await db
     .select({ count: count() })
@@ -217,7 +226,9 @@ export async function getMessagesCountBySessionId(sessionId: string): Promise<nu
  * Delete all messages for a session.
  * Returns the number of deleted messages.
  */
-export async function deleteMessagesBySessionId(sessionId: string): Promise<number> {
+export async function deleteMessagesBySessionId(
+  sessionId: string,
+): Promise<number> {
   const db = getDb();
 
   const beforeCount = await getMessagesCountBySessionId(sessionId);
@@ -230,7 +241,9 @@ export async function deleteMessagesBySessionId(sessionId: string): Promise<numb
 /**
  * Get messages by request ID.
  */
-export async function getMessagesByRequestId(requestId: string): Promise<AgentStoredMessage[]> {
+export async function getMessagesByRequestId(
+  requestId: string,
+): Promise<AgentStoredMessage[]> {
   const db = getDb();
   const rows = await db
     .select()

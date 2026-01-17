@@ -22,7 +22,7 @@ export interface CliToolInvocation {
 export interface AgentToolBridgeOptions {
   /**
    * Base URL of the local MCP HTTP endpoint (e.g. http://127.0.0.1:12306/mcp).
-   * If omitted, DEFAULT_SERVER_PORT from chrome-mcp-shared is used.
+   * If omitted, falls back to NATIVE_SERVER_PORT/defaults from local shared constants.
    */
   mcpUrl?: string;
 }
@@ -40,7 +40,8 @@ export class AgentToolBridge {
 
   constructor(options: AgentToolBridgeOptions = {}) {
     const url =
-      options.mcpUrl || `http://127.0.0.1:${process.env.MCP_HTTP_PORT || NATIVE_SERVER_PORT}/mcp`;
+      options.mcpUrl ||
+      `http://127.0.0.1:${process.env.MCP_HTTP_PORT || NATIVE_SERVER_PORT}/mcp`;
 
     this.transport = new StreamableHTTPClientTransport(new URL(url));
     this.client = new Client(
@@ -57,7 +58,7 @@ export class AgentToolBridge {
    */
   async ensureConnected(): Promise<void> {
     // Client.connect is idempotent; repeated calls reuse the same transport session.
-    if ((this.transport as any)._sessionId) {
+    if ((this.transport as Record<string, unknown>)._sessionId) {
       return;
     }
     await this.client.connect(this.transport);

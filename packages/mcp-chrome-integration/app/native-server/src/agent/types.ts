@@ -18,4 +18,4 @@ export {
   type AgentProject,
   type AgentEngineInfo,
   type AgentStoredMessage,
-} from 'chrome-mcp-shared';
+} from '../shared';

@@ -6,7 +6,8 @@
   },
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "packages/mcp-chrome-integration/app/*"
   ],
   "repository": {
     "type": "git",

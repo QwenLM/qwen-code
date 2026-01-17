@@ -1,5 +1,5 @@
 import type { AgentAttachment, RealtimeEvent } from '../types';
-import type { CodexEngineConfig } from 'chrome-mcp-shared';
+import type { CodexEngineConfig } from '../../shared';
 
 export interface EngineInitOptions {
   sessionId: string;
@@ -93,7 +93,9 @@ export interface ClaudeManagementInfo {
 /**
  * Callback to persist management information after SDK initialization.
  */
-export type ManagementInfoPersistCallback = (info: ClaudeManagementInfo) => Promise<void>;
+export type ManagementInfoPersistCallback = (
+  info: ClaudeManagementInfo,
+) => Promise<void>;
 
 export type EngineName = 'claude' | 'codex' | 'cursor' | 'qwen' | 'glm';
 
@@ -120,7 +122,10 @@ export interface AgentEngine {
    * Whether this engine can act as an MCP client natively.
    */
   supportsMcp?: boolean;
-  initializeAndRun(options: EngineInitOptions, ctx: EngineExecutionContext): Promise<void>;
+  initializeAndRun(
+    options: EngineInitOptions,
+    ctx: EngineExecutionContext,
+  ): Promise<void>;
 }
 
 /**

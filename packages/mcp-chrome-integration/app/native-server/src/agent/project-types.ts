@@ -1,7 +1,7 @@
 /**
  * Re-export AgentProject from shared package and define local input types.
  */
-import type { AgentCliPreference, AgentProject } from 'chrome-mcp-shared';
+import type { AgentCliPreference, AgentProject } from '../shared';
 
 // Re-export for backward compatibility
 export type { AgentProject };

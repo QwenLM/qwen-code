@@ -1,13 +1,25 @@
 import { stdin, stdout } from 'process';
 import { Server } from './server';
 import { v4 as uuidv4 } from 'uuid';
-import { NativeMessageType } from 'chrome-mcp-shared';
+import { NativeMessageType } from './shared';
 import { TIMEOUTS } from './constant';
 import fileHandler from './file-handler';
 
+interface MessagePayload {
+  [key: string]: unknown;
+}
+
+interface BaseMessage {
+  type?: string;
+  payload?: MessagePayload;
+  requestId?: string;
+  responseToRequestId?: string;
+  error?: string;
+}
+
 interface PendingRequest {
-  resolve: (value: any) => void;
-  reject: (reason?: any) => void;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
   timeoutId: NodeJS.Timeout;
 }
 
@@ -23,7 +35,7 @@ export class NativeMessagingHost {
   public start(): void {
     try {
       this.setupMessageHandling();
-    } catch (error: any) {
+    } catch {
       process.exit(1);
     }
   }
@@ -64,8 +76,10 @@ export class NativeMessagingHost {
         try {
           const message = JSON.parse(messageBuffer.toString());
           this.handleMessage(message);
-        } catch (error: any) {
-          this.sendError(`Failed to parse message: ${error.message}`);
+        } catch (error) {
+          this.sendError(
+            `Failed to parse message: ${(error as Error).message || String(error)}`,
+          );
         }
       }
 
@@ -92,7 +106,7 @@ export class NativeMessagingHost {
     });
   }
 
-  private async handleMessage(message: any): Promise<void> {
+  private async handleMessage(message: BaseMessage): Promise<void> {
     if (!message || typeof message !== 'object') {
       this.sendError('Invalid message format');
       return;
@@ -132,10 +146,13 @@ export class NativeMessagingHost {
           if (message.requestId) {
             this.sendMessage({
               responseToRequestId: message.requestId,
-              payload: { success: true, status: 'running' }
+              payload: { success: true, status: 'running' },
             });
           } else {
-            this.sendMessage({ type: 'qwen_started', payload: { success: true, status: 'running' } });
+            this.sendMessage({
+              type: 'qwen_started',
+              payload: { success: true, status: 'running' },
+            });
           }
           break;
         // Support CONNECT message from React Extension
@@ -144,7 +161,7 @@ export class NativeMessagingHost {
           if (message.requestId) {
             this.sendMessage({
               responseToRequestId: message.requestId,
-              payload: { success: true, connected: true }
+              payload: { success: true, connected: true },
             });
           } else {
             this.sendMessage({ type: 'connected', payload: { success: true } });
@@ -165,15 +182,17 @@ export class NativeMessagingHost {
             );
           }
       }
-    } catch (error: any) {
-      this.sendError(`Failed to handle directive message: ${error.message}`);
+    } catch (error) {
+      this.sendError(
+        `Failed to handle directive message: ${(error as Error).message || String(error)}`,
+      );
     }
   }
 
   /**
    * Handle file operations from the extension
    */
-  private async handleFileOperation(message: any): Promise<void> {
+  private async handleFileOperation(message: BaseMessage): Promise<void> {
     try {
       const result = await fileHandler.handleFileRequest(message.payload);
 
@@ -191,10 +210,13 @@ export class NativeMessagingHost {
           payload: result,
         });
       }
-    } catch (error: any) {
+    } catch (error) {
       const errorResponse = {
         success: false,
-        error: error.message || 'Unknown error during file operation',
+        error:
+          (error as Error).message ||
+          String(error) ||
+          'Unknown error during file operation',
       };
 
       if (message.requestId) {
@@ -216,10 +238,10 @@ export class NativeMessagingHost {
    * @returns Promise, resolves to Chrome's returned payload on success, rejects on failure
    */
   public sendRequestToExtensionAndWait(
-    messagePayload: any,
+    messagePayload: MessagePayload,
     messageType: string = 'request_data',
     timeoutMs: number = TIMEOUTS.DEFAULT_REQUEST_TIMEOUT,
-  ): Promise<any> {
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const requestId = uuidv4(); // Generate unique request ID
 
@@ -263,8 +285,10 @@ export class NativeMessagingHost {
         type: NativeMessageType.SERVER_STARTED,
         payload: { port },
       });
-    } catch (error: any) {
-      this.sendError(`Failed to start server: ${error.message}`);
+    } catch (error) {
+      this.sendError(
+        `Failed to start server: ${(error as Error).message || String(error)}`,
+      );
     }
   }
 
@@ -290,15 +314,17 @@ export class NativeMessagingHost {
       // this.serverStarted = false; // Server should update its own status after successful stop
 
       this.sendMessage({ type: NativeMessageType.SERVER_STOPPED }); // Distinguish from previous 'stopped'
-    } catch (error: any) {
-      this.sendError(`Failed to stop server: ${error.message}`);
+    } catch (error) {
+      this.sendError(
+        `Failed to stop server: ${(error as Error).message || String(error)}`,
+      );
     }
   }
 
   /**
    * Send message to Chrome extension
    */
-  public sendMessage(message: any): void {
+  public sendMessage(message: BaseMessage): void {
     try {
       const messageString = JSON.stringify(message);
       const messageBuffer = Buffer.from(messageString);
@@ -312,7 +338,7 @@ export class NativeMessagingHost {
           // Message sent successfully, no action needed
         }
       });
-    } catch (error: any) {
+    } catch {
       // Catch JSON.stringify or Buffer operation errors
       // If preparation stage fails, associated request may never be sent
       // Need to consider whether to reject corresponding Promise (if called within sendRequestToExtensionAndWait)
@@ -336,7 +362,9 @@ export class NativeMessagingHost {
     // Reject all pending requests
     this.pendingRequests.forEach((pending) => {
       clearTimeout(pending.timeoutId);
-      pending.reject(new Error('Native host is shutting down or Chrome disconnected.'));
+      pending.reject(
+        new Error('Native host is shutting down or Chrome disconnected.'),
+      );
     });
     this.pendingRequests.clear();
 

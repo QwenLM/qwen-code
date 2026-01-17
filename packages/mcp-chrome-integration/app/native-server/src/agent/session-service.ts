@@ -48,7 +48,7 @@ export interface SessionOptionsConfig {
    * Optional Codex-specific configuration overrides.
    * Only applicable when using CodexEngine.
    */
-  codexConfig?: Partial<import('chrome-mcp-shared').CodexEngineConfig>;
+  codexConfig?: Partial<import('../shared').CodexEngineConfig>;
 }
 
 /**
@@ -57,7 +57,11 @@ export interface SessionOptionsConfig {
 export interface ManagementInfo {
   models?: Array<{ value: string; displayName: string; description: string }>;
   commands?: Array<{ name: string; description: string; argumentHint: string }>;
-  account?: { email?: string; organization?: string; subscriptionType?: string };
+  account?: {
+    email?: string;
+    organization?: string;
+    subscriptionType?: string;
+  };
   mcpServers?: Array<{ name: string; status: string }>;
   tools?: string[];
   agents?: string[];
@@ -175,7 +179,8 @@ function rowToSession(row: SessionRow): AgentSession {
     name: row.name ?? undefined,
     model: row.model ?? undefined,
     permissionMode: row.permissionMode,
-    allowDangerouslySkipPermissions: row.allowDangerouslySkipPermissions === '1',
+    allowDangerouslySkipPermissions:
+      row.allowDangerouslySkipPermissions === '1',
     systemPromptConfig: parseJson<SystemPromptConfig>(row.systemPromptConfig),
     optionsConfig: parseJson<SessionOptionsConfig>(row.optionsConfig),
     managementInfo: parseJson<ManagementInfo>(row.managementInfo),
@@ -200,7 +205,8 @@ export async function createSession(
   const now = new Date().toISOString();
 
   // Resolve permission mode - AgentChat defaults to bypassPermissions for headless operation
-  const resolvedPermissionMode = options.permissionMode?.trim() || 'bypassPermissions';
+  const resolvedPermissionMode =
+    options.permissionMode?.trim() || 'bypassPermissions';
 
   // SDK requires allowDangerouslySkipPermissions=true when using bypassPermissions mode
   // If explicitly provided, use that value; otherwise infer from permission mode
@@ -217,7 +223,9 @@ export async function createSession(
     name: options.name?.trim() || null,
     model: options.model?.trim() || null,
     permissionMode: resolvedPermissionMode,
-    allowDangerouslySkipPermissions: resolvedAllowDangerouslySkipPermissions ? '1' : null,
+    allowDangerouslySkipPermissions: resolvedAllowDangerouslySkipPermissions
+      ? '1'
+      : null,
     systemPromptConfig: stringifyJson(options.systemPromptConfig),
     optionsConfig: stringifyJson(options.optionsConfig),
     managementInfo: null,
@@ -232,9 +240,15 @@ export async function createSession(
 /**
  * Get a session by ID.
  */
-export async function getSession(sessionId: string): Promise<AgentSession | undefined> {
+export async function getSession(
+  sessionId: string,
+): Promise<AgentSession | undefined> {
   const db = getDb();
-  const rows = await db.select().from(sessions).where(eq(sessions.id, sessionId)).limit(1);
+  const rows = await db
+    .select()
+    .from(sessions)
+    .where(eq(sessions.id, sessionId))
+    .limit(1);
   return rows.length > 0 ? rowToSession(rows[0]) : undefined;
 }
 
@@ -244,7 +258,10 @@ const MAX_PREVIEW_LENGTH = 50;
 /**
  * Truncate text to max length with ellipsis.
  */
-function truncatePreview(text: string, maxLength: number = MAX_PREVIEW_LENGTH): string {
+function truncatePreview(
+  text: string,
+  maxLength: number = MAX_PREVIEW_LENGTH,
+): string {
   const trimmed = text.trim().replace(/\s+/g, ' ');
   if (trimmed.length <= maxLength) return trimmed;
   return trimmed.slice(0, maxLength - 1) + '…';
@@ -254,7 +271,9 @@ function truncatePreview(text: string, maxLength: number = MAX_PREVIEW_LENGTH): 
  * Add preview to sessions by fetching first user message for each.
  * Shared helper to avoid code duplication.
  */
-async function addPreviewsToSessions(rows: SessionRow[]): Promise<AgentSession[]> {
+async function addPreviewsToSessions(
+  rows: SessionRow[],
+): Promise<AgentSession[]> {
   const db = getDb();
 
   return Promise.all(
@@ -285,7 +304,8 @@ async function addPreviewsToSessions(rows: SessionRow[]): Promise<AgentSession[]
             const rawDisplayText = parsed.displayText;
 
             // Validate displayText is a string
-            const displayText = typeof rawDisplayText === 'string' ? rawDisplayText : undefined;
+            const displayText =
+              typeof rawDisplayText === 'string' ? rawDisplayText : undefined;
 
             // Validate clientMeta structure
             const clientMeta =
@@ -321,7 +341,9 @@ async function addPreviewsToSessions(rows: SessionRow[]): Promise<AgentSession[]
  * Get all sessions for a project, sorted by most recently updated.
  * Includes preview from first user message for each session.
  */
-export async function getSessionsByProject(projectId: string): Promise<AgentSession[]> {
+export async function getSessionsByProject(
+  projectId: string,
+): Promise<AgentSession[]> {
   const db = getDb();
   const rows = await db
     .select()
@@ -338,7 +360,10 @@ export async function getSessionsByProject(projectId: string): Promise<AgentSess
  */
 export async function getAllSessions(): Promise<AgentSession[]> {
   const db = getDb();
-  const rows = await db.select().from(sessions).orderBy(desc(sessions.updatedAt));
+  const rows = await db
+    .select()
+    .from(sessions)
+    .orderBy(desc(sessions.updatedAt));
 
   return addPreviewsToSessions(rows);
 }
@@ -354,7 +379,12 @@ export async function getSessionsByProjectAndEngine(
   const rows = await db
     .select()
     .from(sessions)
-    .where(and(eq(sessions.projectId, projectId), eq(sessions.engineName, engineName)))
+    .where(
+      and(
+        eq(sessions.projectId, projectId),
+        eq(sessions.engineName, engineName),
+      ),
+    )
     .orderBy(desc(sessions.updatedAt));
   return rows.map(rowToSession);
 }
@@ -362,7 +392,10 @@ export async function getSessionsByProjectAndEngine(
 /**
  * Update an existing session.
  */
-export async function updateSession(sessionId: string, updates: UpdateSessionInput): Promise<void> {
+export async function updateSession(
+  sessionId: string,
+  updates: UpdateSessionInput,
+): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
 
@@ -383,13 +416,13 @@ export async function updateSession(sessionId: string, updates: UpdateSessionInp
   }
 
   if (updates.permissionMode !== undefined) {
-    updateData.permissionMode = updates.permissionMode?.trim() || 'bypassPermissions';
+    updateData.permissionMode =
+      updates.permissionMode?.trim() || 'bypassPermissions';
   }
 
   if (updates.allowDangerouslySkipPermissions !== undefined) {
-    updateData.allowDangerouslySkipPermissions = updates.allowDangerouslySkipPermissions
-      ? '1'
-      : null;
+    updateData.allowDangerouslySkipPermissions =
+      updates.allowDangerouslySkipPermissions ? '1' : null;
   }
 
   if (updates.systemPromptConfig !== undefined) {
@@ -434,7 +467,10 @@ export async function updateEngineSessionId(
 export async function touchSessionActivity(sessionId: string): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
-  await db.update(sessions).set({ updatedAt: now }).where(eq(sessions.id, sessionId));
+  await db
+    .update(sessions)
+    .set({ updatedAt: now })
+    .where(eq(sessions.id, sessionId));
 }
 
 /**
@@ -445,7 +481,9 @@ export async function updateManagementInfo(
   info: ManagementInfo | null,
 ): Promise<void> {
   // Add timestamp to management info
-  const infoWithTimestamp = info ? { ...info, lastUpdated: new Date().toISOString() } : null;
+  const infoWithTimestamp = info
+    ? { ...info, lastUpdated: new Date().toISOString() }
+    : null;
   await updateSession(sessionId, { managementInfo: infoWithTimestamp });
 }
 
@@ -458,7 +496,10 @@ export async function getOrCreateDefaultSession(
   engineName: EngineName,
   options: CreateSessionOptions = {},
 ): Promise<AgentSession> {
-  const existingSessions = await getSessionsByProjectAndEngine(projectId, engineName);
+  const existingSessions = await getSessionsByProjectAndEngine(
+    projectId,
+    engineName,
+  );
 
   if (existingSessions.length > 0) {
     // Return the most recently updated session

@@ -1,4 +1,0 @@
-packages:
-  - 'packages/*'
-  - 'packages/mcp-chrome-integration/packages/*'
-  - 'packages/mcp-chrome-integration/app/*'

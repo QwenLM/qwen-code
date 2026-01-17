@@ -11,7 +11,7 @@ import { mkdir, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { eq, desc } from 'drizzle-orm';
-import type { AgentProject } from 'chrome-mcp-shared';
+import type { AgentProject } from '../shared';
 import type { CreateOrUpdateProjectInput } from './project-types';
 import { getDb, projects, type ProjectRow } from './db';
 
@@ -48,7 +48,9 @@ export interface PathValidationResult {
  * Validate a root path without creating it.
  * Returns validation result including whether directory needs creation.
  */
-export async function validateRootPath(rootPath: string): Promise<PathValidationResult> {
+export async function validateRootPath(
+  rootPath: string,
+): Promise<PathValidationResult> {
   const trimmed = rootPath.trim();
   if (!trimmed) {
     return {
@@ -65,7 +67,9 @@ export async function validateRootPath(rootPath: string): Promise<PathValidation
     : path.resolve(process.cwd(), trimmed);
 
   // Security check: ensure path is under allowed base directories
-  const isAllowed = ALLOWED_BASE_DIRS.some((base) => absolute.startsWith(path.resolve(base)));
+  const isAllowed = ALLOWED_BASE_DIRS.some((base) =>
+    absolute.startsWith(path.resolve(base)),
+  );
 
   if (!isAllowed) {
     return {
@@ -110,7 +114,9 @@ export async function validateRootPath(rootPath: string): Promise<PathValidation
  * Create a project directory after user confirmation.
  * This should only be called after validateRootPath returns needsCreation: true.
  */
-export async function createProjectDirectory(absolutePath: string): Promise<void> {
+export async function createProjectDirectory(
+  absolutePath: string,
+): Promise<void> {
   // Re-validate for safety
   const validation = await validateRootPath(absolutePath);
   if (!validation.valid) {
@@ -127,7 +133,10 @@ export async function createProjectDirectory(absolutePath: string): Promise<void
  * @param rootPath - The path to normalize
  * @param allowCreate - If true, create directory if it doesn't exist
  */
-async function normalizeRootPath(rootPath: string, allowCreate = false): Promise<string> {
+async function normalizeRootPath(
+  rootPath: string,
+  allowCreate = false,
+): Promise<string> {
   const result = await validateRootPath(rootPath);
 
   if (!result.valid) {
@@ -180,26 +189,40 @@ function rowToProject(row: ProjectRow): AgentProject {
  */
 export async function listProjects(): Promise<AgentProject[]> {
   const db = getDb();
-  const rows = await db.select().from(projects).orderBy(desc(projects.lastActiveAt));
+  const rows = await db
+    .select()
+    .from(projects)
+    .orderBy(desc(projects.lastActiveAt));
   return rows.map(rowToProject);
 }
 
 /**
  * Get a single project by ID.
  */
-export async function getProject(id: string): Promise<AgentProject | undefined> {
+export async function getProject(
+  id: string,
+): Promise<AgentProject | undefined> {
   const db = getDb();
-  const rows = await db.select().from(projects).where(eq(projects.id, id)).limit(1);
+  const rows = await db
+    .select()
+    .from(projects)
+    .where(eq(projects.id, id))
+    .limit(1);
   return rows.length > 0 ? rowToProject(rows[0]) : undefined;
 }
 
 /**
  * Create or update a project.
  */
-export async function upsertProject(input: CreateOrUpdateProjectInput): Promise<AgentProject> {
+export async function upsertProject(
+  input: CreateOrUpdateProjectInput,
+): Promise<AgentProject> {
   const db = getDb();
   const now = new Date().toISOString();
-  const rootPath = await normalizeRootPath(input.rootPath, input.allowCreate ?? false);
+  const rootPath = await normalizeRootPath(
+    input.rootPath,
+    input.allowCreate ?? false,
+  );
 
   const id = input.id?.trim() || randomUUID();
   const existing = await getProject(id);
@@ -208,7 +231,13 @@ export async function upsertProject(input: CreateOrUpdateProjectInput): Promise<
   // - useCcr: '1' or null (legacy)
   // - enableChromeMcp: '1' or '0' (non-null; defaults to enabled)
   const useCcrValue =
-    input.useCcr !== undefined ? (input.useCcr ? '1' : null) : existing?.useCcr ? '1' : null;
+    input.useCcr !== undefined
+      ? input.useCcr
+        ? '1'
+        : null
+      : existing?.useCcr
+        ? '1'
+        : null;
 
   let enableChromeMcpValue: '1' | '0';
   if (typeof input.enableChromeMcp === 'boolean') {
@@ -259,7 +288,10 @@ export async function deleteProject(id: string): Promise<void> {
 export async function touchProjectActivity(id: string): Promise<void> {
   const db = getDb();
   const now = new Date().toISOString();
-  await db.update(projects).set({ lastActiveAt: now, updatedAt: now }).where(eq(projects.id, id));
+  await db
+    .update(projects)
+    .set({ lastActiveAt: now, updatedAt: now })
+    .where(eq(projects.id, id));
 }
 
 /**

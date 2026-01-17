@@ -14,6 +14,7 @@
 ## 🏗️ 架构对比
 
 ### 旧架构 (5 层)
+
 ```
 Chrome Extension (React 19)
   ↓ HTTP (127.0.0.1:18765)
@@ -25,6 +26,7 @@ Qwen CLI
 ```
 
 ### 新架构 (3 层)
+
 ```
 Chrome Extension (React 19)
   ↓ Native Messaging Protocol (stdio)
@@ -35,50 +37,52 @@ Qwen CLI
 
 ## 🆚 功能对比
 
-| 维度 | 旧版 (chrome-extension) | 新版 (mcp-chrome-integration) |
-|------|------------------------|------------------------------|
-| 架构层数 | 5 层 | 3 层 |
-| 工具数量 | 10 个 | 20+ 个 |
-| 通信方式 | HTTP + SSE | Native Messaging |
-| 维护方式 | 内部维护 | 基于社区 + 源码可控 |
-| Response Body | ✅ 支持 | ✅ 支持 |
-| 页面操作 | ✅ 基础支持 | ✅ 增强支持 |
-| AI 语义搜索 | ❌ | ✅ 支持 |
-| 书签管理 | ❌ | ✅ 支持 |
-| 浏览历史 | ❌ | ✅ 支持 |
-| 性能 | 一般 | 更快 |
+| 维度          | 旧版 (chrome-extension) | 新版 (mcp-chrome-integration) |
+| ------------- | ----------------------- | ----------------------------- |
+| 架构层数      | 5 层                    | 3 层                          |
+| 工具数量      | 10 个                   | 20+ 个                        |
+| 通信方式      | HTTP + SSE              | Native Messaging              |
+| 维护方式      | 内部维护                | 基于社区 + 源码可控           |
+| Response Body | ✅ 支持                 | ✅ 支持                       |
+| 页面操作      | ✅ 基础支持             | ✅ 增强支持                   |
+| AI 语义搜索   | ❌                      | ✅ 支持                       |
+| 书签管理      | ❌                      | ✅ 支持                       |
+| 浏览历史      | ❌                      | ✅ 支持                       |
+| 性能          | 一般                    | 更快                          |
 
 详细对比见: [docs/implementation-plan.md](docs/implementation-plan.md)
 
 ## 🚀 快速开始
 
+> 说明：本目录已并入顶层 monorepo 管理，请在仓库根目录用 npm 安装/执行脚本，不要再单独初始化子工作区。
+
 ### 1. 安装依赖
 
+在仓库根目录一次性安装（会覆盖到 chrome-integration 相关包）：
+
 ```bash
-cd packages/mcp-chrome-integration
-pnpm install
+npm install
 ```
 
 ### 2. 构建项目
 
 ```bash
-# 构建所有组件
-pnpm build
+# 构建所有组件（在仓库根目录运行）
+npm run build --workspace=@qwen-code/mcp-chrome-integration
 
 # 或者分步构建
-pnpm build:shared      # 构建 shared 包
-pnpm build:native      # 构建 native-server
-pnpm build:extension   # 构建 Chrome Extension
+npm run build --workspace=mcp-chrome-bridge            # 构建 native-server
+npm run build --workspace=@qwen-code/chrome-bridge     # 构建 Chrome Extension
 ```
 
 ### 3. 注册 Native Messaging
 
 ```bash
 # 注册 Native Messaging Host
-pnpm install:native
+npm run install:native --workspace=@qwen-code/mcp-chrome-integration
 
 # 验证注册
-pnpm doctor
+npm run doctor --workspace=@qwen-code/mcp-chrome-integration
 ```
 
 ### 4. 加载 Chrome Extension
@@ -108,6 +112,7 @@ pnpm doctor
 ## 🛠️ 可用工具
 
 ### 浏览器管理（6个工具）
+
 - `get_windows_and_tabs` - 列出所有窗口和标签
 - `chrome_navigate` - 导航到 URL
 - `chrome_switch_tab` - 切换标签
@@ -116,28 +121,33 @@ pnpm doctor
 - `chrome_inject_script` - 注入脚本
 
 ### 网络监控（4个工具）
+
 - `chrome_network_capture_start/stop` - 网络捕获（webRequest API）
 - `chrome_network_debugger_start/stop` - **网络调试（包含 response body）**
 - `chrome_network_request` - 发送 HTTP 请求
 
 ### 页面交互（3个工具）
+
 - `chrome_click_element` - 点击元素
 - `chrome_fill_or_select` - 填充表单
 - `chrome_keyboard` - 键盘输入
 
 ### 内容分析（4个工具）
+
 - `search_tabs_content` - **AI 语义搜索**
 - `chrome_get_web_content` - 提取页面内容
 - `chrome_get_interactive_elements` - 查找可交互元素
 - `chrome_console` - 捕获控制台日志
 
 ### 数据管理（5个工具）
+
 - `chrome_history` - 搜索浏览历史
 - `chrome_bookmark_search` - 搜索书签
 - `chrome_bookmark_add` - 添加书签
 - `chrome_bookmark_delete` - 删除书签
 
 ### 截图（1个工具）
+
 - `chrome_screenshot` - 高级截图（支持全页、元素、自定义尺寸）
 
 ## 🛠️ 开发
@@ -146,17 +156,17 @@ pnpm doctor
 
 ```bash
 # 启动所有组件的开发模式
-pnpm dev
+npm run dev --workspace=@qwen-code/mcp-chrome-integration
 
 # 或者分别启动
-pnpm dev:extension   # 启动 Extension 开发模式
-pnpm dev:native      # 启动 Native Server 开发模式
+npm run dev --workspace=@qwen-code/chrome-bridge   # 启动 Extension 开发模式
+npm run dev --workspace=mcp-chrome-bridge          # 启动 Native Server 开发模式
 ```
 
 ### 卸载 Native Messaging
 
 ```bash
-pnpm uninstall:native
+npm run uninstall:native --workspace=@qwen-code/mcp-chrome-integration
 ```
 
 ## 📁 项目结构
@@ -164,8 +174,7 @@ pnpm uninstall:native
 ```
 packages/mcp-chrome-integration/
 ├── README.md                          # 本文档
-├── package.json                       # 根 workspace 配置
-├── pnpm-workspace.yaml                # pnpm workspace 定义
+├── package.json                       # 局部脚本定义（由顶层 workspace 管理依赖）
 │
 ├── packages/
 │   └── shared/                        # 共享类型库 (来自 hangwin)
@@ -210,15 +219,15 @@ packages/mcp-chrome-integration/
 
 ### 工具映射表
 
-| 旧版工具 | 新版工具 | 说明 |
-|---------|---------|------|
-| `browser_read_page` | `chrome_read_page` | API 类似 |
-| `browser_capture_screenshot` | `chrome_screenshot` | 功能更强 |
-| `browser_get_network_logs` | `chrome_network_debugger_start/stop` | 两步操作 |
-| `browser_get_console_logs` | `chrome_console` | API 类似 |
-| `browser_click` | `chrome_click_element` | 支持更多选择器 |
-| `browser_fill_form` | `chrome_fill_or_select` | API 类似 |
-| `browser_run_js` | `chrome_inject_script` | 注入脚本 |
+| 旧版工具                     | 新版工具                             | 说明           |
+| ---------------------------- | ------------------------------------ | -------------- |
+| `browser_read_page`          | `chrome_read_page`                   | API 类似       |
+| `browser_capture_screenshot` | `chrome_screenshot`                  | 功能更强       |
+| `browser_get_network_logs`   | `chrome_network_debugger_start/stop` | 两步操作       |
+| `browser_get_console_logs`   | `chrome_console`                     | API 类似       |
+| `browser_click`              | `chrome_click_element`               | 支持更多选择器 |
+| `browser_fill_form`          | `chrome_fill_or_select`              | API 类似       |
+| `browser_run_js`             | `chrome_inject_script`               | 注入脚本       |
 
 详细迁移指南见: [docs/implementation-plan.md](docs/implementation-plan.md)
 
@@ -240,16 +249,19 @@ packages/mcp-chrome-integration/
 ### Extension 无法连接 Native Host
 
 1. 检查 Native Messaging 注册状态:
+
 ```bash
-pnpm doctor
+npm run doctor --workspace=@qwen-code/mcp-chrome-integration
 ```
 
 2. 检查 Extension Console 错误:
+
 - 打开 `chrome://extensions/`
 - 找到扩展，点击 "Inspect views: service worker"
 - 查看 console 中的 `chrome.runtime.lastError`
 
 3. 验证 Native Messaging 配置文件:
+
 ```bash
 # macOS
 cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.mcp_chrome_bridge.json
@@ -258,17 +270,20 @@ cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.m
 ### Native Server 无法启动
 
 1. 检查构建产物:
+
 ```bash
 ls -la app/native-server/dist/
 ```
 
 2. 手动测试启动:
+
 ```bash
 cd app/native-server
 node dist/cli.js doctor
 ```
 
 3. 查看日志:
+
 ```bash
 # 检查 native-server 日志输出
 ```
@@ -276,12 +291,14 @@ node dist/cli.js doctor
 ### Qwen CLI 无法连接
 
 1. 验证 MCP 配置:
+
 ```bash
 # 检查配置文件
 cat ~/.qwen/config.json
 ```
 
 2. 测试连接:
+
 ```bash
 # 使用 Qwen CLI 测试工具调用
 qwen mcp list
@@ -322,7 +339,7 @@ chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.
 - **Native Server**: Node.js + Fastify + MCP SDK
 - **通信协议**: Chrome Native Messaging (stdio)
 - **MCP Transport**: StreamableHttp / stdio
-- **包管理**: pnpm workspace
+- **包管理**: 顶层 npm workspace
 
 ## 📈 预期收益
 
@@ -344,6 +361,7 @@ chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.
 ## 📮 反馈
 
 如有问题或建议：
+
 1. 查看 [实施方案](docs/implementation-plan.md)
 2. 查看 [hangwin/mcp-chrome Issues](https://github.com/hangwin/mcp-chrome/issues)
 3. 项目内部讨论

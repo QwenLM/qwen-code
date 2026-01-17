@@ -8,9 +8,13 @@ import type {
   RunningExecution,
 } from './engines/types';
 import type { AgentMessage, RealtimeEvent } from './types';
-import type { AttachmentMetadata } from 'chrome-mcp-shared';
+import type { AttachmentMetadata } from '../shared';
 import { AgentStreamManager } from './stream-manager';
-import { getProject, touchProjectActivity, updateProjectClaudeSessionId } from './project-service';
+import {
+  getProject,
+  touchProjectActivity,
+  updateProjectClaudeSessionId,
+} from './project-service';
 import { createMessage as persistAgentMessage } from './message-service';
 import {
   getSession,
@@ -50,7 +54,10 @@ export class AgentChatService {
       this.engines.set(engine.name, engine);
     }
 
-    if (options.defaultEngineName && this.engines.has(options.defaultEngineName)) {
+    if (
+      options.defaultEngineName &&
+      this.engines.has(options.defaultEngineName)
+    ) {
       this.defaultEngineName = options.defaultEngineName;
     } else {
       // Fallback to first registered engine to avoid hard-coding 'claude' here.
@@ -62,7 +69,10 @@ export class AgentChatService {
     }
   }
 
-  async handleAct(sessionId: string, payload: AgentActRequest): Promise<{ requestId: string }> {
+  async handleAct(
+    sessionId: string,
+    payload: AgentActRequest,
+  ): Promise<{ requestId: string }> {
     const trimmed = payload.instruction?.trim();
     if (!trimmed) {
       throw new Error('instruction is required');
@@ -84,7 +94,9 @@ export class AgentChatService {
       }
       // Validate project association
       if (projectId && dbSession.projectId !== projectId) {
-        throw new Error(`Session ${dbSessionId} does not belong to project: ${projectId}`);
+        throw new Error(
+          `Session ${dbSessionId} does not belong to project: ${projectId}`,
+        );
       }
       // Use session's project if not explicitly provided
       if (!projectId) {
@@ -94,7 +106,9 @@ export class AgentChatService {
 
     // Project is required - workspace path must come from project system
     if (!projectId) {
-      throw new Error('projectId is required. Please select or create a project first.');
+      throw new Error(
+        'projectId is required. Please select or create a project first.',
+      );
     }
 
     const project = await getProject(projectId);
@@ -136,7 +150,8 @@ export class AgentChatService {
     }
 
     // Model priority: request > session > project
-    const effectiveModel = payload.model?.trim() || dbSession?.model || projectSelectedModel;
+    const effectiveModel =
+      payload.model?.trim() || dbSession?.model || projectSelectedModel;
 
     // For Claude engine with session, use session's engineSessionId for resume
     if (dbSession && engineName === 'claude') {
@@ -152,7 +167,9 @@ export class AgentChatService {
     let resolvedImagePaths: string[] | undefined;
 
     if (projectId && payload.attachments && payload.attachments.length > 0) {
-      const imageAttachments = payload.attachments.filter((a) => a.type === 'image');
+      const imageAttachments = payload.attachments.filter(
+        (a) => a.type === 'image',
+      );
 
       if (imageAttachments.length > 0) {
         try {
@@ -180,7 +197,10 @@ export class AgentChatService {
             `[AgentChatService] Saved ${savedAttachments.length} attachment(s): ${resolvedImagePaths.join(', ')}`,
           );
         } catch (error) {
-          console.error('[AgentChatService] Failed to save attachments:', error);
+          console.error(
+            '[AgentChatService] Failed to save attachments:',
+            error,
+          );
           // Continue without attachments - don't fail the entire request
         }
       }
@@ -244,7 +264,10 @@ export class AgentChatService {
           metadata: userMessageMetadata,
         });
       } catch (error) {
-        console.error('[AgentChatService] Failed to persist user message:', error);
+        console.error(
+          '[AgentChatService] Failed to persist user message:',
+          error,
+        );
       }
     }
 
@@ -298,7 +321,10 @@ export class AgentChatService {
             id: msg.id,
             createdAt: msg.createdAt,
           }).catch((error) => {
-            console.error('[AgentChatService] Failed to persist agent message:', error);
+            console.error(
+              '[AgentChatService] Failed to persist agent message:',
+              error,
+            );
           });
         }
       },
@@ -335,15 +361,20 @@ export class AgentChatService {
       dbSessionId,
       // Session-level configuration for ClaudeEngine
       permissionMode: dbSession?.permissionMode,
-      allowDangerouslySkipPermissions: dbSession?.allowDangerouslySkipPermissions,
+      allowDangerouslySkipPermissions:
+        dbSession?.allowDangerouslySkipPermissions,
       systemPromptConfig: dbSession?.systemPromptConfig,
       optionsConfig: dbSession?.optionsConfig,
       // Pass Claude session ID for session resumption (ClaudeEngine only)
-      resumeClaudeSessionId: engineName === 'claude' ? resumeClaudeSessionId : undefined,
+      resumeClaudeSessionId:
+        engineName === 'claude' ? resumeClaudeSessionId : undefined,
       // Pass useCcr flag for Claude Code Router support (ClaudeEngine only)
       useCcr: engineName === 'claude' ? projectUseCcr : undefined,
       // Pass Codex-specific configuration (CodexEngine only)
-      codexConfig: engineName === 'codex' ? dbSession?.optionsConfig?.codexConfig : undefined,
+      codexConfig:
+        engineName === 'codex'
+          ? dbSession?.optionsConfig?.codexConfig
+          : undefined,
     };
 
     // Create abort controller for cancellation support
@@ -359,7 +390,14 @@ export class AgentChatService {
     });
 
     // Fire-and-forget execution to keep HTTP handler fast.
-    void this.runEngine(engine, engineOptions, ctx, sessionId, requestId, abortController);
+    void this.runEngine(
+      engine,
+      engineOptions,
+      ctx,
+      sessionId,
+      requestId,
+      abortController,
+    );
 
     return { requestId };
   }
@@ -429,7 +467,10 @@ export class AgentChatService {
     return Array.from(this.runningExecutions.values());
   }
 
-  private resolveEngineName(preference?: EngineName, projectPreferredCli?: EngineName): EngineName {
+  private resolveEngineName(
+    preference?: EngineName,
+    projectPreferredCli?: EngineName,
+  ): EngineName {
     if (preference && this.engines.has(preference)) {
       return preference;
     }

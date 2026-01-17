@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+/* global process, console */
+
 /**
  * 将源代码同步到目标扩展目录（默认 dist/extension 或通过 EXTENSION_OUT_DIR/--target 指定）。
  * - 复制 public 下的静态资源（排除 sidepanel/dist 旧构建）
@@ -55,7 +57,11 @@ async function copySources() {
     const srcPath = path.join(projectRoot, src);
     const destPath = path.join(targetDir, destRelative);
     await fs.mkdir(destPath, { recursive: true });
-    await fs.cp(srcPath, destPath, { recursive: true });
+    await fs.cp(srcPath, destPath, {
+      recursive: true,
+      // Skip TypeScript sources so the built JS (via esbuild) is the only output
+      filter: (entry) => !entry.endsWith('.ts') && !entry.endsWith('.tsx'),
+    });
     console.log(`Synced ${src} -> ${path.relative(projectRoot, destPath)}`);
   }
 }

@@ -6,9 +6,13 @@ import {
   CODEX_AUTO_INSTRUCTIONS,
   DEFAULT_CODEX_CONFIG,
   type CodexEngineConfig,
-} from 'chrome-mcp-shared';
-import type { AgentEngine, EngineExecutionContext, EngineInitOptions } from './types';
-import type { AgentMessage, RealtimeEvent } from '../types';
+} from '../../shared';
+import type {
+  AgentEngine,
+  EngineExecutionContext,
+  EngineInitOptions,
+} from './types';
+import type { AgentMessage } from '../types';
 import { AgentToolBridge } from '../tool-bridge';
 import { getProject } from '../project-service';
 import { getChromeMcpUrl } from '../../constant';
@@ -47,7 +51,10 @@ export class CodexEngine implements AgentEngine {
    */
   private static readonly MAX_STDERR_LINES = 200;
 
-  async initializeAndRun(options: EngineInitOptions, ctx: EngineExecutionContext): Promise<void> {
+  async initializeAndRun(
+    options: EngineInitOptions,
+    ctx: EngineExecutionContext,
+  ): Promise<void> {
     const {
       sessionId,
       instruction,
@@ -123,7 +130,10 @@ export class CodexEngine implements AgentEngine {
     if (enableChromeMcp) {
       const chromeMcpUrl = getChromeMcpUrl();
       // Set both url and type for complete HTTP MCP server configuration
-      args.push('-c', `mcp_servers.chrome_mcp_http.url=${JSON.stringify(chromeMcpUrl)}`);
+      args.push(
+        '-c',
+        `mcp_servers.chrome_mcp_http.url=${JSON.stringify(chromeMcpUrl)}`,
+      );
       args.push('-c', `mcp_servers.chrome_mcp_http.type="http"`);
       console.error(`[CodexEngine] Chrome MCP server enabled: ${chromeMcpUrl}`);
     } else {
@@ -136,11 +146,14 @@ export class CodexEngine implements AgentEngine {
 
     // Process image attachments - prefer resolvedImagePaths (persisted), fallback to temp files
     const tempFiles: string[] = [];
-    const hasResolvedPaths = resolvedImagePaths && resolvedImagePaths.length > 0;
+    const hasResolvedPaths =
+      resolvedImagePaths && resolvedImagePaths.length > 0;
 
     if (hasResolvedPaths) {
       // Use pre-resolved persistent paths (preferred - no temp files needed)
-      console.error(`[CodexEngine] Using ${resolvedImagePaths.length} pre-resolved image path(s)`);
+      console.error(
+        `[CodexEngine] Using ${resolvedImagePaths.length} pre-resolved image path(s)`,
+      );
       for (const imagePath of resolvedImagePaths) {
         args.push('--image', imagePath);
       }
@@ -153,7 +166,10 @@ export class CodexEngine implements AgentEngine {
             tempFiles.push(tempFile);
             args.push('--image', tempFile);
           } catch (err) {
-            console.error('[CodexEngine] Failed to write attachment to temp file:', err);
+            console.error(
+              '[CodexEngine] Failed to write attachment to temp file:',
+              err,
+            );
           }
         }
       }
@@ -200,7 +216,10 @@ export class CodexEngine implements AgentEngine {
             console.error(`[CodexEngine] Cleaned up temp file: ${filePath}`);
           } catch (err) {
             // Ignore errors during cleanup - file may already be deleted
-            console.error(`[CodexEngine] Failed to cleanup temp file ${filePath}:`, err);
+            console.error(
+              `[CodexEngine] Failed to cleanup temp file ${filePath}:`,
+              err,
+            );
           }
         }
       };
@@ -277,7 +296,10 @@ export class CodexEngine implements AgentEngine {
         stderrBuffer.push(text);
         // Keep only the most recent lines to prevent memory growth
         if (stderrBuffer.length > CodexEngine.MAX_STDERR_LINES) {
-          stderrBuffer.splice(0, stderrBuffer.length - CodexEngine.MAX_STDERR_LINES);
+          stderrBuffer.splice(
+            0,
+            stderrBuffer.length - CodexEngine.MAX_STDERR_LINES,
+          );
         }
 
         console.error('[CodexEngine][stderr]', text);
@@ -403,14 +425,20 @@ export class CodexEngine implements AgentEngine {
         }
         const command = this.pickFirstString(item.command) ?? tracked?.command;
         const output = this.pickFirstString(item.aggregated_output) ?? '';
-        const exitCode = typeof item.exit_code === 'number' ? item.exit_code : undefined;
+        const exitCode =
+          typeof item.exit_code === 'number' ? item.exit_code : undefined;
         const status = this.pickFirstString(item.status);
-        const isError = status === 'failed' || (typeof exitCode === 'number' && exitCode !== 0);
+        const isError =
+          status === 'failed' ||
+          (typeof exitCode === 'number' && exitCode !== 0);
 
         const summary = command ? `Ran: ${command}` : 'Executed shell command';
-        const exitSuffix = typeof exitCode === 'number' ? ` (exit ${exitCode})` : '';
+        const exitSuffix =
+          typeof exitCode === 'number' ? ` (exit ${exitCode})` : '';
         const body = output.trim();
-        const fullContent = body ? `${summary}${exitSuffix}\n\n${body}` : `${summary}${exitSuffix}`;
+        const fullContent = body
+          ? `${summary}${exitSuffix}\n\n${body}`
+          : `${summary}${exitSuffix}`;
 
         dispatchToolMessage(
           fullContent,
@@ -430,22 +458,35 @@ export class CodexEngine implements AgentEngine {
 
       const emitFileChange = (item: Record<string, unknown>): void => {
         const { content, metadata } = this.summarizeApplyPatch({
-          changes: item.changes as Record<string, unknown> | Array<Record<string, unknown>>,
+          changes: item.changes as
+            | Record<string, unknown>
+            | Array<Record<string, unknown>>,
         });
         const status = this.pickFirstString(item.status) ?? 'completed';
         const isError = status === 'failed';
         const toolName =
-          (metadata?.toolName as string) || (metadata?.tool_name as string) || 'Edit';
+          (metadata?.toolName as string) ||
+          (metadata?.tool_name as string) ||
+          'Edit';
 
         dispatchToolMessage(
           isError ? `Failed: ${content}` : content,
-          { ...metadata, toolName, tool_name: toolName, status, is_error: isError || undefined },
+          {
+            ...metadata,
+            toolName,
+            tool_name: toolName,
+            status,
+            is_error: isError || undefined,
+          },
           'tool_result',
           false,
         );
       };
 
-      const emitTodoListUpdate = (record: Record<string, unknown>, phase: TodoListPhase): void => {
+      const emitTodoListUpdate = (
+        record: Record<string, unknown>,
+        phase: TodoListPhase,
+      ): void => {
         const rawItems = this.extractTodoListItems(record);
         const items = this.normalizeTodoListItems(rawItems);
         const content = this.buildTodoListContent(items, phase);
@@ -542,7 +583,8 @@ export class CodexEngine implements AgentEngine {
 
       // Setup timeout
       const timeoutMs =
-        Number.parseInt(process.env.CODEX_ENGINE_TIMEOUT_MS || '', 10) || 15 * 60 * 1000;
+        Number.parseInt(process.env.CODEX_ENGINE_TIMEOUT_MS || '', 10) ||
+        15 * 60 * 1000;
       timeoutHandle = setTimeout(() => {
         timedOut = true;
         // Close readline to exit the loop
@@ -562,33 +604,39 @@ export class CodexEngine implements AgentEngine {
       timeoutHandle.unref?.();
 
       // Cleanup timeout and handle abnormal exit
-      child.on('close', (code: number | null, closeSignal: NodeJS.Signals | null) => {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-          timeoutHandle = null;
-        }
+      child.on(
+        'close',
+        (code: number | null, closeSignal: NodeJS.Signals | null) => {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+            timeoutHandle = null;
+          }
 
-        // If already timed out, settled, or completed normally, do nothing
-        if (timedOut || settled || hasCompleted) {
-          return;
-        }
+          // If already timed out, settled, or completed normally, do nothing
+          if (timedOut || settled || hasCompleted) {
+            return;
+          }
 
-        // Build error detail from exit code and signal
-        const detailParts: string[] = [];
-        if (typeof code === 'number') {
-          detailParts.push(`exit code ${code}`);
-        }
-        if (closeSignal) {
-          detailParts.push(`signal ${closeSignal}`);
-        }
-        const detail = detailParts.length > 0 ? detailParts.join(', ') : 'unexpected shutdown';
+          // Build error detail from exit code and signal
+          const detailParts: string[] = [];
+          if (typeof code === 'number') {
+            detailParts.push(`exit code ${code}`);
+          }
+          if (closeSignal) {
+            detailParts.push(`signal ${closeSignal}`);
+          }
+          const detail =
+            detailParts.length > 0
+              ? detailParts.join(', ')
+              : 'unexpected shutdown';
 
-        // Emit final assistant message and mark as failed
-        emitAssistant(true);
-        resetAssistantBuffers();
-        hasCompleted = true;
-        void finish(new Error(`CodexEngine: process terminated (${detail})`));
-      });
+          // Emit final assistant message and mark as failed
+          emitAssistant(true);
+          resetAssistantBuffers();
+          hasCompleted = true;
+          void finish(new Error(`CodexEngine: process terminated (${detail})`));
+        },
+      );
 
       // Main event processing loop (wrapped in IIFE to handle async properly)
       void (async () => {
@@ -601,7 +649,10 @@ export class CodexEngine implements AgentEngine {
             try {
               event = JSON.parse(trimmed) as Record<string, unknown>;
             } catch {
-              console.warn('[CodexEngine] Failed to parse Codex event line:', trimmed);
+              console.warn(
+                '[CodexEngine] Failed to parse Codex event line:',
+                trimmed,
+              );
               continue;
             }
 
@@ -625,7 +676,9 @@ export class CodexEngine implements AgentEngine {
                 const msg =
                   (item &&
                     typeof item === 'object' &&
-                    this.pickFirstString((item as Record<string, unknown>).error)) ||
+                    this.pickFirstString(
+                      (item as Record<string, unknown>).error,
+                    )) ||
                   'Codex execution failed';
                 hasCompleted = true;
                 throw new Error(msg);
@@ -636,7 +689,9 @@ export class CodexEngine implements AgentEngine {
                 resetAssistantBuffers();
                 const msg =
                   this.pickFirstString((event as { error?: unknown }).error) ||
-                  this.pickFirstString((event as { message?: unknown }).message) ||
+                  this.pickFirstString(
+                    (event as { message?: unknown }).message,
+                  ) ||
                   stderrBuffer.slice(-5).join('\n') ||
                   'Codex execution error';
                 hasCompleted = true;
@@ -675,7 +730,9 @@ export class CodexEngine implements AgentEngine {
 
   private resolveRepoPath(projectRoot?: string): string {
     const base =
-      (projectRoot && projectRoot.trim()) || process.env.MCP_AGENT_PROJECT_ROOT || process.cwd();
+      (projectRoot && projectRoot.trim()) ||
+      process.env.MCP_AGENT_PROJECT_ROOT ||
+      process.cwd();
     return path.resolve(base);
   }
 
@@ -683,12 +740,18 @@ export class CodexEngine implements AgentEngine {
    * Append project context (file listing) to the prompt.
    * Aligned with other/cweb implementation.
    */
-  private async appendProjectContext(baseInstruction: string, repoPath: string): Promise<string> {
+  private async appendProjectContext(
+    baseInstruction: string,
+    repoPath: string,
+  ): Promise<string> {
     try {
       const fs = await import('node:fs/promises');
       const entries = await fs.readdir(repoPath, { withFileTypes: true });
       const visible = entries
-        .filter((entry) => !entry.name.startsWith('.git') && entry.name !== 'AGENTS.md')
+        .filter(
+          (entry) =>
+            !entry.name.startsWith('.git') && entry.name !== 'AGENTS.md',
+        )
         .map((entry) => entry.name);
 
       if (visible.length === 0) {
@@ -718,14 +781,20 @@ Work directly in the current directory. Do not create subdirectories unless spec
   private buildCodexConfigArgs(config: CodexEngineConfig): string[] {
     const args: string[] = [];
 
-    const pushConfig = (key: string, value: string | number | boolean): void => {
+    const pushConfig = (
+      key: string,
+      value: string | number | boolean,
+    ): void => {
       args.push('-c', `${key}=${String(value)}`);
     };
 
     pushConfig('include_apply_patch_tool', config.includeApplyPatchTool);
     pushConfig('include_plan_tool', config.includePlanTool);
     pushConfig('tools.web_search_request', config.enableWebSearch);
-    pushConfig('use_experimental_streamable_shell_tool', config.useStreamableShell);
+    pushConfig(
+      'use_experimental_streamable_shell_tool',
+      config.useStreamableShell,
+    );
     pushConfig('sandbox_mode', config.sandboxMode);
     pushConfig('max_turns', config.maxTurns);
     pushConfig('max_thinking_tokens', config.maxThinkingTokens);
@@ -779,7 +848,9 @@ Work directly in the current directory. Do not create subdirectories unless spec
     }
     if (extraPaths.length > 0) {
       const currentPath = env.PATH || env.Path || '';
-      env.PATH = [...extraPaths, currentPath].filter(Boolean).join(path.delimiter);
+      env.PATH = [...extraPaths, currentPath]
+        .filter(Boolean)
+        .join(path.delimiter);
     }
     return env;
   }
@@ -900,7 +971,10 @@ Work directly in the current directory. Do not create subdirectories unless spec
     return result;
   }
 
-  private buildTodoListContent(items: TodoListItem[], phase: TodoListPhase): string {
+  private buildTodoListContent(
+    items: TodoListItem[],
+    phase: TodoListPhase,
+  ): string {
     if (items.length === 0) {
       switch (phase) {
         case 'started':

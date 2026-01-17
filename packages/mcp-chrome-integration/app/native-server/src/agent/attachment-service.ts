@@ -16,7 +16,7 @@ import type {
   AgentAttachment,
   AttachmentMetadata,
   AttachmentProjectStats,
-} from 'chrome-mcp-shared';
+} from '../shared';
 import { getAgentDataDir } from './storage';
 
 // ============================================================
@@ -73,7 +73,12 @@ export interface CleanupResult {
 const ATTACHMENTS_DIR_NAME = 'attachments';
 
 /** Allowed MIME types for image attachments */
-const ALLOWED_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const ALLOWED_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+]);
 
 // ============================================================
 // Helper Functions
@@ -232,7 +237,9 @@ export class AttachmentService {
       createdAt: new Date().toISOString(),
     };
 
-    console.error(`[AttachmentService] Saved attachment: ${absolutePath} (${sizeBytes} bytes)`);
+    console.error(
+      `[AttachmentService] Saved attachment: ${absolutePath} (${sizeBytes} bytes)`,
+    );
 
     return {
       absolutePath,
@@ -270,7 +277,10 @@ export class AttachmentService {
           totalBytes += stats.totalBytes;
         } catch (error) {
           // Skip directories we can't read
-          console.error(`[AttachmentService] Failed to stat project ${projectId}:`, error);
+          console.error(
+            `[AttachmentService] Failed to stat project ${projectId}:`,
+            error,
+          );
         }
       }
     } catch {
@@ -339,7 +349,9 @@ export class AttachmentService {
   /**
    * Cleanup attachments for specified projects or all projects.
    */
-  async cleanupAttachments(input?: CleanupAttachmentsInput): Promise<CleanupResult> {
+  async cleanupAttachments(
+    input?: CleanupAttachmentsInput,
+  ): Promise<CleanupResult> {
     const rootDir = this.getAttachmentsRootDir();
     const results: CleanupProjectResult[] = [];
     let totalRemovedFiles = 0;
@@ -370,7 +382,9 @@ export class AttachmentService {
     // Clean each project
     for (const projectId of projectIds) {
       if (!isValidProjectId(projectId)) {
-        console.error(`[AttachmentService] Skipping invalid projectId: ${projectId}`);
+        console.error(
+          `[AttachmentService] Skipping invalid projectId: ${projectId}`,
+        );
         continue;
       }
 
@@ -391,7 +405,9 @@ export class AttachmentService {
   /**
    * Cleanup attachments for a single project.
    */
-  private async cleanupProject(projectId: string): Promise<CleanupProjectResult> {
+  private async cleanupProject(
+    projectId: string,
+  ): Promise<CleanupProjectResult> {
     const dirPath = this.getProjectAttachmentsDir(projectId);
 
     try {
@@ -423,7 +439,10 @@ export class AttachmentService {
         removedBytes: stats.totalBytes,
       };
     } catch (error) {
-      console.error(`[AttachmentService] Failed to cleanup project ${projectId}:`, error);
+      console.error(
+        `[AttachmentService] Failed to cleanup project ${projectId}:`,
+        error,
+      );
       return {
         projectId,
         dirPath,
@@ -437,7 +456,10 @@ export class AttachmentService {
   /**
    * Check if an attachment file exists.
    */
-  async attachmentExists(projectId: string, filename: string): Promise<boolean> {
+  async attachmentExists(
+    projectId: string,
+    filename: string,
+  ): Promise<boolean> {
     try {
       const filePath = this.getAttachmentPath(projectId, filename);
       await fs.access(filePath);

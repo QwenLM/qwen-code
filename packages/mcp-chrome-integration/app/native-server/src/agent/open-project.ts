@@ -18,7 +18,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import type { OpenProjectResponse, OpenProjectTarget } from 'chrome-mcp-shared';
+import type { OpenProjectResponse, OpenProjectTarget } from '../shared';
 import { validateRootPath } from './project-service';
 
 // ============================================================
@@ -64,7 +64,10 @@ function formatSpawnError(err: unknown): string {
 /**
  * Format process exit information.
  */
-function formatExitFailure(code: number | null, signal: NodeJS.Signals | null): string {
+function formatExitFailure(
+  code: number | null,
+  signal: NodeJS.Signals | null,
+): string {
   if (typeof code === 'number') {
     return `Exit code ${code}`;
   }
@@ -148,7 +151,10 @@ async function tryLaunch(attempt: LaunchAttempt): Promise<LaunchResult> {
 /**
  * Try multiple launch attempts in sequence until one succeeds.
  */
-async function runFallbackSequence(errorTitle: string, attempts: LaunchAttempt[]): Promise<void> {
+async function runFallbackSequence(
+  errorTitle: string,
+  attempts: LaunchAttempt[],
+): Promise<void> {
   const errors: string[] = [];
 
   for (const attempt of attempts) {
@@ -206,7 +212,10 @@ async function openInVSCode(absolutePath: string): Promise<void> {
     });
   }
 
-  await runFallbackSequence(`Failed to open VS Code for: ${absolutePath}`, attempts);
+  await runFallbackSequence(
+    `Failed to open VS Code for: ${absolutePath}`,
+    attempts,
+  );
 }
 
 /**
@@ -303,7 +312,10 @@ export async function openFileInVSCode(
     // Security: ensure file stays within project root
     const relativeToRoot = path.relative(rootAbs, absoluteFile);
     if (relativeToRoot.startsWith('..') || path.isAbsolute(relativeToRoot)) {
-      return { success: false, error: 'File path must be within project directory' };
+      return {
+        success: false,
+        error: 'File path must be within project directory',
+      };
     }
 
     // Check file exists
@@ -314,13 +326,18 @@ export async function openFileInVSCode(
           return { success: false, error: `Not a file: ${absoluteFile}` };
         }
       } catch {
-        return { success: false, error: `File does not exist: ${absoluteFile}` };
+        return {
+          success: false,
+          error: `File does not exist: ${absoluteFile}`,
+        };
       }
     }
 
     // Validate and sanitize line/column
     const safeLine =
-      typeof line === 'number' && Number.isFinite(line) && line > 0 ? Math.floor(line) : undefined;
+      typeof line === 'number' && Number.isFinite(line) && line > 0
+        ? Math.floor(line)
+        : undefined;
     const safeColumn =
       typeof column === 'number' && Number.isFinite(column) && column > 0
         ? Math.floor(column)
@@ -362,12 +379,23 @@ export async function openFileInVSCode(
       attempts.push({
         label: 'open -b com.microsoft.VSCode --args',
         cmd: 'open',
-        args: ['-b', 'com.microsoft.VSCode', '--args', '-r', rootAbs, '-g', gotoArg],
+        args: [
+          '-b',
+          'com.microsoft.VSCode',
+          '--args',
+          '-r',
+          rootAbs,
+          '-g',
+          gotoArg,
+        ],
         successAfterMs: 3000,
       });
     }
 
-    await runFallbackSequence(`Failed to open VS Code for: ${gotoArg}`, attempts);
+    await runFallbackSequence(
+      `Failed to open VS Code for: ${gotoArg}`,
+      attempts,
+    );
     return { success: true };
   } catch (error) {
     return { success: false, error: formatSpawnError(error) };
@@ -427,7 +455,12 @@ async function openTerminalWindows(absolutePath: string): Promise<void> {
     {
       label: 'powershell.exe Set-Location',
       cmd: 'powershell.exe',
-      args: ['-NoExit', '-Command', 'Set-Location -LiteralPath $args[0]', absolutePath],
+      args: [
+        '-NoExit',
+        '-Command',
+        'Set-Location -LiteralPath $args[0]',
+        absolutePath,
+      ],
       successAfterMs: 1500,
     },
   ]);
@@ -466,7 +499,14 @@ async function openTerminalLinux(absolutePath: string): Promise<void> {
         label: 'xterm',
         cmd: 'xterm',
         // Use bash with positional parameter to safely pass the path
-        args: ['-e', 'bash', '-lc', 'cd -- "$1" && exec "${SHELL:-bash}"', '_', absolutePath],
+        args: [
+          '-e',
+          'bash',
+          '-lc',
+          'cd -- "$1" && exec "${SHELL:-bash}"',
+          '_',
+          absolutePath,
+        ],
         successAfterMs: 3000,
       },
     ],

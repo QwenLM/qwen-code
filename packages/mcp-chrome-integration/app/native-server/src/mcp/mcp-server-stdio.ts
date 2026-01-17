@@ -9,7 +9,7 @@ import {
   ListResourcesRequestSchema,
   ListPromptsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { TOOL_SCHEMAS } from 'chrome-mcp-shared';
+import { TOOL_SCHEMAS } from '../shared';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as fs from 'fs';
@@ -26,7 +26,9 @@ const loadConfig = () => {
     return JSON.parse(configData);
   } catch (error) {
     console.error('Failed to load stdio-config.json:', error);
-    throw new Error('Configuration file stdio-config.json not found or invalid');
+    throw new Error(
+      'Configuration file stdio-config.json not found or invalid',
+    );
   }
 };
 
@@ -62,8 +64,14 @@ export const ensureMcpClient = async () => {
     }
 
     const config = loadConfig();
-    mcpClient = new Client({ name: 'Mcp Chrome Proxy', version: '1.0.0' }, { capabilities: {} });
-    const transport = new StreamableHTTPClientTransport(new URL(config.url), {});
+    mcpClient = new Client(
+      { name: 'Mcp Chrome Proxy', version: '1.0.0' },
+      { capabilities: {} },
+    );
+    const transport = new StreamableHTTPClientTransport(
+      new URL(config.url),
+      {},
+    );
     await mcpClient.connect(transport);
     return mcpClient;
   } catch (error) {
@@ -75,7 +83,9 @@ export const ensureMcpClient = async () => {
 
 export const setupTools = (server: Server) => {
   // List tools handler
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_SCHEMAS }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: TOOL_SCHEMAS,
+  }));
 
   // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
@@ -83,13 +93,20 @@ export const setupTools = (server: Server) => {
   );
 
   // List resources handler - REQUIRED BY MCP PROTOCOL
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [] }));
+  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    resources: [],
+  }));
 
   // List prompts handler - REQUIRED BY MCP PROTOCOL
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [] }));
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+    prompts: [],
+  }));
 };
 
-const handleToolCall = async (name: string, args: any): Promise<CallToolResult> => {
+const handleToolCall = async (
+  name: string,
+  args: Record<string, unknown>,
+): Promise<CallToolResult> => {
   try {
     const client = await ensureMcpClient();
     if (!client) {
@@ -101,12 +118,12 @@ const handleToolCall = async (name: string, args: any): Promise<CallToolResult> 
       timeout: DEFAULT_CALL_TIMEOUT_MS,
     });
     return result as CallToolResult;
-  } catch (error: any) {
+  } catch (error) {
     return {
       content: [
         {
           type: 'text',
-          text: `Error calling tool: ${error.message}`,
+          text: `Error calling tool: ${(error as Error).message || String(error)}`,
         },
       ],
       isError: true,
