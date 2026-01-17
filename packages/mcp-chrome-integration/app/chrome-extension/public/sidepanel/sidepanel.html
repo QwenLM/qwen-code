@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen Code</title>
+    <style>
+        /* Base reset and full-height container */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body, #root {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #1e1e1e;
+            color: #e0e0e0;
+        }
+        /* Loading state */
+        .loading-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            gap: 16px;
+        }
+        .loading-spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid #333;
+            border-top-color: #615fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .loading-text {
+            color: #888;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root">
+        <div class="loading-container">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading Qwen Code...</div>
+        </div>
+    </div>
+    <script>
+        // Inject extension URI for resource loading
+        try {
+            const extensionUri = chrome.runtime.getURL('');
+            document.body.setAttribute('data-extension-uri', extensionUri);
+            window.__EXTENSION_URI__ = extensionUri;
+        } catch (e) {
+            console.warn('Failed to inject extension URI:', e);
+        }
+    </script>
+    <script src="dist/sidepanel-app.js"></script>
+</body>
+</html>

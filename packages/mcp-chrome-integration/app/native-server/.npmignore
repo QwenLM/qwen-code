@@ -1,0 +1,8 @@
+# Development-only files that should not be published to npm
+
+# node_path.txt contains the absolute path to Node.js used during build.
+# It's written by build.ts for development hot-reload, but is useless
+# (and potentially confusing) in the published package since users will
+# have their own Node.js path written by postinstall.
+node_path.txt
+**/node_path.txt

@@ -1,0 +1,9 @@
+{
+  "semi": true,
+  "singleQuote": true,
+  "tabWidth": 2,
+  "printWidth": 100,
+  "endOfLine": "auto",
+  "proseWrap": "preserve",
+  "htmlWhitespaceSensitivity": "strict"
+}
