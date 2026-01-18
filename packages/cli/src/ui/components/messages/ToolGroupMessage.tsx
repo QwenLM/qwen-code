@@ -96,7 +96,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         Ink to render the border of the box incorrectly and span multiple lines and even
         cause tearing.
       */
-      width="100%"
+      width={terminalWidth - 1}
       marginLeft={1}
       borderDimColor={
         hasPending && (!isShellCommand || !isEmbeddedShellFocused)
