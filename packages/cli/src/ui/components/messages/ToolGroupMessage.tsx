@@ -57,9 +57,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         ? theme.status.warning
         : theme.border.default;
 
+  const borderDimColor =
+    hasPending && (!isShellCommand || !isEmbeddedShellFocused);
+
   const staticHeight = /* border */ 2 + /* marginBottom */ 1;
-  // This is a bit of a magic number, but it accounts for the border and
-  // marginLeft.
+  // Account for borders and padding (2 for left/right border, 2 for padding)
   const innerWidth = terminalWidth - 4;
 
   // only prompt for tool approval on the first 'confirming' tool in the list
@@ -89,26 +91,38 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   return (
     <Box
       flexDirection="column"
-      borderStyle="round"
       /*
         This width constraint is highly important and protects us from an Ink rendering bug.
         Since the ToolGroup can typically change rendering states frequently, it can cause
         Ink to render the border of the box incorrectly and span multiple lines and even
         cause tearing.
       */
-      width={terminalWidth - 1}
+      width={terminalWidth}
       marginLeft={1}
-      borderDimColor={
-        hasPending && (!isShellCommand || !isEmbeddedShellFocused)
-      }
-      borderColor={borderColor}
-      gap={1}
     >
-      {toolCalls.map((tool) => {
+      {toolCalls.map((tool, index) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
+        const isFirst = index === 0;
+
         return (
-          <Box key={tool.callId} flexDirection="column" minHeight={1}>
-            <Box flexDirection="row" alignItems="center">
+          <Box
+            key={tool.callId}
+            flexDirection="column"
+            minHeight={1}
+            width={terminalWidth - 1}
+          >
+            {/* Header with top border (only for first item) and left/right borders */}
+            <Box
+              borderStyle="round"
+              borderTop={isFirst}
+              borderBottom={false}
+              borderLeft={true}
+              borderRight={true}
+              borderColor={borderColor}
+              borderDimColor={borderDimColor}
+              width={terminalWidth - 1}
+              paddingX={1}
+            >
               <ToolMessage
                 {...tool}
                 availableTerminalHeight={availableTerminalHeightPerToolMessage}
@@ -125,29 +139,58 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 config={config}
               />
             </Box>
-            {tool.status === ToolCallStatus.Confirming &&
-              isConfirming &&
-              tool.confirmationDetails && (
-                <ToolConfirmationMessage
-                  confirmationDetails={tool.confirmationDetails}
-                  config={config}
-                  isFocused={isFocused}
-                  availableTerminalHeight={
-                    availableTerminalHeightPerToolMessage
-                  }
-                  terminalWidth={innerWidth}
-                />
+            {/* Confirmation and output sections with left/right borders */}
+            <Box
+              borderLeft={true}
+              borderRight={true}
+              borderTop={false}
+              borderBottom={false}
+              borderColor={borderColor}
+              borderDimColor={borderDimColor}
+              flexDirection="column"
+              borderStyle="round"
+              paddingLeft={1}
+              paddingRight={1}
+              width={terminalWidth - 1}
+            >
+              {tool.status === ToolCallStatus.Confirming &&
+                isConfirming &&
+                tool.confirmationDetails && (
+                  <ToolConfirmationMessage
+                    confirmationDetails={tool.confirmationDetails}
+                    config={config}
+                    isFocused={isFocused}
+                    availableTerminalHeight={
+                      availableTerminalHeightPerToolMessage
+                    }
+                    terminalWidth={innerWidth}
+                  />
+                )}
+              {tool.outputFile && (
+                <Box>
+                  <Text color={theme.text.primary}>
+                    Output too long and was saved to: {tool.outputFile}
+                  </Text>
+                </Box>
               )}
-            {tool.outputFile && (
-              <Box marginX={1}>
-                <Text color={theme.text.primary}>
-                  Output too long and was saved to: {tool.outputFile}
-                </Text>
-              </Box>
-            )}
+            </Box>
           </Box>
         );
       })}
+      {/* Bottom border - kept separate to ensure proper alignment */}
+      {toolCalls.length > 0 && (
+        <Box
+          height={0}
+          width={terminalWidth - 1}
+          borderLeft={true}
+          borderRight={true}
+          borderTop={false}
+          borderBottom={true}
+          borderColor={borderColor}
+          borderDimColor={borderDimColor}
+          borderStyle="round"
+        />
+      )}
     </Box>
   );
 };

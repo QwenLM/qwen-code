@@ -355,6 +355,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <AnsiOutputText
                 data={displayRenderer.data}
                 availableTerminalHeight={availableHeight}
+                width={childWidth}
               />
             )}
             {displayRenderer.type === 'string' && (
