@@ -98,7 +98,10 @@ describe('DiffManager', () => {
       getText: () => 'modified content',
     } as vscode.TextDocument);
     // Reset tabGroups to empty state
-    (vi.mocked(vscode.window.tabGroups).all as readonly vscode.TabGroup[]).length = 0;
+    Object.defineProperty(vi.mocked(vscode.window.tabGroups), 'all', {
+      value: [],
+      writable: true,
+    });
 
     diffManager = new DiffManager(mockLog, mockContentProvider);
   });
@@ -151,9 +154,9 @@ describe('DiffManager', () => {
     it('should use correct diff title format', async () => {
       await diffManager.showDiff('/path/to/myfile.ts', 'old', 'new');
 
-      const diffCall = vi.mocked(vscode.commands.executeCommand).mock.calls.find(
-        (call) => call[0] === 'vscode.diff',
-      );
+      const diffCall = vi
+        .mocked(vscode.commands.executeCommand)
+        .mock.calls.find((call) => call[0] === 'vscode.diff');
 
       expect(diffCall?.[3]).toContain('myfile.ts');
       expect(diffCall?.[3]).toContain('Before');
@@ -175,9 +178,9 @@ describe('DiffManager', () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
 
       // vscode.diff 不应该被再次调用
-      const diffCalls = vi.mocked(vscode.commands.executeCommand).mock.calls.filter(
-        (call) => call[0] === 'vscode.diff',
-      );
+      const diffCalls = vi
+        .mocked(vscode.commands.executeCommand)
+        .mock.calls.filter((call) => call[0] === 'vscode.diff');
       expect(diffCalls.length).toBe(0);
     });
 
@@ -190,9 +193,9 @@ describe('DiffManager', () => {
     it('should preserve focus when showing diff', async () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
 
-      const diffCall = vi.mocked(vscode.commands.executeCommand).mock.calls.find(
-        (call) => call[0] === 'vscode.diff',
-      );
+      const diffCall = vi
+        .mocked(vscode.commands.executeCommand)
+        .mock.calls.find((call) => call[0] === 'vscode.diff');
       const options = diffCall?.[4] as { preserveFocus?: boolean } | undefined;
 
       expect(options?.preserveFocus).toBe(true);
@@ -233,9 +236,11 @@ describe('DiffManager', () => {
       vi.mocked(vscode.commands.executeCommand).mockClear();
 
       // 获取创建的 right URI
-      const uriFromCall = vi.mocked(vscode.Uri.from).mock.results.find(
-        (r) => (r.value as vscode.Uri).query?.includes('new'),
-      )?.value as vscode.Uri;
+      const uriFromCall = vi
+        .mocked(vscode.Uri.from)
+        .mock.results.find((r) =>
+          (r.value as vscode.Uri).query?.includes('new'),
+        )?.value as vscode.Uri;
 
       if (uriFromCall) {
         await diffManager.acceptDiff(uriFromCall);
@@ -259,9 +264,11 @@ describe('DiffManager', () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
       vi.mocked(vscode.commands.executeCommand).mockClear();
 
-      const uriFromCall = vi.mocked(vscode.Uri.from).mock.results.find(
-        (r) => (r.value as vscode.Uri).query?.includes('new'),
-      )?.value as vscode.Uri;
+      const uriFromCall = vi
+        .mocked(vscode.Uri.from)
+        .mock.results.find((r) =>
+          (r.value as vscode.Uri).query?.includes('new'),
+        )?.value as vscode.Uri;
 
       if (uriFromCall) {
         await diffManager.cancelDiff(uriFromCall);

@@ -56,7 +56,10 @@ describe('PanelManager', () => {
     vi.mocked(vscode.commands.executeCommand).mockResolvedValue(undefined);
 
     // Mock tabGroups
-    (vi.mocked(vscode.window.tabGroups).all as readonly vscode.TabGroup[]).length = 0;
+    Object.defineProperty(vi.mocked(vscode.window.tabGroups), 'all', {
+      value: [],
+      writable: true,
+    });
     Object.assign(vi.mocked(vscode.window.tabGroups).activeTabGroup, {
       viewColumn: 1,
       tabs: [],
@@ -130,8 +133,10 @@ describe('PanelManager', () => {
     it('should create panel with scripts enabled', async () => {
       await panelManager.createPanel();
 
-      const createCall = vi.mocked(vscode.window.createWebviewPanel).mock.calls[0];
-      const options = createCall[3] as vscode.WebviewPanelOptions & vscode.WebviewOptions;
+      const createCall = vi.mocked(vscode.window.createWebviewPanel).mock
+        .calls[0];
+      const options = createCall[3] as vscode.WebviewPanelOptions &
+        vscode.WebviewOptions;
 
       expect(options.enableScripts).toBe(true);
     });
@@ -145,8 +150,10 @@ describe('PanelManager', () => {
     it('should retain context when hidden', async () => {
       await panelManager.createPanel();
 
-      const createCall = vi.mocked(vscode.window.createWebviewPanel).mock.calls[0];
-      const options = createCall[3] as vscode.WebviewPanelOptions & vscode.WebviewOptions;
+      const createCall = vi.mocked(vscode.window.createWebviewPanel).mock
+        .calls[0];
+      const options = createCall[3] as vscode.WebviewPanelOptions &
+        vscode.WebviewOptions;
 
       expect(options.retainContextWhenHidden).toBe(true);
     });
@@ -160,8 +167,10 @@ describe('PanelManager', () => {
     it('should set local resource roots', async () => {
       await panelManager.createPanel();
 
-      const createCall = vi.mocked(vscode.window.createWebviewPanel).mock.calls[0];
-      const options = createCall[3] as vscode.WebviewPanelOptions & vscode.WebviewOptions;
+      const createCall = vi.mocked(vscode.window.createWebviewPanel).mock
+        .calls[0];
+      const options = createCall[3] as vscode.WebviewPanelOptions &
+        vscode.WebviewOptions;
 
       expect(options.localResourceRoots).toBeDefined();
       expect(options.localResourceRoots?.length).toBeGreaterThan(0);
