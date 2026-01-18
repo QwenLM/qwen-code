@@ -144,9 +144,32 @@ export class McpClientManager {
     serverName: string,
     uri: string,
   ): Promise<ReadResourceResult> {
-    const client = this.clients.get(serverName);
+    let client = this.clients.get(serverName);
     if (!client) {
-      throw new Error(`MCP server '${serverName}' is not connected.`);
+      const servers = populateMcpServerCommand(
+        this.mcpServers,
+        this.mcpServerCommand,
+      );
+      const serverConfig = servers[serverName];
+      if (!serverConfig) {
+        throw new Error(`MCP server '${serverName}' is not configured.`);
+      }
+
+      const sdkCallback = isSdkMcpServerConfig(serverConfig)
+        ? this.sendSdkMcpMessage
+        : undefined;
+
+      client = new McpClient(
+        serverName,
+        serverConfig,
+        this.toolRegistry,
+        this.promptRegistry,
+        this.workspaceContext,
+        this.debugMode,
+        sdkCallback,
+      );
+      this.clients.set(serverName, client);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
     }
 
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {

@@ -225,15 +225,23 @@ function extractMcpResourceAtReferences(
     }
 
     if (!resource) {
-      merged.push(part);
+      // Treat "@server:" without a resource as plain text, rather than falling
+      // through to file resolution for a path like "server:".
+      merged.push({ type: 'text', content: atText });
       continue;
     }
 
-    const normalizedAtCommand = `@${serverName}:${resource}`;
+    const normalizedResource = resource.includes('://')
+      ? resource
+      : resource.startsWith('/')
+        ? resource.slice(1)
+        : resource;
+
+    const normalizedAtCommand = `@${serverName}:${normalizedResource}`;
     refs.push({
       atCommand: normalizedAtCommand,
       serverName,
-      uri: normalizeMcpResourceUri(serverName, resource),
+      uri: normalizeMcpResourceUri(serverName, normalizedResource),
     });
     merged.push({ type: 'atPath', content: normalizedAtCommand });
   }

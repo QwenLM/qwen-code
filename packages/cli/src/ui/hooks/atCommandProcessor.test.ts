@@ -257,6 +257,135 @@ describe('handleAtCommand', () => {
     );
   });
 
+  it('should expand an MCP resource reference in @server:resource format', async () => {
+    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
+      () =>
+        ({
+          github: {},
+        }) as unknown;
+
+    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
+      contents: [
+        {
+          uri: 'github://repos/owner/repo/issues',
+          mimeType: 'application/json',
+          text: '{"ok":true}',
+        },
+      ],
+    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
+
+    const query = 'Show me the data from @github:repos/owner/repo/issues';
+
+    const result = await handleAtCommand({
+      query,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1001,
+      signal: abortController.signal,
+    });
+
+    expect(result).toEqual({
+      processedQuery: [
+        { text: query },
+        { text: '\n--- Content from referenced MCP resources ---' },
+        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
+        { text: '{"ok":true}' },
+        { text: '\n--- End of MCP resource content ---' },
+      ],
+      shouldProceed: true,
+    });
+    expect(registry.readMcpResource).toHaveBeenCalledWith(
+      'github',
+      'github://repos/owner/repo/issues',
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'tool_group',
+        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
+      }),
+      1001,
+    );
+  });
+
+  it('should expand an MCP resource reference with a leading slash', async () => {
+    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
+      () =>
+        ({
+          github: {},
+        }) as unknown;
+
+    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
+      contents: [
+        {
+          uri: 'github://repos/owner/repo/issues',
+          mimeType: 'application/json',
+          text: '{"ok":true}',
+        },
+      ],
+    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
+
+    const query = 'Show me the data from @github:/repos/owner/repo/issues';
+
+    const result = await handleAtCommand({
+      query,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1002,
+      signal: abortController.signal,
+    });
+
+    expect(result).toEqual({
+      processedQuery: [
+        { text: 'Show me the data from @github:repos/owner/repo/issues' },
+        { text: '\n--- Content from referenced MCP resources ---' },
+        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
+        { text: '{"ok":true}' },
+        { text: '\n--- End of MCP resource content ---' },
+      ],
+      shouldProceed: true,
+    });
+    expect(registry.readMcpResource).toHaveBeenCalledWith(
+      'github',
+      'github://repos/owner/repo/issues',
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'tool_group',
+        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
+      }),
+      1002,
+    );
+  });
+
+  it('should ignore @server: when no MCP resource is provided', async () => {
+    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
+      () =>
+        ({
+          github: {},
+        }) as unknown;
+
+    const readMcpResourceSpy = vi.spyOn(registry, 'readMcpResource');
+    const query = 'Show me the data from @github:';
+
+    const result = await handleAtCommand({
+      query,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1003,
+      signal: abortController.signal,
+    });
+
+    expect(result).toEqual({
+      processedQuery: [{ text: query }],
+      shouldProceed: true,
+    });
+    expect(readMcpResourceSpy).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalled();
+  });
+
   it('should handle query with text before and after @command', async () => {
     const fileContent = 'Markdown content.';
     const filePath = await createTestFile(
