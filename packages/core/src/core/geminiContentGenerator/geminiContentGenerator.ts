@@ -35,7 +35,26 @@ export class GeminiContentGenerator implements ContentGenerator {
     },
     contentGeneratorConfig?: ContentGeneratorConfig,
   ) {
-    this.googleGenAI = new GoogleGenAI(options);
+    const customHeaders = contentGeneratorConfig?.customHeaders;
+    const finalOptions = customHeaders
+      ? (() => {
+          const baseHttpOptions = options.httpOptions;
+          const baseHeaders = baseHttpOptions?.headers ?? {};
+
+          return {
+            ...options,
+            httpOptions: {
+              ...(baseHttpOptions ?? {}),
+              headers: {
+                ...baseHeaders,
+                ...customHeaders,
+              },
+            },
+          };
+        })()
+      : options;
+
+    this.googleGenAI = new GoogleGenAI(finalOptions);
     this.contentGeneratorConfig = contentGeneratorConfig;
   }
 

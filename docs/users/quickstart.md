@@ -159,7 +159,7 @@ Qwen Code will:
 
 ### Test out other common workflows
 
-There are a number of ways to work with Claude:
+There are a number of ways to work with Qwen Code:
 
 **Refactor code**
 

@@ -170,7 +170,17 @@ function normalizeOutputFormat(
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
-  const rawArgv = hideBin(process.argv);
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
+  }
+
   const yargsInstance = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
@@ -324,7 +334,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .option('experimental-skills', {
           type: 'boolean',
           description: 'Enable experimental Skills feature',
-          default: false,
+          default: settings.tools?.experimental?.skills ?? false,
         })
         .option('channel', {
           type: 'string',
@@ -864,11 +874,10 @@ export async function loadCliConfig(
     }
   };
 
-  if (
-    !interactive &&
-    !argv.experimentalAcp &&
-    inputFormat !== InputFormat.STREAM_JSON
-  ) {
+  // ACP mode check: must include both --acp (current) and --experimental-acp (deprecated).
+  // Without this check, edit, write_file, run_shell_command would be excluded in ACP mode.
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  if (!interactive && !isAcpMode && inputFormat !== InputFormat.STREAM_JSON) {
     switch (approvalMode) {
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:

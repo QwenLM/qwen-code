@@ -873,11 +873,11 @@ export default {
   'Session Stats': '会话统计',
   'Model Usage': '模型使用情况',
   Reqs: '请求数',
-  'Input Tokens': '输入令牌',
-  'Output Tokens': '输出令牌',
+  'Input Tokens': '输入 token 数',
+  'Output Tokens': '输出 token 数',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
-    '的输入令牌来自缓存，降低了成本',
+    '从缓存载入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
     '提示：要查看完整的令牌明细，请运行 `/stats model`',
   'Model Stats For Nerds': '模型统计（技术细节）',

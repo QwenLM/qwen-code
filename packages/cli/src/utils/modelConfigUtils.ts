@@ -10,6 +10,7 @@ import {
   type ContentGeneratorConfigSources,
   resolveModelConfig,
   type ModelConfigSourcesInput,
+  type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
 
@@ -81,6 +82,21 @@ export function resolveCliGenerationConfig(
 
   const authType = selectedAuthType;
 
+  // Find modelProvider from settings.modelProviders based on authType and model
+  let modelProvider: ProviderModelConfig | undefined;
+  if (authType && settings.modelProviders) {
+    const providers = settings.modelProviders[authType];
+    if (providers && Array.isArray(providers)) {
+      // Try to find by requested model (from CLI or settings)
+      const requestedModel = argv.model || settings.model?.name;
+      if (requestedModel) {
+        modelProvider = providers.find((p) => p.id === requestedModel) as
+          | ProviderModelConfig
+          | undefined;
+      }
+    }
+  }
+
   const configSources: ModelConfigSourcesInput = {
     authType,
     cli: {
@@ -96,6 +112,7 @@ export function resolveCliGenerationConfig(
         | Partial<ContentGeneratorConfig>
         | undefined,
     },
+    modelProvider,
     env,
   };
 
@@ -103,7 +120,7 @@ export function resolveCliGenerationConfig(
 
   // Log warnings if any
   for (const warning of resolved.warnings) {
-    console.warn(`[modelProviderUtils] ${warning}`);
+    console.warn(warning);
   }
 
   // Resolve OpenAI logging config (CLI-specific, not part of core resolver)

@@ -34,6 +34,8 @@ const external = [
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
   'tiktoken',
+  'pupa',
+  'pump',
 ];
 
 esbuild

@@ -142,6 +142,27 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    it('should merge custom headers with DashScope defaults', () => {
+      const providerWithCustomHeaders = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          customHeaders: {
+            'X-Custom': '1',
+            'X-DashScope-CacheControl': 'disable',
+          },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const headers = providerWithCustomHeaders.buildHeaders();
+
+      expect(headers['User-Agent']).toContain('QwenCode/1.0.0');
+      expect(headers['X-DashScope-UserAgent']).toContain('QwenCode/1.0.0');
+      expect(headers['X-DashScope-AuthType']).toBe(AuthType.QWEN_OAUTH);
+      expect(headers['X-Custom']).toBe('1');
+      expect(headers['X-DashScope-CacheControl']).toBe('disable');
+    });
+
     it('should handle unknown CLI version', () => {
       (
         mockCliConfig.getCliVersion as MockedFunction<

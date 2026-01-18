@@ -600,7 +600,7 @@ export class ModelsConfig {
 
     // If credentials were manually set, don't apply modelProvider defaults
     // Just update the authType and preserve the manually set credentials
-    if (preserveManualCredentials) {
+    if (preserveManualCredentials && authType === AuthType.USE_OPENAI) {
       this.strictModelProviderSelection = false;
       this.currentAuthType = authType;
       if (modelId) {
@@ -621,7 +621,17 @@ export class ModelsConfig {
         this.applyResolvedModelDefaults(resolved);
       }
     } else {
+      // If the provided modelId doesn't exist in the registry for the new authType,
+      // use the default model for that authType instead of keeping the old model.
+      // This handles the case where switching from one authType (e.g., OPENAI with
+      // env vars) to another (e.g., qwen-oauth) - we should use the default model
+      // for the new authType, not the old model.
       this.currentAuthType = authType;
+      const defaultModel =
+        this.modelRegistry.getDefaultModelForAuthType(authType);
+      if (defaultModel) {
+        this.applyResolvedModelDefaults(defaultModel);
+      }
     }
   }
 

@@ -31,6 +31,7 @@ export type ModelGenerationConfig = Pick<
   | 'disableCacheControl'
   | 'schemaCompliance'
   | 'reasoning'
+  | 'customHeaders'
 >;
 
 /**

@@ -480,6 +480,91 @@ describe('ModelsConfig', () => {
     expect(gc.apiKeyEnvKey).toBeUndefined();
   });
 
+  it('should use default model for new authType when switching from different authType with env vars', () => {
+    // Simulate cold start with OPENAI env vars (OPENAI_MODEL and OPENAI_API_KEY)
+    // This sets the model in generationConfig but no authType is selected yet
+    const modelsConfig = new ModelsConfig({
+      generationConfig: {
+        model: 'gpt-4o', // From OPENAI_MODEL env var
+        apiKey: 'openai-key-from-env',
+      },
+    });
+
+    // User switches to qwen-oauth via AuthDialog
+    // refreshAuth calls syncAfterAuthRefresh with the current model (gpt-4o)
+    // which doesn't exist in qwen-oauth registry, so it should use default
+    modelsConfig.syncAfterAuthRefresh(AuthType.QWEN_OAUTH, 'gpt-4o');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Should use default qwen-oauth model (coder-model), not the OPENAI model
+    expect(gc.model).toBe('coder-model');
+    expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
+    expect(gc.apiKeyEnvKey).toBeUndefined();
+  });
+
+  it('should clear manual credentials when switching from USE_OPENAI to QWEN_OAUTH', () => {
+    // User manually set credentials for OpenAI
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'gpt-4o',
+        apiKey: 'manual-openai-key',
+        baseUrl: 'https://manual.example.com/v1',
+      },
+    });
+
+    // Manually set credentials via updateCredentials
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-openai-key',
+      baseUrl: 'https://manual.example.com/v1',
+      model: 'gpt-4o',
+    });
+
+    // User switches to qwen-oauth
+    // Since authType is not USE_OPENAI, manual credentials should be cleared
+    // and default qwen-oauth model should be applied
+    modelsConfig.syncAfterAuthRefresh(AuthType.QWEN_OAUTH, 'gpt-4o');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Should use default qwen-oauth model, not preserve manual OpenAI credentials
+    expect(gc.model).toBe('coder-model');
+    expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
+    // baseUrl should be set to qwen-oauth default, not preserved from manual OpenAI config
+    expect(gc.baseUrl).toBe('DYNAMIC_QWEN_OAUTH_BASE_URL');
+    expect(gc.apiKeyEnvKey).toBeUndefined();
+  });
+
+  it('should preserve manual credentials when switching to USE_OPENAI', () => {
+    // User manually set credentials
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'gpt-4o',
+        apiKey: 'manual-openai-key',
+        baseUrl: 'https://manual.example.com/v1',
+        samplingParams: { temperature: 0.9 },
+      },
+    });
+
+    // Manually set credentials via updateCredentials
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-openai-key',
+      baseUrl: 'https://manual.example.com/v1',
+      model: 'gpt-4o',
+    });
+
+    // User switches to USE_OPENAI (same or different model)
+    // Since authType is USE_OPENAI, manual credentials should be preserved
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'gpt-4o');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Should preserve manual credentials
+    expect(gc.model).toBe('gpt-4o');
+    expect(gc.apiKey).toBe('manual-openai-key');
+    expect(gc.baseUrl).toBe('https://manual.example.com/v1');
+    expect(gc.samplingParams?.temperature).toBe(0.9); // Preserved from initial config
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model after initialization', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

@@ -141,6 +141,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
   private buildHeaders(): Record<string, string> {
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
+    const { customHeaders } = this.contentGeneratorConfig;
 
     const betas: string[] = [];
     const reasoning = this.contentGeneratorConfig.reasoning;
@@ -163,7 +164,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       headers['anthropic-beta'] = betas.join(',');
     }
 
-    return headers;
+    return customHeaders ? { ...headers, ...customHeaders } : headers;
   }
 
   private async buildRequest(

@@ -324,7 +324,9 @@ describe('SkillTool', () => {
         'Review code for quality and best practices.',
       );
 
-      expect(result.returnDisplay).toBe('Launching skill: code-review');
+      expect(result.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
     });
 
     it('should include allowedTools in result when present', async () => {
@@ -349,7 +351,7 @@ describe('SkillTool', () => {
       // Base description is omitted from llmContent; ensure body is present.
       expect(llmText).toContain('Help write comprehensive tests.');
 
-      expect(result.returnDisplay).toBe('Launching skill: testing');
+      expect(result.returnDisplay).toBe('Skill for writing and running tests');
     });
 
     it('should handle skill not found error', async () => {
@@ -416,7 +418,7 @@ describe('SkillTool', () => {
       ).createInvocation(params);
       const description = invocation.getDescription();
 
-      expect(description).toBe('Launching skill: "code-review"');
+      expect(description).toBe('Use skill: "code-review"');
     });
 
     it('should handle skill without additional files', async () => {
@@ -436,7 +438,9 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).not.toContain('## Additional Files');
 
-      expect(result.returnDisplay).toBe('Launching skill: code-review');
+      expect(result.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
     });
   });
 });
