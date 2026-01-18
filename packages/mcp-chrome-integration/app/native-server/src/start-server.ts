@@ -2,10 +2,11 @@
 
 /**
  * Standalone HTTP Server Starter
- * Starts the HTTP server independently for MCP Server (stdio) connections
+ * Starts HTTP server independently for MCP Server (stdio) connections
  */
 
 import serverInstance from './server';
+// import { setMcpServerInstance } from './mcp/mcp-server';
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 12306;
 
@@ -15,9 +16,22 @@ async function start(): Promise<void> {
 
     await serverInstance.start(PORT);
 
+    // Set MCP server instance so mcp-server-stdio.ts can use it
+    // const mcpServer = serverInstance.getMcpServerInstance();
+    // if (mcpServer) {
+    //   setMcpServerInstance(mcpServer);
+    //   console.log(
+    //     '[Standalone Server] ✅ MCP server instance shared with stdio client',
+    //   );
+    // }
+
     console.log(`[Standalone Server] ✅ HTTP server started on port ${PORT}`);
-    console.log(`[Standalone Server] MCP endpoint: http://127.0.0.1:${PORT}/mcp`);
-    console.log(`[Standalone Server] Ping endpoint: http://127.0.0.1:${PORT}/ping`);
+    console.log(
+      `[Standalone Server] MCP endpoint: http://127.0.0.1:${PORT}/mcp`,
+    );
+    console.log(
+      `[Standalone Server] Ping endpoint: http://127.0.0.1:${PORT}/ping`,
+    );
     console.log('');
     console.log('Press Ctrl+C to stop');
   } catch (error) {

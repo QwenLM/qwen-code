@@ -68,11 +68,36 @@ export const ensureMcpClient = async () => {
       { name: 'Mcp Chrome Proxy', version: '1.0.0' },
       { capabilities: {} },
     );
-    const transport = new StreamableHTTPClientTransport(
-      new URL(config.url),
-      {},
-    );
-    await mcpClient.connect(transport);
+
+    // Bypass proxy for localhost connections by setting NO_PROXY
+    const originalHttpProxy = process.env.HTTP_PROXY;
+    const originalHttpsProxy = process.env.HTTPS_PROXY;
+    const originalAllProxy = process.env.ALL_PROXY;
+    const originalNoProxy = process.env.NO_PROXY;
+
+    process.env.HTTP_PROXY = '';
+    process.env.HTTPS_PROXY = '';
+    process.env.ALL_PROXY = '';
+    process.env.NO_PROXY = 'localhost,127.0.0.1';
+
+    try {
+      const transport = new StreamableHTTPClientTransport(
+        new URL(config.url),
+        {},
+      );
+      await mcpClient.connect(transport);
+    } finally {
+      // Restore original proxy settings
+      if (originalHttpProxy !== undefined) process.env.HTTP_PROXY = originalHttpProxy;
+      else delete process.env.HTTP_PROXY;
+      if (originalHttpsProxy !== undefined) process.env.HTTPS_PROXY = originalHttpsProxy;
+      else delete process.env.HTTPS_PROXY;
+      if (originalAllProxy !== undefined) process.env.ALL_PROXY = originalAllProxy;
+      else delete process.env.ALL_PROXY;
+      if (originalNoProxy !== undefined) process.env.NO_PROXY = originalNoProxy;
+      else delete process.env.NO_PROXY;
+    }
+
     return mcpClient;
   } catch (error) {
     mcpClient?.close();

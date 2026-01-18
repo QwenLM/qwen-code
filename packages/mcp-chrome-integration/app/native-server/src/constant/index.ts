@@ -24,8 +24,14 @@ export const SERVER_CONFIG = {
    * CORS origin whitelist - only allow Chrome/Firefox extensions and local debugging.
    * Use RegExp patterns for extension origins, string for exact match.
    */
-  CORS_ORIGIN: [/^chrome-extension:\/\//, /^moz-extension:\/\//, 'http://127.0.0.1'] as const,
+  CORS_ORIGIN: [
+    /^chrome-extension:\/\//,
+    /^moz-extension:\/\//,
+    'http://127.0.0.1',
+  ] as const,
   LOGGER_ENABLED: false,
+  // Disable default body parser for MCP endpoint to allow MCP SDK to handle raw requests
+  BODY_LIMIT: 100 * 1024 * 1024, // 100MB in bytes
 } as const;
 
 // HTTP Status codes
@@ -48,8 +54,10 @@ export const ERROR_MESSAGES = {
   INVALID_MCP_REQUEST: 'Invalid MCP request or session.',
   INVALID_SESSION_ID: 'Invalid or missing MCP session ID.',
   INTERNAL_SERVER_ERROR: 'Internal Server Error',
-  MCP_SESSION_DELETION_ERROR: 'Internal server error during MCP session deletion.',
-  MCP_REQUEST_PROCESSING_ERROR: 'Internal server error during MCP request processing.',
+  MCP_SESSION_DELETION_ERROR:
+    'Internal server error during MCP session deletion.',
+  MCP_REQUEST_PROCESSING_ERROR:
+    'Internal server error during MCP request processing.',
   INVALID_SSE_SESSION: 'Invalid or missing MCP session ID for SSE.',
   BACKEND_UNAVAILABLE: 'Local Qwen Code backend is not available.',
 } as const;
@@ -70,9 +78,12 @@ export const MCP_HTTP_PORT_ENV = 'MCP_HTTP_PORT';
  * Priority: CHROME_MCP_PORT env > MCP_HTTP_PORT env > NATIVE_SERVER_PORT default
  */
 export function getChromeMcpPort(): number {
-  const raw = process.env[CHROME_MCP_PORT_ENV] || process.env[MCP_HTTP_PORT_ENV];
+  const raw =
+    process.env[CHROME_MCP_PORT_ENV] || process.env[MCP_HTTP_PORT_ENV];
   const port = raw ? Number.parseInt(String(raw), 10) : NaN;
-  return Number.isFinite(port) && port > 0 && port <= 65535 ? port : NATIVE_SERVER_PORT;
+  return Number.isFinite(port) && port > 0 && port <= 65535
+    ? port
+    : NATIVE_SERVER_PORT;
 }
 
 /**

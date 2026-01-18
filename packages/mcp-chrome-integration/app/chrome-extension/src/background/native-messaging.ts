@@ -287,6 +287,8 @@
    * Handle incoming message from Native Host
    */
   function handleNativeMessage(message: NativeHostMessage): void {
+    console.log(LOG_PREFIX, 'Received message:', message.type, message);
+
     // Handle response to pending request
     if (message.responseToRequestId) {
       const requestId = message.responseToRequestId;
@@ -343,10 +345,12 @@
       message.type === 'ERROR_FROM_NATIVE_HOST' ||
       message.type === 'error_from_native_host'
     ) {
-      console.error(LOG_PREFIX, 'Error from native host:', message.payload);
+      const errorMsg = message.payload?.message || JSON.stringify(message.payload);
+      console.error(LOG_PREFIX, 'Error from native host:', errorMsg);
+      console.error(LOG_PREFIX, 'Full error payload:', message.payload);
       broadcastToUI({
         type: 'nativeHostError',
-        error: message.payload?.message,
+        error: errorMsg,
       });
       return;
     }

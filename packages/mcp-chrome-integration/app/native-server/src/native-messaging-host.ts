@@ -157,17 +157,31 @@ export class NativeMessagingHost {
           }
           break;
         // Support CONNECT message from React Extension
-        case 'CONNECT':
-          // Just acknowledge the connection, server will start automatically
+        case 'CONNECT': {
+          // Ensure the HTTP server is running so MCP stdio can reach /mcp.
+          // if (this.associatedServer && !this.associatedServer.isRunning) {
+          //   await this.startServer(message.payload?.port || 12306);
+          // }
           if (message.requestId) {
             this.sendMessage({
               responseToRequestId: message.requestId,
-              payload: { success: true, connected: true },
+              payload: {
+                success: true,
+                connected: true,
+                serverRunning: this.associatedServer?.isRunning ?? false,
+              },
             });
           } else {
-            this.sendMessage({ type: 'connected', payload: { success: true } });
+            this.sendMessage({
+              type: 'connected',
+              payload: {
+                success: true,
+                serverRunning: this.associatedServer?.isRunning ?? false,
+              },
+            });
           }
           break;
+        }
         // Keep ping/pong for simple liveness detection, but this differs from request-response pattern
         case 'ping_from_extension':
           this.sendMessage({ type: 'pong_to_extension' });

@@ -1,11 +1,9 @@
 {
   "name": "qwen-cli-chrome-bridge-host",
   "version": "0.0.2",
-  "description": "Bridge service + MCP server for the Qwen Chrome Extension (HTTP bridge, browser MCP tools)",
+  "description": "Bridge service for the Qwen Chrome Extension (HTTP bridge, ACP proxy)",
   "main": "dist/host.js",
   "bin": {
-    "browser-bridge-mcp": "dist/browser-mcp-server.js",
-    "chrome-browser-mcp": "dist/browser-mcp-server.js",
     "qwen-bridge-host": "dist/host.js"
   },
   "scripts": {
@@ -13,7 +11,6 @@
     "build": "npm run clean && tsc --project tsconfig.build.json",
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "start": "node dist/host.js",
-    "mcp": "node dist/browser-mcp-server.js",
     "test": "node dist/host.js --test",
     "prepare": "npm run build"
   },

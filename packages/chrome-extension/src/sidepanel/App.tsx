@@ -31,12 +31,6 @@ interface McpTool {
   // Add other properties as needed based on the actual structure
 }
 
-interface InternalTool {
-  name: string;
-  description: string;
-  // Add other properties as needed based on the actual structure
-}
-
 export const App: React.FC = () => {
   const vscode = useVSCode();
 
@@ -50,8 +44,6 @@ export const App: React.FC = () => {
   const [streamingContent, setStreamingContent] = useState('');
   // Debug: cache slash-commands (available_commands_update) & MCP tools list
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
-  const [internalTools, setInternalTools] = useState<InternalTool[]>([]);
-  const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [authUri, setAuthUri] = useState<string | null>(null);
   const [isComposing, setIsComposing] = useState(false);
   const [permissionRequest, setPermissionRequest] = useState<{
@@ -110,65 +102,6 @@ export const App: React.FC = () => {
           const tools = toolMessage.data?.tools || [];
           setMcpTools(tools);
           console.log('[App] MCP tools:', tools);
-          break;
-        }
-        case 'internalMcpTools': {
-          const internalToolMessage: { data?: { tools?: InternalTool[] } } =
-            message as { data?: { tools?: InternalTool[] } };
-          const tools = internalToolMessage.data?.tools || [];
-          setInternalTools(tools);
-          console.log('[App] Internal MCP tools:', tools);
-          break;
-        }
-
-        case 'toolProgress': {
-          const payload =
-            (
-              message as {
-                data?: {
-                  name?: string;
-                  stage?: string;
-                  ok?: boolean;
-                  error?: string;
-                };
-              }
-            ).data || {};
-          const name = payload.name || '';
-          const stage = payload.stage || '';
-          const ok = payload.ok;
-          const pretty = (n: string) => {
-            switch (n) {
-              case 'read_page':
-                return 'Read Page';
-              case 'capture_screenshot':
-                return 'Capture Screenshot';
-              case 'get_network_logs':
-                return 'Get Network Logs';
-              case 'get_console_logs':
-                return 'Get Console Logs';
-              default:
-                return n;
-            }
-          };
-          if (stage === 'start') {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: 'assistant',
-                content: `Running tool: ${pretty(name)}…`,
-                timestamp: Date.now(),
-              },
-            ]);
-          } else if (stage === 'end') {
-            const endText =
-              ok === false
-                ? `Tool failed: ${pretty(name)}${payload.error ? ` — ${payload.error}` : ''}`
-                : `Tool finished: ${pretty(name)}`;
-            setMessages((prev) => [
-              ...prev,
-              { role: 'assistant', content: endText, timestamp: Date.now() },
-            ]);
-          }
           break;
         }
 
@@ -274,15 +207,11 @@ export const App: React.FC = () => {
         connected?: boolean;
         status?: string;
         mcpTools?: McpTool[];
-        internalTools?: InternalTool[];
       } | null;
       if (response) {
         setIsConnected(response.connected || false);
         if (Array.isArray(response.mcpTools)) {
           setMcpTools(response.mcpTools);
-        }
-        if (Array.isArray(response.internalTools)) {
-          setInternalTools(response.internalTools);
         }
       }
     };
@@ -600,7 +529,7 @@ ${formatted || '(no logs captured)'}`;
               Console Logs
             </button>
           )}
-          {isConnected && mcpTools.length + internalTools.length > 0 && (
+          {isConnected && mcpTools.length > 0 && (
             <button
               className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
               onClick={() => setShowToolsPanel((v) => !v)}
@@ -768,82 +697,6 @@ ${formatted || '(no logs captured)'}`;
         </div>
       )}
 
-      {/* Debug: Tools panel */}
-      {showToolsPanel && mcpTools.length + internalTools.length > 0 && (
-        <div className="absolute right-3 top-10 z-50 max-w-[80%] w-[360px] max-h-[50vh] overflow-auto bg-[#2a2d2e] text-[13px] text-gray-200 border border-gray-700 rounded shadow-lg p-2">
-          <div className="flex items-center justify-between mb-2">
-            <div className="font-semibold">
-              Available Tools ({mcpTools.length + internalTools.length})
-            </div>
-            <button
-              className="text-gray-400 hover:text-gray-200"
-              onClick={() => setShowToolsPanel(false)}
-            >
-              ×
-            </button>
-          </div>
-          <div className="text-[11px] text-gray-400 mb-1">
-            Internal (chrome-browser)
-          </div>
-          <ul className="space-y-1 mb-2">
-            {internalTools.map(
-              (
-                t: InternalTool & {
-                  tool?: { name?: string; description?: string };
-                },
-                i: number,
-              ) => {
-                const name = (t && (t.name || t.tool?.name)) || String(t);
-                const desc =
-                  (t && (t.description || t.tool?.description)) || '';
-                return (
-                  <li
-                    key={`internal-${i}`}
-                    className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
-                  >
-                    <div className="font-mono text-xs text-[#a6e22e] break-all">
-                      {name}
-                    </div>
-                    {desc && (
-                      <div className="text-[11px] text-gray-400 break-words">
-                        {desc}
-                      </div>
-                    )}
-                  </li>
-                );
-              },
-            )}
-          </ul>
-          <div className="text-[11px] text-gray-400 mb-1">Discovered (MCP)</div>
-          <ul className="space-y-1">
-            {mcpTools.map(
-              (
-                t: McpTool & { tool?: { name?: string; description?: string } },
-                i: number,
-              ) => {
-                const name = (t && (t.name || t.tool?.name)) || String(t);
-                const desc =
-                  (t && (t.description || t.tool?.description)) || '';
-                return (
-                  <li
-                    key={`discovered-${i}`}
-                    className="px-2 py-1 rounded hover:bg-[#3a3d3e]"
-                  >
-                    <div className="font-mono text-xs text-[#a6e22e] break-all">
-                      {name}
-                    </div>
-                    {desc && (
-                      <div className="text-[11px] text-gray-400 break-words">
-                        {desc}
-                      </div>
-                    )}
-                  </li>
-                );
-              },
-            )}
-          </ul>
-        </div>
-      )}
     </div>
   );
 };

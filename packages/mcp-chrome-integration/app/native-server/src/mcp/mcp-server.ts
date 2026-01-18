@@ -22,3 +22,9 @@ export const getMcpServer = () => {
   setupTools(mcpServer);
   return mcpServer;
 };
+
+export const setMcpServerInstance = (instance: Server) => {
+  if (instance) {
+    mcpServer = instance;
+  }
+};

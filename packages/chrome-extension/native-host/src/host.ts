@@ -349,9 +349,7 @@ class AcpConnection {
       const spawnCommand = isNodeScript ? process.execPath || 'node' : qwenPath;
       const spawnArgs = [
         ...(isNodeScript ? [qwenPath] : []),
-        '--experimental-acp',
-        '--allowed-mcp-server-names',
-        'chrome-browser,chrome-devtools',
+        '--acp',
         '--debug',
       ];
 
@@ -557,37 +555,6 @@ class AcpConnection {
         this.handleFileWriteRequest(id, params);
         break;
 
-      // Browser MCP Tools
-      case 'browser/read_page':
-        // Get current page content from browser
-        this.handleBrowserReadPage(id, params);
-        break;
-
-      case 'browser/capture_screenshot':
-        // Capture screenshot of current tab
-        this.handleBrowserCaptureScreenshot(id, params);
-        break;
-
-      case 'browser/get_network_logs':
-        // Get network logs from browser
-        this.handleBrowserGetNetworkLogs(id, params);
-        break;
-
-      case 'browser/get_console_logs':
-        // Get console logs from browser
-        this.handleBrowserGetConsoleLogs(id, params);
-        break;
-
-      case 'browser/fill_form':
-        // Fill multiple fields on the current page
-        this.handleBrowserFillForm(id, params);
-        break;
-
-      case 'browser/input_text':
-        // Fill a single field on the current page
-        this.handleBrowserInputText(id, params);
-        break;
-
       default:
         log(`Unknown ACP request: ${method}`);
         this.sendAcpResponse(id, {
@@ -616,113 +583,6 @@ class AcpConnection {
         error: {
           code: -32000,
           message: `Failed to write file: ${err.message}`,
-        },
-      });
-    }
-  }
-
-  // Browser request handlers
-  async handleBrowserReadPage(id, params) {
-    try {
-      const data = await sendBrowserRequest('read_page', params);
-      this.sendAcpResponse(id, {
-        result: {
-          url: data.url,
-          title: data.title,
-          content: data.content,
-          links: data.links,
-          images: data.images,
-        },
-      });
-    } catch (err) {
-      this.sendAcpResponse(id, {
-        error: { code: -32000, message: `Failed to read page: ${err.message}` },
-      });
-    }
-  }
-
-  async handleBrowserCaptureScreenshot(id, params) {
-    try {
-      const data = await sendBrowserRequest('capture_screenshot', params);
-      this.sendAcpResponse(id, {
-        result: {
-          dataUrl: data.dataUrl,
-          format: 'png',
-        },
-      });
-    } catch (err) {
-      this.sendAcpResponse(id, {
-        error: {
-          code: -32000,
-          message: `Failed to capture screenshot: ${err.message}`,
-        },
-      });
-    }
-  }
-
-  async handleBrowserGetNetworkLogs(id, params) {
-    try {
-      const data = await sendBrowserRequest('get_network_logs', params);
-      this.sendAcpResponse(id, {
-        result: {
-          logs: data.logs || [],
-        },
-      });
-    } catch (err) {
-      this.sendAcpResponse(id, {
-        error: {
-          code: -32000,
-          message: `Failed to get network logs: ${err.message}`,
-        },
-      });
-    }
-  }
-
-  async handleBrowserGetConsoleLogs(id, params) {
-    try {
-      const data = await sendBrowserRequest('get_console_logs', params);
-      this.sendAcpResponse(id, {
-        result: {
-          logs: data.logs || [],
-        },
-      });
-    } catch (err) {
-      this.sendAcpResponse(id, {
-        error: {
-          code: -32000,
-          message: `Failed to get console logs: ${err.message}`,
-        },
-      });
-    }
-  }
-
-  async handleBrowserFillForm(id, params) {
-    try {
-      const data = await sendBrowserRequest('fill_form', params);
-      this.sendAcpResponse(id, {
-        result: data || {},
-      });
-    } catch (err) {
-      this.sendAcpResponse(id, {
-        error: {
-          code: -32000,
-          message: `Failed to fill form: ${err.message}`,
-        },
-      });
-    }
-  }
-
-  async handleBrowserInputText(id, params) {
-    try {
-      const data = await sendBrowserRequest('input_text', params);
-      this.sendAcpResponse(id, {
-        result: data || {},
-      });
-    } catch (err) {
-      this.sendAcpResponse(id, {
-        error: {
-          code: -32000,
-          message: `Failed to fill input: ${err.message}`,
         },
       });
     }
@@ -808,133 +668,15 @@ class AcpConnection {
 
   async createSession(cwd) {
     try {
-      // Helper to discover Chrome DevTools WS URL from env or default port
-      async function fetchJson(url: string): Promise<any> {
-        return new Promise<any>((resolve) => {
-          try {
-            const req = http.get(url, (res) => {
-              let body = '';
-              res.on('data', (c) => (body += c));
-              res.on('end', () => {
-                try {
-                  resolve(JSON.parse(body));
-                } catch {
-                  resolve(null);
-                }
-              });
-            });
-            req.on('error', () => resolve(null));
-            req.end();
-          } catch {
-            resolve(null);
-          }
-        });
-      }
-      async function discoverDevToolsWsUrl() {
-        // 1) Explicit env
-        if (process.env.DEVTOOLS_WS_URL) return process.env.DEVTOOLS_WS_URL;
-        // 2) Provided port
-        const port = process.env.CHROME_REMOTE_DEBUG_PORT || '9222';
-        const json: any = await fetchJson(
-          `http://127.0.0.1:${port}/json/version`,
-        );
-        if (json && json.webSocketDebuggerUrl) return json.webSocketDebuggerUrl;
-        return null;
-      }
-
-      // Get the path to browser-mcp-server.js (supports running from root or src)
-      // Enhanced path resolution with environment variable override and better error reporting
-      const browserMcpServerPath = (() => {
-        const candidates = [];
-
-        // Allow environment variable override for custom installations
-        if (process.env.QWEN_BROWSER_MCP_SERVER_PATH) {
-          candidates.push(
-            path.resolve(process.env.QWEN_BROWSER_MCP_SERVER_PATH),
-          );
-        }
-
-        // Standard candidate paths relative to __dirname
-        candidates.push(
-          path.join(__dirname, 'browser-mcp-server.js'),
-          path.join(__dirname, 'src', 'browser-mcp-server.js'),
-          path.join(__dirname, '..', 'browser-mcp-server.js'),
-          path.join(__dirname, '..', 'src', 'browser-mcp-server.js'),
-        );
-
-        for (const candidate of candidates) {
-          try {
-            if (fs.existsSync(candidate)) {
-              log(`Found browser-mcp-server.js at: ${candidate}`);
-              return candidate;
-            }
-          } catch {
-            /* ignore filesystem errors */
-          }
-        }
-
-        // Log error when file not found - this helps diagnose MCP discovery failures
-        logError(
-          `browser-mcp-server.js not found. Tried: ${candidates.join(', ')}`,
-        );
-        return candidates[0] || path.join(__dirname, 'browser-mcp-server.js');
-      })();
-
-      log(`Creating session with MCP server: ${browserMcpServerPath}`);
-
-      // Use the same Node runtime that's running this host process to launch the MCP server.
-      // This avoids hard-coded paths like /usr/local/bin/node which may not exist on all systems
-      // (e.g., Homebrew on Apple Silicon uses /opt/homebrew/bin/node, or users may use nvm).
-      const nodeCommand = process.execPath || 'node';
-
-      const mcpServersConfig = [
-        {
-          name: 'chrome-browser',
-          command: nodeCommand,
-          args: [browserMcpServerPath],
-          env: [],
-          timeout: 180000, // 3 minutes timeout for MCP operations
-          trust: true, // Auto-approve browser tools
-        },
-      ];
-
-      // Optionally add open-source DevTools MCP if a WS URL is available
-      try {
-        const wsUrl = await discoverDevToolsWsUrl();
-        if (wsUrl) {
-          mcpServersConfig.push({
-            name: 'chrome-devtools',
-            command: 'chrome-devtools-mcp',
-            args: ['--ws-url', wsUrl],
-            env: [{ name: 'DEVTOOLS_WS_URL', value: wsUrl }],
-            timeout: 180000,
-            trust: true,
-          });
-          log(`Adding DevTools MCP with wsUrl: ${wsUrl}`);
-        } else {
-          log(
-            'DevTools WS URL not found (is Chrome running with --remote-debugging-port=9222?). Skipping chrome-devtools MCP.',
-          );
-        }
-      } catch (e) {
-        log(`Failed to prepare DevTools MCP: ${e.message}`);
-      }
-
-      log(`MCP servers config: ${JSON.stringify(mcpServersConfig)}`);
-
-      // Enable MCP by default; allow opt-out via env to avoid slower discovery/startup
-      const disableMcp =
-        process.env.QWEN_BRIDGE_DISABLE_MCP === '1' ||
-        process.env.QWEN_DISABLE_MCP === '1';
-      const useMcp = !disableMcp;
-
+      const mcpServersConfig: any[] = [];
+      log('Creating session without injecting legacy MCP servers.');
       const result: any = await this.sendAcpRequest(
         'session/new',
         {
           cwd,
-          mcpServers: useMcp ? mcpServersConfig : [],
+          mcpServers: mcpServersConfig,
         },
-        useMcp ? 240000 : 30000, // MCP discovery can be slow; extend to 4 min
+        240000, // MCP discovery can be slow; extend to 4 min
       );
 
       this.sessionId = result.sessionId;
@@ -1040,57 +782,6 @@ class AcpConnection {
 }
 
 // ============================================================================
-// Browser Request Bridge (Native Host <-> Chrome Extension)
-// ============================================================================
-
-// Pending browser requests from Qwen CLI that need Chrome Extension responses
-const pendingBrowserRequests = new Map();
-let browserRequestId = 0;
-
-/**
- * Send a request to Chrome Extension and wait for response
- */
-function sendBrowserRequest(
-  requestType: string,
-  params: Record<string, unknown>,
-): Promise<any> {
-  return new Promise<any>((resolve, reject) => {
-    const id = ++browserRequestId;
-    pendingBrowserRequests.set(id, { resolve, reject });
-
-    sendMessageToExtension({
-      type: 'browser_request',
-      browserRequestId: id,
-      requestType,
-      params,
-    });
-
-    // Timeout after 30 seconds
-    setTimeout(() => {
-      if (pendingBrowserRequests.has(id)) {
-        pendingBrowserRequests.delete(id);
-        reject(new Error(`Browser request ${requestType} timed out`));
-      }
-    }, 30000);
-  });
-}
-
-/**
- * Handle browser response from Chrome Extension
- */
-function handleBrowserResponse(message) {
-  const pending = pendingBrowserRequests.get(message.browserRequestId);
-  if (pending) {
-    pendingBrowserRequests.delete(message.browserRequestId);
-    if (message.error) {
-      pending.reject(new Error(message.error));
-    } else {
-      pending.resolve(message.data);
-    }
-  }
-}
-
-// ============================================================================
 // Global State
 // ============================================================================
 
@@ -1176,12 +867,6 @@ function buildPromptFromAction(action, data, userPrompt) {
 
 async function handleExtensionMessage(message) {
   log(`Received from extension: ${JSON.stringify(message)}`);
-
-  // Handle browser response (async response from extension for browser requests)
-  if (message.type === 'browser_response') {
-    handleBrowserResponse(message);
-    return;
-  }
 
   let response;
 
@@ -1421,61 +1106,6 @@ function startHttpApiServer() {
       }
 
       try {
-        // Legacy bridge methods (kept for MCP server compatibility)
-        if (request.method) {
-          log(`HTTP Bridge request: ${request.method}`);
-          let result;
-          switch (request.method) {
-            case 'read_page':
-              result = await sendBrowserRequest(
-                'read_page',
-                request.params || {},
-              );
-              break;
-            case 'capture_screenshot':
-              result = await sendBrowserRequest(
-                'capture_screenshot',
-                request.params || {},
-              );
-              break;
-            case 'get_network_logs':
-              result = await sendBrowserRequest(
-                'get_network_logs',
-                request.params || {},
-              );
-              break;
-            case 'get_console_logs':
-              result = await sendBrowserRequest(
-                'get_console_logs',
-                request.params || {},
-              );
-              break;
-            case 'click_text':
-              result = await sendBrowserRequest(
-                'click_text',
-                request.params || {},
-              );
-              break;
-            case 'fill_form':
-              result = await sendBrowserRequest(
-                'fill_form',
-                request.params || {},
-              );
-              break;
-            case 'input_text':
-              result = await sendBrowserRequest(
-                'input_text',
-                request.params || {},
-              );
-              break;
-            default:
-              throw new Error(`Unknown method: ${request.method}`);
-          }
-          res.writeHead(200);
-          res.end(JSON.stringify({ success: true, data: result }));
-          return;
-        }
-
         // Extension → host control surface
         switch (request.type) {
           case 'handshake': {
@@ -1617,13 +1247,6 @@ function startHttpApiServer() {
                 },
               }),
             );
-            return;
-          }
-
-          case 'browser_response': {
-            handleBrowserResponse(request);
-            res.writeHead(200);
-            res.end(JSON.stringify({ success: true }));
             return;
           }
 

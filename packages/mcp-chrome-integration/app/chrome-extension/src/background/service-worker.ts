@@ -7,6 +7,18 @@
 
 /* global chrome, console, setTimeout, clearTimeout, EventSource, fetch, AbortController */
 
+// Load native messaging bridge for MCP tool calls.
+try {
+  importScripts('native-messaging.js');
+  const nativeMessaging = (self as { NativeMessaging?: { init?: () => void } })
+    .NativeMessaging;
+  if (nativeMessaging?.init) {
+    nativeMessaging.init();
+  }
+} catch (error) {
+  console.error('[ServiceWorker] Failed to init native messaging:', error);
+}
+
 // Legacy HTTP endpoint (ACP over HTTP, proxied by native-server)
 const BACKEND_URL = 'http://127.0.0.1:12306';
 
@@ -27,199 +39,12 @@ let lastMcpTools = [];
 // Debounce stream end to avoid cutting off late chunks
 let streamEndTimeout = null;
 const STREAM_END_DEBOUNCE_MS = 300;
-// Static list of internal Chrome browser MCP tools exposed by this extension
-const INTERNAL_MCP_TOOLS = [
-  {
-    name: 'browser_read_page',
-    description:
-      'Read content of the current active tab (url, title, text, links, images).',
-  },
-  {
-    name: 'browser_capture_screenshot',
-    description:
-      'Capture a screenshot (PNG) of the current visible tab (base64).',
-  },
-  {
-    name: 'browser_get_network_logs',
-    description:
-      'Get recent Network.* events from Chrome debugger for the active tab.',
-  },
-  {
-    name: 'browser_get_console_logs',
-    description: 'Get recent console logs from the active tab.',
-  },
-  {
-    name: 'browser_fill_form',
-    description:
-      'Fill inputs/textareas/contenteditable elements on the current page using selectors or labels.',
-  },
-  {
-    name: 'browser_input_text',
-    description:
-      'Fill a single input/textarea/contentEditable element using a CSS selector.',
-  },
-  {
-    name: 'browser_fill_form_auto',
-    description:
-      'Auto-fill form fields by matching provided keys to labels/placeholder/name.',
-  },
-  {
-    name: 'browser_click',
-    description: 'Click an element on the current page using a CSS selector.',
-  },
-  {
-    name: 'browser_click_text',
-    description: 'Click an element (button/link) by matching its visible text.',
-  },
-  {
-    name: 'browser_run_js',
-    description: 'Execute a JavaScript snippet in the page context.',
-  },
-];
-
-// Check whether MCP discovery already surfaced the browser tools so we can
-// defer to standard MCP tool-calls instead of running local heuristics.
-function hasBrowserMcpTools() {
-  return Array.isArray(lastMcpTools)
-    ? lastMcpTools.some((t) => t?.name?.startsWith('browser_'))
-    : false;
-}
-
 function scheduleStreamEnd() {
   if (streamEndTimeout) clearTimeout(streamEndTimeout);
   streamEndTimeout = setTimeout(() => {
     streamEndTimeout = null;
     broadcastToUI({ type: 'streamEnd' });
   }, STREAM_END_DEBOUNCE_MS);
-}
-
-// Heuristic: detect if user intent asks to read current page
-function shouldTriggerReadPage(text) {
-  if (!text) return false;
-  const t = String(text).toLowerCase();
-  const keywords = [
-    'read this page',
-    'read the page',
-    'read current page',
-    'read page',
-    '读取当前页面',
-    '读取页面',
-    '读取网页',
-    '读这个页面',
-  ];
-  return keywords.some((k) => t.includes(k));
-}
-
-// Heuristic: detect if user intent asks for console logs
-function shouldTriggerConsoleLogs(text) {
-  if (!text) return false;
-  const t = String(text).toLowerCase();
-  const keywords = [
-    'console log',
-    'console logs',
-    'get console',
-    'show console',
-    'browser console',
-    'console 日志',
-    'console日志',
-    '控制台日志',
-    '获取控制台',
-    '查看控制台',
-    '读取日志',
-    '日志信息',
-    '获取日志',
-    '查看日志',
-    'log信息',
-    '错误日志',
-    'error log',
-  ];
-  return keywords.some((k) => t.includes(k));
-}
-
-// Heuristic: detect if user intent asks for screenshot
-function shouldTriggerScreenshot(text) {
-  if (!text) return false;
-  const t = String(text).toLowerCase();
-  const keywords = [
-    'screenshot',
-    'capture screen',
-    'take screenshot',
-    'screen capture',
-    '截图',
-    '截屏',
-    '屏幕截图',
-    '页面截图',
-  ];
-  return keywords.some((k) => t.includes(k));
-}
-
-// Heuristic: detect if user intent asks for network logs
-function shouldTriggerNetworkLogs(text) {
-  if (!text) return false;
-  const t = String(text).toLowerCase();
-  const keywords = [
-    'network log',
-    'network logs',
-    'network request',
-    'api call',
-    'http request',
-    '网络日志',
-    '网络请求',
-    'api请求',
-    '请求日志',
-    '接口请求',
-    '接口日志',
-    'xhr',
-    'fetch',
-    '请求记录',
-    '网络记录',
-  ];
-  return keywords.some((k) => t.includes(k));
-}
-
-// Heuristic: detect if user intent asks to fill/enter text
-function shouldTriggerFormFill(text) {
-  if (!text) return false;
-  const t = String(text).toLowerCase();
-  const keywords = [
-    'fill form',
-    'fill the form',
-    'fill input',
-    'type into',
-    'enter text',
-    '填写',
-    '填表',
-    '输入',
-    '录入',
-    '填入',
-    '搜索框',
-  ];
-  return keywords.some((k) => t.includes(k));
-}
-
-// Build a short hint to guide the model toward browser MCP tools
-function buildToolIntentHint(text) {
-  const hints = [];
-  if (shouldTriggerNetworkLogs(text)) {
-    hints.push(
-      '如需检查接口/网络请求，请调用 browser_get_network_logs（返回 method/url/status/headers/body）。',
-    );
-  }
-  if (shouldTriggerConsoleLogs(text)) {
-    hints.push('如需查看前端/控制台错误，请调用 browser_get_console_logs。');
-  }
-  if (shouldTriggerReadPage(text)) {
-    hints.push('如需获取当前页面内容，请调用 browser_read_page。');
-  }
-  if (shouldTriggerScreenshot(text)) {
-    hints.push('需要视觉信息时，可调用 browser_capture_screenshot。');
-  }
-  if (shouldTriggerFormFill(text)) {
-    hints.push(
-      '如需在页面输入/填表，请调用 browser_fill_form / browser_fill_form_auto（缺 selector/label/key 时请先向用户询问）。',
-    );
-  }
-  return hints.length ? hints.join('\n') : '';
 }
 
 // Send message to backend (HTTP proxy -> Qwen Code)
@@ -274,82 +99,103 @@ async function connectToNativeHost() {
 }
 
 // Event polling via SSE with fallback
+let sseLoopStarted = false;
+
 async function startEventPolling() {
+  if (sseLoopStarted) return;
+  sseLoopStarted = true;
+
   console.log('Starting SSE event polling via HTTP backend...');
 
-  try {
-    const es = new EventSource(`${BACKEND_URL}/events`);
-    es.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleNativeMessage(data);
-      } catch (err) {
-        console.error('Failed to parse SSE message:', err, event.data);
+  // MV3 service worker does not reliably support EventSource across Chrome versions.
+  // Use fetch streaming so we can parse SSE frames ourselves.
+  let delay = 500;
+  const maxDelay = 10_000;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const controller = new AbortController();
+    try {
+      const res = await fetch(`${BACKEND_URL}/events`, {
+        method: 'GET',
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+
+      if (!res.ok || !res.body) {
+        throw new Error(`SSE HTTP ${res.status}`);
       }
-    };
-    es.onerror = (err) => {
-      console.warn('SSE error, closing and falling back to poll:', err);
+
+      delay = 500; // reset backoff after a successful connect
+      await readSseStream(res.body);
+      console.warn('SSE stream ended; reconnecting...');
+    } catch (err) {
+      console.warn('SSE connect/read failed; retrying...', err);
+    } finally {
       try {
-        es.close();
+        controller.abort();
       } catch {
         // ignore
       }
-      pollEventsWithBackoff();
-    };
-  } catch (err) {
-    console.warn('SSE not available, fallback to poll:', err);
-    pollEventsWithBackoff();
-  }
-}
-
-async function pollEventsWithBackoff() {
-  let delay = 1000;
-  const maxDelay = 10000;
-  while (true) {
-    try {
-      await pollEventsOnce();
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelay);
-    } catch (err) {
-      console.warn('Event poll error, retrying:', err);
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelay);
     }
+
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay * 2, maxDelay);
   }
 }
 
-// Fallback single poll for events (used if EventSource ctor fails)
-async function pollEventsOnce() {
-  const res = await fetch(`${BACKEND_URL}/events`, {
-    method: 'GET',
-    headers: { Accept: 'text/event-stream, application/json' },
-  });
-  const ct = res.headers.get('content-type') || '';
-  if (ct.includes('text/event-stream')) {
-    // naive SSE parse for one line
-    const text = await res.text();
-    text
-      .split('\n')
-      .filter((l) => l.startsWith('data:'))
-      .forEach((l) => {
-        const data = l.replace(/^data:\s*/, '');
-        try {
-          handleNativeMessage(JSON.parse(data));
-        } catch (err) {
-          console.error('Failed to parse fallback SSE data:', err, data);
+async function readSseStream(stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+
+  let buffer = '';
+  let dataLines: string[] = [];
+
+  try {
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete lines (SSE uses \n, optionally \r\n).
+      while (true) {
+        const newlineIdx = buffer.indexOf('\n');
+        if (newlineIdx === -1) break;
+
+        let line = buffer.slice(0, newlineIdx);
+        buffer = buffer.slice(newlineIdx + 1);
+        if (line.endsWith('\r')) line = line.slice(0, -1);
+
+        // Comments/keepalive
+        if (line.startsWith(':')) continue;
+
+        // Blank line = dispatch event
+        if (line === '') {
+          if (dataLines.length > 0) {
+            const payload = dataLines.join('\n');
+            dataLines = [];
+            try {
+              handleNativeMessage(JSON.parse(payload));
+            } catch (e) {
+              console.error('Failed to parse SSE JSON:', e, payload);
+            }
+          }
+          continue;
         }
-      });
-    return;
-  }
-  const data = await res.json();
-  if (data && Array.isArray(data.messages)) {
-    data.messages.forEach((msg) => {
-      try {
-        handleNativeMessage(msg);
-      } catch (err) {
-        console.error('Failed to handle polled message:', err, msg);
+
+        if (line.startsWith('data:')) {
+          dataLines.push(line.slice('data:'.length).trimStart());
+        }
       }
-    });
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -1135,6 +981,74 @@ function handleQwenEvent(event) {
   });
 }
 
+// Execute tool based on name and arguments
+async function executeTool(name: string, args: Record<string, unknown>) {
+  console.log('[ServiceWorker] executeTool:', name, args);
+
+  try {
+    let result;
+
+    switch (name) {
+      case 'chrome_read_page':
+        result = await getBrowserPageContent();
+        break;
+
+      case 'chrome_screenshot':
+        result = await getBrowserScreenshot();
+        break;
+
+      case 'chrome_network_capture':
+        result = await getBrowserNetworkLogs();
+        break;
+
+      case 'get_windows_and_tabs':
+        // Get all windows and tabs
+        result = await chrome.windows.getAll({ populate: true });
+        break;
+
+      case 'chrome_javascript':
+        result = await executeJsOnPage(args.code as string);
+        break;
+
+      case 'chrome_navigate':
+        // Navigate to URL
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tabs[0]) {
+          await chrome.tabs.update(tabs[0].id, { url: args.url as string });
+          result = { success: true, url: args.url };
+        } else {
+          throw new Error('No active tab found');
+        }
+        break;
+
+      // Add more tool handlers as needed
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+
+    // Format result according to MCP CallToolResult format
+    return {
+      content: [
+        {
+          type: 'text',
+          text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+        },
+      ],
+    };
+  } catch (error) {
+    console.error('[ServiceWorker] Tool execution error:', error);
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Error executing tool ${name}: ${(error as Error).message || String(error)}`,
+        },
+      ],
+      isError: true,
+    };
+  }
+}
+
 // Broadcast message to all UI components (side panel, popup, etc.)
 function broadcastToUI(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
@@ -1144,6 +1058,29 @@ function broadcastToUI(message) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   console.log('Message received:', request, 'from:', sender);
 
+  // Handle tool execution request from native-messaging.js
+  if (request.type === 'EXECUTE_TOOL') {
+    const { name, args } = request.data || {};
+    console.log('[ServiceWorker] Executing tool:', name, args);
+
+    // Execute the tool by calling the appropriate handler
+    executeTool(name, args)
+      .then((result) => {
+        sendResponse({
+          status: 'success',
+          data: result,
+        });
+      })
+      .catch((error) => {
+        console.error('[ServiceWorker] Tool execution failed:', error);
+        sendResponse({
+          status: 'error',
+          error: error.message || String(error),
+        });
+      });
+    return true; // Will respond asynchronously
+  }
+
   if (request.type === 'CONNECT') {
     // Connect to native host
     connectToNativeHost()
@@ -1151,17 +1088,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({
           success: true,
           status: qwenCliStatus,
-          internalTools: INTERNAL_MCP_TOOLS,
         });
-        // Broadcast internal tools so UI can render tools panel
-        try {
-          broadcastToUI({
-            type: 'internalMcpTools',
-            data: { tools: INTERNAL_MCP_TOOLS },
-          });
-        } catch {
-          // Ignore errors
-        }
       })
       .catch((error) => {
         sendResponse({ success: false, error: error.message });
@@ -1176,7 +1103,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       status: qwenCliStatus,
       availableCommands: lastAvailableCommands,
       mcpTools: lastMcpTools,
-      internalTools: INTERNAL_MCP_TOOLS,
     });
     return false;
   }
@@ -1222,260 +1148,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               throw startError;
             }
           }
-        }
-
-        // Fallback: if user intent asks to read page (and MCP might not be available),
-        // directly read the page via content script and send to Qwen for analysis.
-        if (!hasBrowserMcpTools()) {
-          // Only use heuristics when browser MCP tools are not yet available.
-          try {
-            if (shouldTriggerReadPage(text)) {
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'read_page', stage: 'start' },
-              });
-              const data = await getBrowserPageContent();
-              // start stream for qwen_request path
-              broadcastToUI({ type: 'streamStart' });
-              await sendToNativeHost({
-                type: 'qwen_request',
-                action: 'analyze_page',
-                data: data,
-                userPrompt: text, // Include user's full request for context
-              });
-              // do not send original prompt to avoid duplication
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'read_page', stage: 'end', ok: true },
-              });
-              sendResponse({ success: true });
-              return;
-            }
-          } catch (e) {
-            console.warn('Fallback read_page failed:', e);
-            broadcastToUI({
-              type: 'toolProgress',
-              data: {
-                name: 'read_page',
-                stage: 'end',
-                ok: false,
-                error: String((e && e.message) || e),
-              },
-            });
-            // continue to send prompt normally
-          }
-
-          // Fallback: get console logs
-          try {
-            const shouldGetConsole = shouldTriggerConsoleLogs(text);
-            console.log(
-              '[Fallback] shouldTriggerConsoleLogs:',
-              shouldGetConsole,
-              'text:',
-              text,
-            );
-            if (shouldGetConsole) {
-              console.log('[Fallback] Triggering console logs...');
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'console_logs', stage: 'start' },
-              });
-              const data = await getBrowserConsoleLogs();
-              console.log('[Fallback] Console logs data:', data);
-              const logs = data.logs || [];
-              const formatted = logs
-                .slice(-50)
-                .map((log) => `[${log.type}] ${log.message}`)
-                .join('\n');
-              broadcastToUI({ type: 'streamStart' });
-              await sendToNativeHost({
-                type: 'qwen_request',
-                action: 'process_text',
-                data: {
-                  text: `Console logs (last ${Math.min(logs.length, 50)} entries):\n${formatted || '(no logs captured)'}`,
-                  context: 'console logs from browser',
-                },
-                userPrompt: text, // Include user's full request
-              });
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'console_logs', stage: 'end', ok: true },
-              });
-              sendResponse({ success: true });
-              return;
-            }
-          } catch (e) {
-            console.error('[Fallback] Console logs failed:', e);
-            broadcastToUI({
-              type: 'toolProgress',
-              data: {
-                name: 'console_logs',
-                stage: 'end',
-                ok: false,
-                error: String((e && e.message) || e),
-              },
-            });
-          }
-
-          // Fallback: capture screenshot
-          try {
-            if (shouldTriggerScreenshot(text)) {
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'screenshot', stage: 'start' },
-              });
-              const screenshot = await getBrowserScreenshot();
-              const tabs = await chrome.tabs.query({
-                active: true,
-                currentWindow: true,
-              });
-              broadcastToUI({ type: 'streamStart' });
-              await sendToNativeHost({
-                type: 'qwen_request',
-                action: 'analyze_screenshot',
-                data: {
-                  dataUrl: screenshot.dataUrl,
-                  url: tabs[0]?.url || 'unknown',
-                },
-                userPrompt: text, // Include user's full request
-              });
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'screenshot', stage: 'end', ok: true },
-              });
-              sendResponse({ success: true });
-              return;
-            }
-          } catch (e) {
-            console.warn('Fallback screenshot failed:', e);
-            broadcastToUI({
-              type: 'toolProgress',
-              data: {
-                name: 'screenshot',
-                stage: 'end',
-                ok: false,
-                error: String((e && e.message) || e),
-              },
-            });
-          }
-
-          // Fallback: get network logs
-          try {
-            const shouldGetNetwork = shouldTriggerNetworkLogs(text);
-            console.log(
-              '[Fallback] shouldTriggerNetworkLogs:',
-              shouldGetNetwork,
-              'text:',
-              text,
-            );
-            if (shouldGetNetwork) {
-              console.log('[Fallback] Triggering network logs...');
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'network_logs', stage: 'start' },
-              });
-              const logs = await getNetworkLogs(null);
-              console.log('[Fallback] Network logs count:', logs?.length);
-              // Build a requestId -> body map for quick lookup
-              const bodyMap = new Map();
-              for (const log of logs || []) {
-                if (
-                  log.method === 'Network.responseBody' &&
-                  log.params?.requestId
-                ) {
-                  bodyMap.set(log.params.requestId, {
-                    body: log.params.body,
-                    base64Encoded: log.params.base64Encoded,
-                    error: log.params.error,
-                  });
-                }
-              }
-              const buildBodySnippet = (requestId) => {
-                if (!requestId || !bodyMap.has(requestId)) return undefined;
-                const { body, base64Encoded, error } = bodyMap.get(requestId);
-                if (error) return `error: ${error}`;
-                if (typeof body !== 'string') return undefined;
-                const snippet = body.slice(0, 4000); // cap to avoid huge payload
-                return base64Encoded
-                  ? `(base64,len=${body.length}) ${snippet}`
-                  : snippet;
-              };
-              const summary = logs
-                .filter((log) => {
-                  const url =
-                    log.params?.request?.url || log.params?.documentURL;
-                  if (
-                    log.method === 'Network.responseBody' &&
-                    typeof log.params?.error === 'string' &&
-                    log.params.error.includes(
-                      'No resource with given identifier found',
-                    )
-                  ) {
-                    return false; // drop noisy CDP body fetch errors
-                  }
-                  return !shouldIgnoreRequestUrl(url);
-                })
-                .slice(-200)
-                .map((log) => ({
-                  method: log.method,
-                  url: log.params?.request?.url || log.params?.documentURL,
-                  status: log.params?.response?.status,
-                  timestamp: log.timestamp,
-                  requestId: log.params?.requestId,
-                  body:
-                    buildBodySnippet(log.params?.requestId) ||
-                    buildBodySnippet(
-                      log.params?.requestId || log.params?.loaderId,
-                    ),
-                  bodyType:
-                    bodyMap.has(log.params?.requestId) &&
-                    bodyMap.get(log.params?.requestId)?.base64Encoded
-                      ? 'base64'
-                      : undefined,
-                }));
-              // Cap payload size to avoid upstream model length errors
-              let textPayload = `Network logs (last ${summary.length} entries):\n${JSON.stringify(summary, null, 2)}`;
-              const MAX_TEXT_LEN = 200000; // ~200 KB safety cap
-              if (textPayload.length > MAX_TEXT_LEN) {
-                textPayload =
-                  textPayload.slice(0, MAX_TEXT_LEN) +
-                  `\n...[truncated ${(textPayload.length - MAX_TEXT_LEN).toLocaleString()} chars]`;
-              }
-              broadcastToUI({ type: 'streamStart' });
-              await sendToNativeHost({
-                type: 'qwen_request',
-                action: 'process_text',
-                data: {
-                  text: textPayload,
-                  context: 'network request logs from browser',
-                },
-                userPrompt: text, // Include user's full request
-              });
-              broadcastToUI({
-                type: 'toolProgress',
-                data: { name: 'network_logs', stage: 'end', ok: true },
-              });
-              sendResponse({ success: true });
-              return;
-            }
-          } catch (e) {
-            console.error('[Fallback] Network logs failed:', e);
-            broadcastToUI({
-              type: 'toolProgress',
-              data: {
-                name: 'network_logs',
-                stage: 'end',
-                ok: false,
-                error: String((e && e.message) || e),
-              },
-            });
-          }
-        }
-
-        // Inject tool-intent hints to help the model call browser tools proactively
-        const toolHint = buildToolIntentHint(text);
-        if (toolHint) {
-          promptText = `${toolHint}\n\n${text}`;
         }
 
         // Send the prompt with retry logic for session initialization
@@ -1581,66 +1253,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  if (request.type === 'EXTRACT_PAGE_DATA') {
-    // Request page data from content script
-    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-      if (tabs[0]) {
-        const tab = tabs[0];
-
-        // Check if we can inject content script (skip chrome:// and other protected pages)
-        if (
-          tab.url &&
-          (tab.url.startsWith('chrome://') ||
-            tab.url.startsWith('chrome-extension://') ||
-            tab.url.startsWith('edge://') ||
-            tab.url.startsWith('about:'))
-        ) {
-          sendResponse({
-            success: false,
-            error: 'Cannot access this page (browser internal page)',
-          });
-          return;
-        }
-
-        // Try to inject content script first in case it's not loaded
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            files: ['content/content-script.js'],
-          });
-        } catch (injectError) {
-          // Script might already be injected or page doesn't allow injection
-          console.log('Script injection skipped:', injectError.message);
-        }
-
-        chrome.tabs.sendMessage(
-          tab.id,
-          {
-            type: 'EXTRACT_DATA',
-          },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              sendResponse({
-                success: false,
-                error:
-                  chrome.runtime.lastError.message +
-                  '. Try refreshing the page.',
-              });
-            } else {
-              sendResponse(response);
-            }
-          },
-        );
-      } else {
-        sendResponse({
-          success: false,
-          error: 'No active tab found',
-        });
-      }
-    });
-    return true; // Will respond asynchronously
-  }
-
   if (request.type === 'SEND_TO_QWEN') {
     // Send data to Qwen CLI via native host
     const send = async () => {
@@ -1732,61 +1344,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // Will respond asynchronously
   }
 
-  if (request.type === 'CAPTURE_SCREENSHOT') {
-    // Capture screenshot of active tab
-    chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
-      if (chrome.runtime.lastError) {
-        sendResponse({
-          success: false,
-          error: chrome.runtime.lastError.message,
-        });
-      } else {
-        sendResponse({
-          success: true,
-          data: dataUrl,
-        });
-      }
-    });
-    return true; // Will respond asynchronously
-  }
-
-  if (request.type === 'GET_NETWORK_LOGS') {
-    // Get network logs (requires debugger API)
-    getNetworkLogs(sender.tab?.id)
-      .then((logs) => {
-        sendResponse({ success: true, data: logs });
-      })
-      .catch((error) => {
-        sendResponse({ success: false, error: error.message });
-      });
-    return true; // Will respond asynchronously
-  }
-
-  if (request.type === 'GET_CONSOLE_LOGS') {
-    // Get console logs via content script
-    getBrowserConsoleLogs()
-      .then((res) => {
-        sendResponse({ success: true, data: res.logs || [] });
-      })
-      .catch((error) => {
-        sendResponse({ success: false, error: error.message });
-      });
-    return true; // Will respond asynchronously
-  }
-
-  if (request.type === 'GET_CAPTURED_RESPONSES') {
-    getCapturedResponsesFromPage({
-      urlSubstring: request.urlSubstring,
-      limit: request.limit,
-    })
-      .then((data) => {
-        sendResponse({ success: true, data });
-      })
-      .catch((error) => {
-        sendResponse({ success: false, error: error.message });
-      });
-    return true; // Will respond asynchronously
-  }
 });
 
 // Network logging using both webRequest and debugger APIs
