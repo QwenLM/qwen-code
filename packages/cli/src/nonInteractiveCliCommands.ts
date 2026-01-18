@@ -166,6 +166,13 @@ function handleCommandResult(
         originalType: 'confirm_action',
       };
 
+    case 'update_input':
+      return {
+        type: 'unsupported',
+        reason: 'Updating input is not supported in non-interactive mode.',
+        originalType: 'update_input',
+      };
+
     default: {
       // Exhaustiveness check
       const _exhaustive: never = result;

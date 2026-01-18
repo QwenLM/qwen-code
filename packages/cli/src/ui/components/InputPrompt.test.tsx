@@ -366,7 +366,6 @@ describe('InputPrompt', () => {
 
   describe('clipboard image paste', () => {
     beforeEach(() => {
-      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
       vi.mocked(clipboardUtils.cleanupOldClipboardImages).mockResolvedValue(
         undefined,
@@ -374,9 +373,8 @@ describe('InputPrompt', () => {
     });
 
     it('should handle Ctrl+V when clipboard has an image', async () => {
-      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
-        '/test/.gemini-clipboard/clipboard-123.png',
+        '/test/.qwen-clipboard/clipboard-123.png',
       );
 
       const { stdin, unmount } = renderWithProviders(
@@ -388,7 +386,6 @@ describe('InputPrompt', () => {
       stdin.write('\x16'); // Ctrl+V
       await wait();
 
-      expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalledWith(
         props.config.getTargetDir(),
       );
@@ -400,24 +397,6 @@ describe('InputPrompt', () => {
     });
 
     it('should not insert anything when clipboard has no image', async () => {
-      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(false);
-
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      stdin.write('\x16'); // Ctrl+V
-      await wait();
-
-      expect(clipboardUtils.clipboardHasImage).toHaveBeenCalled();
-      expect(clipboardUtils.saveClipboardImage).not.toHaveBeenCalled();
-      expect(mockBuffer.setText).not.toHaveBeenCalled();
-      unmount();
-    });
-
-    it('should handle image save failure gracefully', async () => {
-      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
 
       const { stdin, unmount } = renderWithProviders(
@@ -429,17 +408,32 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
-      expect(mockBuffer.setText).not.toHaveBeenCalled();
+      expect(mockBuffer.replaceRangeByOffset).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should handle image save failure gracefully', async () => {
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(null);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x16'); // Ctrl+V
+      await wait();
+
+      expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
+      expect(mockBuffer.replaceRangeByOffset).not.toHaveBeenCalled();
       unmount();
     });
 
     it('should insert image path at cursor position with proper spacing', async () => {
       const imagePath = path.join(
         'test',
-        '.gemini-clipboard',
+        '.qwen-clipboard',
         'clipboard-456.png',
       );
-      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
 
       // Set initial text and cursor position
@@ -474,7 +468,7 @@ describe('InputPrompt', () => {
       const consoleErrorSpy = vi
         .spyOn(console, 'error')
         .mockImplementation(() => {});
-      vi.mocked(clipboardUtils.clipboardHasImage).mockRejectedValue(
+      vi.mocked(clipboardUtils.saveClipboardImage).mockRejectedValue(
         new Error('Clipboard error'),
       );
 
@@ -490,7 +484,7 @@ describe('InputPrompt', () => {
         'Error handling clipboard image:',
         expect.any(Error),
       );
-      expect(mockBuffer.setText).not.toHaveBeenCalled();
+      expect(mockBuffer.replaceRangeByOffset).not.toHaveBeenCalled();
 
       consoleErrorSpy.mockRestore();
       unmount();
@@ -1172,7 +1166,6 @@ describe('InputPrompt', () => {
 
   describe('vim mode', () => {
     it('should not call buffer.handleInput when vim mode is enabled and vim handles the input', async () => {
-      props.vimModeEnabled = true;
       props.vimHandleInput = vi.fn().mockReturnValue(true); // Mock that vim handled it.
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
@@ -1188,7 +1181,6 @@ describe('InputPrompt', () => {
     });
 
     it('should call buffer.handleInput when vim mode is enabled but vim does not handle the input', async () => {
-      props.vimModeEnabled = true;
       props.vimHandleInput = vi.fn().mockReturnValue(false); // Mock that vim did NOT handle it.
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,

@@ -387,7 +387,13 @@ export function KeypressProvider({
       }
     };
 
-    const handleKeypress = (_: unknown, key: Key) => {
+    const handleKeypress = (ch: unknown, key: Key) => {
+      // Backfill name from char if missing (common with some Alt+Char combos on Windows)
+      if (!key.name && typeof ch === 'string' && ch.length === 1) {
+        // cast to allow mutation
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (key as any).name = ch.toLowerCase();
+      }
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
         return;
       }

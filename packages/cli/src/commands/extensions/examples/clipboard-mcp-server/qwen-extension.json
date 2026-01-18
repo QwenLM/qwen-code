@@ -1,0 +1,14 @@
+{
+  "name": "qwen-clipboard-server",
+  "version": "1.0.0",
+  "description": "MCP server that provides clipboard image access functionality",
+  "type": "mcp-server",
+  "entrypoint": "./clipboard-server.ts",
+  "mcpServers": {
+    "qwen-clipboard": {
+      "command": "tsx",
+      "args": ["clipboard-server.ts"]
+    }
+  },
+  "permissions": ["file-system"]
+}

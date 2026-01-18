@@ -192,6 +192,11 @@ export interface ConfirmActionReturn {
   };
 }
 
+export interface UpdateInputActionReturn {
+  type: 'update_input';
+  content: string;
+}
+
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
@@ -201,7 +206,8 @@ export type SlashCommandActionReturn =
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
   | ConfirmShellCommandsActionReturn
-  | ConfirmActionReturn;
+  | ConfirmActionReturn
+  | UpdateInputActionReturn;
 
 export enum CommandKind {
   BUILT_IN = 'built-in',

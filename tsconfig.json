@@ -27,5 +27,7 @@
     "target": "es2022",
     "types": ["node", "vitest/globals"],
     "jsx": "react-jsx"
-  }
+  },
+  "include": ["scripts/**/*", "*.ts", "*.d.ts", "*.js"],
+  "exclude": ["node_modules", "dist", "packages"]
 }
