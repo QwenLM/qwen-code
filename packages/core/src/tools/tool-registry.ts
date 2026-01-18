@@ -23,6 +23,7 @@ import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
+import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -482,5 +483,16 @@ export class ToolRegistry {
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
     return this.tools.get(name);
+  }
+
+  async readMcpResource(
+    serverName: string,
+    uri: string,
+  ): Promise<ReadResourceResult> {
+    if (!this.config.isTrustedFolder()) {
+      throw new Error('MCP resources are unavailable in untrusted folders.');
+    }
+
+    return this.mcpClientManager.readResource(serverName, uri);
   }
 }
