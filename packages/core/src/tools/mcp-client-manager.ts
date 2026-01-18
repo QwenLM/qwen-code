@@ -11,12 +11,14 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import {
   McpClient,
   MCPDiscoveryState,
+  MCPServerStatus,
   populateMcpServerCommand,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { EventEmitter } from 'node:events';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
@@ -136,5 +138,21 @@ export class McpClientManager {
 
   getDiscoveryState(): MCPDiscoveryState {
     return this.discoveryState;
+  }
+
+  async readResource(
+    serverName: string,
+    uri: string,
+  ): Promise<ReadResourceResult> {
+    const client = this.clients.get(serverName);
+    if (!client) {
+      throw new Error(`MCP server '${serverName}' is not connected.`);
+    }
+
+    if (client.getStatus() !== MCPServerStatus.CONNECTED) {
+      await client.connect();
+    }
+
+    return client.readResource(uri);
   }
 }

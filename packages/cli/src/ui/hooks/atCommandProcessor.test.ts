@@ -26,6 +26,7 @@ import * as path from 'node:path';
 describe('handleAtCommand', () => {
   let testRootDir: string;
   let mockConfig: Config;
+  let registry: ToolRegistry;
 
   const mockAddItem: Mock<UseHistoryManagerReturn['addItem']> = vi.fn();
   const mockOnDebugMessage: Mock<(message: string) => void> = vi.fn();
@@ -53,6 +54,7 @@ describe('handleAtCommand', () => {
       getToolRegistry,
       getTargetDir: () => testRootDir,
       isSandboxed: () => false,
+      isTrustedFolder: () => true,
       getFileService: () => new FileDiscoveryService(testRootDir),
       getFileFilteringRespectGitIgnore: () => true,
       getFileFilteringRespectQwenIgnore: () => true,
@@ -84,7 +86,7 @@ describe('handleAtCommand', () => {
       getTruncateToolOutputLines: () => 500,
     } as unknown as Config;
 
-    const registry = new ToolRegistry(mockConfig);
+    registry = new ToolRegistry(mockConfig);
     registry.registerTool(new ReadManyFilesTool(mockConfig));
     registry.registerTool(new GlobTool(mockConfig));
     getToolRegistry.mockReturnValue(registry);
@@ -201,6 +203,57 @@ describe('handleAtCommand', () => {
     });
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       `Path ${dirPath} resolved to directory, using glob: ${resolvedGlob}`,
+    );
+  });
+
+  it('should expand an MCP resource reference in @server: resource format', async () => {
+    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
+      () =>
+        ({
+          github: {},
+        }) as unknown;
+
+    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
+      contents: [
+        {
+          uri: 'github://repos/owner/repo/issues',
+          mimeType: 'application/json',
+          text: '{"ok":true}',
+        },
+      ],
+    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
+
+    const query = 'Show me the data from @github: repos/owner/repo/issues';
+
+    const result = await handleAtCommand({
+      query,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1000,
+      signal: abortController.signal,
+    });
+
+    expect(result).toEqual({
+      processedQuery: [
+        { text: 'Show me the data from @github:repos/owner/repo/issues' },
+        { text: '\n--- Content from referenced MCP resources ---' },
+        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
+        { text: '{"ok":true}' },
+        { text: '\n--- End of MCP resource content ---' },
+      ],
+      shouldProceed: true,
+    });
+    expect(registry.readMcpResource).toHaveBeenCalledWith(
+      'github',
+      'github://repos/owner/repo/issues',
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'tool_group',
+        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
+      }),
+      1000,
     );
   });
 
