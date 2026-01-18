@@ -5,6 +5,7 @@ on:
     branches:
       - 'main'
       - 'release/**'
+      - feat/ide-test-ci
     paths:
       - 'packages/vscode-ide-companion/**'
       - '.github/workflows/vscode-extension-test.yml'
