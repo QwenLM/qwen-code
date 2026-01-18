@@ -502,6 +502,64 @@ describe('ModelsConfig', () => {
     expect(gc.apiKeyEnvKey).toBeUndefined();
   });
 
+  it('should not force provider default model during same-authType refresh when modelId is not in registry', () => {
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'provider-model',
+          name: 'Provider Model',
+          baseUrl: 'https://provider.example.com/v1',
+          envKey: 'OPENAI_API_KEY',
+          generationConfig: {
+            samplingParams: { temperature: 0.1, max_tokens: 123 },
+            timeout: 111,
+            maxRetries: 1,
+          },
+        },
+      ],
+    };
+
+    // User config: raw model id + settings-sourced generation config.
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'raw-model',
+        samplingParams: { temperature: 0.9, max_tokens: 999 },
+        timeout: 9999,
+        maxRetries: 9,
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        samplingParams: {
+          kind: 'settings',
+          detail: 'settings.model.generationConfig.samplingParams',
+        },
+        timeout: {
+          kind: 'settings',
+          detail: 'settings.model.generationConfig.timeout',
+        },
+        maxRetries: {
+          kind: 'settings',
+          detail: 'settings.model.generationConfig.maxRetries',
+        },
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'raw-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    expect(gc.model).toBe('raw-model');
+    expect(gc.samplingParams?.temperature).toBe(0.9);
+    expect(gc.samplingParams?.max_tokens).toBe(999);
+    expect(gc.timeout).toBe(9999);
+    expect(gc.maxRetries).toBe(9);
+    expect(modelsConfig.isStrictModelProviderSelection()).toBe(false);
+
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['model']?.kind).toBe('settings');
+  });
+
   it('should clear manual credentials when switching from USE_OPENAI to QWEN_OAUTH', () => {
     // User manually set credentials for OpenAI
     const modelsConfig = new ModelsConfig({

@@ -43,21 +43,30 @@ export interface ResolvedCliGenerationConfig {
   sources: ContentGeneratorConfigSources;
 }
 
-export function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env['OPENAI_API_KEY']) {
+export function getAuthTypeFromEnv(
+  env: Record<string, string | undefined> = process.env as Record<
+    string,
+    string | undefined
+  >,
+): AuthType | undefined {
+  if (env['OPENAI_API_KEY']) {
     return AuthType.USE_OPENAI;
   }
-  if (process.env['QWEN_OAUTH']) {
+  if (env['QWEN_OAUTH']) {
     return AuthType.QWEN_OAUTH;
   }
 
-  if (process.env['GEMINI_API_KEY']) {
+  if (env['GEMINI_API_KEY'] && env['GEMINI_MODEL']) {
     return AuthType.USE_GEMINI;
   }
-  if (process.env['GOOGLE_API_KEY']) {
+  if (env['GOOGLE_API_KEY'] && env['GOOGLE_MODEL']) {
     return AuthType.USE_VERTEX_AI;
   }
-  if (process.env['ANTHROPIC_API_KEY']) {
+  if (
+    env['ANTHROPIC_API_KEY'] &&
+    env['ANTHROPIC_MODEL'] &&
+    env['ANTHROPIC_BASE_URL']
+  ) {
     return AuthType.USE_ANTHROPIC;
   }
 

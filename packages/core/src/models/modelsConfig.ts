@@ -595,6 +595,8 @@ export class ModelsConfig {
    * after removing environment variables for a previously selected model.
    */
   syncAfterAuthRefresh(authType: AuthType, modelId?: string): void {
+    const isAuthTypeChange = authType !== this.currentAuthType;
+
     // Check if we have manually set credentials that should be preserved
     const preserveManualCredentials = this.hasManualCredentials;
 
@@ -611,7 +613,7 @@ export class ModelsConfig {
 
     this.strictModelProviderSelection = false;
 
-    if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
+    if (modelId) {
       const resolved = this.modelRegistry.getModel(authType, modelId);
       if (resolved) {
         // Ensure applyResolvedModelDefaults can correctly apply authType-specific
@@ -619,19 +621,29 @@ export class ModelsConfig {
         // before applying defaults.
         this.currentAuthType = authType;
         this.applyResolvedModelDefaults(resolved);
+        return;
       }
-    } else {
-      // If the provided modelId doesn't exist in the registry for the new authType,
-      // use the default model for that authType instead of keeping the old model.
-      // This handles the case where switching from one authType (e.g., OPENAI with
-      // env vars) to another (e.g., qwen-oauth) - we should use the default model
-      // for the new authType, not the old model.
-      this.currentAuthType = authType;
+    }
+
+    // If the model is not in the registry:
+    // - For qwen-oauth, ONLY registry-backed models are supported.
+    // - For authType switches, prefer switching to the default model for the new authType.
+    // - For same-authType refreshes, preserve the current raw model ID (do not
+    //   force the first configured provider model).
+    this.currentAuthType = authType;
+
+    if (authType === AuthType.QWEN_OAUTH || isAuthTypeChange) {
       const defaultModel =
         this.modelRegistry.getDefaultModelForAuthType(authType);
       if (defaultModel) {
         this.applyResolvedModelDefaults(defaultModel);
       }
+      return;
+    }
+
+    // Same authType, raw model id: keep it as-is.
+    if (modelId) {
+      this._generationConfig.model = modelId;
     }
   }
 
