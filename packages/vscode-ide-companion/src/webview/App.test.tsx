@@ -3,18 +3,18 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * App 组件测试
+ * App Component Tests
  *
- * 测试目标：确保 WebView 主应用能正确渲染和交互，防止 WebView 无法显示问题
+ * Test objective: Ensure WebView main app renders and interacts correctly, preventing display failures.
  *
- * 关键测试场景：
- * 1. 初始渲染 - 确保应用能正确渲染，不会白屏
- * 2. 认证状态显示 - 根据认证状态显示正确的 UI
- * 3. 加载状态 - 初始化时显示加载指示器
- * 4. 消息显示 - 确保消息能正确渲染
- * 5. 输入交互 - 确保用户能输入和发送消息
- * 6. 权限弹窗 - 确保权限请求能正确显示和响应
- * 7. 会话管理 - 确保会话切换功能正常
+ * Key test scenarios:
+ * 1. Initial rendering - Ensure app renders without blank screen
+ * 2. Authentication state display - Show correct UI based on auth state
+ * 3. Loading state - Show loading indicator during initialization
+ * 4. Message display - Ensure messages render correctly
+ * 5. Input interaction - Ensure users can input and send messages
+ * 6. Permission drawer - Ensure permission requests display and respond correctly
+ * 7. Session management - Ensure session switching works
  */
 
 /** @vitest-environment jsdom */
@@ -129,22 +129,22 @@ describe('App', () => {
     vi.restoreAllMocks();
   });
 
-  describe('Initial Rendering - 防止 WebView 白屏', () => {
+  describe('Initial Rendering - Prevent WebView blank screen', () => {
     /**
-     * 测试：基本渲染
+     * Test: Basic rendering
      *
-     * 验证 App 组件能成功渲染而不抛出错误
-     * 这是最基本的测试，如果失败意味着 WebView 将无法显示
+     * Verifies App component renders successfully without throwing.
+     * This is the most basic test; failure means WebView cannot display.
      */
     it('should render without crashing', () => {
       expect(() => render(<App />)).not.toThrow();
     });
 
     /**
-     * 测试：聊天容器存在
+     * Test: Chat container exists
      *
-     * 验证主要的聊天容器 div 存在
-     * 这是所有 UI 元素的父容器
+     * Verifies main chat container div exists.
+     * This is the parent container for all UI elements.
      */
     it('should render chat container', () => {
       const { container } = render(<App />);
@@ -153,10 +153,10 @@ describe('App', () => {
     });
 
     /**
-     * 测试：消息容器存在
+     * Test: Messages container exists
      *
-     * 验证消息列表容器存在
-     * 消息将在此容器中显示
+     * Verifies message list container exists.
+     * Messages are displayed in this container.
      */
     it('should render messages container', () => {
       const { container } = render(<App />);
@@ -165,76 +165,80 @@ describe('App', () => {
     });
   });
 
-  describe('Loading State - 加载状态显示', () => {
+  describe('Loading State - Loading indicator display', () => {
     /**
-     * 测试：初始加载状态
+     * Test: Initial loading state
      *
-     * 验证应用初始化时显示加载指示器
-     * 在认证状态确定前，用户应该看到加载提示
+     * Verifies loading indicator shows during app initialization.
+     * Users should see loading prompt before auth state is determined.
      */
     it('should show loading state initially', () => {
       render(<App />);
 
-      // 应该显示加载文本
+      // Should display loading text
       expect(screen.getByText(/Preparing Qwen Code/i)).toBeInTheDocument();
     });
   });
 
-  describe('Authentication States - 认证状态显示', () => {
+  describe('Authentication States - Auth state display', () => {
     /**
-     * 测试：未认证状态 - 显示登录引导
+     * Test: Unauthenticated state - Show login guide
      *
-     * 验证用户未登录时显示 Onboarding 组件
-     * 引导用户进行登录
+     * Verifies Onboarding component shows when user is not logged in.
+     * Guides user to perform login.
      */
     it('should render correctly when not authenticated', async () => {
-      // 使用 useWebViewMessages mock 模拟认证状态变更
-      const { useWebViewMessages } = await import('./hooks/useWebViewMessages.js');
+      // Use useWebViewMessages mock to simulate auth state change
+      const { useWebViewMessages } = await import(
+        './hooks/useWebViewMessages.js'
+      );
       vi.mocked(useWebViewMessages).mockImplementation((props) => {
-        // 模拟收到未认证状态
+        // Simulate receiving unauthenticated state
         React.useEffect(() => {
           props.setIsAuthenticated?.(false);
-        }, [props]); // 添加 props 到依赖数组
+        }, [props]); // Add props to dependency array
       });
 
       render(<App />);
 
-      // 等待状态更新
+      // Wait for state update
       await waitFor(() => {
-        // 未认证时应该显示登录相关 UI（如 Onboarding）
-        // 确保不会抛出错误
+        // When unauthenticated, login-related UI should show (like Onboarding)
+        // Ensure no errors are thrown
         expect(document.body).toBeInTheDocument();
       });
     });
 
     /**
-     * 测试：已认证状态 - 显示输入框
+     * Test: Authenticated state - Show input form
      *
-     * 验证用户已登录时显示消息输入区域
+     * Verifies message input area shows when user is logged in.
      */
     it('should show input form when authenticated', async () => {
-      const { useWebViewMessages } = await import('./hooks/useWebViewMessages.js');
+      const { useWebViewMessages } = await import(
+        './hooks/useWebViewMessages.js'
+      );
       vi.mocked(useWebViewMessages).mockImplementation((props) => {
         React.useEffect(() => {
           props.setIsAuthenticated?.(true);
-        }, [props]); // 添加 props 到依赖数组
+        }, [props]); // Add props to dependency array
       });
 
       render(<App />);
 
-      // 等待认证状态更新
+      // Wait for auth state update
       await waitFor(() => {
-        // 已认证时应该有输入相关的 UI
+        // When authenticated, input-related UI should exist
         expect(document.body).toBeInTheDocument();
       });
     });
   });
 
-  describe('Message Rendering - 消息显示', () => {
+  describe('Message Rendering - Message display', () => {
     /**
-     * 测试：用户消息显示
+     * Test: User message display
      *
-     * 验证用户发送的消息能正确显示
+     * Verifies user-sent messages display correctly.
      */
     it('should render user messages correctly', async () => {
       // Mock useMessageHandling to return messages
@@ -264,14 +268,14 @@ describe('App', () => {
         }),
       }));
 
-      // 由于 mock 限制，这里验证组件不崩溃
+      // Due to mock limitations, verify component doesn't crash
       expect(() => render(<App />)).not.toThrow();
     });
 
     /**
-     * 测试：AI 回复显示
+     * Test: AI response display
      *
-     * 验证 AI 的回复能正确显示
+     * Verifies AI responses display correctly.
      */
     it('should render assistant messages correctly', async () => {
       vi.doMock('./hooks/message/useMessageHandling.js', () => ({
@@ -304,9 +308,9 @@ describe('App', () => {
     });
 
     /**
-     * 测试：思考过程显示
+     * Test: Thinking process display
      *
-     * 验证 AI 的思考过程能正确显示
+     * Verifies AI thinking process displays correctly.
      */
     it('should render thinking messages correctly', async () => {
       vi.doMock('./hooks/message/useMessageHandling.js', () => ({
@@ -339,35 +343,37 @@ describe('App', () => {
     });
   });
 
-  describe('Empty State - 空状态显示', () => {
+  describe('Empty State - Empty state display', () => {
     /**
-     * 测试：无消息时显示空状态
+     * Test: Show empty state when no messages
      *
-     * 验证没有聊天记录时显示欢迎/空状态 UI
+     * Verifies welcome/empty state UI shows when no chat history.
      */
     it('should show empty state when no messages and authenticated', async () => {
-      const { useWebViewMessages } = await import('./hooks/useWebViewMessages.js');
+      const { useWebViewMessages } = await import(
+        './hooks/useWebViewMessages.js'
+      );
       vi.mocked(useWebViewMessages).mockImplementation((props) => {
         React.useEffect(() => {
           props.setIsAuthenticated?.(true);
-        }, [props]); // 添加 props 到依赖数组
+        }, [props]); // Add props to dependency array
       });
 
       const { container } = render(<App />);
 
-      // 等待状态更新
+      // Wait for state update
       await waitFor(() => {
-        // 验证应用不会崩溃
+        // Verify app doesn't crash
         expect(container.querySelector('.chat-container')).toBeInTheDocument();
       });
     });
   });
 
-  describe('Streaming State - 流式响应状态', () => {
+  describe('Streaming State - Streaming response state', () => {
     /**
-     * 测试：流式响应时的 UI 状态
+     * Test: UI state during streaming
      *
-     * 验证 AI 正在生成回复时 UI 正确显示
+     * Verifies UI displays correctly while AI is generating response.
      */
     it('should handle streaming state correctly', async () => {
       vi.doMock('./hooks/message/useMessageHandling.js', () => ({
@@ -394,9 +400,9 @@ describe('App', () => {
     });
 
     /**
-     * 测试：等待响应时的 UI 状态
+     * Test: UI state while waiting for response
      *
-     * 验证等待 AI 响应时显示加载提示
+     * Verifies loading prompt shows while waiting for AI response.
      */
     it('should show waiting message when waiting for response', async () => {
       vi.doMock('./hooks/message/useMessageHandling.js', () => ({
@@ -423,11 +429,11 @@ describe('App', () => {
     });
   });
 
-  describe('Session Management - 会话管理', () => {
+  describe('Session Management - Session management', () => {
     /**
-     * 测试：会话标题显示
+     * Test: Session title display
      *
-     * 验证当前会话标题正确显示在 Header 中
+     * Verifies current session title displays correctly in Header.
      */
     it('should display current session title in header', async () => {
       vi.doMock('./hooks/session/useSessionManagement.js', () => ({
@@ -452,11 +458,11 @@ describe('App', () => {
     });
   });
 
-  describe('Tool Calls - 工具调用显示', () => {
+  describe('Tool Calls - Tool call display', () => {
     /**
-     * 测试：进行中的工具调用
+     * Test: In-progress tool calls
      *
-     * 验证正在执行的工具调用能正确显示
+     * Verifies executing tool calls display correctly.
      */
     it('should render in-progress tool calls', async () => {
       vi.doMock('./hooks/useToolCalls.js', () => ({
@@ -480,9 +486,9 @@ describe('App', () => {
     });
 
     /**
-     * 测试：已完成的工具调用
+     * Test: Completed tool calls
      *
-     * 验证已完成的工具调用能正确显示
+     * Verifies completed tool calls display correctly.
      */
     it('should render completed tool calls', async () => {
       vi.doMock('./hooks/useToolCalls.js', () => ({
@@ -507,74 +513,76 @@ describe('App', () => {
     });
   });
 
-  describe('Error Boundaries - 错误边界', () => {
+  describe('Error Boundaries - Error boundaries', () => {
     /**
-     * 测试：Hook 错误不会导致崩溃
+     * Test: Hook errors don't cause crash
      *
-     * 验证即使某些 hook 抛出错误，整体应用也能优雅降级
+     * Verifies app degrades gracefully even if some hooks throw errors.
      */
     it('should not crash on hook errors', () => {
-      // 即使 mock 不完整，组件也应该能渲染
+      // Even with incomplete mocks, component should render
       expect(() => render(<App />)).not.toThrow();
     });
   });
 
-  describe('Accessibility - 可访问性', () => {
+  describe('Accessibility - Accessibility', () => {
     /**
-     * 测试：基本可访问性结构
+     * Test: Basic accessibility structure
      *
-     * 验证组件有正确的语义结构
+     * Verifies component has proper semantic structure.
      */
     it('should have proper semantic structure', () => {
       const { container } = render(<App />);
 
-      // 应该有容器 div
+      // Should have container div
       expect(container.querySelector('.chat-container')).toBeInTheDocument();
     });
   });
 
-  describe('CSS Classes - 样式类', () => {
+  describe('CSS Classes - Style classes', () => {
     /**
-     * 测试：关键 CSS 类存在
+     * Test: Required CSS classes exist
      *
-     * 验证必要的 CSS 类被正确应用
-     * 如果缺失可能导致样式问题
+     * Verifies necessary CSS classes are correctly applied.
+     * Missing classes may cause styling issues.
      */
     it('should have required CSS classes', () => {
       const { container } = render(<App />);
 
-      // chat-container 是主容器的关键类
+      // chat-container is the key class for main container
       expect(container.querySelector('.chat-container')).toBeInTheDocument();
     });
   });
 });
 
-describe('App Integration - 集成场景', () => {
+describe('App Integration - Integration scenarios', () => {
   /**
-   * 测试：完整的消息发送流程（模拟）
+   * Test: Complete message submission flow (simulated)
    *
-   * 验证从输入到发送的完整流程
-   * 这是用户最常用的功能
+   * Verifies complete flow from input to send.
+   * This is the most common user operation.
    */
   it('should handle message submission flow', () => {
     const { container } = render(<App />);
 
-    // 验证应用渲染成功
+    // Verify app renders successfully
     expect(container.querySelector('.chat-container')).toBeInTheDocument();
   });
 
   /**
-   * 测试：权限请求显示
+   * Test: Permission request display
    *
-   * 验证当需要用户授权时，权限弹窗能正确显示
+   * Verifies permission drawer displays correctly when user authorization is needed.
    */
   it('should show permission drawer when permission requested', async () => {
-    // 权限请求通过 useWebViewMessages 触发
-    const { useWebViewMessages } = await import('./hooks/useWebViewMessages.js');
+    // Permission requests are triggered via useWebViewMessages
+    const { useWebViewMessages } = await import(
+      './hooks/useWebViewMessages.js'
+    );
     vi.mocked(useWebViewMessages).mockImplementation((props) => {
       React.useEffect(() => {
         props.setIsAuthenticated?.(true);
-        // 模拟权限请求
+        // Simulate permission request
         props.handlePermissionRequest({
           options: [
             { optionId: 'allow', name: 'Allow', kind: 'allow' },
@@ -586,12 +594,12 @@ describe('App Integration - 集成场景', () => {
             kind: 'edit',
           },
         });
-      }, [props]); // 添加 props 到依赖数组
+      }, [props]); // Add props to dependency array
     });
 
     const { container } = render(<App />);
 
-    // 验证应用不崩溃
+    // Verify app doesn't crash
     expect(container.querySelector('.chat-container')).toBeInTheDocument();
   });
 });

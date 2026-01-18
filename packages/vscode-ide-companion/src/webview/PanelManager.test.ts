@@ -3,16 +3,16 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * PanelManager 测试
+ * PanelManager Tests
  *
- * 测试目标：确保 WebView Panel/Tab 能正确创建和管理，防止 Tab 无法打开问题
+ * Test objective: Ensure WebView Panel/Tab can be correctly created and managed, preventing Tab open failures.
  *
- * 关键测试场景：
- * 1. Panel 创建 - 确保能成功创建 WebView Panel
- * 2. Panel 复用 - 确保不会重复创建 Panel
- * 3. Panel 显示 - 确保 Panel 能正确 reveal
- * 4. Tab 捕获 - 确保能正确捕获和追踪 Tab
- * 5. 资源释放 - 确保 dispose 正确清理资源
+ * Key test scenarios:
+ * 1. Panel creation - Ensure WebView Panel can be successfully created
+ * 2. Panel reuse - Ensure Panel is not duplicated
+ * 3. Panel display - Ensure Panel can be correctly revealed
+ * 4. Tab capture - Ensure Tab can be correctly captured and tracked
+ * 5. Resource cleanup - Ensure dispose properly cleans up resources
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -31,7 +31,7 @@ describe('PanelManager', () => {
     mockExtensionUri = { fsPath: '/path/to/extension' } as vscode.Uri;
     onDisposeCallback = vi.fn();
 
-    // 创建 mock panel
+    // Create mock panel
     mockPanel = {
       webview: {
         html: '',
@@ -76,10 +76,10 @@ describe('PanelManager', () => {
 
   describe('createPanel', () => {
     /**
-     * 测试：首次创建 Panel
+     * Test: First Panel creation
      *
-     * 验证 PanelManager 能成功创建新的 WebView Panel
-     * 如果创建失败，用户将看不到聊天界面
+     * Verifies PanelManager can successfully create a new WebView Panel.
+     * If creation fails, users will not see the chat interface.
      */
     it('should create a new panel when none exists', async () => {
       const result = await panelManager.createPanel();
@@ -90,17 +90,17 @@ describe('PanelManager', () => {
         'Qwen Code', // title
         expect.any(Object), // viewColumn options
         expect.objectContaining({
-          enableScripts: true, // 必须启用脚本才能运行 React
-          retainContextWhenHidden: true, // 隐藏时保持状态
+          enableScripts: true, // Must enable scripts for React to run
+          retainContextWhenHidden: true, // Retain state when hidden
         }),
       );
     });
 
     /**
-     * 测试：Panel 复用
+     * Test: Panel reuse
      *
-     * 验证当 Panel 已存在时，不会重复创建
-     * 防止创建多个不必要的 Panel
+     * Verifies Panel is not recreated when it already exists.
+     * Prevents creating unnecessary duplicate Panels.
      */
     it('should return false if panel already exists', async () => {
       await panelManager.createPanel();
@@ -113,10 +113,10 @@ describe('PanelManager', () => {
     });
 
     /**
-     * 测试：Panel 图标设置
+     * Test: Panel icon setting
      *
-     * 验证创建 Panel 时设置了正确的图标
-     * 图标显示在 Tab 上，帮助用户识别
+     * Verifies correct icon is set when creating Panel.
+     * Icon displays on Tab to help users identify it.
      */
     it('should set panel icon', async () => {
       await panelManager.createPanel();
@@ -125,10 +125,10 @@ describe('PanelManager', () => {
     });
 
     /**
-     * 测试：启用脚本
+     * Test: Enable scripts
      *
-     * 验证创建 Panel 时启用了脚本执行
-     * 这是 React 应用运行的必要条件
+     * Verifies script execution is enabled when creating Panel.
+     * This is required for React app to run.
      */
     it('should create panel with scripts enabled', async () => {
       await panelManager.createPanel();
@@ -142,10 +142,10 @@ describe('PanelManager', () => {
     });
 
     /**
-     * 测试：保持上下文
+     * Test: Retain context
      *
-     * 验证创建 Panel 时设置了 retainContextWhenHidden
-     * 防止切换 Tab 时丢失聊天状态
+     * Verifies retainContextWhenHidden is set when creating Panel.
+     * Prevents losing chat state when switching Tabs.
      */
     it('should retain context when hidden', async () => {
       await panelManager.createPanel();
@@ -159,10 +159,10 @@ describe('PanelManager', () => {
     });
 
     /**
-     * 测试：本地资源根目录
+     * Test: Local resource roots
      *
-     * 验证创建 Panel 时设置了正确的本地资源根目录
-     * 这决定了 WebView 能访问哪些本地文件
+     * Verifies correct local resource roots are set when creating Panel.
+     * This determines which local files WebView can access.
      */
     it('should set local resource roots', async () => {
       await panelManager.createPanel();
@@ -179,18 +179,18 @@ describe('PanelManager', () => {
 
   describe('getPanel', () => {
     /**
-     * 测试：获取空 Panel
+     * Test: Get empty Panel
      *
-     * 验证在没有创建 Panel 时返回 null
+     * Verifies null is returned when no Panel is created.
      */
     it('should return null when no panel exists', () => {
       expect(panelManager.getPanel()).toBeNull();
     });
 
     /**
-     * 测试：获取已创建的 Panel
+     * Test: Get created Panel
      *
-     * 验证能正确获取已创建的 Panel 实例
+     * Verifies the created Panel instance can be correctly retrieved.
      */
     it('should return panel after creation', async () => {
       await panelManager.createPanel();
@@ -201,9 +201,9 @@ describe('PanelManager', () => {
 
   describe('setPanel', () => {
     /**
-     * 测试：设置 Panel（用于恢复）
+     * Test: Set Panel (for restoration)
      *
-     * 验证能设置已有的 Panel，用于 VSCode 重启后的恢复
+     * Verifies existing Panel can be set, used for restoration after VSCode restart.
      */
     it('should set panel for restoration', () => {
       panelManager.setPanel(mockPanel);
@@ -214,10 +214,10 @@ describe('PanelManager', () => {
 
   describe('revealPanel', () => {
     /**
-     * 测试：显示 Panel
+     * Test: Show Panel
      *
-     * 验证能正确调用 reveal 显示 Panel
-     * 当用户点击打开聊天时需要此功能
+     * Verifies reveal is correctly called to show Panel.
+     * Needed when user clicks to open chat.
      */
     it('should reveal panel when it exists', async () => {
       await panelManager.createPanel();
@@ -228,9 +228,9 @@ describe('PanelManager', () => {
     });
 
     /**
-     * 测试：保持焦点选项
+     * Test: Preserve focus option
      *
-     * 验证 reveal 时能正确传递 preserveFocus 参数
+     * Verifies preserveFocus parameter is correctly passed to reveal.
      */
     it('should respect preserveFocus parameter', async () => {
       await panelManager.createPanel();
@@ -246,10 +246,10 @@ describe('PanelManager', () => {
 
   describe('dispose', () => {
     /**
-     * 测试：释放资源
+     * Test: Release resources
      *
-     * 验证 dispose 正确清理 Panel 资源
-     * 防止内存泄漏
+     * Verifies dispose properly cleans up Panel resources.
+     * Prevents memory leaks.
      */
     it('should dispose panel and set to null', async () => {
       await panelManager.createPanel();
@@ -261,9 +261,9 @@ describe('PanelManager', () => {
     });
 
     /**
-     * 测试：安全 dispose
+     * Test: Safe dispose
      *
-     * 验证在没有 Panel 时 dispose 不会报错
+     * Verifies dispose doesn't throw when no Panel exists.
      */
     it('should not throw when disposing without panel', () => {
       expect(() => panelManager.dispose()).not.toThrow();
@@ -272,10 +272,10 @@ describe('PanelManager', () => {
 
   describe('registerDisposeHandler', () => {
     /**
-     * 测试：注册 dispose 回调
+     * Test: Register dispose callback
      *
-     * 验证能注册 Panel dispose 时的回调
-     * 用于清理相关资源
+     * Verifies dispose callback can be registered for Panel disposal.
+     * Used to clean up related resources.
      */
     it('should register dispose handler', async () => {
       await panelManager.createPanel();
@@ -289,10 +289,10 @@ describe('PanelManager', () => {
 
   describe('registerViewStateChangeHandler', () => {
     /**
-     * 测试：注册视图状态变更处理器
+     * Test: Register view state change handler
      *
-     * 验证能监听 Panel 的视图状态变更
-     * 用于更新 Tab 追踪
+     * Verifies Panel view state changes can be monitored.
+     * Used to update Tab tracking.
      */
     it('should register view state change handler', async () => {
       await panelManager.createPanel();
@@ -306,16 +306,16 @@ describe('PanelManager', () => {
 
   describe('error handling', () => {
     /**
-     * 测试：创建 Panel 失败处理
+     * Test: Handle Panel creation failure
      *
-     * 验证当创建新编辑器组失败时能正确 fallback
+     * Verifies graceful fallback when creating new editor group fails.
      */
     it('should handle newGroupRight command failure gracefully', async () => {
       vi.mocked(vscode.commands.executeCommand).mockRejectedValueOnce(
         new Error('Command failed'),
       );
 
-      // 应该不抛出错误，而是 fallback 到其他方式
+      // Should not throw, but fallback to alternative method
       const result = await panelManager.createPanel();
 
       expect(result).toBe(true);

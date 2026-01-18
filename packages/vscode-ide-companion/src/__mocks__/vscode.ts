@@ -5,13 +5,13 @@
  *
  * VSCode API Mock
  *
- * 为测试环境提供完整的 VSCode API mock 实现。
- * 这个文件通过 vitest.config.ts 中的 alias 配置被引用。
+ * Provides comprehensive VSCode API mock implementations for testing.
+ * This file is referenced via the alias configuration in vitest.config.ts.
  */
 
 import { vi } from 'vitest';
 
-// Window API - 用于创建 UI 元素
+// Window API - for creating UI elements
 export const window = {
   showInformationMessage: vi.fn(),
   showErrorMessage: vi.fn(),
@@ -32,7 +32,12 @@ export const window = {
   visibleTextEditors: [],
   tabGroups: {
     all: [],
-    activeTabGroup: { viewColumn: 1, tabs: [], isActive: true, activeTab: undefined },
+    activeTabGroup: {
+      viewColumn: 1,
+      tabs: [],
+      isActive: true,
+      activeTab: undefined,
+    },
     close: vi.fn(),
   },
   showTextDocument: vi.fn(),
@@ -46,7 +51,7 @@ export const window = {
   ),
 };
 
-// Workspace API - 用于访问工作区
+// Workspace API - for accessing workspace
 export const workspace = {
   workspaceFolders: [] as unknown[],
   onDidCloseTextDocument: vi.fn(() => ({ dispose: vi.fn() })),
@@ -60,14 +65,14 @@ export const workspace = {
   isTrusted: true,
 };
 
-// Commands API - 用于注册和执行命令
+// Commands API - for registering and executing commands
 export const commands = {
   registerCommand: vi.fn(() => ({ dispose: vi.fn() })),
   executeCommand: vi.fn(),
   getCommands: vi.fn(() => Promise.resolve([])),
 };
 
-// URI 工具类
+// URI utility class
 export const Uri = {
   file: (path: string) => ({
     fsPath: path,
@@ -120,20 +125,22 @@ export const Uri = {
   })),
 };
 
-// 扩展相关
+// Extension related
 export const ExtensionMode = {
   Development: 1,
   Production: 2,
   Test: 3,
 };
 
-// 事件发射器
+// Event emitter
 export class EventEmitter<T = unknown> {
   private listeners: Array<(e: T) => void> = [];
 
   event = (listener: (e: T) => void) => {
     this.listeners.push(listener);
-    return { dispose: () => this.listeners.splice(this.listeners.indexOf(listener), 1) };
+    return {
+      dispose: () => this.listeners.splice(this.listeners.indexOf(listener), 1),
+    };
   };
 
   fire = (data: T) => {
@@ -143,12 +150,12 @@ export class EventEmitter<T = unknown> {
   dispose = vi.fn();
 }
 
-// 扩展管理
+// Extension management
 export const extensions = {
   getExtension: vi.fn(),
 };
 
-// ViewColumn 枚举
+// ViewColumn enum
 export const ViewColumn = {
   One: 1,
   Two: 2,
@@ -163,14 +170,14 @@ export const ViewColumn = {
   Beside: -2,
 };
 
-// 进度位置
+// Progress location
 export const ProgressLocation = {
   Notification: 15,
   Window: 10,
   SourceControl: 1,
 };
 
-// 文本编辑器选择变更类型
+// Text editor selection change kind
 export const TextEditorSelectionChangeKind = {
   Keyboard: 1,
   Mouse: 2,
@@ -189,8 +196,8 @@ export class Disposable {
 // Position
 export class Position {
   constructor(
-    public readonly line: number,
-    public readonly character: number,
+    readonly line: number,
+    readonly character: number,
   ) {}
 
   isBefore(other: Position): boolean {
@@ -211,8 +218,8 @@ export class Position {
 // Range
 export class Range {
   constructor(
-    public readonly start: Position,
-    public readonly end: Position,
+    readonly start: Position,
+    readonly end: Position,
   ) {}
 
   get isEmpty(): boolean {
@@ -226,8 +233,8 @@ export class Range {
 // Selection
 export class Selection extends Range {
   constructor(
-    public readonly anchor: Position,
-    public readonly active: Position,
+    readonly anchor: Position,
+    readonly active: Position,
   ) {
     super(anchor, active);
   }
@@ -294,7 +301,9 @@ export class CancellationTokenSource {
 // FileSystemError
 export class FileSystemError extends Error {
   static FileNotFound(uri?: { toString: () => string }) {
-    return new FileSystemError(`File not found: ${uri?.toString() || 'unknown'}`);
+    return new FileSystemError(
+      `File not found: ${uri?.toString() || 'unknown'}`,
+    );
   }
 
   static FileExists(uri?: { toString: () => string }) {
@@ -302,15 +311,21 @@ export class FileSystemError extends Error {
   }
 
   static FileNotADirectory(uri?: { toString: () => string }) {
-    return new FileSystemError(`Not a directory: ${uri?.toString() || 'unknown'}`);
+    return new FileSystemError(
+      `Not a directory: ${uri?.toString() || 'unknown'}`,
+    );
   }
 
   static FileIsADirectory(uri?: { toString: () => string }) {
-    return new FileSystemError(`Is a directory: ${uri?.toString() || 'unknown'}`);
+    return new FileSystemError(
+      `Is a directory: ${uri?.toString() || 'unknown'}`,
+    );
   }
 
   static NoPermissions(uri?: { toString: () => string }) {
-    return new FileSystemError(`No permissions: ${uri?.toString() || 'unknown'}`);
+    return new FileSystemError(
+      `No permissions: ${uri?.toString() || 'unknown'}`,
+    );
   }
 
   static Unavailable(uri?: { toString: () => string }) {
@@ -326,7 +341,7 @@ export const FileType = {
   SymbolicLink: 64,
 };
 
-// 默认导出所有 mock
+// Default export all mocks
 export default {
   window,
   workspace,

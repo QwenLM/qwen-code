@@ -3,15 +3,15 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * MessageHandler 测试
+ * MessageHandler Tests
  *
- * 测试目标：确保消息能正确在 Extension 和 WebView 之间路由，防止消息丢失
+ * Test objective: Ensure messages are correctly routed between Extension and WebView, preventing message loss.
  *
- * 关键测试场景：
- * 1. 消息路由 - 确保不同类型的消息路由到正确的处理器
- * 2. 会话管理 - 确保会话 ID 能正确设置和获取
- * 3. 权限处理 - 确保权限响应能正确传递
- * 4. 流式内容 - 确保流式响应能正确追加
+ * Key test scenarios:
+ * 1. Message routing - Ensure different message types route to correct handlers
+ * 2. Session management - Ensure session ID can be correctly set and retrieved
+ * 3. Permission handling - Ensure permission responses are correctly passed
+ * 4. Stream content - Ensure streaming responses are correctly appended
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -26,7 +26,7 @@ describe('MessageHandler', () => {
   let mockSendToWebView: (message: unknown) => void;
 
   beforeEach(() => {
-    // Mock QwenAgentManager - AI 代理管理器
+    // Mock QwenAgentManager - AI agent manager
     mockAgentManager = {
       sendMessage: vi.fn().mockResolvedValue(undefined),
       createNewSession: vi.fn().mockResolvedValue({ id: 'new-session' }),
@@ -38,36 +38,40 @@ describe('MessageHandler', () => {
       currentSessionId: null,
     } as unknown as QwenAgentManager;
 
-    // Mock ConversationStore - 本地会话存储
+    // Mock ConversationStore - local session storage
     mockConversationStore = {
-      createConversation: vi.fn().mockResolvedValue({ id: 'conv-1', messages: [] }),
-      getConversation: vi.fn().mockResolvedValue({ id: 'conv-1', messages: [] }),
+      createConversation: vi
+        .fn()
+        .mockResolvedValue({ id: 'conv-1', messages: [] }),
+      getConversation: vi
+        .fn()
+        .mockResolvedValue({ id: 'conv-1', messages: [] }),
       updateConversation: vi.fn().mockResolvedValue(undefined),
       deleteConversation: vi.fn().mockResolvedValue(undefined),
-      // 添加 addMessage 方法用于消息存储
+      // addMessage method for message storage
       addMessage: vi.fn().mockResolvedValue(undefined),
-      // 添加会话历史相关方法
+      // Session history related methods
       getSessionHistory: vi.fn().mockResolvedValue([]),
       saveSession: vi.fn().mockResolvedValue(undefined),
     } as unknown as ConversationStore;
 
-    // Mock sendToWebView - 发送消息到 WebView
+    // Mock sendToWebView - send message to WebView
     mockSendToWebView = vi.fn();
 
     messageHandler = new MessageHandler(
       mockAgentManager,
       mockConversationStore,
-      null, // 初始会话 ID
+      null, // initial session ID
       mockSendToWebView,
     );
   });
 
   describe('route', () => {
     /**
-     * 测试：路由 sendMessage 消息
+     * Test: Route sendMessage
      *
-     * 验证用户发送的消息能正确传递给 AI 代理
-     * 如果此功能失败，用户消息将无法发送
+     * Verifies user messages are correctly passed to AI agent.
+     * If this fails, user messages cannot be sent.
      */
     it('should route sendMessage to agent manager', async () => {
       await messageHandler.route({
@@ -79,10 +83,10 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：路由 cancelStreaming 消息
+     * Test: Route cancelStreaming
      *
-     * 验证取消请求能正确传递给 AI 代理
-     * 用户点击停止按钮时需要此功能
+     * Verifies cancel requests are correctly passed to AI agent.
+     * Needed when user clicks stop button.
      */
     it('should route cancelStreaming to agent manager', async () => {
       await messageHandler.route({
@@ -94,9 +98,9 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：路由 newSession 消息
+     * Test: Route newSession
      *
-     * 验证新建会话请求能正确传递给 AI 代理
+     * Verifies new session requests are correctly passed to AI agent.
      */
     it('should route newSession to agent manager', async () => {
       await messageHandler.route({
@@ -108,9 +112,9 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：路由 loadSessions 消息
+     * Test: Route loadSessions
      *
-     * 验证加载会话列表请求能正确处理
+     * Verifies load sessions requests are correctly handled.
      */
     it('should route loadSessions to agent manager', async () => {
       await messageHandler.route({
@@ -122,9 +126,9 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：路由 switchSession 消息
+     * Test: Route switchSession
      *
-     * 验证切换会话请求能正确传递给 AI 代理
+     * Verifies switch session requests are correctly passed to AI agent.
      */
     it('should route switchSession to agent manager', async () => {
       await messageHandler.route({
@@ -136,9 +140,9 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：处理未知消息类型
+     * Test: Handle unknown message types
      *
-     * 验证未知消息类型不会导致崩溃
+     * Verifies unknown message types don't cause crashes.
      */
     it('should handle unknown message types gracefully', async () => {
       await expect(
@@ -152,30 +156,32 @@ describe('MessageHandler', () => {
 
   describe('setCurrentConversationId / getCurrentConversationId', () => {
     /**
-     * 测试：设置和获取会话 ID
+     * Test: Set and get session ID
      *
-     * 验证会话 ID 能正确设置和检索
-     * 这对于会话状态管理至关重要
+     * Verifies session ID can be correctly set and retrieved.
+     * This is critical for session state management.
      */
     it('should set and get conversation ID', () => {
       messageHandler.setCurrentConversationId('test-conversation-id');
 
-      expect(messageHandler.getCurrentConversationId()).toBe('test-conversation-id');
+      expect(messageHandler.getCurrentConversationId()).toBe(
+        'test-conversation-id',
+      );
     });
 
     /**
-     * 测试：初始会话 ID 为 null
+     * Test: Initial session ID is null
      *
-     * 验证初始状态下会话 ID 为 null
+     * Verifies session ID is null in initial state.
      */
     it('should return null initially', () => {
       expect(messageHandler.getCurrentConversationId()).toBeNull();
     });
 
     /**
-     * 测试：设置 null 会话 ID
+     * Test: Set null session ID
      *
-     * 验证能将会话 ID 重置为 null
+     * Verifies session ID can be reset to null.
      */
     it('should allow setting null', () => {
       messageHandler.setCurrentConversationId('test-id');
@@ -187,16 +193,16 @@ describe('MessageHandler', () => {
 
   describe('setPermissionHandler', () => {
     /**
-     * 测试：设置权限处理器
+     * Test: Set permission handler
      *
-     * 验证权限处理器能正确设置
-     * 权限请求需要此处理器来响应用户选择
+     * Verifies permission handler can be correctly set.
+     * Permission requests need this handler to respond to user choices.
      */
     it('should set permission handler', async () => {
       const handler = vi.fn();
       messageHandler.setPermissionHandler(handler);
 
-      // 触发权限响应
+      // Trigger permission response
       await messageHandler.route({
         type: 'permissionResponse',
         data: { optionId: 'allow_once' },
@@ -209,9 +215,9 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：权限响应正确传递选项 ID
+     * Test: Permission response passes correct optionId
      *
-     * 验证用户选择的权限选项能正确传递
+     * Verifies user's selected permission option is correctly passed.
      */
     it('should pass correct optionId to handler', async () => {
       const handler = vi.fn();
@@ -232,10 +238,10 @@ describe('MessageHandler', () => {
 
   describe('setLoginHandler', () => {
     /**
-     * 测试：设置登录处理器
+     * Test: Set login handler
      *
-     * 验证登录处理器能正确设置
-     * 用户执行 /login 命令时需要此处理器
+     * Verifies login handler can be correctly set.
+     * Needed when user executes /login command.
      */
     it('should set login handler', async () => {
       const loginHandler = vi.fn().mockResolvedValue(undefined);
@@ -252,10 +258,10 @@ describe('MessageHandler', () => {
 
   describe('appendStreamContent', () => {
     /**
-     * 测试：追加流式内容
+     * Test: Append stream content
      *
-     * 验证流式响应内容能正确追加
-     * AI 回复是流式返回的，需要逐块追加
+     * Verifies streaming response content can be correctly appended.
+     * AI responses are streamed, need to append chunk by chunk.
      */
     it('should append stream content without error', () => {
       expect(() => {
@@ -267,16 +273,16 @@ describe('MessageHandler', () => {
 
   describe('error handling', () => {
     /**
-     * 测试：处理 sendMessage 错误
+     * Test: Handle sendMessage errors
      *
-     * 验证发送消息失败时不会导致崩溃
+     * Verifies message send failures don't cause crashes.
      */
     it('should handle sendMessage errors gracefully', async () => {
       vi.mocked(mockAgentManager.sendMessage).mockRejectedValue(
         new Error('Network error'),
       );
 
-      // 应该不抛出错误（错误应该被内部处理）
+      // Should not throw (errors should be handled internally)
       await expect(
         messageHandler.route({
           type: 'sendMessage',
@@ -286,9 +292,9 @@ describe('MessageHandler', () => {
     });
 
     /**
-     * 测试：处理 loadSessions 错误
+     * Test: Handle loadSessions errors
      *
-     * 验证加载会话失败时不会导致崩溃
+     * Verifies load sessions failures don't cause crashes.
      */
     it('should handle loadSessions errors gracefully', async () => {
       vi.mocked(mockAgentManager.loadSession).mockRejectedValue(
@@ -306,9 +312,9 @@ describe('MessageHandler', () => {
 
   describe('message types coverage', () => {
     /**
-     * 测试：支持的消息类型
+     * Test: Supported message types
      *
-     * 验证所有关键消息类型都能被处理
+     * Verifies all key message types can be handled.
      */
     const messageTypes = [
       'sendMessage',

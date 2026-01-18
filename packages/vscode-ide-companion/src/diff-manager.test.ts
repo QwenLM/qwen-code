@@ -3,16 +3,16 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * DiffManager 测试
+ * DiffManager Tests
  *
- * 测试目标：确保 Diff 编辑器能正确显示代码对比，防止 Diff 无法打开问题
+ * Test objective: Ensure the Diff editor correctly displays code comparisons, preventing Diff open failures.
  *
- * 关键测试场景：
- * 1. Diff 显示 - 确保能正确打开 Diff 视图
- * 2. Diff 接受 - 确保用户能接受代码更改
- * 3. Diff 取消 - 确保用户能取消代码更改
- * 4. 去重逻辑 - 防止重复打开相同的 Diff
- * 5. 资源清理 - 确保 Diff 关闭后正确清理资源
+ * Key test scenarios:
+ * 1. Diff display - Ensure Diff view opens correctly
+ * 2. Diff accept - Ensure users can accept code changes
+ * 3. Diff cancel - Ensure users can cancel code changes
+ * 4. Deduplication - Prevent duplicate Diffs from opening
+ * 5. Resource cleanup - Ensure resources are properly cleaned up after Diff closes
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -27,10 +27,10 @@ describe('DiffContentProvider', () => {
   });
 
   /**
-   * 测试：设置和获取内容
+   * Test: Set and get content
    *
-   * 验证 DiffContentProvider 能正确存储和检索 Diff 内容
-   * 这是 VSCode Diff 视图的内容来源
+   * Verifies DiffContentProvider can correctly store and retrieve Diff content.
+   * This is the content source for VSCode Diff view.
    */
   it('should set and get content', () => {
     const uri = { toString: () => 'test-uri' } as vscode.Uri;
@@ -41,9 +41,9 @@ describe('DiffContentProvider', () => {
   });
 
   /**
-   * 测试：未知 URI 返回空字符串
+   * Test: Return empty string for unknown URI
    *
-   * 验证对于未设置内容的 URI 返回空字符串，而不是报错
+   * Verifies that an empty string is returned for URIs without content, instead of throwing.
    */
   it('should return empty string for unknown URI', () => {
     const uri = { toString: () => 'unknown-uri' } as vscode.Uri;
@@ -52,10 +52,10 @@ describe('DiffContentProvider', () => {
   });
 
   /**
-   * 测试：删除内容
+   * Test: Delete content
    *
-   * 验证能正确删除已设置的内容
-   * 在 Diff 关闭时需要清理内容
+   * Verifies that content can be properly deleted.
+   * Content needs to be cleaned up when Diff is closed.
    */
   it('should delete content', () => {
     const uri = { toString: () => 'test-uri' } as vscode.Uri;
@@ -67,9 +67,9 @@ describe('DiffContentProvider', () => {
   });
 
   /**
-   * 测试：getContent 方法
+   * Test: getContent method
    *
-   * 验证 getContent 能返回原始内容或 undefined
+   * Verifies getContent returns the original content or undefined.
    */
   it('should return content via getContent', () => {
     const uri = { toString: () => 'test-uri' } as vscode.Uri;
@@ -92,7 +92,7 @@ describe('DiffManager', () => {
     mockLog = vi.fn();
     mockContentProvider = new DiffContentProvider();
 
-    // 重置 vscode mocks
+    // Reset vscode mocks
     vi.mocked(vscode.commands.executeCommand).mockResolvedValue(undefined);
     vi.mocked(vscode.workspace.openTextDocument).mockResolvedValue({
       getText: () => 'modified content',
@@ -112,10 +112,10 @@ describe('DiffManager', () => {
 
   describe('showDiff', () => {
     /**
-     * 测试：创建 Diff 视图
+     * Test: Create Diff view
      *
-     * 验证 showDiff 调用 vscode.diff 命令创建 Diff 视图
-     * 如果此功能失败，用户将无法看到代码对比
+     * Verifies showDiff calls vscode.diff command to create Diff view.
+     * If this fails, users cannot see code comparisons.
      */
     it('should create diff view with correct URIs', async () => {
       await diffManager.showDiff('/test/file.ts', 'old content', 'new content');
@@ -130,10 +130,10 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：设置 Diff 可见上下文
+     * Test: Set Diff visible context
      *
-     * 验证 showDiff 设置 qwen.diff.isVisible 上下文
-     * 这控制了接受/取消按钮的显示
+     * Verifies showDiff sets qwen.diff.isVisible context.
+     * This controls accept/cancel button visibility.
      */
     it('should set qwen.diff.isVisible context to true', async () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
@@ -146,10 +146,10 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：Diff 标题格式
+     * Test: Diff title format
      *
-     * 验证 Diff 视图的标题包含文件名和 "Before ↔ After"
-     * 帮助用户理解这是一个对比视图
+     * Verifies Diff view title contains filename and "Before / After".
+     * Helps users understand this is a comparison view.
      */
     it('should use correct diff title format', async () => {
       await diffManager.showDiff('/path/to/myfile.ts', 'old', 'new');
@@ -164,20 +164,20 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：去重 - 相同内容不重复打开
+     * Test: Deduplication - same content doesn't open twice
      *
-     * 验证对于相同的文件和内容，不会重复创建 Diff 视图
-     * 防止用户界面混乱
+     * Verifies that for the same file and content, Diff view is not created again.
+     * Prevents UI clutter.
      */
     it('should deduplicate rapid duplicate calls', async () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
 
       vi.mocked(vscode.commands.executeCommand).mockClear();
 
-      // 立即再次调用相同参数
+      // Immediately call again with same parameters
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
 
-      // vscode.diff 不应该被再次调用
+      // vscode.diff should not be called again
       const diffCalls = vi
         .mocked(vscode.commands.executeCommand)
         .mock.calls.filter((call) => call[0] === 'vscode.diff');
@@ -185,10 +185,10 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：保持焦点在 WebView
+     * Test: Preserve focus on WebView
      *
-     * 验证打开 Diff 时设置 preserveFocus: true
-     * 确保聊天界面保持焦点，不打断用户输入
+     * Verifies that preserveFocus: true is set when opening Diff.
+     * Ensures chat interface keeps focus without interrupting user input.
      */
     it('should preserve focus when showing diff', async () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
@@ -202,9 +202,9 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：两参数重载 (自动读取原文件)
+     * Test: Two-argument overload (auto-read original file)
      *
-     * 验证只传 newContent 时能自动读取原文件内容
+     * Verifies that when only newContent is passed, original file content is auto-read.
      */
     it('should support two-argument overload', async () => {
       vi.mocked(vscode.workspace.openTextDocument).mockResolvedValue({
@@ -225,17 +225,17 @@ describe('DiffManager', () => {
 
   describe('acceptDiff', () => {
     /**
-     * 测试：接受 Diff 后清除上下文
+     * Test: Clear context after accepting Diff
      *
-     * 验证接受 Diff 后设置 qwen.diff.isVisible 为 false
-     * 这会隐藏接受/取消按钮
+     * Verifies qwen.diff.isVisible is set to false after accepting.
+     * This hides the accept/cancel buttons.
      */
     it('should set qwen.diff.isVisible context to false', async () => {
-      // 先显示 Diff
+      // First show Diff
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
       vi.mocked(vscode.commands.executeCommand).mockClear();
 
-      // 获取创建的 right URI
+      // Get the created right URI
       const uriFromCall = vi
         .mocked(vscode.Uri.from)
         .mock.results.find((r) =>
@@ -256,9 +256,9 @@ describe('DiffManager', () => {
 
   describe('cancelDiff', () => {
     /**
-     * 测试：取消 Diff 后清除上下文
+     * Test: Clear context after canceling Diff
      *
-     * 验证取消 Diff 后设置 qwen.diff.isVisible 为 false
+     * Verifies qwen.diff.isVisible is set to false after canceling.
      */
     it('should set qwen.diff.isVisible context to false', async () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
@@ -282,9 +282,9 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：取消不存在的 Diff
+     * Test: Cancel non-existent Diff
      *
-     * 验证取消不存在的 Diff 不会报错
+     * Verifies canceling a non-existent Diff doesn't throw.
      */
     it('should handle canceling non-existent diff gracefully', async () => {
       const unknownUri = {
@@ -299,10 +299,10 @@ describe('DiffManager', () => {
 
   describe('closeAll', () => {
     /**
-     * 测试：关闭所有 Diff
+     * Test: Close all Diffs
      *
-     * 验证 closeAll 能关闭所有打开的 Diff 视图
-     * 在权限允许后需要清理 Diff
+     * Verifies closeAll closes all open Diff views.
+     * Needed to clean up Diffs after permission is granted.
      */
     it('should close all open diff editors', async () => {
       await diffManager.showDiff('/test/file1.ts', 'old1', 'new1');
@@ -318,9 +318,9 @@ describe('DiffManager', () => {
     });
 
     /**
-     * 测试：关闭空列表
+     * Test: Close empty list
      *
-     * 验证在没有打开 Diff 时 closeAll 不会报错
+     * Verifies closeAll doesn't throw when no Diffs are open.
      */
     it('should not throw when no diffs are open', async () => {
       await expect(diffManager.closeAll()).resolves.not.toThrow();
@@ -329,23 +329,23 @@ describe('DiffManager', () => {
 
   describe('closeDiff', () => {
     /**
-     * 测试：按文件路径关闭 Diff
+     * Test: Close Diff by file path
      *
-     * 验证能通过文件路径关闭特定的 Diff 视图
+     * Verifies specific Diff view can be closed by file path.
      */
     it('should close diff by file path', async () => {
       await diffManager.showDiff('/test/file.ts', 'old', 'new');
 
       const result = await diffManager.closeDiff('/test/file.ts');
 
-      // 应该返回关闭时的内容
+      // Should return content when closed
       expect(result).toBeDefined();
     });
 
     /**
-     * 测试：关闭不存在的文件 Diff
+     * Test: Close non-existent file Diff
      *
-     * 验证关闭不存在的文件 Diff 返回 undefined
+     * Verifies closing non-existent file Diff returns undefined.
      */
     it('should return undefined for non-existent file', async () => {
       const result = await diffManager.closeDiff('/non/existent.ts');
@@ -356,22 +356,22 @@ describe('DiffManager', () => {
 
   describe('suppressFor', () => {
     /**
-     * 测试：临时抑制 Diff 显示
+     * Test: Temporarily suppress Diff display
      *
-     * 验证 suppressFor 能临时阻止 Diff 显示
-     * 用于在权限允许后短暂抑制新 Diff
+     * Verifies suppressFor temporarily prevents Diff display.
+     * Used to briefly suppress new Diffs after permission is granted.
      */
     it('should suppress diffs for specified duration', () => {
-      // 这个方法设置一个内部时间戳
+      // This method sets an internal timestamp
       expect(() => diffManager.suppressFor(1000)).not.toThrow();
     });
   });
 
   describe('dispose', () => {
     /**
-     * 测试：资源释放
+     * Test: Resource cleanup
      *
-     * 验证 dispose 不会报错
+     * Verifies dispose doesn't throw.
      */
     it('should dispose without errors', () => {
       expect(() => diffManager.dispose()).not.toThrow();
@@ -380,10 +380,10 @@ describe('DiffManager', () => {
 
   describe('onDidChange event', () => {
     /**
-     * 测试：事件发射器
+     * Test: Event emitter
      *
-     * 验证 DiffManager 有 onDidChange 事件
-     * 用于通知其他组件 Diff 状态变化
+     * Verifies DiffManager has onDidChange event.
+     * Used to notify other components of Diff state changes.
      */
     it('should have onDidChange event', () => {
       expect(diffManager.onDidChange).toBeDefined();

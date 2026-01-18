@@ -3,16 +3,16 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Commands 测试
+ * Commands Tests
  *
- * 测试目标：确保所有 VSCode 命令能正确注册和执行，防止命令失效
+ * Test objective: Ensure all VSCode commands are correctly registered and executed, preventing command failures.
  *
- * 关键测试场景：
- * 1. 命令注册 - 确保所有命令都正确注册到 VSCode
- * 2. openChat - 确保能打开聊天面板
- * 3. showDiff - 确保能显示 Diff 视图
- * 4. openNewChatTab - 确保能打开新的聊天 Tab
- * 5. login - 确保能触发登录流程
+ * Key test scenarios:
+ * 1. Command registration - Ensure all commands are properly registered with VSCode
+ * 2. openChat - Ensure the chat panel can be opened
+ * 3. showDiff - Ensure Diff view can be displayed
+ * 4. openNewChatTab - Ensure a new chat Tab can be opened
+ * 5. login - Ensure the login flow can be triggered
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -93,10 +93,10 @@ describe('Commands', () => {
 
   describe('registerNewCommands', () => {
     /**
-     * 测试：命令注册
+     * Test: Command registration
      *
-     * 验证 registerNewCommands 正确注册所有命令
-     * 如果命令未注册，用户将无法使用快捷键或命令面板执行操作
+     * Verifies registerNewCommands correctly registers all commands.
+     * If commands are not registered, users cannot use keyboard shortcuts or command palette.
      */
     it('should register all required commands', () => {
       registerNewCommands(
@@ -126,10 +126,10 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：订阅管理
+     * Test: Subscription management
      *
-     * 验证命令 disposable 被添加到 context.subscriptions
-     * 确保扩展停用时能正确清理命令
+     * Verifies command disposables are added to context.subscriptions.
+     * Ensures commands are properly cleaned up when extension is deactivated.
      */
     it('should add disposables to context.subscriptions', () => {
       registerNewCommands(
@@ -140,17 +140,17 @@ describe('Commands', () => {
         mockCreateWebViewProvider,
       );
 
-      // 应该注册 4 个命令，每个都添加到 subscriptions
+      // Should register 4 commands, each added to subscriptions
       expect(mockContext.subscriptions.length).toBe(4);
     });
   });
 
   describe('openChat command', () => {
     /**
-     * 测试：打开现有聊天面板
+     * Test: Open existing chat panel
      *
-     * 验证当已有 WebViewProvider 时，使用现有的 provider
-     * 防止创建不必要的新面板
+     * Verifies that when a WebViewProvider already exists, it uses the existing provider.
+     * Prevents creating unnecessary new panels.
      */
     it('should show existing provider when providers exist', async () => {
       const mockProvider = {
@@ -174,10 +174,10 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：创建新聊天面板
+     * Test: Create new chat panel
      *
-     * 验证当没有现有 provider 时，创建新的 provider
-     * 确保用户总能打开聊天界面
+     * Verifies that when no provider exists, a new provider is created.
+     * Ensures users can always open the chat interface.
      */
     it('should create new provider when no providers exist', async () => {
       registerNewCommands(
@@ -195,9 +195,9 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：使用最新的 provider
+     * Test: Use the latest provider
      *
-     * 验证当有多个 provider 时，使用最后一个（最新的）
+     * Verifies that when multiple providers exist, the last one (newest) is used.
      */
     it('should use the last provider when multiple exist', async () => {
       const firstProvider = {
@@ -226,9 +226,9 @@ describe('Commands', () => {
 
   describe('showDiff command', () => {
     /**
-     * 测试：显示 Diff（绝对路径）
+     * Test: Show Diff (absolute path)
      *
-     * 验证使用绝对路径时直接调用 diffManager
+     * Verifies that absolute paths are passed directly to diffManager.
      */
     it('should show diff with absolute path', async () => {
       registerNewCommands(
@@ -254,10 +254,10 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：显示 Diff（相对路径）
+     * Test: Show Diff (relative path)
      *
-     * 验证使用相对路径时正确拼接工作区路径
-     * 这是常见用法，确保相对路径能正确解析
+     * Verifies that relative paths are correctly joined with workspace path.
+     * This is a common usage pattern, ensuring relative paths resolve correctly.
      */
     it('should resolve relative path against workspace folder', async () => {
       registerNewCommands(
@@ -283,10 +283,10 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：记录日志
+     * Test: Log operations
      *
-     * 验证 showDiff 命令记录日志
-     * 便于调试和问题排查
+     * Verifies showDiff command logs operations.
+     * Useful for debugging and troubleshooting.
      */
     it('should log the diff operation', async () => {
       registerNewCommands(
@@ -310,10 +310,10 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：错误处理
+     * Test: Error handling
      *
-     * 验证 diffManager 错误被正确捕获和显示
-     * 防止未处理异常导致扩展崩溃
+     * Verifies diffManager errors are properly caught and displayed.
+     * Prevents unhandled exceptions from crashing the extension.
      */
     it('should handle errors and show error message', async () => {
       vi.mocked(mockDiffManager.showDiff).mockRejectedValue(
@@ -344,9 +344,9 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：Windows 路径处理
+     * Test: Windows path handling
      *
-     * 验证 Windows 风格的绝对路径被正确识别
+     * Verifies Windows-style absolute paths are correctly recognized.
      */
     it('should handle Windows absolute paths', async () => {
       registerNewCommands(
@@ -364,7 +364,7 @@ describe('Commands', () => {
         newText: 'new',
       });
 
-      // Windows 路径应该被识别为绝对路径，不进行拼接
+      // Windows path should be recognized as absolute, no joining needed
       expect(mockDiffManager.showDiff).toHaveBeenCalledWith(
         'C:/Users/test/file.ts',
         'old',
@@ -375,10 +375,10 @@ describe('Commands', () => {
 
   describe('openNewChatTab command', () => {
     /**
-     * 测试：创建新聊天 Tab
+     * Test: Create new chat Tab
      *
-     * 验证命令总是创建新的 WebViewProvider
-     * 允许用户同时打开多个聊天会话
+     * Verifies the command always creates a new WebViewProvider.
+     * Allows users to open multiple chat sessions simultaneously.
      */
     it('should always create new provider', async () => {
       registerNewCommands(
@@ -396,9 +396,9 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：即使有现有 provider 也创建新的
+     * Test: Create new provider even when existing ones exist
      *
-     * 与 openChat 不同，openNewChatTab 总是创建新的
+     * Unlike openChat, openNewChatTab always creates a new one.
      */
     it('should create new provider even when providers exist', async () => {
       const existingProvider = {
@@ -424,9 +424,9 @@ describe('Commands', () => {
 
   describe('login command', () => {
     /**
-     * 测试：登录已有 provider
+     * Test: Login with existing provider
      *
-     * 验证有 provider 时调用 forceReLogin
+     * Verifies forceReLogin is called when a provider exists.
      */
     it('should call forceReLogin on existing provider', async () => {
       const mockProvider = {
@@ -449,10 +449,10 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：无 provider 时提示用户
+     * Test: Show message when no provider exists
      *
-     * 验证没有 provider 时显示提示信息
-     * 引导用户先打开聊天界面
+     * Verifies an info message is shown when no provider exists.
+     * Guides users to open the chat interface first.
      */
     it('should show info message when no providers exist', async () => {
       registerNewCommands(
@@ -472,9 +472,9 @@ describe('Commands', () => {
     });
 
     /**
-     * 测试：使用最新的 provider 进行登录
+     * Test: Use latest provider for login
      *
-     * 验证有多个 provider 时使用最后一个
+     * Verifies the last provider is used when multiple exist.
      */
     it('should use the last provider for login', async () => {
       const firstProvider = {
@@ -503,10 +503,10 @@ describe('Commands', () => {
 
   describe('command constants', () => {
     /**
-     * 测试：命令名称常量
+     * Test: Command name constants
      *
-     * 验证命令名称常量正确定义
-     * 防止拼写错误导致命令无法找到
+     * Verifies command name constants are correctly defined.
+     * Prevents typos from causing commands to not be found.
      */
     it('should export correct command names', () => {
       expect(openChatCommand).toBe('qwen-code.openChat');

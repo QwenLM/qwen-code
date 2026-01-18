@@ -3,22 +3,24 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * 测试用 Mock 数据工厂
+ * Test Mock Data Factory
  *
- * 提供创建测试数据的工厂函数，确保测试数据的一致性和可维护性
+ * Provides factory functions for creating test data, ensuring consistency and maintainability.
  */
 
 import { vi } from 'vitest';
 
 /**
- * 创建 Mock Tool Call 数据
+ * Create Mock Tool Call data
  *
- * Tool Call 是 AI 执行工具操作时的数据结构，
- * 包含工具类型、状态、输入输出等信息
+ * Tool Call is the data structure when AI executes tool operations,
+ * containing tool type, status, input/output, etc.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
-export const createMockToolCall = (overrides: Record<string, unknown> = {}) => ({
+export const createMockToolCall = (
+  overrides: Record<string, unknown> = {},
+) => ({
   toolCallId: 'test-tool-call-id',
   kind: 'execute' as const,
   title: 'Test Tool Call',
@@ -29,12 +31,12 @@ export const createMockToolCall = (overrides: Record<string, unknown> = {}) => (
 });
 
 /**
- * 创建 Mock 消息数据
+ * Create Mock Message data
  *
- * 消息是聊天界面中的基本单元，
- * 包含用户消息、AI 回复、思考过程等
+ * Messages are the basic units in the chat interface,
+ * including user messages, AI responses, thinking process, etc.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
 export const createMockMessage = (overrides: Record<string, unknown> = {}) => ({
   role: 'user' as const,
@@ -44,11 +46,11 @@ export const createMockMessage = (overrides: Record<string, unknown> = {}) => ({
 });
 
 /**
- * 创建 Mock 会话数据
+ * Create Mock Session data
  *
- * 会话包含一组相关的消息，支持历史记录和会话切换
+ * Session contains a group of related messages, supporting history and session switching.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
 export const createMockSession = (overrides: Record<string, unknown> = {}) => ({
   id: 'test-session-id',
@@ -60,14 +62,16 @@ export const createMockSession = (overrides: Record<string, unknown> = {}) => ({
 });
 
 /**
- * 创建 Mock 权限请求数据
+ * Create Mock Permission Request data
  *
- * 权限请求在 AI 需要执行敏感操作时触发，
- * 用户需要选择允许或拒绝
+ * Permission requests are triggered when AI needs to perform sensitive operations,
+ * requiring user to choose allow or reject.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
-export const createMockPermissionRequest = (overrides: Record<string, unknown> = {}) => ({
+export const createMockPermissionRequest = (
+  overrides: Record<string, unknown> = {},
+) => ({
   toolCall: {
     toolCallId: 'test-tool-call-id',
     title: 'Read file',
@@ -82,13 +86,15 @@ export const createMockPermissionRequest = (overrides: Record<string, unknown> =
 });
 
 /**
- * 创建 Mock WebView Panel
+ * Create Mock WebView Panel
  *
- * WebView Panel 是 VSCode 中显示自定义 UI 的容器
+ * WebView Panel is the container for displaying custom UI in VSCode.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
-export const createMockWebviewPanel = (overrides: Record<string, unknown> = {}) => ({
+export const createMockWebviewPanel = (
+  overrides: Record<string, unknown> = {},
+) => ({
   webview: {
     html: '',
     options: {},
@@ -113,13 +119,15 @@ export const createMockWebviewPanel = (overrides: Record<string, unknown> = {}) 
 });
 
 /**
- * 创建 Mock Extension Context
+ * Create Mock Extension Context
  *
- * Extension Context 提供扩展运行时的上下文信息
+ * Extension Context provides runtime context information for the extension.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
-export const createMockExtensionContext = (overrides: Record<string, unknown> = {}) => ({
+export const createMockExtensionContext = (
+  overrides: Record<string, unknown> = {},
+) => ({
   subscriptions: [],
   extensionUri: { fsPath: '/path/to/extension' },
   extensionPath: '/path/to/extension',
@@ -144,13 +152,15 @@ export const createMockExtensionContext = (overrides: Record<string, unknown> = 
 });
 
 /**
- * 创建 Mock Diff Info
+ * Create Mock Diff Info
  *
- * Diff Info 包含代码对比的信息
+ * Diff Info contains code comparison information.
  *
- * @param overrides 覆盖默认值的属性
+ * @param overrides Properties to override default values
  */
-export const createMockDiffInfo = (overrides: Record<string, unknown> = {}) => ({
+export const createMockDiffInfo = (
+  overrides: Record<string, unknown> = {},
+) => ({
   filePath: '/test/file.ts',
   oldContent: 'const x = 1;',
   newContent: 'const x = 2;',

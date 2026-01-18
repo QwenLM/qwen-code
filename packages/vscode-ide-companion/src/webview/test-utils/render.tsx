@@ -3,44 +3,44 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * WebView 组件测试渲染工具
+ * WebView Component Test Rendering Utilities
  *
- * 提供带有必要 Provider 和 mock 的渲染函数，
- * 简化 WebView React 组件的测试
+ * Provides rendering functions with necessary Providers and mocks,
+ * simplifying WebView React component testing.
  */
 
-import React from 'react';
+import type React from 'react';
 import { render, type RenderOptions } from '@testing-library/react';
 import { vi } from 'vitest';
 
 /**
  * Mock VSCode WebView API
  *
- * WebView 中的组件通过 acquireVsCodeApi() 获取此 API，
- * 用于与 VSCode 扩展进行双向通信
+ * Components in WebView obtain this API via acquireVsCodeApi(),
+ * used for bidirectional communication with VSCode extension.
  */
 export const mockVSCodeAPI = {
-  /** 向扩展发送消息 */
+  /** Send message to extension */
   postMessage: vi.fn(),
-  /** 获取 WebView 持久化状态 */
+  /** Get WebView persistent state */
   getState: vi.fn(() => ({})),
-  /** 设置 WebView 持久化状态 */
+  /** Set WebView persistent state */
   setState: vi.fn(),
 };
 
 /**
- * 测试用 Provider 包装器
+ * Test Provider wrapper
  *
- * 如果组件需要特定的 Context Provider，可以在这里添加
+ * Add specific Context Providers here if components need them.
  */
-const AllTheProviders: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  return <>{children}</>;
-};
+const AllTheProviders: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => <>{children}</>;
 
 /**
- * 带 Provider 的渲染函数
+ * Render function with Providers
  *
- * 使用方式：
+ * Usage:
  * ```tsx
  * import { renderWithProviders, screen } from './test-utils/render';
  *
@@ -56,15 +56,15 @@ export const renderWithProviders = (
 ) => render(ui, { wrapper: AllTheProviders, ...options });
 
 /**
- * 模拟从扩展接收消息
+ * Simulate receiving message from extension
  *
- * WebView 通过 window.addEventListener('message', ...) 接收消息
- * 使用此函数模拟扩展发送的消息
+ * WebView receives messages via window.addEventListener('message', ...).
+ * Use this function to simulate messages sent by the extension.
  *
- * @param type 消息类型
- * @param data 消息数据
+ * @param type Message type
+ * @param data Message data
  *
- * 使用示例：
+ * Usage example:
  * ```ts
  * simulateExtensionMessage('authState', { authenticated: true });
  * ```
@@ -78,12 +78,12 @@ export const simulateExtensionMessage = (type: string, data: unknown) => {
 };
 
 /**
- * 等待异步状态更新
+ * Wait for async state updates
  *
- * 用于等待 React 状态更新完成后再进行断言
+ * Used to wait for React state updates to complete before assertions.
  */
 export const waitForStateUpdate = () =>
   new Promise((resolve) => setTimeout(resolve, 0));
 
-// 导出 @testing-library/react 的所有工具以及其他辅助函数
+// Export all utilities from @testing-library/react and other helpers
 export * from '@testing-library/react';
