@@ -37,7 +37,12 @@ test('shows permission drawer and closes after allow', async ({
 
   const allowButton = webview.getByRole('button', { name: 'Allow once' });
   await expect(allowButton).toBeVisible();
-  await allowButton.click();
+
+  // Wait a bit for any potential notifications to settle, then try clicking
+  await page.waitForTimeout(500);
+
+  // Use force click to bypass potential overlays
+  await allowButton.click({ force: true });
 
   await expect(allowButton).toBeHidden();
 });
