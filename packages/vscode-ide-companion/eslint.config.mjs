@@ -51,11 +51,12 @@ export default [
       'react-hooks/exhaustive-deps': 'off', // Disable for all .ts files by default
       // Restrict deep imports but allow known-safe exceptions used by the webview
       // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
       // - ./styles/**: local CSS modules loaded by the webview
       'import/no-internal-modules': [
         'error',
         {
-          allow: ['react-dom/client', './styles/**'],
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
         },
       ],
 
@@ -91,11 +92,12 @@ export default [
       'react-hooks/exhaustive-deps': 'off', // Explicitly disable for test files
       // Restrict deep imports but allow known-safe exceptions used by the webview
       // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
       // - ./styles/**: local CSS modules loaded by the webview
       'import/no-internal-modules': [
         'error',
         {
-          allow: ['react-dom/client', './styles/**'],
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
         },
       ],
 
@@ -137,11 +139,12 @@ export default [
       'react-hooks/exhaustive-deps': 'error',    // Enable React hooks rule for JSX/TSX files in src
       // Restrict deep imports but allow known-safe exceptions used by the webview
       // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
       // - ./styles/**: local CSS modules loaded by the webview
       'import/no-internal-modules': [
         'error',
         {
-          allow: ['react-dom/client', './styles/**'],
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
         },
       ],
 
@@ -183,11 +186,12 @@ export default [
       'react-hooks/exhaustive-deps': 'error',    // Enable React hooks rule for webview .ts files
       // Restrict deep imports but allow known-safe exceptions used by the webview
       // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
       // - ./styles/**: local CSS modules loaded by the webview
       'import/no-internal-modules': [
         'error',
         {
-          allow: ['react-dom/client', './styles/**'],
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
         },
       ],
 
