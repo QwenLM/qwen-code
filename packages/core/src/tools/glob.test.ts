@@ -22,7 +22,7 @@ vi.mock('glob', { spy: true });
 describe('GlobTool', () => {
   let tempRootDir: string; // This will be the rootDirectory for the GlobTool instance
   let globTool: GlobTool;
-  const abortSignal = new AbortController().signal;
+  let abortSignal: AbortSignal;
 
   const createMockConfig = (rootDir: string): Config =>
     ({
@@ -62,6 +62,7 @@ describe('GlobTool', () => {
     // Create a unique root directory for each test run
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-tool-root-'));
     await fs.writeFile(path.join(tempRootDir, '.git'), ''); // Fake git repo
+    abortSignal = new AbortController().signal;
     mockConfig = createMockConfig(tempRootDir);
     globTool = new GlobTool(mockConfig);
 
