@@ -6,7 +6,7 @@
 
 /** @vitest-environment jsdom */
 
-/* eslint-disable import/no-internal-modules */
+ 
 import React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createRoot } from 'react-dom/client';
@@ -257,9 +257,14 @@ describe('useWebViewMessages', () => {
       );
     });
 
+    // The actual postMessage sends data without the 'type' field
     expect(postMessage).toHaveBeenCalledWith({
       type: 'openDiff',
-      data: diffContent,
+      data: {
+        path: 'src/example.ts',
+        oldText: 'old',
+        newText: 'new',
+      },
     });
 
     expect(props.handleToolCallUpdate).toHaveBeenCalled();

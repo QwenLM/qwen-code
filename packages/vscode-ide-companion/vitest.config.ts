@@ -1,17 +1,51 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { defineConfig } from 'vitest/config';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+
+const testingLibraryRoot = path.dirname(
+  require.resolve('@testing-library/react/package.json'),
+);
+const resolvePeer = (pkg: string) => {
+  const resolveFrom = (base: string) => {
+    try {
+      return require.resolve(`${pkg}/package.json`, { paths: [base] });
+    } catch {
+      try {
+        return require.resolve(pkg, { paths: [base] });
+      } catch {
+        return null;
+      }
+    }
+  };
+
+  const resolved = resolveFrom(testingLibraryRoot) ?? resolveFrom(__dirname);
+  if (!resolved) {
+    return path.resolve(__dirname, 'node_modules', pkg);
+  }
+  return path.dirname(resolved);
+};
+const reactRoot = resolvePeer('react');
+const reactDomRoot = resolvePeer('react-dom');
+const reactIsRoot = resolvePeer('react-is');
+const schedulerRoot = resolvePeer('scheduler');
 
 export default defineConfig({
   test: {
     globals: true,
-    // 使用 jsdom 环境以支持 DOM 测试（WebView 组件测试需要）
     environment: 'jsdom',
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
-    // 全局测试 setup 文件
     setupFiles: ['./src/test-setup.ts'],
+    environmentOptions: {
+      jsdom: {
+        url: 'http://localhost',
+        pretendToBeVisual: true,
+        resources: 'usable',
+      },
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html', 'clover'],
@@ -24,18 +58,35 @@ export default defineConfig({
         'src/**/test-utils/**',
       ],
     },
-    // 测试超时时间（集成测试可能需要更长时间）
     testTimeout: 10000,
-    // 依赖处理配置
     deps: {
-      // 确保 vscode 模块可以被正确 mock
       interopDefault: true,
     },
   },
-  // resolve 配置，使 vscode 模块能被正确识别为虚拟模块并被 mock
   resolve: {
     alias: {
+      // 保持原有的别名
       vscode: path.resolve(__dirname, 'src/__mocks__/vscode.ts'),
+      // 强制统一 React 模块解析（与 testing-library 解析来源保持一致）
+      react: reactRoot,
+      'react-dom': reactDomRoot,
+      'react/jsx-runtime': path.resolve(reactRoot, 'jsx-runtime'),
+      'react/jsx-dev-runtime': path.resolve(reactRoot, 'jsx-dev-runtime'),
+      'react-dom/client': path.resolve(reactDomRoot, 'client'),
+      'react-is': reactIsRoot,
+      scheduler: schedulerRoot,
     },
+    // 确保这些包都被 dedupe
+    dedupe: [
+      'react',
+      'react-dom',
+      'react-is',
+      'scheduler',
+      '@testing-library/react',
+    ],
+  },
+  define: {
+    // 确保 React 环境变量设置正确
+    'process.env.NODE_ENV': JSON.stringify('test'),
   },
 });

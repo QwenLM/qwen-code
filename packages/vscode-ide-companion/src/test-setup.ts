@@ -10,6 +10,7 @@
  * pointing to src/__mocks__/vscode.ts
  */
 
+import '@testing-library/jest-dom';
 import { vi, beforeEach, afterEach } from 'vitest';
 
 /**
@@ -36,4 +37,11 @@ beforeEach(() => {
 afterEach(() => {
   // Clear all mock call records
   vi.clearAllMocks();
+
+  // Clear jsdom window to prevent React element cache issues
+  if (typeof window !== 'undefined') {
+    // Clean up DOM after each test without removing <body>/<head>
+    document.body?.replaceChildren();
+    document.head?.replaceChildren();
+  }
 });

@@ -62,6 +62,10 @@
     "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"
+    },
+    "react": "^19.1.0",
+    "react-dom": {
+      ".": "^19.1.0"
     }
   },
   "bin": {

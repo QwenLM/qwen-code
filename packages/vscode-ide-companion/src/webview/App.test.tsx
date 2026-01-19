@@ -192,12 +192,14 @@ describe('App', () => {
       const { useWebViewMessages } = await import(
         './hooks/useWebViewMessages.js'
       );
-      vi.mocked(useWebViewMessages).mockImplementation((props) => {
-        // Simulate receiving unauthenticated state
-        React.useEffect(() => {
-          props.setIsAuthenticated?.(false);
-        }, [props]); // Add props to dependency array
-      });
+      vi.mocked(useWebViewMessages).mockImplementation(
+        ({ setIsAuthenticated }) => {
+          // Simulate receiving unauthenticated state
+          React.useEffect(() => {
+            setIsAuthenticated?.(false);
+          }, [setIsAuthenticated]);
+        },
+      );
 
       render(<App />);
 
@@ -218,11 +220,13 @@ describe('App', () => {
       const { useWebViewMessages } = await import(
         './hooks/useWebViewMessages.js'
       );
-      vi.mocked(useWebViewMessages).mockImplementation((props) => {
-        React.useEffect(() => {
-          props.setIsAuthenticated?.(true);
-        }, [props]); // Add props to dependency array
-      });
+      vi.mocked(useWebViewMessages).mockImplementation(
+        ({ setIsAuthenticated }) => {
+          React.useEffect(() => {
+            setIsAuthenticated?.(true);
+          }, [setIsAuthenticated]);
+        },
+      );
 
       render(<App />);
 
@@ -353,11 +357,13 @@ describe('App', () => {
       const { useWebViewMessages } = await import(
         './hooks/useWebViewMessages.js'
       );
-      vi.mocked(useWebViewMessages).mockImplementation((props) => {
-        React.useEffect(() => {
-          props.setIsAuthenticated?.(true);
-        }, [props]); // Add props to dependency array
-      });
+      vi.mocked(useWebViewMessages).mockImplementation(
+        ({ setIsAuthenticated }) => {
+          React.useEffect(() => {
+            setIsAuthenticated?.(true);
+          }, [setIsAuthenticated]);
+        },
+      );
 
       const { container } = render(<App />);
 
@@ -579,23 +585,25 @@ describe('App Integration - Integration scenarios', () => {
     const { useWebViewMessages } = await import(
       './hooks/useWebViewMessages.js'
     );
-    vi.mocked(useWebViewMessages).mockImplementation((props) => {
-      React.useEffect(() => {
-        props.setIsAuthenticated?.(true);
-        // Simulate permission request
-        props.handlePermissionRequest({
-          options: [
-            { optionId: 'allow', name: 'Allow', kind: 'allow' },
-            { optionId: 'deny', name: 'Deny', kind: 'reject' },
-          ],
-          toolCall: {
-            toolCallId: 'tc-1',
-            title: 'Edit file.ts',
-            kind: 'edit',
-          },
-        });
-      }, [props]); // Add props to dependency array
-    });
+    vi.mocked(useWebViewMessages).mockImplementation(
+      ({ setIsAuthenticated, handlePermissionRequest }) => {
+        React.useEffect(() => {
+          setIsAuthenticated?.(true);
+          // Simulate permission request
+          handlePermissionRequest({
+            options: [
+              { optionId: 'allow', name: 'Allow', kind: 'allow' },
+              { optionId: 'deny', name: 'Deny', kind: 'reject' },
+            ],
+            toolCall: {
+              toolCallId: 'tc-1',
+              title: 'Edit file.ts',
+              kind: 'edit',
+            },
+          });
+        }, [setIsAuthenticated, handlePermissionRequest]);
+      },
+    );
 
     const { container } = render(<App />);
 
