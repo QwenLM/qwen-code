@@ -6,8 +6,7 @@
 
 /** @vitest-environment jsdom */
 
-/* eslint-disable import/no-internal-modules */
-import React from 'react';
+import type React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';

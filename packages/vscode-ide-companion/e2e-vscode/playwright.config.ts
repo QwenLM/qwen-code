@@ -38,6 +38,7 @@ const launchOptions = chromiumExecutablePath
 
 export default defineConfig({
   testDir: path.resolve(__dirname, 'tests'),
+  outputDir: path.resolve(__dirname, '..', 'test-results'), // 输出到父级的 test-results 目录
   timeout: 90_000,
   expect: { timeout: 15_000 },
   use: {
@@ -49,4 +50,7 @@ export default defineConfig({
   },
   retries: process.env.CI ? 1 : 0,
   workers: 1,
+  reporter: [
+    ['html', { outputFolder: path.resolve(__dirname, '..', 'playwright-report') }], // 输出HTML报告到父级的 playwright-report 目录
+  ],
 });

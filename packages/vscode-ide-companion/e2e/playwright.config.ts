@@ -23,7 +23,10 @@ const chromiumExecutablePath = (() => {
         '/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing',
         '/chrome-headless-shell',
       )
-      .replace('/Chromium.app/Contents/MacOS/Chromium', '/chrome-headless-shell'),
+      .replace(
+        '/Chromium.app/Contents/MacOS/Chromium',
+        '/chrome-headless-shell',
+      ),
   );
 
   for (const candidate of [...headlessCandidates, ...candidates]) {
@@ -40,6 +43,7 @@ const launchOptions = chromiumExecutablePath
 
 export default defineConfig({
   testDir: path.resolve(__dirname, 'tests'),
+  outputDir: path.resolve(__dirname, '..', 'test-results'), // 输出到父级的 test-results 目录
   timeout: 60_000,
   expect: { timeout: 10_000 },
   use: {
@@ -50,5 +54,11 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },
+  reporter: [
+    [
+      'html',
+      { outputFolder: path.resolve(__dirname, '..', 'playwright-report') },
+    ], // 输出HTML报告到父级的 playwright-report 目录
+  ],
   retries: process.env.CI ? 1 : 0,
 });
