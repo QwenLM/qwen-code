@@ -33,6 +33,7 @@ import {
 import type { Part, PartListUnion } from '@google/genai';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
+import { partToString } from '../utils/partUtils.js';
 import {
   isModifiableDeclarativeTool,
   modifyWithEditor,
@@ -176,12 +177,13 @@ export function convertToFunctionResponse(
   }
 
   if (Array.isArray(contentToProcess)) {
-    const functionResponse = createFunctionResponsePart(
-      callId,
-      toolName,
-      'Tool execution succeeded.',
-    );
-    return [functionResponse, ...toParts(contentToProcess)];
+    return [
+      createFunctionResponsePart(
+        callId,
+        toolName,
+        partToString(contentToProcess),
+      ),
+    ];
   }
 
   // After this point, contentToProcess is a single Part object.
@@ -220,18 +222,6 @@ export function convertToFunctionResponse(
   return [
     createFunctionResponsePart(callId, toolName, 'Tool execution succeeded.'),
   ];
-}
-
-function toParts(input: PartListUnion): Part[] {
-  const parts: Part[] = [];
-  for (const part of Array.isArray(input) ? input : [input]) {
-    if (typeof part === 'string') {
-      parts.push({ text: part });
-    } else if (part) {
-      parts.push(part);
-    }
-  }
-  return parts;
 }
 
 const createErrorResponse = (
