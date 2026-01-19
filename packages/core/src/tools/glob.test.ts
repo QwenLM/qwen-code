@@ -24,26 +24,45 @@ describe('GlobTool', () => {
   let globTool: GlobTool;
   const abortSignal = new AbortController().signal;
 
-  // Mock config for testing
-  const mockConfig = {
-    getFileService: () => new FileDiscoveryService(tempRootDir),
-    getFileFilteringRespectGitIgnore: () => true,
-    getFileFilteringOptions: () => ({
-      respectGitIgnore: true,
-      respectQwenIgnore: true,
-    }),
-    getTargetDir: () => tempRootDir,
-    getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-    getFileExclusions: () => ({
-      getGlobExcludes: () => [],
-    }),
-    getTruncateToolOutputLines: () => 1000,
-  } as unknown as Config;
+  const createMockConfig = (rootDir: string): Config =>
+    ({
+      getFileService: () => new FileDiscoveryService(rootDir),
+      getFileFilteringRespectGitIgnore: () => true,
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
+      getTargetDir: () => rootDir,
+      getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
+      getFileExclusions: () => ({
+        getGlobExcludes: () => [],
+      }),
+      getTruncateToolOutputLines: () => 1000,
+    }) as unknown as Config;
+
+  let mockConfig: Config;
+
+  const writeTruncTestFiles = async (
+    rootDir: string,
+    filenamePrefix: string,
+    count: number,
+  ) => {
+    await Promise.all(
+      Array.from({ length: count }, (_, index) => {
+        const i = index + 1;
+        return fs.writeFile(
+          path.join(rootDir, `${filenamePrefix}${i}.trunctest`),
+          `content${i}`,
+        );
+      }),
+    );
+  };
 
   beforeEach(async () => {
     // Create a unique root directory for each test run
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'glob-tool-root-'));
     await fs.writeFile(path.join(tempRootDir, '.git'), ''); // Fake git repo
+    mockConfig = createMockConfig(tempRootDir);
     globTool = new GlobTool(mockConfig);
 
     // Create some test files and directories within this root
@@ -75,7 +94,12 @@ describe('GlobTool', () => {
 
   afterEach(async () => {
     // Clean up the temporary root directory
-    await fs.rm(tempRootDir, { recursive: true, force: true });
+    await fs.rm(tempRootDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
   });
 
   describe('execute', () => {
@@ -227,14 +251,9 @@ describe('GlobTool', () => {
       }
 
       // 2. Create a new GlobTool instance with this mismatched root
-      const mismatchedConfig = {
-        ...mockConfig,
-        getTargetDir: () => mismatchedRootDir,
-        getWorkspaceContext: () =>
-          createMockWorkspaceContext(mismatchedRootDir),
-      } as unknown as Config;
-
-      const mismatchedGlobTool = new GlobTool(mismatchedConfig);
+      const mismatchedGlobTool = new GlobTool(
+        createMockConfig(mismatchedRootDir),
+      );
 
       // 3. Execute search
       const params: GlobToolParams = { pattern: '*.txt' };
@@ -313,8 +332,8 @@ describe('GlobTool', () => {
 
     it("should return error if search path resolves outside the tool's root directory", () => {
       // Create a globTool instance specifically for this test, with a deeper root
-      tempRootDir = path.join(tempRootDir, 'sub');
-      const specificGlobTool = new GlobTool(mockConfig);
+      const deeperRootDir = path.join(tempRootDir, 'sub');
+      const specificGlobTool = new GlobTool(createMockConfig(deeperRootDir));
       // const params: GlobToolParams = { pattern: '*.txt', path: '..' }; // This line is unused and will be removed.
       // This should be fine as tempRootDir is still within the original tempRootDir (the parent of deeperRootDir)
       // Let's try to go further up.
@@ -415,16 +434,14 @@ describe('GlobTool', () => {
 
   describe('file count truncation', () => {
     it('should truncate results when more than 100 files are found', async () => {
+      const rootDir = tempRootDir;
+      const tool = globTool;
+
       // Create 150 test files
-      for (let i = 1; i <= 150; i++) {
-        await fs.writeFile(
-          path.join(tempRootDir, `file${i}.trunctest`),
-          `content${i}`,
-        );
-      }
+      await writeTruncTestFiles(rootDir, 'file', 150);
 
       const params: GlobToolParams = { pattern: '*.trunctest' };
-      const invocation = globTool.build(params);
+      const invocation = tool.build(params);
       const result = await invocation.execute(abortSignal);
       const llmContent = partListUnionToString(result.llmContent);
 
@@ -446,16 +463,14 @@ describe('GlobTool', () => {
     });
 
     it('should not truncate when exactly 100 files are found', async () => {
+      const rootDir = tempRootDir;
+      const tool = globTool;
+
       // Create exactly 100 test files
-      for (let i = 1; i <= 100; i++) {
-        await fs.writeFile(
-          path.join(tempRootDir, `exact${i}.trunctest`),
-          `content${i}`,
-        );
-      }
+      await writeTruncTestFiles(rootDir, 'exact', 100);
 
       const params: GlobToolParams = { pattern: '*.trunctest' };
-      const invocation = globTool.build(params);
+      const invocation = tool.build(params);
       const result = await invocation.execute(abortSignal);
 
       // Should report all 100 files found
@@ -473,16 +488,14 @@ describe('GlobTool', () => {
     });
 
     it('should not truncate when fewer than 100 files are found', async () => {
+      const rootDir = tempRootDir;
+      const tool = globTool;
+
       // Create 50 test files
-      for (let i = 1; i <= 50; i++) {
-        await fs.writeFile(
-          path.join(tempRootDir, `small${i}.trunctest`),
-          `content${i}`,
-        );
-      }
+      await writeTruncTestFiles(rootDir, 'small', 50);
 
       const params: GlobToolParams = { pattern: '*.trunctest' };
-      const invocation = globTool.build(params);
+      const invocation = tool.build(params);
       const result = await invocation.execute(abortSignal);
 
       // Should report all 50 files found
@@ -496,16 +509,14 @@ describe('GlobTool', () => {
     });
 
     it('should use correct singular/plural in truncation message for 1 file truncated', async () => {
+      const rootDir = tempRootDir;
+      const tool = globTool;
+
       // Create 101 test files (will truncate 1 file)
-      for (let i = 1; i <= 101; i++) {
-        await fs.writeFile(
-          path.join(tempRootDir, `singular${i}.trunctest`),
-          `content${i}`,
-        );
-      }
+      await writeTruncTestFiles(rootDir, 'singular', 101);
 
       const params: GlobToolParams = { pattern: '*.trunctest' };
-      const invocation = globTool.build(params);
+      const invocation = tool.build(params);
       const result = await invocation.execute(abortSignal);
 
       // Should use singular "file" for 1 truncated file
@@ -514,16 +525,14 @@ describe('GlobTool', () => {
     });
 
     it('should use correct plural in truncation message for multiple files truncated', async () => {
+      const rootDir = tempRootDir;
+      const tool = globTool;
+
       // Create 105 test files (will truncate 5 files)
-      for (let i = 1; i <= 105; i++) {
-        await fs.writeFile(
-          path.join(tempRootDir, `plural${i}.trunctest`),
-          `content${i}`,
-        );
-      }
+      await writeTruncTestFiles(rootDir, 'plural', 105);
 
       const params: GlobToolParams = { pattern: '*.trunctest' };
-      const invocation = globTool.build(params);
+      const invocation = tool.build(params);
       const result = await invocation.execute(abortSignal);
 
       // Should use plural "files" for multiple truncated files
