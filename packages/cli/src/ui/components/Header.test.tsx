@@ -6,12 +6,25 @@
 
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  isGitRepository,
+  getGitBranch,
+} from '@qwen-code/qwen-code-core';
 import { Header } from './Header.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
 
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
+
+// Mock git functions
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal()),
+  isGitRepository: vi.fn(),
+  getGitBranch: vi.fn(),
+}));
+const mockedIsGitRepository = vi.mocked(isGitRepository);
+const mockedGetGitBranch = vi.mocked(getGitBranch);
 
 const defaultProps = {
   version: '1.0.0',
@@ -24,6 +37,9 @@ describe('<Header />', () => {
   beforeEach(() => {
     // Default to wide terminal (shows both logo and info panel)
     useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
+    // Default to not in a git repo (no branch shown)
+    mockedIsGitRepository.mockReturnValue(false);
+    mockedGetGitBranch.mockReturnValue(undefined);
   });
 
   it('renders the ASCII logo on wide terminal', () => {
@@ -81,6 +97,29 @@ describe('<Header />', () => {
     // Branch name is no longer shown in header
     expect(lastFrame()).toContain('/home/user/projects/test');
     expect(lastFrame()).not.toContain('(main*)');
+  });
+
+  it('displays git branch when in a git repository', () => {
+    mockedIsGitRepository.mockReturnValue(true);
+    mockedGetGitBranch.mockReturnValue('main');
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    expect(lastFrame()).toContain('(main)');
+  });
+
+  it('does not display git branch when not in a git repository', () => {
+    mockedIsGitRepository.mockReturnValue(false);
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    // Check that there's no git branch line (e.g., "(main)")
+    // Branch is shown after the working directory path, not as part of title
+    expect(lastFrame()).not.toContain('(main)');
+    expect(lastFrame()).not.toMatch(/\([^)]+\)$/m);
+  });
+
+  it('displays different git branch names', () => {
+    mockedIsGitRepository.mockReturnValue(true);
+    mockedGetGitBranch.mockReturnValue('feature/new-feature');
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    expect(lastFrame()).toContain('(feature/new-feature)');
   });
 
   it('formats home directory with tilde', () => {
