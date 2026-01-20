@@ -253,92 +253,176 @@ export class WebViewProvider {
           };
           const handler = (message: {
             type: string;
-            data: { optionId: string };
+            data: { optionId: string; customMessage?: string };
           }) => {
             if (message.type !== 'permissionResponse') {
               return;
             }
 
             const optionId = message.data.optionId || '';
+            const customMessage = message.data.customMessage || '';
 
             // 1) First resolve the optionId back to ACP so the agent isn't blocked
             this.pendingPermissionResolve?.(optionId);
 
-            // 2) If user cancelled/rejected, proactively stop current generation
+            // 2) If user cancelled/rejected, handle based on whether there's custom feedback
             const isCancel =
               optionId === 'cancel' ||
               optionId.toLowerCase().includes('reject');
 
             if (isCancel) {
-              // Fire and forget – do not block the ACP resolve
-              (async () => {
-                try {
-                  // Stop server-side generation
-                  await this.agentManager.cancelCurrentPrompt();
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] cancelCurrentPrompt error:',
-                    err,
-                  );
-                }
+              // Close any open qwen-diff editors first
+              try {
+                void vscode.commands.executeCommand('qwen.diff.closeAll');
+              } catch (err) {
+                console.warn(
+                  '[WebViewProvider] Failed to close diffs after reject:',
+                  err,
+                );
+              }
 
-                // Ensure the webview exits streaming state immediately
-                this.sendMessageToWebView({
-                  type: 'streamEnd',
-                  data: { timestamp: Date.now(), reason: 'user_cancelled' },
-                });
-
-                // Synthesize a failed tool_call_update to match CLI UX
-                try {
-                  const toolCallId =
-                    (request.toolCall as { toolCallId?: string } | undefined)
-                      ?.toolCallId || '';
-                  const title =
-                    (request.toolCall as { title?: string } | undefined)
-                      ?.title || '';
-                  // Normalize kind for UI – fall back to 'execute'
-                  let kind = ((
-                    request.toolCall as { kind?: string } | undefined
-                  )?.kind || 'execute') as string;
-                  if (!kind && title) {
-                    const t = title.toLowerCase();
-                    if (t.includes('read') || t.includes('cat')) {
-                      kind = 'read';
-                    } else if (t.includes('write') || t.includes('edit')) {
-                      kind = 'edit';
-                    } else {
-                      kind = 'execute';
+              // If user provided custom feedback, send it as a new message to continue the conversation
+              // instead of completely cancelling the request
+              if (customMessage.trim()) {
+                // Fire and forget – do not block the ACP resolve
+                (async () => {
+                  // Update the tool call status to 'failed' in UI
+                  try {
+                    const toolCallId =
+                      (request.toolCall as { toolCallId?: string } | undefined)
+                        ?.toolCallId || '';
+                    const title =
+                      (request.toolCall as { title?: string } | undefined)
+                        ?.title || '';
+                    let kind = ((
+                      request.toolCall as { kind?: string } | undefined
+                    )?.kind || 'execute') as string;
+                    if (!kind && title) {
+                      const t = title.toLowerCase();
+                      if (t.includes('read') || t.includes('cat')) {
+                        kind = 'read';
+                      } else if (t.includes('write') || t.includes('edit')) {
+                        kind = 'edit';
+                      } else {
+                        kind = 'execute';
+                      }
                     }
+
+                    this.sendMessageToWebView({
+                      type: 'toolCall',
+                      data: {
+                        type: 'tool_call_update',
+                        toolCallId,
+                        title,
+                        kind,
+                        status: 'failed',
+                        rawInput: (request.toolCall as { rawInput?: unknown })
+                          ?.rawInput,
+                        locations: (
+                          request.toolCall as {
+                            locations?: Array<{
+                              path: string;
+                              line?: number | null;
+                            }>;
+                          }
+                        )?.locations,
+                      },
+                    });
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] failed to synthesize failed tool_call_update:',
+                      err,
+                    );
                   }
 
+                  // Send the custom feedback as a new user message to continue the conversation
+                  // This allows the AI to understand user's intent and try a different approach
+                  try {
+                    await this.agentManager.sendMessage(customMessage.trim());
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] failed to send custom feedback as new prompt:',
+                      err,
+                    );
+                    // If sending fails, notify the webview
+                    this.sendMessageToWebView({
+                      type: 'error',
+                      data: {
+                        message: 'Failed to send feedback to AI',
+                        error: String(err),
+                      },
+                    });
+                  }
+                })();
+              } else {
+                // No custom feedback - completely cancel the request (original behavior)
+                (async () => {
+                  try {
+                    // Stop server-side generation
+                    await this.agentManager.cancelCurrentPrompt();
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] cancelCurrentPrompt error:',
+                      err,
+                    );
+                  }
+
+                  // Ensure the webview exits streaming state immediately
                   this.sendMessageToWebView({
-                    type: 'toolCall',
-                    data: {
-                      type: 'tool_call_update',
-                      toolCallId,
-                      title,
-                      kind,
-                      status: 'failed',
-                      // Best-effort pass-through (used by UI hints)
-                      rawInput: (request.toolCall as { rawInput?: unknown })
-                        ?.rawInput,
-                      locations: (
-                        request.toolCall as {
-                          locations?: Array<{
-                            path: string;
-                            line?: number | null;
-                          }>;
-                        }
-                      )?.locations,
-                    },
+                    type: 'streamEnd',
+                    data: { timestamp: Date.now(), reason: 'user_cancelled' },
                   });
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] failed to synthesize failed tool_call_update:',
-                    err,
-                  );
-                }
-              })();
+
+                  // Synthesize a failed tool_call_update to match CLI UX
+                  try {
+                    const toolCallId =
+                      (request.toolCall as { toolCallId?: string } | undefined)
+                        ?.toolCallId || '';
+                    const title =
+                      (request.toolCall as { title?: string } | undefined)
+                        ?.title || '';
+                    let kind = ((
+                      request.toolCall as { kind?: string } | undefined
+                    )?.kind || 'execute') as string;
+                    if (!kind && title) {
+                      const t = title.toLowerCase();
+                      if (t.includes('read') || t.includes('cat')) {
+                        kind = 'read';
+                      } else if (t.includes('write') || t.includes('edit')) {
+                        kind = 'edit';
+                      } else {
+                        kind = 'execute';
+                      }
+                    }
+
+                    this.sendMessageToWebView({
+                      type: 'toolCall',
+                      data: {
+                        type: 'tool_call_update',
+                        toolCallId,
+                        title,
+                        kind,
+                        status: 'failed',
+                        rawInput: (request.toolCall as { rawInput?: unknown })
+                          ?.rawInput,
+                        locations: (
+                          request.toolCall as {
+                            locations?: Array<{
+                              path: string;
+                              line?: number | null;
+                            }>;
+                          }
+                        )?.locations,
+                      },
+                    });
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] failed to synthesize failed tool_call_update:',
+                      err,
+                    );
+                  }
+                })();
+              }
             }
             // If user allowed/proceeded, proactively close any open qwen-diff editors and suppress re-open briefly
             else {

@@ -12,7 +12,7 @@ interface PermissionDrawerProps {
   isOpen: boolean;
   options: PermissionOption[];
   toolCall: ToolCall;
-  onResponse: (optionId: string) => void;
+  onResponse: (optionId: string, customMessage?: string) => void;
   onClose?: () => void;
 }
 
@@ -247,10 +247,13 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
                 customMessage={customMessage}
                 setCustomMessage={setCustomMessage}
                 onFocusRow={() => setFocusedIndex(options.length)}
-                onSubmitReject={() => {
-                  if (rejectOptionId) {
-                    onResponse(rejectOptionId);
-                  }
+                onSubmitWithFeedback={(message: string) => {
+                  // When user submits custom feedback, reject the current operation
+                  // and pass the feedback message to the AI
+                  const optionId = rejectOptionId || 'reject_once';
+                  onResponse(optionId, message);
+                  // Clear the custom message after submission
+                  setCustomMessage('');
                 }}
                 inputRef={customInputRef}
               />
@@ -272,7 +275,7 @@ interface CustomMessageInputRowProps {
   customMessage: string;
   setCustomMessage: (val: string) => void;
   onFocusRow: () => void; // Set focus when mouse enters or input box is focused
-  onSubmitReject: () => void; // Triggered when Enter is pressed (selecting reject option)
+  onSubmitWithFeedback: (customMessage: string) => void; // Triggered when Enter is pressed with custom message
   inputRef: React.RefObject<HTMLInputElement | null>;
 }
 
@@ -281,7 +284,7 @@ const CustomMessageInputRow: React.FC<CustomMessageInputRowProps> = ({
   customMessage,
   setCustomMessage,
   onFocusRow,
-  onSubmitReject,
+  onSubmitWithFeedback,
   inputRef,
 }) => (
   <div
@@ -304,7 +307,7 @@ const CustomMessageInputRow: React.FC<CustomMessageInputRowProps> = ({
       onKeyDown={(e) => {
         if (e.key === 'Enter' && !e.shiftKey && customMessage.trim()) {
           e.preventDefault();
-          onSubmitReject();
+          onSubmitWithFeedback(customMessage.trim());
         }
       }}
     />

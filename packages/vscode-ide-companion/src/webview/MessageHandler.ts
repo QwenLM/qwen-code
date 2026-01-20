@@ -55,7 +55,10 @@ export class MessageHandler {
    * Set permission handler
    */
   setPermissionHandler(
-    handler: (message: { type: string; data: { optionId: string } }) => void,
+    handler: (message: {
+      type: string;
+      data: { optionId: string; customMessage?: string };
+    }) => void,
   ): void {
     this.router.setPermissionHandler(handler);
   }

@@ -22,7 +22,10 @@ export class MessageRouter {
   private authHandler: AuthMessageHandler;
   private currentConversationId: string | null = null;
   private permissionHandler:
-    | ((message: { type: string; data: { optionId: string } }) => void)
+    | ((message: {
+        type: string;
+        data: { optionId: string; customMessage?: string };
+      }) => void)
     | null = null;
 
   constructor(
@@ -81,7 +84,10 @@ export class MessageRouter {
     if (message.type === 'permissionResponse') {
       if (this.permissionHandler) {
         this.permissionHandler(
-          message as { type: string; data: { optionId: string } },
+          message as {
+            type: string;
+            data: { optionId: string; customMessage?: string };
+          },
         );
       }
       return;
@@ -131,7 +137,10 @@ export class MessageRouter {
    * Set permission handler
    */
   setPermissionHandler(
-    handler: (message: { type: string; data: { optionId: string } }) => void,
+    handler: (message: {
+      type: string;
+      data: { optionId: string; customMessage?: string };
+    }) => void,
   ): void {
     this.permissionHandler = handler;
   }
