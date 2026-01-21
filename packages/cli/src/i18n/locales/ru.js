@@ -33,6 +33,13 @@ export default {
   'Model Context Protocol command (from external servers)':
     'Команда Model Context Protocol (из внешних серверов)',
   'Keyboard Shortcuts:': 'Горячие клавиши:',
+  'Toggle this help display': 'Показать/скрыть эту справку',
+  'Toggle shell mode': 'Переключить режим оболочки',
+  'Open command menu': 'Открыть меню команд',
+  'Add file context': 'Добавить файл в контекст',
+  'Accept suggestion / Autocomplete': 'Принять подсказку / Автодополнение',
+  'Reverse search history': 'Обратный поиск по истории',
+  'Press ? again to close': 'Нажмите ? ещё раз, чтобы закрыть',
   'Jump through words in the input': 'Переход по словам во вводе',
   'Close dialogs, cancel requests, or quit application':
     'Закрыть диалоги, отменить запросы или выйти из приложения',
@@ -46,6 +53,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     'Подключение к MCP-серверам... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
+  '? for shortcuts': '? — горячие клавиши',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -59,10 +67,28 @@ export default {
   'show version info': 'Просмотр информации о версии',
   'submit a bug report': 'Отправка отчёта об ошибке',
   'About Qwen Code': 'Об Qwen Code',
+  Status: 'Статус',
+
+  // Keyboard shortcuts panel descriptions
+  'for shell mode': 'режим оболочки',
+  'for commands': 'меню команд',
+  'for file paths': 'пути к файлам',
+  'to clear input': 'очистить ввод',
+  'to cycle approvals': 'переключить режим',
+  'to quit': 'выход',
+  'for newline': 'новая строка',
+  'to clear screen': 'очистить экран',
+  'to search history': 'поиск в истории',
+  'to paste images': 'вставить изображения',
+  'for external editor': 'внешний редактор',
 
   // ============================================================================
   // Поля системной информации
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: 'Среда выполнения',
+  OS: 'ОС',
+  Auth: 'Аутентификация',
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
@@ -75,6 +101,7 @@ export default {
   'Session ID': 'ID сессии',
   'Auth Method': 'Метод авторизации',
   'Base URL': 'Базовый URL',
+  Proxy: 'Прокси',
   'Memory Usage': 'Использование памяти',
   'IDE Client': 'Клиент IDE',
 
@@ -100,8 +127,8 @@ export default {
   Preview: 'Предпросмотр',
   '(Use Enter to select, Tab to configure scope)':
     '(Enter для выбора, Tab для настройки области)',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '(Enter для применения области, Tab для выбора темы)',
+  '(Use Enter to apply scope, Tab to go back)':
+    '(Enter для применения области, Tab для возврата)',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     'Настройка темы недоступна из-за переменной окружения NO_COLOR.',
   'Theme "{{themeName}}" not found.': 'Тема "{{themeName}}" не найдена.',
@@ -260,8 +287,6 @@ export default {
   // ============================================================================
   'View and edit Qwen Code settings': 'Просмотр и изменение настроек Qwen Code',
   Settings: 'Настройки',
-  '(Use Enter to select{{tabText}})': '(Enter для выбора{{tabText}})',
-  ', Tab to change focus': ', Tab для смены фокуса',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     'Для применения изменений необходимо перезапустить Qwen Code. Нажмите r для выхода и применения изменений.',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -271,24 +296,24 @@ export default {
   // ============================================================================
   'Vim Mode': 'Режим Vim',
   'Disable Auto Update': 'Отключить автообновление',
+  'Attribution: commit': 'Атрибуция: коммит',
+  'Terminal Bell Notification': 'Звуковое уведомление терминала',
+  'Enable Usage Statistics': 'Включить сбор статистики использования',
+  Theme: 'Тема',
+  'Preferred Editor': 'Предпочтительный редактор',
+  'Auto-connect to IDE': 'Автоподключение к IDE',
   'Enable Prompt Completion': 'Включить автодополнение промптов',
   'Debug Keystroke Logging': 'Логирование нажатий клавиш для отладки',
-  Language: 'Язык',
+  'Language: UI': 'Язык: интерфейс',
+  'Language: Model': 'Язык: модель',
   'Output Format': 'Формат вывода',
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
-  'Hide Banner': 'Скрыть баннер',
-  'Hide Context Summary': 'Скрыть сводку контекста',
-  'Hide CWD': 'Скрыть текущую директорию',
-  'Hide Sandbox Status': 'Скрыть статус песочницы',
-  'Hide Model Info': 'Скрыть информацию о модели',
-  'Hide Footer': 'Скрыть нижний колонтитул',
-  'Show Memory Usage': 'Показывать использование памяти',
-  'Show Line Numbers': 'Показывать номера строк',
+  'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
-  'Enable Welcome Back': 'Включить приветствие при возврате',
+  'Show Welcome Back Dialog': 'Показывать диалог приветствия',
   'Enable User Feedback': 'Включить отзывы пользователей',
   'How is Qwen doing this session? (optional)':
     'Как дела у Qwen в этой сессии? (необязательно)',
@@ -315,7 +340,7 @@ export default {
   'Respect .qwenignore': 'Учитывать .qwenignore',
   'Enable Recursive File Search': 'Включить рекурсивный поиск файлов',
   'Disable Fuzzy Search': 'Отключить нечеткий поиск',
-  'Enable Interactive Shell': 'Включить интерактивный терминал',
+  'Interactive Shell (PTY)': 'Интерактивный терминал (PTY)',
   'Show Color': 'Показывать цвета',
   'Auto Accept': 'Автоподтверждение',
   'Use Ripgrep': 'Использовать Ripgrep',
@@ -326,6 +351,7 @@ export default {
   'Folder Trust': 'Доверие к папке',
   'Vision Model Preview': 'Визуальная модель (предпросмотр)',
   'Tool Schema Compliance': 'Соответствие схеме инструмента',
+  'Experimental: Skills': 'Экспериментальное: Навыки',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   Text: 'Текст',
@@ -352,6 +378,11 @@ export default {
     'Показать все директории в рабочем пространстве',
   'set external editor preference':
     'Установка предпочитаемого внешнего редактора',
+  'Select Editor': 'Выбрать редактор',
+  'Editor Preference': 'Настройка редактора',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    'В настоящее время поддерживаются следующие редакторы. Обратите внимание, что некоторые редакторы нельзя использовать в режиме песочницы.',
+  'Your preferred editor is:': 'Ваш предпочитаемый редактор:',
   'Manage extensions': 'Управление расширениями',
   'List active extensions': 'Показать активные расширения',
   'Update extensions. Usage: update <extension-names>|--all':
@@ -419,6 +450,8 @@ export default {
   'Example: /language output English': 'Пример: /language output English',
   'Example: /language output 日本語': 'Пример: /language output 日本語',
   'UI language changed to {{lang}}': 'Язык интерфейса изменен на {{lang}}',
+  'LLM output language set to {{lang}}':
+    'Язык вывода LLM установлен на {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'Файл правил языка вывода LLM создан в {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -441,7 +474,7 @@ export default {
   // ============================================================================
   // Команды - Режим подтверждения
   // ============================================================================
-  'Approval Mode': 'Режим подтверждения',
+  'Tool Approval Mode': 'Режим подтверждения инструментов',
   'Current approval mode: {{mode}}': 'Текущий режим подтверждения: {{mode}}',
   'Available approval modes:': 'Доступные режимы подтверждения:',
   'Approval mode changed to: {{mode}}':
@@ -483,8 +516,6 @@ export default {
     'Автоматически подтверждать все инструменты',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Режим подтверждения рабочего пространства существует и имеет приоритет. Изменение на уровне пользователя не будет иметь эффекта.',
-  '(Use Enter to select, Tab to change focus)':
-    '(Enter для выбора, Tab для смены фокуса)',
   'Apply To': 'Применить к',
   'User Settings': 'Настройки пользователя',
   'Workspace Settings': 'Настройки рабочего пространства',

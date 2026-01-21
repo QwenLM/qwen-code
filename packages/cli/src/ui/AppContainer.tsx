@@ -272,7 +272,8 @@ export const AppContainer = (props: AppContainerProps) => {
       calculatePromptWidths(terminalWidth);
     return { inputWidth, suggestionsWidth };
   }, [terminalWidth]);
-  const mainAreaWidth = Math.floor(terminalWidth * 0.9);
+  // Uniform width for bordered box components: accounts for margins and caps at 100
+  const mainAreaWidth = Math.min(terminalWidth - 4, 100);
   const staticAreaMaxItemHeight = Math.max(terminalHeight * 4, 100);
 
   const isValidPath = useCallback((filePath: string): boolean => {
@@ -1404,6 +1405,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const uiActions: UIActions = useMemo(
     () => ({
+      openThemeDialog,
+      openEditorDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -1445,6 +1448,8 @@ export const AppContainer = (props: AppContainerProps) => {
       submitFeedback,
     }),
     [
+      openThemeDialog,
+      openEditorDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,

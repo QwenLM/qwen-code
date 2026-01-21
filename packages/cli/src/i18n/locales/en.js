@@ -33,6 +33,25 @@ export default {
   'Model Context Protocol command (from external servers)':
     'Model Context Protocol command (from external servers)',
   'Keyboard Shortcuts:': 'Keyboard Shortcuts:',
+  'Toggle this help display': 'Toggle this help display',
+  'Toggle shell mode': 'Toggle shell mode',
+  'Open command menu': 'Open command menu',
+  'Add file context': 'Add file context',
+  'Accept suggestion / Autocomplete': 'Accept suggestion / Autocomplete',
+  'Reverse search history': 'Reverse search history',
+  'Press ? again to close': 'Press ? again to close',
+  // Keyboard shortcuts panel descriptions
+  'for shell mode': 'for shell mode',
+  'for commands': 'for commands',
+  'for file paths': 'for file paths',
+  'to clear input': 'to clear input',
+  'to cycle approvals': 'to cycle approvals',
+  'to quit': 'to quit',
+  'for newline': 'for newline',
+  'to clear screen': 'to clear screen',
+  'to search history': 'to search history',
+  'to paste images': 'to paste images',
+  'for external editor': 'for external editor',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -46,6 +65,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
+  '? for shortcuts': '? for shortcuts',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':
@@ -59,10 +79,15 @@ export default {
   'show version info': 'show version info',
   'submit a bug report': 'submit a bug report',
   'About Qwen Code': 'About Qwen Code',
+  Status: 'Status',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: 'Runtime',
+  OS: 'OS',
+  Auth: 'Auth',
   'CLI Version': 'CLI Version',
   'Git Commit': 'Git Commit',
   Model: 'Model',
@@ -75,6 +100,7 @@ export default {
   'Session ID': 'Session ID',
   'Auth Method': 'Auth Method',
   'Base URL': 'Base URL',
+  Proxy: 'Proxy',
   'Memory Usage': 'Memory Usage',
   'IDE Client': 'IDE Client',
 
@@ -98,8 +124,8 @@ export default {
   Preview: 'Preview',
   '(Use Enter to select, Tab to configure scope)':
     '(Use Enter to select, Tab to configure scope)',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '(Use Enter to apply scope, Tab to select theme)',
+  '(Use Enter to apply scope, Tab to go back)':
+    '(Use Enter to apply scope, Tab to go back)',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     'Theme configuration unavailable due to NO_COLOR env variable.',
   'Theme "{{themeName}}" not found.': 'Theme "{{themeName}}" not found.',
@@ -257,8 +283,6 @@ export default {
   // ============================================================================
   'View and edit Qwen Code settings': 'View and edit Qwen Code settings',
   Settings: 'Settings',
-  '(Use Enter to select{{tabText}})': '(Use Enter to select{{tabText}})',
-  ', Tab to change focus': ', Tab to change focus',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -268,24 +292,24 @@ export default {
   // ============================================================================
   'Vim Mode': 'Vim Mode',
   'Disable Auto Update': 'Disable Auto Update',
+  'Attribution: commit': 'Attribution: commit',
+  'Terminal Bell Notification': 'Terminal Bell Notification',
+  'Enable Usage Statistics': 'Enable Usage Statistics',
+  Theme: 'Theme',
+  'Preferred Editor': 'Preferred Editor',
+  'Auto-connect to IDE': 'Auto-connect to IDE',
   'Enable Prompt Completion': 'Enable Prompt Completion',
   'Debug Keystroke Logging': 'Debug Keystroke Logging',
-  Language: 'Language',
+  'Language: UI': 'Language: UI',
+  'Language: Model': 'Language: Model',
   'Output Format': 'Output Format',
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
-  'Hide Banner': 'Hide Banner',
-  'Hide Context Summary': 'Hide Context Summary',
-  'Hide CWD': 'Hide CWD',
-  'Hide Sandbox Status': 'Hide Sandbox Status',
-  'Hide Model Info': 'Hide Model Info',
-  'Hide Footer': 'Hide Footer',
-  'Show Memory Usage': 'Show Memory Usage',
-  'Show Line Numbers': 'Show Line Numbers',
+  'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
-  'Enable Welcome Back': 'Enable Welcome Back',
+  'Show Welcome Back Dialog': 'Show Welcome Back Dialog',
   'Enable User Feedback': 'Enable User Feedback',
   'How is Qwen doing this session? (optional)':
     'How is Qwen doing this session? (optional)',
@@ -312,7 +336,7 @@ export default {
   'Respect .qwenignore': 'Respect .qwenignore',
   'Enable Recursive File Search': 'Enable Recursive File Search',
   'Disable Fuzzy Search': 'Disable Fuzzy Search',
-  'Enable Interactive Shell': 'Enable Interactive Shell',
+  'Interactive Shell (PTY)': 'Interactive Shell (PTY)',
   'Show Color': 'Show Color',
   'Auto Accept': 'Auto Accept',
   'Use Ripgrep': 'Use Ripgrep',
@@ -323,6 +347,7 @@ export default {
   'Folder Trust': 'Folder Trust',
   'Vision Model Preview': 'Vision Model Preview',
   'Tool Schema Compliance': 'Tool Schema Compliance',
+  'Experimental: Skills': 'Experimental: Skills',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
   Text: 'Text',
@@ -347,6 +372,11 @@ export default {
   'Show all directories in the workspace':
     'Show all directories in the workspace',
   'set external editor preference': 'set external editor preference',
+  'Select Editor': 'Select Editor',
+  'Editor Preference': 'Editor Preference',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.',
+  'Your preferred editor is:': 'Your preferred editor is:',
   'Manage extensions': 'Manage extensions',
   'List active extensions': 'List active extensions',
   'Update extensions. Usage: update <extension-names>|--all':
@@ -413,6 +443,7 @@ export default {
   'Example: /language output English': 'Example: /language output English',
   'Example: /language output 日本語': 'Example: /language output 日本語',
   'UI language changed to {{lang}}': 'UI language changed to {{lang}}',
+  'LLM output language set to {{lang}}': 'LLM output language set to {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'LLM output language rule file generated at {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -434,7 +465,7 @@ export default {
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
-  'Approval Mode': 'Approval Mode',
+  'Tool Approval Mode': 'Tool Approval Mode',
   'Current approval mode: {{mode}}': 'Current approval mode: {{mode}}',
   'Available approval modes:': 'Available approval modes:',
   'Approval mode changed to: {{mode}}': 'Approval mode changed to: {{mode}}',
@@ -473,8 +504,6 @@ export default {
   'Automatically approve all tools': 'Automatically approve all tools',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
-  '(Use Enter to select, Tab to change focus)':
-    '(Use Enter to select, Tab to change focus)',
   'Apply To': 'Apply To',
   'User Settings': 'User Settings',
   'Workspace Settings': 'Workspace Settings',
@@ -898,14 +927,23 @@ export default {
   // ============================================================================
   // Startup Tips
   // ============================================================================
-  'Tips for getting started:': 'Tips for getting started:',
-  '1. Ask questions, edit files, or run commands.':
-    '1. Ask questions, edit files, or run commands.',
-  '2. Be specific for the best results.':
-    '2. Be specific for the best results.',
-  'files to customize your interactions with Qwen Code.':
-    'files to customize your interactions with Qwen Code.',
-  'for more information.': 'for more information.',
+  'Tips:': 'Tips:',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Use /compress when the conversation gets long to summarize history and free up context.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Start a fresh idea with /clear or /new; the previous session stays available in history.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Use /bug to submit issues to the maintainers when something goes off.',
+  'Switch auth type quickly with /auth.':
+    'Switch auth type quickly with /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'You can resume a previous conversation by running qwen --continue or qwen --resume.',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
 
   // ============================================================================
   // Exit Screen / Stats

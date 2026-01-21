@@ -294,10 +294,7 @@ describe('AppContainer State Management', () => {
     // Mock LoadedSettings
     mockSettings = {
       merged: {
-        hideBanner: false,
-        hideFooter: false,
         hideTips: false,
-        showMemoryUsage: false,
         theme: 'default',
         ui: {
           showStatusInTitle: false,
@@ -445,10 +442,7 @@ describe('AppContainer State Management', () => {
     it('handles settings with all display options disabled', () => {
       const settingsAllHidden = {
         merged: {
-          hideBanner: true,
-          hideFooter: true,
           hideTips: true,
-          showMemoryUsage: false,
         },
       } as unknown as LoadedSettings;
 
@@ -457,28 +451,6 @@ describe('AppContainer State Management', () => {
           <AppContainer
             config={mockConfig}
             settings={settingsAllHidden}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
-    });
-
-    it('handles settings with memory usage enabled', () => {
-      const settingsWithMemory = {
-        merged: {
-          hideBanner: false,
-          hideFooter: false,
-          hideTips: false,
-          showMemoryUsage: true,
-        },
-      } as unknown as LoadedSettings;
-
-      expect(() => {
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={settingsWithMemory}
             version="1.0.0"
             initializationResult={mockInitResult}
           />,

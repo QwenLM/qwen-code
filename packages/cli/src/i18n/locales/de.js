@@ -60,10 +60,15 @@ export default {
   'show version info': 'Versionsinformationen anzeigen',
   'submit a bug report': 'Fehlerbericht einreichen',
   'About Qwen Code': 'Über Qwen Code',
+  Status: 'Status',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: 'Laufzeit',
+  OS: 'Betriebssystem',
+  Auth: 'Authentifizierung',
   'CLI Version': 'CLI-Version',
   'Git Commit': 'Git-Commit',
   Model: 'Modell',
@@ -76,6 +81,7 @@ export default {
   'Session ID': 'Sitzungs-ID',
   'Auth Method': 'Authentifizierungsmethode',
   'Base URL': 'Basis-URL',
+  Proxy: 'Proxy',
   'Memory Usage': 'Speichernutzung',
   'IDE Client': 'IDE-Client',
 
@@ -97,8 +103,8 @@ export default {
   Preview: 'Vorschau',
   '(Use Enter to select, Tab to configure scope)':
     '(Enter zum Auswählen, Tab zum Konfigurieren des Bereichs)',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '(Enter zum Anwenden des Bereichs, Tab zum Auswählen des Designs)',
+  '(Use Enter to apply scope, Tab to go back)':
+    '(Enter zum Anwenden des Bereichs, Tab zum Zurückgehen)',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     'Design-Konfiguration aufgrund der NO_COLOR-Umgebungsvariable nicht verfügbar.',
   'Theme "{{themeName}}" not found.': 'Design "{{themeName}}" nicht gefunden.',
@@ -260,8 +266,6 @@ export default {
   'View and edit Qwen Code settings':
     'Qwen Code Einstellungen anzeigen und bearbeiten',
   Settings: 'Einstellungen',
-  '(Use Enter to select{{tabText}})': '(Enter zum Auswählen{{tabText}})',
-  ', Tab to change focus': ', Tab zum Fokuswechsel',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     'Um Änderungen zu sehen, muss Qwen Code neu gestartet werden. Drücken Sie r, um jetzt zu beenden und Änderungen anzuwenden.',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -271,24 +275,24 @@ export default {
   // ============================================================================
   'Vim Mode': 'Vim-Modus',
   'Disable Auto Update': 'Automatische Updates deaktivieren',
+  'Attribution: commit': 'Attribution: Commit',
+  'Terminal Bell Notification': 'Terminal-Signalton',
+  'Enable Usage Statistics': 'Nutzungsstatistiken aktivieren',
+  Theme: 'Farbschema',
+  'Preferred Editor': 'Bevorzugter Editor',
+  'Auto-connect to IDE': 'Automatische Verbindung zur IDE',
   'Enable Prompt Completion': 'Eingabevervollständigung aktivieren',
   'Debug Keystroke Logging': 'Debug-Protokollierung von Tastatureingaben',
-  Language: 'Sprache',
+  'Language: UI': 'Sprache: Benutzeroberfläche',
+  'Language: Model': 'Sprache: Modell',
   'Output Format': 'Ausgabeformat',
   'Hide Window Title': 'Fenstertitel ausblenden',
   'Show Status in Title': 'Status im Titel anzeigen',
   'Hide Tips': 'Tipps ausblenden',
-  'Hide Banner': 'Banner ausblenden',
-  'Hide Context Summary': 'Kontextzusammenfassung ausblenden',
-  'Hide CWD': 'Arbeitsverzeichnis ausblenden',
-  'Hide Sandbox Status': 'Sandbox-Status ausblenden',
-  'Hide Model Info': 'Modellinformationen ausblenden',
-  'Hide Footer': 'Fußzeile ausblenden',
-  'Show Memory Usage': 'Speichernutzung anzeigen',
-  'Show Line Numbers': 'Zeilennummern anzeigen',
+  'Show Line Numbers in Code': 'Zeilennummern im Code anzeigen',
   'Show Citations': 'Quellenangaben anzeigen',
   'Custom Witty Phrases': 'Benutzerdefinierte Witzige Sprüche',
-  'Enable Welcome Back': 'Willkommen-zurück aktivieren',
+  'Show Welcome Back Dialog': 'Willkommen-zurück-Dialog anzeigen',
   'Enable User Feedback': 'Benutzerfeedback aktivieren',
   'How is Qwen doing this session? (optional)':
     'Wie macht sich Qwen in dieser Sitzung? (optional)',
@@ -315,7 +319,7 @@ export default {
   'Respect .qwenignore': '.qwenignore beachten',
   'Enable Recursive File Search': 'Rekursive Dateisuche aktivieren',
   'Disable Fuzzy Search': 'Unscharfe Suche deaktivieren',
-  'Enable Interactive Shell': 'Interaktive Shell aktivieren',
+  'Interactive Shell (PTY)': 'Interaktive Shell (PTY)',
   'Show Color': 'Farbe anzeigen',
   'Auto Accept': 'Automatisch akzeptieren',
   'Use Ripgrep': 'Ripgrep verwenden',
@@ -327,6 +331,7 @@ export default {
   'Folder Trust': 'Ordnervertrauen',
   'Vision Model Preview': 'Vision-Modell-Vorschau',
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
+  'Experimental: Skills': 'Experimentell: Fähigkeiten',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   Text: 'Text',
@@ -351,6 +356,11 @@ export default {
   'Show all directories in the workspace':
     'Alle Verzeichnisse im Arbeitsbereich anzeigen',
   'set external editor preference': 'Externen Editor festlegen',
+  'Select Editor': 'Editor auswählen',
+  'Editor Preference': 'Editor-Einstellung',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    'Diese Editoren werden derzeit unterstützt. Bitte beachten Sie, dass einige Editoren nicht im Sandbox-Modus verwendet werden können.',
+  'Your preferred editor is:': 'Ihr bevorzugter Editor ist:',
   'Manage extensions': 'Erweiterungen verwalten',
   'List active extensions': 'Aktive Erweiterungen auflisten',
   'Update extensions. Usage: update <extension-names>|--all':
@@ -419,6 +429,8 @@ export default {
   'Example: /language output English': 'Beispiel: /language output English',
   'Example: /language output 日本語': 'Beispiel: /language output Japanisch',
   'UI language changed to {{lang}}': 'UI-Sprache geändert zu {{lang}}',
+  'LLM output language set to {{lang}}':
+    'LLM-Ausgabesprache auf {{lang}} gesetzt',
   'LLM output language rule file generated at {{path}}':
     'LLM-Ausgabesprach-Regeldatei generiert unter {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -441,7 +453,7 @@ export default {
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
-  'Approval Mode': 'Genehmigungsmodus',
+  'Tool Approval Mode': 'Werkzeug-Genehmigungsmodus',
   'Current approval mode: {{mode}}': 'Aktueller Genehmigungsmodus: {{mode}}',
   'Available approval modes:': 'Verfügbare Genehmigungsmodi:',
   'Approval mode changed to: {{mode}}':
@@ -483,8 +495,6 @@ export default {
   'Automatically approve all tools': 'Alle Werkzeuge automatisch genehmigen',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',
-  '(Use Enter to select, Tab to change focus)':
-    '(Enter zum Auswählen, Tab zum Fokuswechsel)',
   'Apply To': 'Anwenden auf',
   'User Settings': 'Benutzereinstellungen',
   'Workspace Settings': 'Arbeitsbereich-Einstellungen',

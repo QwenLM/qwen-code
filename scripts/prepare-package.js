@@ -98,17 +98,6 @@ console.log('Creating package.json for distribution...');
 const rootPackageJson = JSON.parse(
   fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
 );
-const corePackageJson = JSON.parse(
-  fs.readFileSync(
-    path.join(rootDir, 'packages', 'core', 'package.json'),
-    'utf-8',
-  ),
-);
-
-const runtimeDependencies = {};
-if (corePackageJson.dependencies?.tiktoken) {
-  runtimeDependencies.tiktoken = corePackageJson.dependencies.tiktoken;
-}
 
 // Create a clean package.json for the published package
 const distPackageJson = {
@@ -124,7 +113,7 @@ const distPackageJson = {
   },
   files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE', 'locales'],
   config: rootPackageJson.config,
-  dependencies: runtimeDependencies,
+  dependencies: {},
   optionalDependencies: {
     '@lydell/node-pty': '1.1.0',
     '@lydell/node-pty-darwin-arm64': '1.1.0',

@@ -14,10 +14,12 @@ import { t } from '../../i18n/index.js';
 
 interface SessionSummaryDisplayProps {
   duration: string;
+  width: number;
 }
 
 export const SessionSummaryDisplay: React.FC<SessionSummaryDisplayProps> = ({
   duration,
+  width,
 }) => {
   const config = useConfig();
   const { stats } = useSessionStats();
@@ -32,6 +34,7 @@ export const SessionSummaryDisplay: React.FC<SessionSummaryDisplayProps> = ({
       <StatsDisplay
         title={t('Agent powering down. Goodbye!')}
         duration={duration}
+        width={width}
       />
       {hasMessages && canResume && (
         <Box marginTop={1}>

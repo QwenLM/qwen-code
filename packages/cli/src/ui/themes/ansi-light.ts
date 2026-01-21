@@ -18,6 +18,8 @@ const ansiLightColors: ColorsTheme = {
   AccentGreen: 'green',
   AccentYellow: 'orange',
   AccentRed: 'red',
+  AccentYellowDim: 'orange',
+  AccentRedDim: 'red',
   DiffAdded: '#E5F2E5',
   DiffRemoved: '#FFE5E5',
   Comment: 'gray',

@@ -291,9 +291,10 @@ export async function start_sandbox(
           sandboxEnv['NO_PROXY'] = noProxy;
           sandboxEnv['no_proxy'] = noProxy;
         }
-        proxyProcess = spawn(proxyCommand, {
+        // Note: CodeQL flags this as js/shell-command-injection-from-environment.
+        // This is intentional - CLI tool executes user-provided proxy commands.
+        proxyProcess = spawn('bash', ['-c', proxyCommand], {
           stdio: ['ignore', 'pipe', 'pipe'],
-          shell: true,
           detached: true,
         });
         // install handlers to stop proxy on exit/signal
@@ -781,9 +782,15 @@ export async function start_sandbox(
     if (proxyCommand) {
       // run proxyCommand in its own container
       const proxyContainerCommand = `${config.command} run --rm --init ${userFlag} --name ${SANDBOX_PROXY_NAME} --network ${SANDBOX_PROXY_NAME} -p 8877:8877 -v ${process.cwd()}:${workdir} --workdir ${workdir} ${image} ${proxyCommand}`;
-      proxyProcess = spawn(proxyContainerCommand, {
+      const isWindows = os.platform() === 'win32';
+      const proxyShell = isWindows ? 'cmd.exe' : 'bash';
+      const proxyShellArgs = isWindows
+        ? ['/c', proxyContainerCommand]
+        : ['-c', proxyContainerCommand];
+      // Note: CodeQL flags this as js/shell-command-injection-from-environment.
+      // This is intentional - CLI tool executes user-provided proxy commands in container.
+      proxyProcess = spawn(proxyShell, proxyShellArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: true,
         detached: true,
       });
       // install handlers to stop proxy on exit/signal

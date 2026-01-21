@@ -152,12 +152,38 @@ export const DialogManager = ({
       </Box>
     );
   }
+  if (uiState.isEditorDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        {uiState.editorError && (
+          <Box marginBottom={1}>
+            <Text color={theme.status.error}>{uiState.editorError}</Text>
+          </Box>
+        )}
+        <EditorSettingsDialog
+          onSelect={uiActions.handleEditorSelect}
+          settings={settings}
+          onExit={uiActions.exitEditorDialog}
+        />
+      </Box>
+    );
+  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
         <SettingsDialog
           settings={settings}
-          onSelect={() => uiActions.closeSettingsDialog()}
+          onSelect={(settingName) => {
+            if (settingName === 'ui.theme') {
+              uiActions.openThemeDialog();
+              return;
+            }
+            if (settingName === 'general.preferredEditor') {
+              uiActions.openEditorDialog();
+              return;
+            }
+            uiActions.closeSettingsDialog();
+          }}
           onRestartRequest={() => process.exit(0)}
           availableTerminalHeight={terminalHeight - staticExtraHeight}
           config={config}
@@ -236,22 +262,6 @@ export const DialogManager = ({
         />
       );
     }
-  }
-  if (uiState.isEditorDialogOpen) {
-    return (
-      <Box flexDirection="column">
-        {uiState.editorError && (
-          <Box marginBottom={1}>
-            <Text color={theme.status.error}>{uiState.editorError}</Text>
-          </Box>
-        )}
-        <EditorSettingsDialog
-          onSelect={uiActions.handleEditorSelect}
-          settings={settings}
-          onExit={uiActions.exitEditorDialog}
-        />
-      </Box>
-    );
   }
   if (uiState.isPermissionsDialogOpen) {
     return (

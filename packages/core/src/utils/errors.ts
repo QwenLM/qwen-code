@@ -14,6 +14,28 @@ export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
 
+/**
+ * Check if the error is an abort error (user cancellation).
+ * This handles both DOMException-style AbortError and Node.js abort errors.
+ */
+export function isAbortError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') {
+    return false;
+  }
+
+  // Check for AbortError by name (standard DOMException and custom AbortError)
+  if (error instanceof Error && error.name === 'AbortError') {
+    return true;
+  }
+
+  // Check for Node.js abort error code
+  if (isNodeError(error) && error.code === 'ABORT_ERR') {
+    return true;
+  }
+
+  return false;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;

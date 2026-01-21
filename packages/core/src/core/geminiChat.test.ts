@@ -708,7 +708,7 @@ describe('GeminiChat', () => {
 
       // Verify that token counting is called when usageMetadata is present
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
-        42,
+        57,
       );
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,

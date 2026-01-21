@@ -2260,7 +2260,7 @@ describe('Settings Loading and Merging', () => {
           disableAutoUpdate: true,
         },
         ui: {
-          hideBanner: true,
+          hideTips: true,
           customThemes: {
             myTheme: {},
           },
@@ -2283,7 +2283,7 @@ describe('Settings Loading and Merging', () => {
       const v1Settings = migrateSettingsToV1(v2Settings);
       expect(v1Settings).toEqual({
         disableAutoUpdate: true,
-        hideBanner: true,
+        hideTips: true,
         customThemes: {
           myTheme: {},
         },

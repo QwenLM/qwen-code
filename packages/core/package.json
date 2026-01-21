@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -63,7 +63,6 @@
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",
     "strip-ansi": "^7.1.0",
-    "tiktoken": "^1.0.21",
     "undici": "^6.22.0",
     "uuid": "^9.0.1",
     "ws": "^8.18.0"

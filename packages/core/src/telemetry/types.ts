@@ -439,17 +439,27 @@ export interface ChatCompressionEvent extends BaseTelemetryEvent {
   'event.timestamp': string;
   tokens_before: number;
   tokens_after: number;
+  compression_input_token_count?: number;
+  compression_output_token_count?: number;
 }
 
 export function makeChatCompressionEvent({
   tokens_before,
   tokens_after,
+  compression_input_token_count,
+  compression_output_token_count,
 }: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
   return {
     'event.name': 'chat_compression',
     'event.timestamp': new Date().toISOString(),
     tokens_before,
     tokens_after,
+    ...(compression_input_token_count !== undefined
+      ? { compression_input_token_count }
+      : {}),
+    ...(compression_output_token_count !== undefined
+      ? { compression_output_token_count }
+      : {}),
   };
 }
 

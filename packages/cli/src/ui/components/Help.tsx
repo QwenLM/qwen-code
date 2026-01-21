@@ -12,15 +12,16 @@ import { t } from '../../i18n/index.js';
 
 interface Help {
   commands: readonly SlashCommand[];
+  width?: number;
 }
 
-export const Help: React.FC<Help> = ({ commands }) => (
+export const Help: React.FC<Help> = ({ commands, width }) => (
   <Box
     flexDirection="column"
-    marginBottom={1}
     borderColor={theme.border.default}
     borderStyle="round"
     padding={1}
+    width={width}
   >
     {/* Basics */}
     <Text bold color={theme.text.primary}>

@@ -25,7 +25,7 @@ type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
-import { getDefaultTokenizer } from '../../utils/request-tokenizer/index.js';
+import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 
@@ -105,10 +105,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
     try {
-      const tokenizer = getDefaultTokenizer();
-      const result = await tokenizer.calculateTokens(request, {
-        textEncoding: 'cl100k_base',
-      });
+      const estimator = new RequestTokenEstimator();
+      const result = await estimator.calculateTokens(request);
 
       return {
         totalTokens: result.totalTokens,

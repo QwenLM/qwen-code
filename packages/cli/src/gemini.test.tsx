@@ -456,7 +456,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       promptInteractive: undefined,
       query: undefined,
       allFiles: undefined,
-      showMemoryUsage: undefined,
       yolo: undefined,
       approvalMode: undefined,
       telemetry: undefined,

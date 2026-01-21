@@ -23,7 +23,7 @@ export const InfoMessage: React.FC<InfoMessageProps> = ({ text }) => {
   const prefixWidth = prefix.length;
 
   return (
-    <Box flexDirection="row" marginBottom={1}>
+    <Box flexDirection="row">
       <Box width={prefixWidth}>
         <Text color={theme.status.warning}>{prefix}</Text>
       </Box>

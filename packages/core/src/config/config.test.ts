@@ -157,6 +157,25 @@ vi.mock('../services/gitService.js', () => {
   return { GitService: GitServiceMock };
 });
 
+vi.mock('../skills/skill-manager.js', () => {
+  const SkillManagerMock = vi.fn();
+  SkillManagerMock.prototype.startWatching = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.stopWatching = vi.fn();
+  return { SkillManager: SkillManagerMock };
+});
+
+vi.mock('../subagents/subagent-manager.js', () => {
+  const SubagentManagerMock = vi.fn();
+  SubagentManagerMock.prototype.loadSessionSubagents = vi.fn();
+  SubagentManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  return { SubagentManager: SubagentManagerMock };
+});
+
 vi.mock('../ide/ide-client.js', () => ({
   IdeClient: {
     getInstance: vi.fn().mockResolvedValue({

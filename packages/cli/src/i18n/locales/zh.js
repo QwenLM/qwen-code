@@ -32,6 +32,25 @@ export default {
   'Model Context Protocol command (from external servers)':
     '模型上下文协议命令（来自外部服务器）',
   'Keyboard Shortcuts:': '键盘快捷键：',
+  'Toggle this help display': '切换此帮助显示',
+  'Toggle shell mode': '切换命令行模式',
+  'Open command menu': '打开命令菜单',
+  'Add file context': '添加文件上下文',
+  'Accept suggestion / Autocomplete': '接受建议 / 自动补全',
+  'Reverse search history': '反向搜索历史',
+  'Press ? again to close': '再次按 ? 关闭',
+  // Keyboard shortcuts panel descriptions
+  'for shell mode': '命令行模式',
+  'for commands': '命令菜单',
+  'for file paths': '文件路径',
+  'to clear input': '清空输入',
+  'to cycle approvals': '切换审批模式',
+  'to quit': '退出',
+  'for newline': '换行',
+  'to clear screen': '清屏',
+  'to search history': '搜索历史',
+  'to paste images': '粘贴图片',
+  'for external editor': '外部编辑器',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -45,6 +64,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
+  '? for shortcuts': '按 ? 查看快捷键',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
   'Cancel operation / Clear input (double press)':
@@ -58,10 +78,15 @@ export default {
   'show version info': '显示版本信息',
   'submit a bug report': '提交错误报告',
   'About Qwen Code': '关于 Qwen Code',
+  Status: '状态',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: '运行环境',
+  OS: '操作系统',
+  Auth: '认证',
   'CLI Version': 'CLI 版本',
   'Git Commit': 'Git 提交',
   Model: '模型',
@@ -74,6 +99,7 @@ export default {
   'Session ID': '会话 ID',
   'Auth Method': '认证方式',
   'Base URL': '基础 URL',
+  Proxy: '代理',
   'Memory Usage': '内存使用',
   'IDE Client': 'IDE 客户端',
 
@@ -97,8 +123,8 @@ export default {
   Preview: '预览',
   '(Use Enter to select, Tab to configure scope)':
     '（使用 Enter 选择，Tab 配置作用域）',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '（使用 Enter 应用作用域，Tab 选择主题）',
+  '(Use Enter to apply scope, Tab to go back)':
+    '（使用 Enter 应用作用域，Tab 返回）',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     '由于 NO_COLOR 环境变量，主题配置不可用。',
   'Theme "{{themeName}}" not found.': '未找到主题 "{{themeName}}"。',
@@ -248,8 +274,6 @@ export default {
   // ============================================================================
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
-  '(Use Enter to select{{tabText}})': '（使用 Enter 选择{{tabText}}）',
-  ', Tab to change focus': '，Tab 切换焦点',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必须重启 Qwen Code。按 r 退出并立即应用更改。',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -259,24 +283,24 @@ export default {
   // ============================================================================
   'Vim Mode': 'Vim 模式',
   'Disable Auto Update': '禁用自动更新',
+  'Attribution: commit': '署名：提交',
+  'Terminal Bell Notification': '终端响铃通知',
+  'Enable Usage Statistics': '启用使用统计',
+  Theme: '主题',
+  'Preferred Editor': '首选编辑器',
+  'Auto-connect to IDE': '自动连接到 IDE',
   'Enable Prompt Completion': '启用提示补全',
   'Debug Keystroke Logging': '调试按键记录',
-  Language: '语言',
+  'Language: UI': '语言：界面',
+  'Language: Model': '语言：模型',
   'Output Format': '输出格式',
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
   'Hide Tips': '隐藏提示',
-  'Hide Banner': '隐藏横幅',
-  'Hide Context Summary': '隐藏上下文摘要',
-  'Hide CWD': '隐藏当前工作目录',
-  'Hide Sandbox Status': '隐藏沙箱状态',
-  'Hide Model Info': '隐藏模型信息',
-  'Hide Footer': '隐藏页脚',
-  'Show Memory Usage': '显示内存使用',
-  'Show Line Numbers': '显示行号',
+  'Show Line Numbers in Code': '在代码中显示行号',
   'Show Citations': '显示引用',
   'Custom Witty Phrases': '自定义诙谐短语',
-  'Enable Welcome Back': '启用欢迎回来',
+  'Show Welcome Back Dialog': '显示欢迎回来对话框',
   'Enable User Feedback': '启用用户反馈',
   'How is Qwen doing this session? (optional)': 'Qwen 这次表现如何？（可选）',
   Bad: '不满意',
@@ -301,7 +325,7 @@ export default {
   'Respect .qwenignore': '遵守 .qwenignore',
   'Enable Recursive File Search': '启用递归文件搜索',
   'Disable Fuzzy Search': '禁用模糊搜索',
-  'Enable Interactive Shell': '启用交互式 Shell',
+  'Interactive Shell (PTY)': '交互式 Shell (PTY)',
   'Show Color': '显示颜色',
   'Auto Accept': '自动接受',
   'Use Ripgrep': '使用 Ripgrep',
@@ -312,6 +336,7 @@ export default {
   'Folder Trust': '文件夹信任',
   'Vision Model Preview': '视觉模型预览',
   'Tool Schema Compliance': '工具 Schema 兼容性',
+  'Experimental: Skills': '实验性: 技能',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   Text: '文本',
@@ -333,6 +358,11 @@ export default {
     '将目录添加到工作区。使用逗号分隔多个路径',
   'Show all directories in the workspace': '显示工作区中的所有目录',
   'set external editor preference': '设置外部编辑器首选项',
+  'Select Editor': '选择编辑器',
+  'Editor Preference': '编辑器首选项',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    '当前支持以下编辑器。请注意，某些编辑器无法在沙箱模式下使用。',
+  'Your preferred editor is:': '您的首选编辑器是：',
   'Manage extensions': '管理扩展',
   'List active extensions': '列出活动扩展',
   'Update extensions. Usage: update <extension-names>|--all':
@@ -396,6 +426,7 @@ export default {
   'Example: /language output English': '示例：/language output English',
   'Example: /language output 日本語': '示例：/language output 日本語',
   'UI language changed to {{lang}}': 'UI 语言已更改为 {{lang}}',
+  'LLM output language set to {{lang}}': 'LLM 输出语言已设置为 {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'LLM 输出语言规则文件已生成于 {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -416,7 +447,7 @@ export default {
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
-  'Approval Mode': '审批模式',
+  'Tool Approval Mode': '工具审批模式',
   'Current approval mode: {{mode}}': '当前审批模式：{{mode}}',
   'Available approval modes:': '可用的审批模式：',
   'Approval mode changed to: {{mode}}': '审批模式已更改为：{{mode}}',
@@ -450,8 +481,6 @@ export default {
   'Automatically approve all tools': '自动批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
-  '(Use Enter to select, Tab to change focus)':
-    '（使用 Enter 选择，Tab 切换焦点）',
   'Apply To': '应用于',
   'User Settings': '用户设置',
   'Workspace Settings': '工作区设置',
@@ -851,13 +880,22 @@ export default {
   // ============================================================================
   // Startup Tips
   // ============================================================================
-  'Tips for getting started:': '入门提示：',
-  '1. Ask questions, edit files, or run commands.':
-    '1. 提问、编辑文件或运行命令',
-  '2. Be specific for the best results.': '2. 具体描述以获得最佳结果',
-  'files to customize your interactions with Qwen Code.':
-    '文件以自定义您与 Qwen Code 的交互',
-  'for more information.': '获取更多信息',
+  'Tips:': '提示：',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    '对话变长时用 /compress，总结历史并释放上下文。',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    '用 /clear 或 /new 开启新思路；之前的会话会保留在历史记录中。',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    '遇到问题时，用 /bug 将问题提交给维护者。',
+  'Switch auth type quickly with /auth.': '用 /auth 快速切换认证方式。',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    '在 Qwen Code 中使用 ! 可运行任意 shell 命令（例如 !ls）。',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    '输入 / 打开命令弹窗；按 Tab 自动补全斜杠命令和保存的提示词。',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    '运行 qwen --continue 或 qwen --resume 可继续之前的会话。',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    '按 Shift+Tab 或输入 /approval-mode 可快速切换权限模式。',
 
   // ============================================================================
   // Exit Screen / Stats

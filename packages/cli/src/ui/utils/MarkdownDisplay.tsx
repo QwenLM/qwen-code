@@ -16,7 +16,7 @@ interface MarkdownDisplayProps {
   text: string;
   isPending: boolean;
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
   textColor?: string;
 }
 
@@ -31,7 +31,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   text,
   isPending,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
   textColor = theme.text.primary,
 }) => {
   if (!text) return <></>;
@@ -79,7 +79,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             lang={codeBlockLang}
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
-            terminalWidth={terminalWidth}
+            contentWidth={contentWidth}
           />,
         );
         inCodeBlock = false;
@@ -144,7 +144,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             key={`table-${contentBlocks.length}`}
             headers={tableHeaders}
             rows={tableRows}
-            terminalWidth={terminalWidth}
+            contentWidth={contentWidth}
           />,
         );
       }
@@ -266,7 +266,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         lang={codeBlockLang}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
-        terminalWidth={terminalWidth}
+        contentWidth={contentWidth}
       />,
     );
   }
@@ -278,7 +278,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         key={`table-${contentBlocks.length}`}
         headers={tableHeaders}
         rows={tableRows}
-        terminalWidth={terminalWidth}
+        contentWidth={contentWidth}
       />,
     );
   }
@@ -293,7 +293,7 @@ interface RenderCodeBlockProps {
   lang: string | null;
   isPending: boolean;
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
 }
 
 const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
@@ -301,7 +301,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   lang,
   isPending,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
 }) => {
   const settings = useSettings();
   const MIN_LINES_FOR_MESSAGE = 1; // Minimum lines to show before the "generating more" message
@@ -329,7 +329,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         truncatedContent.join('\n'),
         lang,
         availableTerminalHeight,
-        terminalWidth - CODE_BLOCK_PREFIX_PADDING,
+        contentWidth - CODE_BLOCK_PREFIX_PADDING,
         undefined,
         settings,
       );
@@ -347,7 +347,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     fullContent,
     lang,
     availableTerminalHeight,
-    terminalWidth - CODE_BLOCK_PREFIX_PADDING,
+    contentWidth - CODE_BLOCK_PREFIX_PADDING,
     undefined,
     settings,
   );
@@ -356,7 +356,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     <Box
       paddingLeft={CODE_BLOCK_PREFIX_PADDING}
       flexDirection="column"
-      width={terminalWidth}
+      width={contentWidth}
       flexShrink={0}
     >
       {colorizedCode}
@@ -407,15 +407,15 @@ const RenderListItem = React.memo(RenderListItemInternal);
 interface RenderTableProps {
   headers: string[];
   rows: string[][];
-  terminalWidth: number;
+  contentWidth: number;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
   headers,
   rows,
-  terminalWidth,
+  contentWidth,
 }) => (
-  <TableRenderer headers={headers} rows={rows} terminalWidth={terminalWidth} />
+  <TableRenderer headers={headers} rows={rows} contentWidth={contentWidth} />
 );
 
 const RenderTable = React.memo(RenderTableInternal);

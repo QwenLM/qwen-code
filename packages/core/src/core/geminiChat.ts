@@ -529,10 +529,10 @@ export class GeminiChat {
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
         usageMetadata = chunk.usageMetadata;
-        if (chunk.usageMetadata.promptTokenCount !== undefined) {
-          uiTelemetryService.setLastPromptTokenCount(
-            chunk.usageMetadata.promptTokenCount,
-          );
+        const lastPromptTokenCount =
+          usageMetadata.totalTokenCount ?? usageMetadata.promptTokenCount;
+        if (lastPromptTokenCount) {
+          uiTelemetryService.setLastPromptTokenCount(lastPromptTokenCount);
         }
       }
 

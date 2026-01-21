@@ -15,7 +15,7 @@ import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
 import { initializeI18n } from '../i18n/index.js';
-import { initializeLlmOutputLanguage } from '../ui/commands/languageCommand.js';
+import { initializeLlmOutputLanguage } from '../utils/languageUtils.js';
 
 export interface InitializationResult {
   authError: string | null;
@@ -43,7 +43,7 @@ export async function initializeApp(
   await initializeI18n(languageSetting);
 
   // Auto-detect and set LLM output language on first use
-  initializeLlmOutputLanguage();
+  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
 
   // Use authType from modelsConfig which respects CLI --auth-type argument
   // over settings.security.auth.selectedType

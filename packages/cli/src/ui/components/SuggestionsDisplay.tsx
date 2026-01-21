@@ -42,7 +42,7 @@ export function SuggestionsDisplay({
 }: SuggestionsDisplayProps) {
   if (isLoading) {
     return (
-      <Box paddingX={1} width={width}>
+      <Box width={width}>
         <Text color="gray">Loading suggestions...</Text>
       </Box>
     );
@@ -70,7 +70,7 @@ export function SuggestionsDisplay({
     mode === 'slash' ? Math.min(maxLabelLength, Math.floor(width * 0.5)) : 0;
 
   return (
-    <Box flexDirection="column" paddingX={1} width={width}>
+    <Box flexDirection="column" width={width}>
       {scrollOffset > 0 && <Text color={theme.text.primary}>▲</Text>}
 
       {visibleSuggestions.map((suggestion, index) => {
