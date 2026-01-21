@@ -13,19 +13,45 @@ import { execCommand } from '@qwen-code/qwen-code-core';
  * @returns true if clipboard contains an image
  */
 export async function clipboardHasImage(): Promise<boolean> {
-  if (process.platform !== 'darwin') {
-    return false;
+  // Windows implementation
+  if (process.platform === 'win32') {
+    try {
+      const script = `
+        Add-Type -AssemblyName System.Windows.Forms;
+        [System.Windows.Forms.Clipboard]::ContainsImage()
+      `.trim();
+
+      const { stdout } = await execCommand('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        script,
+      ]);
+
+      return stdout.trim() === 'True';
+    } catch {
+      return false;
+    }
   }
 
-  try {
-    // Use osascript to check clipboard type
-    const { stdout } = await execCommand('osascript', ['-e', 'clipboard info']);
-    const imageRegex =
-      /«class PNGf»|TIFF picture|JPEG picture|GIF picture|«class JPEG»|«class TIFF»/;
-    return imageRegex.test(stdout);
-  } catch {
-    return false;
+  // macOS implementation
+  if (process.platform === 'darwin') {
+    try {
+      // Use osascript to check clipboard type
+      const { stdout } = await execCommand('osascript', [
+        '-e',
+        'clipboard info',
+      ]);
+      const imageRegex =
+        /«class PNGf»|TIFF picture|JPEG picture|GIF picture|«class JPEG»|«class TIFF»/;
+      return imageRegex.test(stdout);
+    } catch {
+      return false;
+    }
   }
+
+  // Unsupported platform
+  return false;
 }
 
 /**
@@ -36,10 +62,6 @@ export async function clipboardHasImage(): Promise<boolean> {
 export async function saveClipboardImage(
   targetDir?: string,
 ): Promise<string | null> {
-  if (process.platform !== 'darwin') {
-    return null;
-  }
-
   try {
     // Create a temporary directory for clipboard images within the target directory
     // This avoids security restrictions on paths outside the target directory
@@ -50,59 +72,136 @@ export async function saveClipboardImage(
     // Generate a unique filename with timestamp
     const timestamp = new Date().getTime();
 
-    // Try different image formats in order of preference
-    const formats = [
-      { class: 'PNGf', extension: 'png' },
-      { class: 'JPEG', extension: 'jpg' },
-      { class: 'TIFF', extension: 'tiff' },
-      { class: 'GIFf', extension: 'gif' },
-    ];
+    // Windows implementation
+    if (process.platform === 'win32') {
+      // Try different image formats in order of preference
+      const formats = [
+        { name: 'Png', extension: 'png' },
+        { name: 'Jpeg', extension: 'jpg' },
+        { name: 'Bmp', extension: 'bmp' },
+      ];
 
-    for (const format of formats) {
-      const tempFilePath = path.join(
-        tempDir,
-        `clipboard-${timestamp}.${format.extension}`,
-      );
+      for (const format of formats) {
+        const outputPath = path.join(
+          tempDir,
+          `clipboard-${timestamp}.${format.extension}`,
+        );
 
-      // Try to save clipboard as this format
-      const script = `
-        try
-          set imageData to the clipboard as «class ${format.class}»
-          set fileRef to open for access POSIX file "${tempFilePath}" with write permission
-          write imageData to fileRef
-          close access fileRef
-          return "success"
-        on error errMsg
-          try
-            close access POSIX file "${tempFilePath}"
-          end try
-          return "error"
-        end try
-      `;
+        // Escape backslashes for PowerShell string
+        const escapedPath = outputPath.replace(/\\/g, '\\\\');
 
-      const { stdout } = await execCommand('osascript', ['-e', script]);
+        const script = `
+          try {
+            Add-Type -AssemblyName System.Windows.Forms;
+            Add-Type -AssemblyName System.Drawing;
+            
+            $image = [System.Windows.Forms.Clipboard]::GetImage();
+            
+            if ($null -eq $image) {
+              Write-Output "no_image";
+              exit 1;
+            }
+            
+            $image.Save("${escapedPath}", [System.Drawing.Imaging.ImageFormat]::${format.name});
+            $image.Dispose();
+            Write-Output "success";
+            exit 0;
+          } catch {
+            Write-Output "error";
+            exit 1;
+          }
+        `.trim();
 
-      if (stdout.trim() === 'success') {
-        // Verify the file was created and has content
         try {
-          const stats = await fs.stat(tempFilePath);
-          if (stats.size > 0) {
-            return tempFilePath;
+          const { stdout } = await execCommand('powershell', [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            script,
+          ]);
+
+          if (stdout.trim() === 'success') {
+            // Verify file was created and has content
+            try {
+              const stats = await fs.stat(outputPath);
+              if (stats.size > 0) {
+                return outputPath;
+              }
+            } catch {
+              // File doesn't exist, try next format
+            }
+          }
+
+          // Clean up failed attempt
+          try {
+            await fs.unlink(outputPath);
+          } catch {
+            // Ignore cleanup errors
           }
         } catch {
-          // File doesn't exist, continue to next format
+          // PowerShell execution failed, try next format
+          continue;
         }
       }
 
-      // Clean up failed attempt
-      try {
-        await fs.unlink(tempFilePath);
-      } catch {
-        // Ignore cleanup errors
-      }
+      // No format worked
+      return null;
     }
 
-    // No format worked
+    // macOS implementation
+    if (process.platform === 'darwin') {
+      const formats = [
+        { class: 'PNGf', extension: 'png' },
+        { class: 'JPEG', extension: 'jpg' },
+        { class: 'TIFF', extension: 'tiff' },
+        { class: 'GIFf', extension: 'gif' },
+      ];
+
+      for (const format of formats) {
+        const tempFilePath = path.join(
+          tempDir,
+          `clipboard-${timestamp}.${format.extension}`,
+        );
+
+        const script = `
+          try
+            set imageData to the clipboard as «class ${format.class}»
+            set fileRef to open for access POSIX file "${tempFilePath}" with write permission
+            write imageData to fileRef
+            close access fileRef
+            return "success"
+          on error errMsg
+            try
+              close access POSIX file "${tempFilePath}"
+            end try
+            return "error"
+          end try
+        `;
+
+        const { stdout } = await execCommand('osascript', ['-e', script]);
+
+        if (stdout.trim() === 'success') {
+          try {
+            const stats = await fs.stat(tempFilePath);
+            if (stats.size > 0) {
+              return tempFilePath;
+            }
+          } catch {
+            // File doesn't exist, continue to next format
+          }
+        }
+
+        try {
+          await fs.unlink(tempFilePath);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+
+      return null;
+    }
+
+    // Unsupported platform
     return null;
   } catch (error) {
     console.error('Error saving clipboard image:', error);
