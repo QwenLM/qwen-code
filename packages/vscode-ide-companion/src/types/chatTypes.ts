@@ -10,6 +10,14 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+  attachments?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    size: number;
+    data: string;
+    timestamp: number;
+  }>;
 }
 
 export interface PlanEntry {

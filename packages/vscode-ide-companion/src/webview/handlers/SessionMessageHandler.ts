@@ -9,6 +9,11 @@ import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { ACP_ERROR_CODES } from '../../constants/acpSchema.js';
+import type { PromptContent } from '../../services/acpSessionManager.js';
+import {
+  cleanupOldClipboardImages,
+  saveBase64ImageSync,
+} from '@qwen-code/qwen-code-core/src/utils/clipboardImageStorage.js';
 
 const AUTH_REQUIRED_CODE_PATTERN = `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`;
 
@@ -45,39 +50,51 @@ export class SessionMessageHandler extends BaseMessageHandler {
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
-    const data = message.data as Record<string, unknown> | undefined;
+    type SendMessagePayload = {
+      text?: string;
+      context?: Array<{
+        type: string;
+        name: string;
+        value: string;
+        startLine?: number;
+        endLine?: number;
+      }>;
+      fileContext?: {
+        fileName: string;
+        filePath: string;
+        startLine?: number;
+        endLine?: number;
+      };
+      attachments?: Array<{
+        id: string;
+        name: string;
+        type: string;
+        size: number;
+        data: string;
+        timestamp: number;
+      }>;
+    };
+
+    type MessageData = {
+      text?: string;
+      context?: SendMessagePayload['context'];
+      fileContext?: SendMessagePayload['fileContext'];
+      attachments?: SendMessagePayload['attachments'];
+      sessionId?: string;
+      cursor?: number;
+      size?: number;
+      tag?: string;
+    };
+
+    const data = message.data as MessageData | undefined;
 
     switch (message.type) {
       case 'sendMessage':
         await this.handleSendMessage(
-          (data?.text as string) || '',
-          data?.context as
-            | Array<{
-                type: string;
-                name: string;
-                value: string;
-                startLine?: number;
-                endLine?: number;
-              }>
-            | undefined,
-          data?.fileContext as
-            | {
-                fileName: string;
-                filePath: string;
-                startLine?: number;
-                endLine?: number;
-              }
-            | undefined,
-          data?.attachments as
-            | Array<{
-                id: string;
-                name: string;
-                type: string;
-                size: number;
-                data: string;
-                timestamp: number;
-              }>
-            | undefined,
+          data?.text || '',
+          data?.context,
+          data?.fileContext,
+          data?.attachments,
         );
         break;
 
@@ -86,22 +103,19 @@ export class SessionMessageHandler extends BaseMessageHandler {
         break;
 
       case 'switchQwenSession':
-        await this.handleSwitchQwenSession((data?.sessionId as string) || '');
+        await this.handleSwitchQwenSession(data?.sessionId || '');
         break;
 
       case 'getQwenSessions':
-        await this.handleGetQwenSessions(
-          (data?.cursor as number | undefined) ?? undefined,
-          (data?.size as number | undefined) ?? undefined,
-        );
+        await this.handleGetQwenSessions(data?.cursor, data?.size);
         break;
 
       case 'saveSession':
-        await this.handleSaveSession((data?.tag as string) || '');
+        await this.handleSaveSession(data?.tag || '');
         break;
 
       case 'resumeSession':
-        await this.handleResumeSession((data?.sessionId as string) || '');
+        await this.handleResumeSession(data?.sessionId || '');
         break;
 
       case 'openNewChatTab':
@@ -146,60 +160,30 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
   /**
    * Save base64 image to a temporary file
+   * Uses the shared clipboard image storage utility from core package.
    * @param base64Data The base64 encoded image data (with or without data URL prefix)
    * @param fileName Original filename
-   * @returns The path to the saved file or null if failed
+   * @returns The relative path to the saved file or null if failed
    */
-  private async saveImageToFile(
-    base64Data: string,
-    fileName: string,
-  ): Promise<string | null> {
-    try {
-      // Get workspace folder
-      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-      if (!workspaceFolder) {
-        console.error('[SessionMessageHandler] No workspace folder found');
-        return null;
-      }
-
-      // Create temp directory for images (same as CLI)
-      const tempDir = path.join(
-        workspaceFolder.uri.fsPath,
-        '.gemini-clipboard',
-      );
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(tempDir, { recursive: true });
-      }
-
-      // Generate unique filename (same pattern as CLI)
-      const timestamp = Date.now();
-      const ext = path.extname(fileName) || '.png';
-      const tempFileName = `clipboard-${timestamp}${ext}`;
-      const tempFilePath = path.join(tempDir, tempFileName);
-
-      // Extract base64 data if it's a data URL
-      let pureBase64 = base64Data;
-      const dataUrlMatch = base64Data.match(/^data:[^;]+;base64,(.+)$/);
-      if (dataUrlMatch) {
-        pureBase64 = dataUrlMatch[1];
-      }
-
-      // Write file
-      const buffer = Buffer.from(pureBase64, 'base64');
-      fs.writeFileSync(tempFilePath, buffer);
-
-      console.log('[SessionMessageHandler] Saved image to:', tempFilePath);
-
-      // Return relative path from workspace root
-      const relativePath = path.relative(
-        workspaceFolder.uri.fsPath,
-        tempFilePath,
-      );
-      return relativePath;
-    } catch (error) {
-      console.error('[SessionMessageHandler] Failed to save image:', error);
+  private saveImageToFile(base64Data: string, fileName: string): string | null {
+    // Get workspace folder
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      console.error('[SessionMessageHandler] No workspace folder found');
       return null;
     }
+
+    const relativePath = saveBase64ImageSync(
+      base64Data,
+      fileName,
+      workspaceFolder.uri.fsPath,
+    );
+
+    if (relativePath) {
+      console.log('[SessionMessageHandler] Saved image to:', relativePath);
+    }
+
+    return relativePath;
   }
 
   /**
@@ -336,6 +320,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
       formattedText = `${contextParts}\n\n${text}`;
     }
 
+    if (!formattedText && (!attachments || attachments.length === 0)) {
+      this.sendToWebView({
+        type: 'error',
+        data: { message: 'Message is empty.' },
+      });
+      return;
+    }
+
     // Build prompt content
     let promptContent: PromptContent[] = [];
 
@@ -364,8 +356,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
           dataLength: attachment.data.length,
         });
 
-        // Save image to file
-        const imagePath = await this.saveImageToFile(
+        // Save image to file (sync operation using shared utility)
+        const imagePath = this.saveImageToFile(
           attachment.data,
           attachment.name,
         );
@@ -382,6 +374,16 @@ export class SessionMessageHandler extends BaseMessageHandler {
             attachment.name,
           );
         }
+      }
+
+      const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+      if (workspaceFolder) {
+        cleanupOldClipboardImages(workspaceFolder.uri.fsPath).catch((error) => {
+          console.warn(
+            '[SessionMessageHandler] Failed to cleanup clipboard images:',
+            error,
+          );
+        });
       }
 
       // Add image references to the text
@@ -480,6 +482,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       role: 'user',
       content: text,
       timestamp: Date.now(),
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
     };
 
     // Store the original message with just text
@@ -733,7 +736,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       // Get session details (includes cwd and filePath when using ACP)
-      let sessionDetails: Record<string, unknown> | null = null;
+      type SessionDetails = {
+        id?: string;
+        sessionId?: string;
+        cwd?: string;
+        [key: string]: unknown;
+      };
+      let sessionDetails: SessionDetails | null = null;
       try {
         const allSessions = await this.agentManager.getSessionList();
         sessionDetails =
@@ -762,7 +771,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
         const loadResponse = await this.agentManager.loadSessionViaAcp(
           sessionId,
-          (sessionDetails?.cwd as string | undefined) || undefined,
+          sessionDetails?.cwd,
         );
         console.log(
           '[SessionMessageHandler] session/load succeeded (per ACP spec result is null; actual history comes via session/update):',

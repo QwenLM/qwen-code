@@ -41,9 +41,12 @@ export function usePasteHandler({
 
       const files = clipboardData.files;
       const hasFiles = files && files.length > 0;
+      const imageFiles = hasFiles
+        ? Array.from(files).filter((file) => file.type.startsWith('image/'))
+        : [];
 
       // Check if there are image files in the clipboard
-      if (hasFiles) {
+      if (imageFiles.length > 0) {
         processingRef.current = true;
         event.preventDefault();
         event.stopPropagation();
@@ -52,14 +55,7 @@ export function usePasteHandler({
         const errors: string[] = [];
 
         try {
-          for (let i = 0; i < files.length; i++) {
-            const file = files[i];
-
-            // Check if it's an image
-            if (!file.type.startsWith('image/')) {
-              continue;
-            }
-
+          for (const file of imageFiles) {
             // Check if it's a supported image type
             if (!isSupportedImage(file)) {
               errors.push(`Unsupported image type: ${file.type}`);

@@ -1,12 +1,17 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { execCommand } from '@qwen-code/qwen-code-core';
+import {
+  execCommand,
+  ensureClipboardImageDir,
+  generateClipboardImageFilename,
+  cleanupOldClipboardImages as cleanupOldImages,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Checks if the system clipboard contains an image (macOS only for now)
@@ -30,6 +35,7 @@ export async function clipboardHasImage(): Promise<boolean> {
 
 /**
  * Saves the image from clipboard to a temporary file (macOS only for now)
+ * Uses osascript to read from system clipboard and save to file.
  * @param targetDir The target directory to create temp files within
  * @returns The path to the saved image file, or null if no image or error
  */
@@ -44,11 +50,7 @@ export async function saveClipboardImage(
     // Create a temporary directory for clipboard images within the target directory
     // This avoids security restrictions on paths outside the target directory
     const baseDir = targetDir || process.cwd();
-    const tempDir = path.join(baseDir, '.gemini-clipboard');
-    await fs.mkdir(tempDir, { recursive: true });
-
-    // Generate a unique filename with timestamp
-    const timestamp = new Date().getTime();
+    const tempDir = await ensureClipboardImageDir(baseDir);
 
     // Try different image formats in order of preference
     const formats = [
@@ -61,7 +63,7 @@ export async function saveClipboardImage(
     for (const format of formats) {
       const tempFilePath = path.join(
         tempDir,
-        `clipboard-${timestamp}.${format.extension}`,
+        generateClipboardImageFilename(format.extension),
       );
 
       // Try to save clipboard as this format
@@ -118,28 +120,6 @@ export async function saveClipboardImage(
 export async function cleanupOldClipboardImages(
   targetDir?: string,
 ): Promise<void> {
-  try {
-    const baseDir = targetDir || process.cwd();
-    const tempDir = path.join(baseDir, '.gemini-clipboard');
-    const files = await fs.readdir(tempDir);
-    const oneHourAgo = Date.now() - 60 * 60 * 1000;
-
-    for (const file of files) {
-      if (
-        file.startsWith('clipboard-') &&
-        (file.endsWith('.png') ||
-          file.endsWith('.jpg') ||
-          file.endsWith('.tiff') ||
-          file.endsWith('.gif'))
-      ) {
-        const filePath = path.join(tempDir, file);
-        const stats = await fs.stat(filePath);
-        if (stats.mtimeMs < oneHourAgo) {
-          await fs.unlink(filePath);
-        }
-      }
-    }
-  } catch {
-    // Ignore errors in cleanup
-  }
+  const baseDir = targetDir || process.cwd();
+  await cleanupOldImages(baseDir);
 }

@@ -76,6 +76,7 @@ export * from './utils/subagentGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
+export * from './utils/clipboardImageStorage.js';
 
 // Config resolution utilities
 export * from './utils/configResolver.js';

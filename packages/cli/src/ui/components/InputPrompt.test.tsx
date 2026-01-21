@@ -376,7 +376,7 @@ describe('InputPrompt', () => {
     it('should handle Ctrl+V when clipboard has an image', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
-        '/test/.gemini-clipboard/clipboard-123.png',
+        '/test/.qwen-code-clipboard/clipboard-123.png',
       );
 
       const { stdin, unmount } = renderWithProviders(
@@ -436,7 +436,7 @@ describe('InputPrompt', () => {
     it('should insert image path at cursor position with proper spacing', async () => {
       const imagePath = path.join(
         'test',
-        '.gemini-clipboard',
+        '.qwen-code-clipboard',
         'clipboard-456.png',
       );
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
