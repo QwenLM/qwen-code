@@ -62,6 +62,13 @@ const vscodeMock = vi.hoisted(() => ({
 
 vi.mock('vscode', () => vscodeMock);
 
+vi.mock('@qwen-code/qwen-code-core/src/ide/detect-ide.js', () => ({
+  detectIdeFromEnv: vi.fn(() => ({
+    name: 'vscode',
+    displayName: 'VS Code',
+  })),
+}));
+
 vi.mock('./open-files-manager', () => {
   const OpenFilesManager = vi.fn();
   OpenFilesManager.prototype.onDidChange = vi.fn(() => ({ dispose: vi.fn() }));

@@ -10,7 +10,11 @@ import { ModelDialog } from './ModelDialog.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope } from '../../config/settings.js';
 import {
   AVAILABLE_MODELS_QWEN,
   MAINLINE_CODER,
@@ -36,18 +40,29 @@ const renderComponent = (
   };
   const combinedProps = { ...defaultProps, ...props };
 
+  const mockSettings = {
+    isTrusted: true,
+    user: { settings: {} },
+    workspace: { settings: {} },
+    setValue: vi.fn(),
+  } as unknown as LoadedSettings;
+
   const mockConfig = contextValue
     ? ({
         // --- Functions used by ModelDialog ---
         getModel: vi.fn(() => MAINLINE_CODER),
-        setModel: vi.fn(),
+        setModel: vi.fn().mockResolvedValue(undefined),
+        switchModel: vi.fn().mockResolvedValue(undefined),
         getAuthType: vi.fn(() => 'qwen-oauth'),
 
         // --- Functions used by ClearcutLogger ---
         getUsageStatisticsEnabled: vi.fn(() => true),
         getSessionId: vi.fn(() => 'mock-session-id'),
         getDebugMode: vi.fn(() => false),
-        getContentGeneratorConfig: vi.fn(() => ({ authType: 'mock' })),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.QWEN_OAUTH,
+          model: MAINLINE_CODER,
+        })),
         getUseSmartEdit: vi.fn(() => false),
         getUseModelRouter: vi.fn(() => false),
         getProxy: vi.fn(() => undefined),
@@ -58,21 +73,27 @@ const renderComponent = (
     : undefined;
 
   const renderResult = render(
-    <ConfigContext.Provider value={mockConfig}>
-      <ModelDialog {...combinedProps} />
-    </ConfigContext.Provider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider value={mockConfig}>
+        <ModelDialog {...combinedProps} />
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 
   return {
     ...renderResult,
     props: combinedProps,
     mockConfig,
+    mockSettings,
   };
 };
 
 describe('<ModelDialog />', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Ensure env-based fallback models don't leak into this suite from the developer environment.
+    delete process.env['OPENAI_MODEL'];
+    delete process.env['ANTHROPIC_MODEL'];
   });
 
   afterEach(() => {
@@ -91,8 +112,12 @@ describe('<ModelDialog />', () => {
 
     const props = mockedSelect.mock.calls[0][0];
     expect(props.items).toHaveLength(AVAILABLE_MODELS_QWEN.length);
-    expect(props.items[0].value).toBe(MAINLINE_CODER);
-    expect(props.items[1].value).toBe(MAINLINE_VLM);
+    expect(props.items[0].value).toBe(
+      `${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`,
+    );
+    expect(props.items[1].value).toBe(
+      `${AuthType.QWEN_OAUTH}::${MAINLINE_VLM}`,
+    );
     expect(props.showNumbers).toBe(true);
   });
 
@@ -139,16 +164,93 @@ describe('<ModelDialog />', () => {
     expect(mockedSelect).toHaveBeenCalledTimes(1);
   });
 
-  it('calls config.setModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', () => {
-    const { props, mockConfig } = renderComponent({}, {}); // Pass empty object for contextValue
+  it('calls config.switchModel and onClose when DescriptiveRadioButtonSelect.onSelect is triggered', async () => {
+    const { props, mockConfig, mockSettings } = renderComponent({}, {}); // Pass empty object for contextValue
 
     const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
     expect(childOnSelect).toBeDefined();
 
-    childOnSelect(MAINLINE_CODER);
+    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
 
-    // Assert against the default mock provided by renderComponent
-    expect(mockConfig?.setModel).toHaveBeenCalledWith(MAINLINE_CODER);
+    expect(mockConfig?.switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      MAINLINE_CODER,
+      undefined,
+      {
+        reason: 'user_manual',
+        context: 'Model switched via /model dialog',
+      },
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      MAINLINE_CODER,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'security.auth.selectedType',
+      AuthType.QWEN_OAUTH,
+    );
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('calls config.switchModel and persists authType+model when selecting a different authType', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    const getAvailableModelsForAuthType = vi.fn((t: AuthType) => {
+      if (t === AuthType.USE_OPENAI) {
+        return [{ id: 'gpt-4', label: 'GPT-4', authType: t }];
+      }
+      if (t === AuthType.QWEN_OAUTH) {
+        return AVAILABLE_MODELS_QWEN.map((m) => ({
+          id: m.id,
+          label: m.label,
+          authType: AuthType.QWEN_OAUTH,
+        }));
+      }
+      return [];
+    });
+
+    const mockConfigWithSwitchAuthType = {
+      getAuthType,
+      getModel: vi.fn(() => 'gpt-4'),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.QWEN_OAUTH,
+        model: MAINLINE_CODER,
+      })),
+      // Add switchModel to the mock object (not the type)
+      switchModel,
+      getAvailableModelsForAuthType,
+    };
+
+    const { props, mockSettings } = renderComponent(
+      {},
+      // Cast to Config to bypass type checking, matching the runtime behavior
+      mockConfigWithSwitchAuthType as unknown as Partial<Config>,
+    );
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.QWEN_OAUTH}::${MAINLINE_CODER}`);
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      MAINLINE_CODER,
+      { requireCachedCredentials: true },
+      {
+        reason: 'user_manual',
+        context: 'AuthType+model switched via /model dialog',
+      },
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'model.name',
+      MAINLINE_CODER,
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'security.auth.selectedType',
+      AuthType.QWEN_OAUTH,
+    );
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -193,17 +295,25 @@ describe('<ModelDialog />', () => {
   it('updates initialIndex when config context changes', () => {
     const mockGetModel = vi.fn(() => MAINLINE_CODER);
     const mockGetAuthType = vi.fn(() => 'qwen-oauth');
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
     const { rerender } = render(
-      <ConfigContext.Provider
-        value={
-          {
-            getModel: mockGetModel,
-            getAuthType: mockGetAuthType,
-          } as unknown as Config
-        }
-      >
-        <ModelDialog onClose={vi.fn()} />
-      </ConfigContext.Provider>,
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: mockGetModel,
+              getAuthType: mockGetAuthType,
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
     );
 
     expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
@@ -215,9 +325,11 @@ describe('<ModelDialog />', () => {
     } as unknown as Config;
 
     rerender(
-      <ConfigContext.Provider value={newMockConfig}>
-        <ModelDialog onClose={vi.fn()} />
-      </ConfigContext.Provider>,
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider value={newMockConfig}>
+          <ModelDialog onClose={vi.fn()} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
     );
 
     // Should be called at least twice: initial render + re-render after context change

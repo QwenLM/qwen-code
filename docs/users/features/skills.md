@@ -11,10 +11,27 @@ This guide shows you how to create, use, and manage Agent Skills in **Qwen Code*
 ## Prerequisites
 
 - Qwen Code (recent version)
-- Run with the experimental flag enabled:
+
+## How to enable
+
+### Via CLI flag
 
 ```bash
 qwen --experimental-skills
+```
+
+### Via settings.json
+
+Add to your `~/.qwen/settings.json` or project's `.qwen/settings.json`:
+
+```json
+{
+  "tools": {
+    "experimental": {
+      "skills": true
+    }
+  }
+}
 ```
 
 - Basic familiarity with Qwen Code ([Quickstart](../quickstart.md))
@@ -26,6 +43,14 @@ Agent Skills package expertise into discoverable capabilities. Each Skill consis
 ### How Skills are invoked
 
 Skills are **model-invoked** — the model autonomously decides when to use them based on your request and the Skill’s description. This is different from slash commands, which are **user-invoked** (you explicitly type `/command`).
+
+If you want to invoke a Skill explicitly, use the `/skills` slash command:
+
+```bash
+/skills <skill-name>
+```
+
+The `/skills` command is only available when you run with `--experimental-skills`. Use autocomplete to browse available Skills and descriptions.
 
 ### Benefits
 

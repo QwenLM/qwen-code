@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.6.0",
+  "version": "0.7.1",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -27,7 +27,6 @@
     "@google/genai": "1.30.0",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@opentelemetry/api": "^1.9.0",
-    "async-mutex": "^0.5.0",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
     "@opentelemetry/exporter-metrics-otlp-grpc": "^0.203.0",
@@ -40,7 +39,9 @@
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
+    "async-mutex": "^0.5.0",
     "chardet": "^2.1.0",
+    "chokidar": "^4.0.3",
     "diff": "^7.0.0",
     "dotenv": "^17.1.0",
     "fast-levenshtein": "^2.0.6",

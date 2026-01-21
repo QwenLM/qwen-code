@@ -66,6 +66,11 @@ export class AcpFileHandler {
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[ACP] Failed to read file ${params.path}:`, errorMsg);
 
+      const nodeError = error as NodeJS.ErrnoException;
+      if (nodeError?.code === 'ENOENT') {
+        throw error;
+      }
+
       throw new Error(`Failed to read file '${params.path}': ${errorMsg}`);
     }
   }

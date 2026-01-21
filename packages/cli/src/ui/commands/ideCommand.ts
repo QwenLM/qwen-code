@@ -191,11 +191,23 @@ export const ideCommand = async (): Promise<SlashCommand> => {
     kind: CommandKind.BUILT_IN,
     action: async (context) => {
       const installer = getIdeInstaller(currentIDE);
+      const isSandBox = !!process.env['SANDBOX'];
+      if (isSandBox) {
+        context.ui.addItem(
+          {
+            type: 'info',
+            text: `IDE integration needs to be installed on the host. If you have already installed it, you can directly connect the ide`,
+          },
+          Date.now(),
+        );
+        return;
+      }
       if (!installer) {
+        const ideName = ideClient.getDetectedIdeDisplayName();
         context.ui.addItem(
           {
             type: 'error',
-            text: `No installer is available for ${ideClient.getDetectedIdeDisplayName()}. Please install the '${QWEN_CODE_COMPANION_EXTENSION_NAME}' extension manually from the marketplace.`,
+            text: `Automatic installation is not supported for ${ideName}. Please install the '${QWEN_CODE_COMPANION_EXTENSION_NAME}' extension manually from the marketplace.`,
           },
           Date.now(),
         );

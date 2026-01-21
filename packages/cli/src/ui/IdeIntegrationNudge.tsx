@@ -38,6 +38,7 @@ export function IdeIntegrationNudge({
   );
 
   const { displayName: ideName } = ide;
+  const isInSandbox = !!process.env['SANDBOX'];
   // Assume extension is already installed if the env variables are set.
   const isExtensionPreInstalled =
     !!process.env['QWEN_CODE_IDE_SERVER_PORT'] &&
@@ -70,13 +71,15 @@ export function IdeIntegrationNudge({
     },
   ];
 
-  const installText = isExtensionPreInstalled
-    ? `If you select Yes, the CLI will have access to your open files and display diffs directly in ${
-        ideName ?? 'your editor'
-      }.`
-    : `If you select Yes, we'll install an extension that allows the CLI to access your open files and display diffs directly in ${
-        ideName ?? 'your editor'
-      }.`;
+  const installText = isInSandbox
+    ? `Note: In sandbox environments, IDE integration requires manual setup on the host system. If you select Yes, you'll receive instructions on how to set this up.`
+    : isExtensionPreInstalled
+      ? `If you select Yes, the CLI will connect to your ${
+          ideName ?? 'editor'
+        } and have access to your open files and display diffs directly.`
+      : `If you select Yes, we'll install an extension that allows the CLI to access your open files and display diffs directly in ${
+          ideName ?? 'your editor'
+        }.`;
 
   return (
     <Box

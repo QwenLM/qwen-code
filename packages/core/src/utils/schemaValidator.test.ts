@@ -122,4 +122,91 @@ describe('SchemaValidator', () => {
     };
     expect(SchemaValidator.validate(schema, params)).not.toBeNull();
   });
+
+  describe('boolean string coercion', () => {
+    const booleanSchema = {
+      type: 'object',
+      properties: {
+        is_background: {
+          type: 'boolean',
+        },
+      },
+      required: ['is_background'],
+    };
+
+    it('should coerce string "true" to boolean true', () => {
+      const params = { is_background: 'true' };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(true);
+    });
+
+    it('should coerce string "True" to boolean true', () => {
+      const params = { is_background: 'True' };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(true);
+    });
+
+    it('should coerce string "TRUE" to boolean true', () => {
+      const params = { is_background: 'TRUE' };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(true);
+    });
+
+    it('should coerce string "false" to boolean false', () => {
+      const params = { is_background: 'false' };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(false);
+    });
+
+    it('should coerce string "False" to boolean false', () => {
+      const params = { is_background: 'False' };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(false);
+    });
+
+    it('should coerce string "FALSE" to boolean false', () => {
+      const params = { is_background: 'FALSE' };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(false);
+    });
+
+    it('should handle nested objects with string booleans', () => {
+      const nestedSchema = {
+        type: 'object',
+        properties: {
+          options: {
+            type: 'object',
+            properties: {
+              enabled: { type: 'boolean' },
+            },
+          },
+        },
+      };
+      const params = { options: { enabled: 'true' } };
+      expect(SchemaValidator.validate(nestedSchema, params)).toBeNull();
+      expect((params.options as unknown as { enabled: boolean }).enabled).toBe(
+        true,
+      );
+    });
+
+    it('should not affect non-boolean strings', () => {
+      const mixedSchema = {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          is_active: { type: 'boolean' },
+        },
+      };
+      const params = { name: 'trueman', is_active: 'true' };
+      expect(SchemaValidator.validate(mixedSchema, params)).toBeNull();
+      expect(params.name).toBe('trueman');
+      expect(params.is_active).toBe(true);
+    });
+
+    it('should pass through actual boolean values unchanged', () => {
+      const params = { is_background: true };
+      expect(SchemaValidator.validate(booleanSchema, params)).toBeNull();
+      expect(params.is_background).toBe(true);
+    });
+  });
 });

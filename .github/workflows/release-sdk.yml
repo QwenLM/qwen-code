@@ -241,7 +241,7 @@ jobs:
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         id: 'pr'
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
@@ -258,26 +258,15 @@ jobs:
 
           echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Wait for CI checks to complete'
-        if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-        run: |-
-          set -euo pipefail
-          echo "Waiting for CI checks to complete..."
-          gh pr checks "${PR_URL}" --watch --interval 30
-
       - name: 'Enable auto-merge for release PR'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' && steps.vars.outputs.is_nightly == 'false' && steps.vars.outputs.is_preview == 'false' }}
         env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_URL: '${{ steps.pr.outputs.PR_URL }}'
         run: |-
           set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto
+          gh pr merge "${PR_URL}" --merge --auto --delete-branch
 
       - name: 'Create Issue on Failure'
         if: |-

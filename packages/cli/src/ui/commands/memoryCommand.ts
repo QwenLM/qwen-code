@@ -6,12 +6,13 @@
 
 import {
   getErrorMessage,
+  getCurrentGeminiMdFilename,
   loadServerHierarchicalMemory,
   QWEN_DIR,
 } from '@qwen-code/qwen-code-core';
 import path from 'node:path';
-import os from 'os';
-import fs from 'fs/promises';
+import os from 'node:os';
+import fs from 'node:fs/promises';
 import { MessageType } from '../types.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
@@ -56,7 +57,12 @@ export const memoryCommand: SlashCommand = {
           kind: CommandKind.BUILT_IN,
           action: async (context) => {
             try {
-              const projectMemoryPath = path.join(process.cwd(), 'QWEN.md');
+              const workingDir =
+                context.services.config?.getWorkingDir?.() ?? process.cwd();
+              const projectMemoryPath = path.join(
+                workingDir,
+                getCurrentGeminiMdFilename(),
+              );
               const memoryContent = await fs.readFile(
                 projectMemoryPath,
                 'utf-8',
@@ -104,7 +110,7 @@ export const memoryCommand: SlashCommand = {
               const globalMemoryPath = path.join(
                 os.homedir(),
                 QWEN_DIR,
-                'QWEN.md',
+                getCurrentGeminiMdFilename(),
               );
               const globalMemoryContent = await fs.readFile(
                 globalMemoryPath,
@@ -309,8 +315,6 @@ export const memoryCommand: SlashCommand = {
                 config.getFolderTrust(),
                 context.services.settings.merged.context?.importFormat ||
                   'tree', // Use setting or default to 'tree'
-                config.getFileFilteringOptions(),
-                context.services.settings.merged.context?.discoveryMaxDirs,
               );
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);

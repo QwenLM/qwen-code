@@ -18,23 +18,17 @@
 
 ### Requirements
 
-- VS Code 1.98.0 or higher
+- VS Code 1.85.0 or higher
 
 ### Installation
 
-1. Install Qwen Code CLI:
-
-   ```bash
-   npm install -g qwen-code
-   ```
-
-2. Download and install the extension from the [Visual Studio Code Extension Marketplace](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion).
+Download and install the extension from the [Visual Studio Code Extension Marketplace](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion).
 
 ## Troubleshooting
 
 ### Extension not installing
 
-- Ensure you have VS Code 1.98.0 or higher
+- Ensure you have VS Code 1.85.0 or higher
 - Check that VS Code has permission to install extensions
 - Try installing directly from the Marketplace website
 

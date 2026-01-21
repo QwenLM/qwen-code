@@ -89,6 +89,10 @@ export default {
   'No tools available': 'Нет доступных инструментов',
   'View or change the approval mode for tool usage':
     'Просмотр или изменение режима подтверждения для использования инструментов',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    'Недопустимый режим подтверждения "{{arg}}". Допустимые режимы: {{modes}}',
+  'Approval mode set to "{{mode}}"':
+    'Режим подтверждения установлен на "{{mode}}"',
   'View or change the language setting':
     'Просмотр или изменение настроек языка',
   'change the theme': 'Изменение темы',
@@ -103,8 +107,8 @@ export default {
   'Theme "{{themeName}}" not found.': 'Тема "{{themeName}}" не найдена.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Тема "{{themeName}}" не найдена в выбранной области.',
-  'clear the screen and conversation history':
-    'Очистка экрана и истории диалога',
+  'Clear conversation history and free up context':
+    'Очистить историю диалога и освободить контекст',
   'Compresses the context by replacing it with a summary.':
     'Сжатие контекста заменой на краткую сводку',
   'open full Qwen Code documentation in your browser':
@@ -285,6 +289,13 @@ export default {
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
   'Enable Welcome Back': 'Включить приветствие при возврате',
+  'Enable User Feedback': 'Включить отзывы пользователей',
+  'How is Qwen doing this session? (optional)':
+    'Как дела у Qwen в этой сессии? (необязательно)',
+  Bad: 'Плохо',
+  Good: 'Хорошо',
+  'Not Sure Yet': 'Пока не уверен',
+  'Any other key': 'Любая другая клавиша',
   'Disable Loading Phrases': 'Отключить фразы при загрузке',
   'Screen Reader Mode': 'Режим программы чтения с экрана',
   'IDE Mode': 'Режим IDE',
@@ -314,6 +325,7 @@ export default {
   'Tool Output Truncation Lines': 'Лимит строк вывода инструментов',
   'Folder Trust': 'Доверие к папке',
   'Vision Model Preview': 'Визуальная модель (предпросмотр)',
+  'Tool Schema Compliance': 'Соответствие схеме инструмента',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   Text: 'Текст',
@@ -342,8 +354,8 @@ export default {
     'Установка предпочитаемого внешнего редактора',
   'Manage extensions': 'Управление расширениями',
   'List active extensions': 'Показать активные расширения',
-  'Update extensions. Usage: update |--all':
-    'Обновить расширения. Использование: update |--all',
+  'Update extensions. Usage: update <extension-names>|--all':
+    'Обновить расширения. Использование: update <extension-names>|--all',
   'manage IDE integration': 'Управление интеграцией с IDE',
   'check status of IDE integration': 'Проверить статус интеграции с IDE',
   'install required IDE companion for {{ideName}}':
@@ -401,7 +413,8 @@ export default {
   'Set LLM output language': 'Установка языка вывода LLM',
   'Usage: /language ui [zh-CN|en-US]':
     'Использование: /language ui [zh-CN|en-US|ru-RU]',
-  'Usage: /language output ': 'Использование: /language output ',
+  'Usage: /language output <language>':
+    'Использование: /language output <language>',
   'Example: /language output 中文': 'Пример: /language output 中文',
   'Example: /language output English': 'Пример: /language output English',
   'Example: /language output 日本語': 'Пример: /language output 日本語',
@@ -418,9 +431,8 @@ export default {
   'To request additional UI language packs, please open an issue on GitHub.':
     'Для запроса дополнительных языковых пакетов интерфейса, пожалуйста, создайте обращение на GitHub.',
   'Available options:': 'Доступные варианты:',
-  ' - zh-CN: Simplified Chinese': ' - zh-CN: Упрощенный китайский',
-  ' - en-US: English': ' - en-US: Английский',
-  ' - ru-RU: Russian': ' - ru-RU: Русский',
+  '  - zh-CN: Simplified Chinese': ' - zh-CN: Упрощенный китайский',
+  '  - en-US: English': ' - en-US: Английский',
   'Set UI language to Simplified Chinese (zh-CN)':
     'Установить язык интерфейса на упрощенный китайский (zh-CN)',
   'Set UI language to English (en-US)':
@@ -436,8 +448,8 @@ export default {
     'Режим подтверждения изменен на: {{mode}}',
   'Approval mode changed to: {{mode}} (saved to {{scope}} settings{{location}})':
     'Режим подтверждения изменен на: {{mode}} (сохранено в настройках {{scope}}{{location}})',
-  'Usage: /approval-mode [--session|--user|--project]':
-    'Использование: /approval-mode [--session|--user|--project]',
+  'Usage: /approval-mode <mode> [--session|--user|--project]':
+    'Использование: /approval-mode <mode> [--session|--user|--project]',
   'Scope subcommands do not accept additional arguments.':
     'Подкоманды области не принимают дополнительных аргументов.',
   'Plan mode - Analyze only, do not modify files or execute commands':
@@ -589,8 +601,8 @@ export default {
     'Ошибка при экспорте диалога: {{error}}',
   'Conversation shared to {{filePath}}': 'Диалог экспортирован в {{filePath}}',
   'No conversation found to share.': 'Нет диалога для экспорта.',
-  'Share the current conversation to a markdown or json file. Usage: /chat share <путь-к-файлу>':
-    'Экспортировать текущий диалог в markdown или json файл. Использование: /chat share <путь-к-файлу>',
+  'Share the current conversation to a markdown or json file. Usage: /chat share <file>':
+    'Экспортировать текущий диалог в markdown или json файл. Использование: /chat share <файл>',
 
   // ============================================================================
   // Команды - Резюме
@@ -625,8 +637,9 @@ export default {
   // ============================================================================
   // Команды - Очистка
   // ============================================================================
-  'Clearing terminal and resetting chat.': 'Очистка терминала и сброс чата.',
-  'Clearing terminal.': 'Очистка терминала.',
+  'Starting a new session, resetting chat, and clearing terminal.':
+    'Начало новой сессии, сброс чата и очистка терминала.',
+  'Starting a new session and clearing.': 'Начало новой сессии и очистка.',
 
   // ============================================================================
   // Команды - Сжатие
@@ -657,8 +670,8 @@ export default {
     'Команда /directory add не поддерживается в ограничительных профилях песочницы. Пожалуйста, используйте --include-directories при запуске сессии.',
   "Error adding '{{path}}': {{error}}":
     "Ошибка при добавлении '{{path}}': {{error}}",
-  'Successfully added GEMINI.md files from the following directories if there are:\n- {{directories}}':
-    'Успешно добавлены файлы GEMINI.md из следующих директорий (если они есть):\n- {{directories}}',
+  'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
+    'Успешно добавлены файлы QWEN.md из следующих директорий (если они есть):\n- {{directories}}',
   'Error refreshing memory: {{error}}':
     'Ошибка при обновлении памяти: {{error}}',
   'Successfully added directories:\n- {{directories}}':
@@ -780,6 +793,21 @@ export default {
     'Время ожидания авторизации истекло. Пожалуйста, попробуйте снова.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Ожидание авторизации... (Нажмите ESC или CTRL+C для отмены)',
+  'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
+    'Отсутствует API-ключ для аутентификации, совместимой с OpenAI. Укажите settings.security.auth.apiKey или переменную окружения {{envKeyHint}}.',
+  '{{envKeyHint}} environment variable not found.':
+    'Переменная окружения {{envKeyHint}} не найдена.',
+  '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
+    'Переменная окружения {{envKeyHint}} не найдена. Укажите её в файле .env или среди системных переменных.',
+  '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
+    'Переменная окружения {{envKeyHint}} не найдена (или установите settings.security.auth.apiKey). Укажите её в файле .env или среди системных переменных.',
+  'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
+    'Отсутствует API-ключ для аутентификации, совместимой с OpenAI. Установите переменную окружения {{envKeyHint}}.',
+  'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
+    'У провайдера Anthropic отсутствует обязательный baseUrl в modelProviders[].baseUrl.',
+  'ANTHROPIC_BASE_URL environment variable not found.':
+    'Переменная окружения ANTHROPIC_BASE_URL не найдена.',
+  'Invalid auth method selected.': 'Выбран недопустимый метод авторизации.',
   'Failed to authenticate. Message: {{message}}':
     'Не удалось авторизоваться. Сообщение: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
@@ -801,6 +829,15 @@ export default {
   // ============================================================================
   'Select Model': 'Выбрать модель',
   '(Press Esc to close)': '(Нажмите Esc для закрытия)',
+  'Current (effective) configuration': 'Текущая (фактическая) конфигурация',
+  AuthType: 'Тип авторизации',
+  'API Key': 'API-ключ',
+  unset: 'не задано',
+  '(default)': '(по умолчанию)',
+  '(set)': '(установлено)',
+  '(not set)': '(не задано)',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
+    "Не удалось переключиться на модель '{{modelId}}'.\n\n{{error}}",
   'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
     'Последняя модель Qwen Coder от Alibaba Cloud ModelStudio (версия: qwen3-coder-plus-2025-09-23)',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
@@ -891,6 +928,7 @@ export default {
   // Экран выхода / Статистика
   // ============================================================================
   'Agent powering down. Goodbye!': 'Агент завершает работу. До свидания!',
+  'To continue this session, run': 'Для продолжения этой сессии, выполните',
   'Interaction Summary': 'Сводка взаимодействия',
   'Session ID:': 'ID сессии:',
   'Tool Calls:': 'Вызовы инструментов:',
@@ -950,179 +988,139 @@ export default {
   'Waiting for user confirmation...':
     'Ожидание подтверждения от пользователя...',
   '(esc to cancel, {{time}})': '(esc для отмены, {{time}})',
-  "I'm Feeling Lucky": 'Мне повезёт!',
-  'Shipping awesomeness... ': 'Доставляем крутизну... ',
-  'Painting the serifs back on...': 'Рисуем засечки на буквах...',
-  'Navigating the slime mold...': 'Пробираемся через слизевиков..',
-  'Consulting the digital spirits...': 'Советуемся с цифровыми духами...',
-  'Reticulating splines...': 'Сглаживание сплайнов...',
-  'Warming up the AI hamsters...': 'Разогреваем ИИ-хомячков...',
-  'Asking the magic conch shell...': 'Спрашиваем волшебную ракушку...',
-  'Generating witty retort...': 'Генерируем остроумный ответ...',
-  'Polishing the algorithms...': 'Полируем алгоритмы...',
-  "Don't rush perfection (or my code)...":
+
+  // ============================================================================
+
+  // ============================================================================
+  // Loading Phrases
+  // ============================================================================
+  WITTY_LOADING_PHRASES: [
+    'Мне повезёт!',
+    'Доставляем крутизну... ',
+    'Рисуем засечки на буквах...',
+    'Пробираемся через слизевиков..',
+    'Советуемся с цифровыми духами...',
+    'Сглаживание сплайнов...',
+    'Разогреваем ИИ-хомячков...',
+    'Спрашиваем волшебную ракушку...',
+    'Генерируем остроумный ответ...',
+    'Полируем алгоритмы...',
     'Не торопите совершенство (или мой код)...',
-  'Brewing fresh bytes...': 'Завариваем свежие байты...',
-  'Counting electrons...': 'Пересчитываем электроны...',
-  'Engaging cognitive processors...': 'Задействуем когнитивные процессоры...',
-  'Checking for syntax errors in the universe...':
+    'Завариваем свежие байты...',
+    'Пересчитываем электроны...',
+    'Задействуем когнитивные процессоры...',
     'Ищем синтаксические ошибки во вселенной...',
-  'One moment, optimizing humor...': 'Секундочку, оптимизируем юмор...',
-  'Shuffling punchlines...': 'Перетасовываем панчлайны...',
-  'Untangling neural nets...': 'Распутаваем нейросети...',
-  'Compiling brilliance...': 'Компилируем гениальность...',
-  'Loading wit.exe...': 'Загружаем yumor.exe...',
-  'Summoning the cloud of wisdom...': 'Призываем облако мудрости...',
-  'Preparing a witty response...': 'Готовим остроумный ответ...',
-  "Just a sec, I'm debugging reality...": 'Секунду, идёт отладка реальности...',
-  'Confuzzling the options...': 'Запутываем варианты...',
-  'Tuning the cosmic frequencies...': 'Настраиваем космические частоты...',
-  'Crafting a response worthy of your patience...':
+    'Секундочку, оптимизируем юмор...',
+    'Перетасовываем панчлайны...',
+    'Распутаваем нейросети...',
+    'Компилируем гениальность...',
+    'Загружаем yumor.exe...',
+    'Призываем облако мудрости...',
+    'Готовим остроумный ответ...',
+    'Секунду, идёт отладка реальности...',
+    'Запутываем варианты...',
+    'Настраиваем космические частоты...',
     'Создаем ответ, достойный вашего терпения...',
-  'Compiling the 1s and 0s...': 'Компилируем единички и нолики...',
-  'Resolving dependencies... and existential crises...':
+    'Компилируем единички и нолики...',
     'Разрешаем зависимости... и экзистенциальные кризисы...',
-  'Defragmenting memories... both RAM and personal...':
     'Дефрагментация памяти... и оперативной, и личной...',
-  'Rebooting the humor module...': 'Перезагрузка модуля юмора...',
-  'Caching the essentials (mostly cat memes)...':
+    'Перезагрузка модуля юмора...',
     'Кэшируем самое важное (в основном мемы с котиками)...',
-  'Optimizing for ludicrous speed': 'Оптимизация для безумной скорости',
-  "Swapping bits... don't tell the bytes...":
+    'Оптимизация для безумной скорости',
     'Меняем биты... только байтам не говорите...',
-  'Garbage collecting... be right back...': 'Сборка мусора... скоро вернусь...',
-  'Assembling the interwebs...': 'Сборка интернетов...',
-  'Converting coffee into code...': 'Превращаем кофе в код...',
-  'Updating the syntax for reality...': 'Обновляем синтаксис реальности...',
-  'Rewiring the synapses...': 'Переподключаем синапсы...',
-  'Looking for a misplaced semicolon...': 'Ищем лишнюю точку с запятой...',
-  "Greasin' the cogs of the machine...": 'Смазываем шестерёнки машины...',
-  'Pre-heating the servers...': 'Разогреваем серверы...',
-  'Calibrating the flux capacitor...': 'Калибруем потоковый накопитель...',
-  'Engaging the improbability drive...': 'Включаем двигатель невероятности...',
-  'Channeling the Force...': 'Направляем Силу...',
-  'Aligning the stars for optimal response...':
+    'Сборка мусора... скоро вернусь...',
+    'Сборка интернетов...',
+    'Превращаем кофе в код...',
+    'Обновляем синтаксис реальности...',
+    'Переподключаем синапсы...',
+    'Ищем лишнюю точку с запятой...',
+    'Смазываем шестерёнки машины...',
+    'Разогреваем серверы...',
+    'Калибруем потоковый накопитель...',
+    'Включаем двигатель невероятности...',
+    'Направляем Силу...',
     'Выравниваем звёзды для оптимального ответа...',
-  'So say we all...': 'Так скажем мы все...',
-  'Loading the next great idea...': 'Загрузка следующей великой идеи...',
-  "Just a moment, I'm in the zone...": 'Минутку, я в потоке...',
-  'Preparing to dazzle you with brilliance...':
+    'Так скажем мы все...',
+    'Загрузка следующей великой идеи...',
+    'Минутку, я в потоке...',
     'Готовлюсь ослепить вас гениальностью...',
-  "Just a tick, I'm polishing my wit...": 'Секунду, полирую остроумие...',
-  "Hold tight, I'm crafting a masterpiece...": 'Держитесь, создаю шедевр...',
-  "Just a jiffy, I'm debugging the universe...":
+    'Секунду, полирую остроумие...',
+    'Держитесь, создаю шедевр...',
     'Мигом, отлаживаю вселенную...',
-  "Just a moment, I'm aligning the pixels...": 'Момент, выравниваю пиксели...',
-  "Just a sec, I'm optimizing the humor...": 'Секунду, оптимизирую юмор...',
-  "Just a moment, I'm tuning the algorithms...":
+    'Момент, выравниваю пиксели...',
+    'Секунду, оптимизирую юмор...',
     'Момент, настраиваю алгоритмы...',
-  'Warp speed engaged...': 'Варп-скорость включена...',
-  'Mining for more Dilithium crystals...': 'Добываем кристаллы дилития...',
-  "Don't panic...": 'Без паники...',
-  'Following the white rabbit...': 'Следуем за белым кроликом...',
-  'The truth is in here... somewhere...': 'Истина где-то здесь... внутри...',
-  'Blowing on the cartridge...': 'Продуваем картридж...',
-  'Loading... Do a barrel roll!': 'Загрузка... Сделай бочку!',
-  'Waiting for the respawn...': 'Ждем респауна...',
-  'Finishing the Kessel Run in less than 12 parsecs...':
+    'Варп-прыжок активирован...',
+    'Добываем кристаллы дилития...',
+    'Без паники...',
+    'Следуем за белым кроликом...',
+    'Истина где-то здесь... внутри...',
+    'Продуваем картридж...',
+    'Загрузка... Сделай бочку!',
+    'Ждем респауна...',
     'Делаем Дугу Кесселя менее чем за 12 парсеков...',
-  "The cake is not a lie, it's just still loading...":
     'Тортик — не ложь, он просто ещё грузится...',
-  'Fiddling with the character creation screen...':
     'Возимся с экраном создания персонажа...',
-  "Just a moment, I'm finding the right meme...":
     'Минутку, ищу подходящий мем...',
-  "Pressing 'A' to continue...": "Нажимаем 'A' для продолжения...",
-  'Herding digital cats...': 'Пасём цифровых котов...',
-  'Polishing the pixels...': 'Полируем пиксели...',
-  'Finding a suitable loading screen pun...':
+    "Нажимаем 'A' для продолжения...",
+    'Пасём цифровых котов...',
+    'Полируем пиксели...',
     'Ищем подходящий каламбур для экрана загрузки...',
-  'Distracting you with this witty phrase...':
     'Отвлекаем вас этой остроумной фразой...',
-  'Almost there... probably...': 'Почти готово... вроде...',
-  'Our hamsters are working as fast as they can...':
+    'Почти готово... вроде...',
     'Наши хомячки работают изо всех сил...',
-  'Giving Cloudy a pat on the head...': 'Гладим Облачко по голове...',
-  'Petting the cat...': 'Гладим кота...',
-  'Rickrolling my boss...': 'Рикроллим начальника...',
-  'Never gonna give you up, never gonna let you down...':
+    'Гладим Облачко по голове...',
+    'Гладим кота...',
+    'Рикроллим начальника...',
     'Never gonna give you up, never gonna let you down...',
-  'Slapping the bass...': 'Лабаем бас-гитару...',
-  'Tasting the snozberries...': 'Пробуем снузберри на вкус...',
-  "I'm going the distance, I'm going for speed...":
+    'Лабаем бас-гитару...',
+    'Пробуем снузберри на вкус...',
     'Иду до конца, иду на скорость...',
-  'Is this the real life? Is this just fantasy?...':
     'Is this the real life? Is this just fantasy?...',
-  "I've got a good feeling about this...": 'У меня хорошее предчувствие...',
-  'Poking the bear...': 'Дразним медведя... (Не лезь...)',
-  'Doing research on the latest memes...': 'Изучаем свежие мемы...',
-  'Figuring out how to make this more witty...':
+    'У меня хорошее предчувствие...',
+    'Дразним медведя... (Не лезь...)',
+    'Изучаем свежие мемы...',
     'Думаем, как сделать это остроумнее...',
-  'Hmmm... let me think...': 'Хмм... дайте подумать...',
-  'What do you call a fish with no eyes? A fsh...':
+    'Хмм... дайте подумать...',
     'Как называется бумеранг, который не возвращается? Палка...',
-  'Why did the computer go to therapy? It had too many bytes...':
     'Почему компьютер простудился? Потому что оставил окна открытыми...',
-  "Why don't programmers like nature? It has too many bugs...":
     'Почему программисты не любят гулять на улице? Там среда не настроена...',
-  'Why do programmers prefer dark mode? Because light attracts bugs...':
     'Почему программисты предпочитают тёмную тему? Потому что в темноте не видно багов...',
-  'Why did the developer go broke? Because they used up all their cache...':
     'Почему разработчик разорился? Потому что потратил весь свой кэш...',
-  "What can you do with a broken pencil? Nothing, it's pointless...":
     'Что можно делать со сломанным карандашом? Ничего — он тупой...',
-  'Applying percussive maintenance...': 'Провожу настройку методом тыка...',
-  'Searching for the correct USB orientation...':
+    'Провожу настройку методом тыка...',
     'Ищем, какой стороной вставлять флешку...',
-  'Ensuring the magic smoke stays inside the wires...':
     'Следим, чтобы волшебный дым не вышел из проводов...',
-  'Rewriting in Rust for no particular reason...':
-    'Переписываем всё на Rust без особой причины...',
-  'Trying to exit Vim...': 'Пытаемся выйти из Vim...',
-  'Spinning up the hamster wheel...': 'Раскручиваем колесо для хомяка...',
-  "That's not a bug, it's an undocumented feature...": 'Это не баг, а фича...',
-  'Engage.': 'Поехали!',
-  "I'll be back... with an answer.": 'Я вернусь... с ответом.',
-  'My other process is a TARDIS...': 'Мой другой процесс — это ТАРДИС...',
-  'Communing with the machine spirit...': 'Общаемся с духом машины...',
-  'Letting the thoughts marinate...': 'Даем мыслям замариноваться...',
-  'Just remembered where I put my keys...':
+    'Пытаемся выйти из Vim...',
+    'Раскручиваем колесо для хомяка...',
+    'Это не баг, а фича...',
+    'Поехали!',
+    'Я вернусь... с ответом.',
+    'Мой другой процесс — это ТАРДИС...',
+    'Общаемся с духом машины...',
+    'Даем мыслям замариноваться...',
     'Только что вспомнил, куда положил ключи...',
-  'Pondering the orb...': 'Размышляю над сферой...',
-  "I've seen things you people wouldn't believe... like a user who reads loading messages.":
-    'Я видел такое, во что вы, люди, просто не поверите... например, пользователя, читающего сообщения загрузки.',
-  'Initiating thoughtful gaze...': 'Инициируем задумчивый взгляд...',
-  "What's a computer's favorite snack? Microchips.":
+    'Размышляю над сферой...',
+    'Я видел такое, что вам, людям, и не снилось... пользователя, читающего эти сообщения.',
+    'Инициируем задумчивый взгляд...',
     'Что сервер заказывает в баре? Пинг-коладу.',
-  "Why do Java developers wear glasses? Because they don't C#.":
     'Почему Java-разработчики не убираются дома? Они ждут сборщик мусора...',
-  'Charging the laser... pew pew!': 'Заряжаем лазер... пиу-пиу!',
-  'Dividing by zero... just kidding!': 'Делим на ноль... шучу!',
-  'Looking for an adult superviso... I mean, processing.':
+    'Заряжаем лазер... пиу-пиу!',
+    'Делим на ноль... шучу!',
     'Ищу взрослых для присмот... в смысле, обрабатываю.',
-  'Making it go beep boop.': 'Делаем бип-буп.',
-  'Buffering... because even AIs need a moment.':
-    'Буферизация... даже ИИ нужно мгновение.',
-  'Entangling quantum particles for a faster response...':
+    'Делаем бип-буп.',
+    'Буферизация... даже ИИ нужно время подумать.',
     'Запутываем квантовые частицы для быстрого ответа...',
-  'Polishing the chrome... on the algorithms.':
     'Полируем хром... на алгоритмах.',
-  'Are you not entertained? (Working on it!)':
     'Вы ещё не развлеклись?! Разве вы не за этим сюда пришли?!',
-  'Summoning the code gremlins... to help, of course.':
     'Призываем гремлинов кода... для помощи, конечно же.',
-  'Just waiting for the dial-up tone to finish...':
     'Ждем, пока закончится звук dial-up модема...',
-  'Recalibrating the humor-o-meter.': 'Перекалибровка юморометра.',
-  'My other loading screen is even funnier.':
+    'Перекалибровка юморометра.',
     'Мой другой экран загрузки ещё смешнее.',
-  "Pretty sure there's a cat walking on the keyboard somewhere...":
     'Кажется, где-то по клавиатуре гуляет кот...',
-  'Enhancing... Enhancing... Still loading.':
     'Улучшаем... Ещё улучшаем... Всё ещё грузится.',
-  "It's not a bug, it's a feature... of this loading screen.":
     'Это не баг, это фича... экрана загрузки.',
-  'Have you tried turning it off and on again? (The loading screen, not me.)':
     'Пробовали выключить и включить снова? (Экран загрузки, не меня!)',
-  'Constructing additional pylons...': 'Нужно построить больше пилонов...',
+    'Нужно построить больше пилонов...',
+  ],
 };

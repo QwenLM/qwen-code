@@ -94,6 +94,14 @@ export class OpenAIContentConverter {
   }
 
   /**
+   * Update the model used for response metadata (modelVersion/logging) and any
+   * model-specific conversion behavior.
+   */
+  setModel(model: string): void {
+    this.model = model;
+  }
+
+  /**
    * Reset streaming tool calls parser for new stream processing
    * This should be called at the beginning of each stream to prevent
    * data pollution from previous incomplete streams
@@ -752,6 +760,8 @@ export class OpenAIContentConverter {
         usage.prompt_tokens_details?.cached_tokens ??
         extendedUsage.cached_tokens ??
         0;
+      const thinkingTokens =
+        usage.completion_tokens_details?.reasoning_tokens || 0;
 
       // If we only have total tokens but no breakdown, estimate the split
       // Typically input is ~70% and output is ~30% for most conversations
@@ -769,6 +779,7 @@ export class OpenAIContentConverter {
         candidatesTokenCount: finalCompletionTokens,
         totalTokenCount: totalTokens,
         cachedContentTokenCount: cachedTokens,
+        thoughtsTokenCount: thinkingTokens,
       };
     }
 
@@ -788,7 +799,7 @@ export class OpenAIContentConverter {
       const parts: Part[] = [];
 
       const reasoningText = (choice.delta as ExtendedCompletionChunkDelta)
-        .reasoning_content;
+        ?.reasoning_content;
       if (reasoningText) {
         parts.push({ text: reasoningText, thought: true });
       }
@@ -1120,12 +1131,44 @@ export class OpenAIContentConverter {
         // If the last message is also an assistant message, merge them
         if (lastMessage.role === 'assistant') {
           // Combine content
-          const combinedContent = [
-            typeof lastMessage.content === 'string' ? lastMessage.content : '',
-            typeof message.content === 'string' ? message.content : '',
-          ]
-            .filter(Boolean)
-            .join('');
+          const lastContent = lastMessage.content;
+          const currentContent = message.content;
+
+          // Determine if we should use array format (if either content is an array)
+          const useArrayFormat =
+            Array.isArray(lastContent) || Array.isArray(currentContent);
+
+          let combinedContent:
+            | string
+            | OpenAI.Chat.ChatCompletionContentPart[]
+            | null;
+
+          if (useArrayFormat) {
+            // Convert both to array format and merge
+            const lastParts = Array.isArray(lastContent)
+              ? lastContent
+              : typeof lastContent === 'string' && lastContent
+                ? [{ type: 'text' as const, text: lastContent }]
+                : [];
+
+            const currentParts = Array.isArray(currentContent)
+              ? currentContent
+              : typeof currentContent === 'string' && currentContent
+                ? [{ type: 'text' as const, text: currentContent }]
+                : [];
+
+            combinedContent = [
+              ...lastParts,
+              ...currentParts,
+            ] as OpenAI.Chat.ChatCompletionContentPart[];
+          } else {
+            // Both are strings or null, merge as strings
+            const lastText = typeof lastContent === 'string' ? lastContent : '';
+            const currentText =
+              typeof currentContent === 'string' ? currentContent : '';
+            const mergedText = [lastText, currentText].filter(Boolean).join('');
+            combinedContent = mergedText || null;
+          }
 
           // Combine tool calls
           const lastToolCalls =
@@ -1137,14 +1180,17 @@ export class OpenAIContentConverter {
           // Update the last message with combined data
           (
             lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-              content: string | null;
+              content: string | OpenAI.Chat.ChatCompletionContentPart[] | null;
               tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).content = combinedContent || null;
           if (combinedToolCalls.length > 0) {
             (
               lastMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-                content: string | null;
+                content:
+                  | string
+                  | OpenAI.Chat.ChatCompletionContentPart[]
+                  | null;
                 tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
               }
             ).tool_calls = combinedToolCalls;

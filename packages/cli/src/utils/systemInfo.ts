@@ -115,8 +115,7 @@ export async function getSystemInfo(
   const sandboxEnv = getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
   const cliVersion = await getCliVersion();
-  const selectedAuthType =
-    context.services.settings.merged.security?.auth?.selectedType || '';
+  const selectedAuthType = context.services.config?.getAuthType() || '';
   const ideClient = await getIdeClientName(context);
   const sessionId = context.services.config?.getSessionId() || 'unknown';
 

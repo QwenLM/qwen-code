@@ -33,7 +33,7 @@ interface CheckResult {
  */
 async function loadTranslationsFile(
   filePath: string,
-): Promise<Record<string, string>> {
+): Promise<Record<string, string | string[]>> {
   try {
     // Dynamic import for ES modules
     const module = await import(filePath);
@@ -118,8 +118,8 @@ async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
 
-      // Find all t( calls
-      const tCallRegex = /t\s*\(/g;
+      // Find all t( or ta( calls
+      const tCallRegex = /\bta?\s*\(/g;
       let match;
       while ((match = tCallRegex.exec(content)) !== null) {
         const startPos = match.index + match[0].length;
@@ -153,11 +153,16 @@ async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
  * Check key-value consistency in en.js
  */
 function checkKeyValueConsistency(
-  enTranslations: Record<string, string>,
+  enTranslations: Record<string, string | string[]>,
 ): string[] {
   const errors: string[] = [];
 
   for (const [key, value] of Object.entries(enTranslations)) {
+    // Skip array values as they don't follow the key=value rule (e.g., WITTY_LOADING_PHRASES)
+    if (Array.isArray(value)) {
+      continue;
+    }
+
     if (key !== value) {
       errors.push(`Key-value mismatch: "${key}" !== "${value}"`);
     }
@@ -170,8 +175,8 @@ function checkKeyValueConsistency(
  * Check if en.js and zh.js have matching keys
  */
 function checkKeyMatching(
-  enTranslations: Record<string, string>,
-  zhTranslations: Record<string, string>,
+  enTranslations: Record<string, string | string[]>,
+  zhTranslations: Record<string, string | string[]>,
 ): string[] {
   const errors: string[] = [];
   const enKeys = new Set(Object.keys(enTranslations));
@@ -301,8 +306,8 @@ async function checkI18n(): Promise<CheckResult> {
   const zhPath = path.join(localesDir, 'zh.js');
 
   // Load translation files
-  let enTranslations: Record<string, string>;
-  let zhTranslations: Record<string, string>;
+  let enTranslations: Record<string, string | string[]>;
+  let zhTranslations: Record<string, string | string[]>;
 
   try {
     enTranslations = await loadTranslationsFile(enPath);

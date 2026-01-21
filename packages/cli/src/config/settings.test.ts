@@ -55,6 +55,7 @@ import { disableExtension } from './extension.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
+  getSettingsWarnings,
   loadSettings,
   USER_SETTINGS_PATH, // This IS the mocked path.
   getSystemSettingsPath,
@@ -416,6 +417,86 @@ describe('Settings Loading and Merging', () => {
         },
         someUnrecognizedSetting: 'should-be-preserved',
       });
+    });
+
+    it('should warn about ignored legacy keys in a v2 settings file', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        usageStatisticsEnabled: false,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Legacy setting 'usageStatisticsEnabled' will be ignored",
+          ),
+        ]),
+      );
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("'privacy.usageStatisticsEnabled'"),
+        ]),
+      );
+    });
+
+    it('should warn about unknown top-level keys in a v2 settings file', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        someUnknownKey: 'value',
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Unknown setting 'someUnknownKey' will be ignored",
+          ),
+        ]),
+      );
+    });
+
+    it('should not warn for valid v2 container keys', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+        model: { name: 'qwen-coder' },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
     it('should rewrite allowedTools to tools.allowed during migration', () => {

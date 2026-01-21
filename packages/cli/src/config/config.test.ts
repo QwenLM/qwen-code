@@ -77,10 +77,8 @@ vi.mock('read-package-up', () => ({
   ),
 }));
 
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actualServer = await vi.importActual<typeof ServerConfig>(
-    '@qwen-code/qwen-code-core',
-  );
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actualServer = await importOriginal<typeof ServerConfig>();
   return {
     ...actualServer,
     IdeClient: {
@@ -1198,11 +1196,6 @@ describe('Hierarchical Memory Loading (config.ts) - Placeholder Suite', () => {
       ],
       true,
       'tree',
-      {
-        respectGitIgnore: false,
-        respectQwenIgnore: true,
-      },
-      undefined, // maxDirs
     );
   });
 
@@ -1593,6 +1586,58 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getExcludeTools();
     expect(excludedTools).toContain(ShellTool.Name);
+    expect(excludedTools).toContain(EditTool.Name);
+    expect(excludedTools).toContain(WriteFileTool.Name);
+  });
+
+  it('should not exclude a tool explicitly allowed in tools.allowed', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {
+      tools: {
+        allowed: [ShellTool.Name],
+      },
+    };
+    const extensions: Extension[] = [];
+
+    const config = await loadCliConfig(
+      settings,
+      extensions,
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      argv,
+    );
+
+    const excludedTools = config.getExcludeTools();
+    expect(excludedTools).not.toContain(ShellTool.Name);
+    expect(excludedTools).toContain(EditTool.Name);
+    expect(excludedTools).toContain(WriteFileTool.Name);
+  });
+
+  it('should not exclude a tool explicitly allowed in tools.core', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {
+      tools: {
+        core: [ShellTool.Name],
+      },
+    };
+    const extensions: Extension[] = [];
+
+    const config = await loadCliConfig(
+      settings,
+      extensions,
+      new ExtensionEnablementManager(
+        ExtensionStorage.getUserExtensionsDir(),
+        argv.extensions,
+      ),
+      argv,
+    );
+
+    const excludedTools = config.getExcludeTools();
+    expect(excludedTools).not.toContain(ShellTool.Name);
     expect(excludedTools).toContain(EditTool.Name);
     expect(excludedTools).toContain(WriteFileTool.Name);
   });

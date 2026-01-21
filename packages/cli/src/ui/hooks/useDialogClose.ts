@@ -25,7 +25,6 @@ export interface DialogCloseOptions {
   isAuthDialogOpen: boolean;
   handleAuthSelect: (
     authType: AuthType | undefined,
-    scope: SettingScope,
     credentials?: OpenAICredentials,
   ) => Promise<void>;
   pendingAuthType: AuthType | undefined;

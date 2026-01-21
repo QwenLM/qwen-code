@@ -49,6 +49,8 @@ Cross-platform sandboxing with complete process isolation.
 
 By default, Qwen Code uses a published sandbox image (configured in the CLI package) and will pull it as needed.
 
+The container sandbox mounts your workspace and your `~/.qwen` directory into the container so auth and settings persist between runs.
+
 **Best for**: Strong isolation on any OS, consistent tooling inside a known image.
 
 ### Choosing a method
@@ -157,21 +159,12 @@ For a working allowlist-style proxy example, see: [Example Proxy Script](/develo
 
 ## Linux UID/GID handling
 
-The sandbox automatically handles user permissions on Linux. Override these permissions with:
+On Linux, Qwen Code defaults to enabling UID/GID mapping so the sandbox runs as your user (and reuses the mounted `~/.qwen`). Override with:
 
 ```bash
 export SANDBOX_SET_UID_GID=true   # Force host UID/GID
 export SANDBOX_SET_UID_GID=false  # Disable UID/GID mapping
 ```
-
-## Customizing the sandbox environment (Docker/Podman)
-
-If you need extra tools inside the container (e.g., `git`, `python`, `rg`), create a custom Dockerfile:
-
-- Path: `.qwen/sandbox.Dockerfile`
-- Then run with: `BUILD_SANDBOX=1 qwen -s ...`
-
-This builds a project-specific image based on the default sandbox image.
 
 ## Troubleshooting
 

@@ -13,12 +13,6 @@ import {
   type ContentGeneratorConfig,
   type Config,
 } from '@qwen-code/qwen-code-core';
-import * as availableModelsModule from '../models/availableModels.js';
-
-// Mock the availableModels module
-vi.mock('../models/availableModels.js', () => ({
-  getAvailableModelsForAuthType: vi.fn(),
-}));
 
 // Helper function to create a mock config
 function createMockConfig(
@@ -31,9 +25,6 @@ function createMockConfig(
 
 describe('modelCommand', () => {
   let mockContext: CommandContext;
-  const mockGetAvailableModelsForAuthType = vi.mocked(
-    availableModelsModule.getAvailableModelsForAuthType,
-  );
 
   beforeEach(() => {
     mockContext = createMockCommandContext();
@@ -87,10 +78,6 @@ describe('modelCommand', () => {
   });
 
   it('should return dialog action for QWEN_OAUTH auth type', async () => {
-    mockGetAvailableModelsForAuthType.mockReturnValue([
-      { id: 'qwen3-coder-plus', label: 'qwen3-coder-plus' },
-    ]);
-
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: AuthType.QWEN_OAUTH,
@@ -105,11 +92,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should return dialog action for USE_OPENAI auth type when model is available', async () => {
-    mockGetAvailableModelsForAuthType.mockReturnValue([
-      { id: 'gpt-4', label: 'gpt-4' },
-    ]);
-
+  it('should return dialog action for USE_OPENAI auth type', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: AuthType.USE_OPENAI,
@@ -124,28 +107,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should return error for USE_OPENAI auth type when no model is available', async () => {
-    mockGetAvailableModelsForAuthType.mockReturnValue([]);
-
-    const mockConfig = createMockConfig({
-      model: 'test-model',
-      authType: AuthType.USE_OPENAI,
-    });
-    mockContext.services.config = mockConfig as Config;
-
-    const result = await modelCommand.action!(mockContext, '');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content:
-        'No models available for the current authentication type (openai).',
-    });
-  });
-
-  it('should return error for unsupported auth types', async () => {
-    mockGetAvailableModelsForAuthType.mockReturnValue([]);
-
+  it('should return dialog action for unsupported auth types', async () => {
     const mockConfig = createMockConfig({
       model: 'test-model',
       authType: 'UNSUPPORTED_AUTH_TYPE' as AuthType,
@@ -155,10 +117,8 @@ describe('modelCommand', () => {
     const result = await modelCommand.action!(mockContext, '');
 
     expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content:
-        'No models available for the current authentication type (UNSUPPORTED_AUTH_TYPE).',
+      type: 'dialog',
+      dialog: 'model',
     });
   });
 

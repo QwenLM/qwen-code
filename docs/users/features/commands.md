@@ -48,7 +48,7 @@ Commands specifically for controlling interface and output language.
 | → `ui [language]`     | Set UI interface language        | `/language ui zh-CN`       |
 | → `output [language]` | Set LLM output language          | `/language output Chinese` |
 
-- Available UI languages: `zh-CN` (Simplified Chinese), `en-US` (English)
+- Available built-in UI languages: `zh-CN` (Simplified Chinese), `en-US` (English), `ru-RU` (Russian), `de-DE` (German)
 - Output language examples: `Chinese`, `English`, `Japanese`, etc.
 
 ### 1.4 Tool and Model Management
@@ -59,6 +59,7 @@ Commands for managing AI tools and models.
 | ---------------- | --------------------------------------------- | --------------------------------------------- |
 | `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
 | `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
+| `/skills`        | List and run available skills (experimental)  | `/skills`, `/skills <name>`                   |
 | `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
 | →`plan`          | Analysis only, no execution                   | Secure review                                 |
 | →`default`       | Require approval for edits                    | Daily use                                     |
@@ -72,17 +73,16 @@ Commands for managing AI tools and models.
 
 Commands for obtaining information and performing system settings.
 
-| Command         | Description                                     | Usage Examples                                   |
-| --------------- | ----------------------------------------------- | ------------------------------------------------ |
-| `/help`         | Display help information for available commands | `/help` or `/?`                                  |
-| `/about`        | Display version information                     | `/about`                                         |
-| `/stats`        | Display detailed statistics for current session | `/stats`                                         |
-| `/settings`     | Open settings editor                            | `/settings`                                      |
-| `/auth`         | Change authentication method                    | `/auth`                                          |
-| `/bug`          | Submit issue about Qwen Code                    | `/bug Button click unresponsive`                 |
-| `/copy`         | Copy last output content to clipboard           | `/copy`                                          |
-| `/quit-confirm` | Show confirmation dialog before quitting        | `/quit-confirm` (shortcut: press `Ctrl+C` twice) |
-| `/quit`         | Exit Qwen Code immediately                      | `/quit` or `/exit`                               |
+| Command     | Description                                     | Usage Examples                   |
+| ----------- | ----------------------------------------------- | -------------------------------- |
+| `/help`     | Display help information for available commands | `/help` or `/?`                  |
+| `/about`    | Display version information                     | `/about`                         |
+| `/stats`    | Display detailed statistics for current session | `/stats`                         |
+| `/settings` | Open settings editor                            | `/settings`                      |
+| `/auth`     | Change authentication method                    | `/auth`                          |
+| `/bug`      | Submit issue about Qwen Code                    | `/bug Button click unresponsive` |
+| `/copy`     | Copy last output content to clipboard           | `/copy`                          |
+| `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
 ### 1.6 Common Shortcuts
 

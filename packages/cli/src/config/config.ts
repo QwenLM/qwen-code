@@ -9,26 +9,30 @@ import {
   AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
-  DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-  EditTool,
   FileDiscoveryService,
   getCurrentGeminiMdFilename,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
-  ShellTool,
-  WriteFileTool,
   resolveTelemetrySettings,
   FatalConfigError,
   Storage,
   InputFormat,
   OutputFormat,
+  isToolEnabled,
   SessionService,
   type ResumedSessionData,
-  type FileFilteringOptions,
   type MCPServerConfig,
+  type ToolName,
+  EditTool,
+  ShellTool,
+  WriteFileTool,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
+import {
+  resolveCliGenerationConfig,
+  getAuthTypeFromEnv,
+} from '../utils/modelConfigUtils.js';
 import yargs, { type Argv } from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
@@ -111,6 +115,7 @@ export interface CliArgs {
   telemetryOutfile: string | undefined;
   allowedMcpServerNames: string[] | undefined;
   allowedTools: string[] | undefined;
+  acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalSkills: boolean | undefined;
   extensions: string[] | undefined;
@@ -163,7 +168,17 @@ function normalizeOutputFormat(
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
-  const rawArgv = hideBin(process.argv);
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
+  }
+
   const yargsInstance = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
@@ -304,14 +319,27 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description: 'Enables checkpointing of file edits',
           default: false,
         })
-        .option('experimental-acp', {
+        .option('acp', {
           type: 'boolean',
           description: 'Starts the agent in ACP mode',
+        })
+        .option('experimental-acp', {
+          type: 'boolean',
+          description:
+            'Starts the agent in ACP mode (deprecated, use --acp instead)',
+          hidden: true,
         })
         .option('experimental-skills', {
           type: 'boolean',
           description: 'Enable experimental Skills feature',
-          default: false,
+          default: (() => {
+            const legacySkills = (
+              settings as Settings & {
+                tools?: { experimental?: { skills?: boolean } };
+              }
+            ).tools?.experimental?.skills;
+            return settings.experimental?.skills ?? legacySkills ?? false;
+          })(),
         })
         .option('channel', {
           type: 'string',
@@ -589,8 +617,19 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
   // The import format is now only controlled by settings.memoryImportFormat
   // We no longer accept it as a CLI argument
 
-  // Apply ACP fallback: if experimental-acp is present but no explicit --channel, treat as ACP
-  if (result['experimentalAcp'] && !result['channel']) {
+  // Handle deprecated --experimental-acp flag
+  if (result['experimentalAcp']) {
+    console.warn(
+      '\x1b[33m⚠ Warning: --experimental-acp is deprecated and will be removed in a future release. Please use --acp instead.\x1b[0m',
+    );
+    // Map experimental-acp to acp if acp is not explicitly set
+    if (!result['acp']) {
+      (result as Record<string, unknown>)['acp'] = true;
+    }
+  }
+
+  // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
+  if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
     (result as Record<string, unknown>)['channel'] = 'ACP';
   }
 
@@ -609,7 +648,6 @@ export async function loadHierarchicalGeminiMemory(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
-  fileFilteringOptions?: FileFilteringOptions,
 ): Promise<{ memoryContent: string; fileCount: number }> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
@@ -635,8 +673,6 @@ export async function loadHierarchicalGeminiMemory(
     extensionContextFilePaths,
     folderTrust,
     memoryImportFormat,
-    fileFilteringOptions,
-    settings.context?.discoveryMaxDirs,
   );
 }
 
@@ -706,11 +742,6 @@ export async function loadCliConfig(
 
   const fileService = new FileDiscoveryService(cwd);
 
-  const fileFiltering = {
-    ...DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-    ...settings.context?.fileFiltering,
-  };
-
   const includeDirectories = (settings.context?.includeDirectories || [])
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
@@ -727,7 +758,6 @@ export async function loadCliConfig(
     extensionContextFilePaths,
     trustedFolder,
     memoryImportFormat,
-    fileFiltering,
   );
 
   let mcpServers = mergeMcpServers(settings, activeExtensions);
@@ -818,20 +848,44 @@ export async function loadCliConfig(
   // However, if stream-json input is used, control can be requested via JSON messages,
   // so tools should not be excluded in that case.
   const extraExcludes: string[] = [];
-  if (
-    !interactive &&
-    !argv.experimentalAcp &&
-    inputFormat !== InputFormat.STREAM_JSON
-  ) {
+  const resolvedCoreTools = argv.coreTools || settings.tools?.core || [];
+  const resolvedAllowedTools =
+    argv.allowedTools || settings.tools?.allowed || [];
+  const isExplicitlyEnabled = (toolName: ToolName): boolean => {
+    if (resolvedCoreTools.length > 0) {
+      if (isToolEnabled(toolName, resolvedCoreTools, [])) {
+        return true;
+      }
+    }
+    if (resolvedAllowedTools.length > 0) {
+      if (isToolEnabled(toolName, resolvedAllowedTools, [])) {
+        return true;
+      }
+    }
+    return false;
+  };
+  const excludeUnlessExplicit = (toolName: ToolName): void => {
+    if (!isExplicitlyEnabled(toolName)) {
+      extraExcludes.push(toolName);
+    }
+  };
+
+  // ACP mode check: must include both --acp (current) and --experimental-acp (deprecated).
+  // Without this check, edit, write_file, run_shell_command would be excluded in ACP mode.
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  if (!interactive && !isAcpMode && inputFormat !== InputFormat.STREAM_JSON) {
     switch (approvalMode) {
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
-        // In default non-interactive mode, all tools that require approval are excluded.
-        extraExcludes.push(ShellTool.Name, EditTool.Name, WriteFileTool.Name);
+        // In default non-interactive mode, all tools that require approval are excluded,
+        // unless explicitly enabled via coreTools/allowedTools.
+        excludeUnlessExplicit(ShellTool.Name as ToolName);
+        excludeUnlessExplicit(EditTool.Name as ToolName);
+        excludeUnlessExplicit(WriteFileTool.Name as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
         // In auto-edit non-interactive mode, only tools that still require a prompt are excluded.
-        extraExcludes.push(ShellTool.Name);
+        excludeUnlessExplicit(ShellTool.Name as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra excludes for YOLO mode.
@@ -879,28 +933,25 @@ export async function loadCliConfig(
 
   const selectedAuthType =
     (argv.authType as AuthType | undefined) ||
-    settings.security?.auth?.selectedType;
+    settings.security?.auth?.selectedType ||
+    /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
+    getAuthTypeFromEnv();
 
-  const apiKey =
-    (selectedAuthType === AuthType.USE_OPENAI
-      ? argv.openaiApiKey ||
-        process.env['OPENAI_API_KEY'] ||
-        settings.security?.auth?.apiKey
-      : '') || '';
-  const baseUrl =
-    (selectedAuthType === AuthType.USE_OPENAI
-      ? argv.openaiBaseUrl ||
-        process.env['OPENAI_BASE_URL'] ||
-        settings.security?.auth?.baseUrl
-      : '') || '';
-  const resolvedModel =
-    argv.model ||
-    (selectedAuthType === AuthType.USE_OPENAI
-      ? process.env['OPENAI_MODEL'] ||
-        process.env['QWEN_MODEL'] ||
-        settings.model?.name
-      : '') ||
-    '';
+  // Unified resolution of generation config with source attribution
+  const resolvedCliConfig = resolveCliGenerationConfig({
+    argv: {
+      model: argv.model,
+      openaiApiKey: argv.openaiApiKey,
+      openaiBaseUrl: argv.openaiBaseUrl,
+      openaiLogging: argv.openaiLogging,
+      openaiLoggingDir: argv.openaiLoggingDir,
+    },
+    settings,
+    selectedAuthType,
+    env: process.env as Record<string, string | undefined>,
+  });
+
+  const { model: resolvedModel } = resolvedCliConfig;
 
   const sandboxConfig = await loadSandboxConfig(settings, argv);
   const screenReader =
@@ -933,6 +984,8 @@ export async function loadCliConfig(
       }
     }
   }
+
+  const modelProvidersConfig = settings.modelProviders;
 
   return new Config({
     sessionId,
@@ -981,7 +1034,7 @@ export async function loadCliConfig(
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
-    experimentalZedIntegration: argv.experimentalAcp || false,
+    experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     experimentalSkills: argv.experimentalSkills || false,
     listExtensions: argv.listExtensions || false,
     extensions: allExtensions,
@@ -991,24 +1044,11 @@ export async function loadCliConfig(
     inputFormat,
     outputFormat,
     includePartialMessages,
-    generationConfig: {
-      ...(settings.model?.generationConfig || {}),
-      model: resolvedModel,
-      apiKey,
-      baseUrl,
-      enableOpenAILogging:
-        (typeof argv.openaiLogging === 'undefined'
-          ? settings.model?.enableOpenAILogging
-          : argv.openaiLogging) ?? false,
-      openAILoggingDir:
-        argv.openaiLoggingDir || settings.model?.openAILoggingDir,
-    },
+    modelProvidersConfig,
+    generationConfigSources: resolvedCliConfig.sources,
+    generationConfig: resolvedCliConfig.generationConfig,
     cliVersion: await getCliVersion(),
-    webSearch: buildWebSearchConfig(
-      argv,
-      settings,
-      settings.security?.auth?.selectedType,
-    ),
+    webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
     summarizeToolOutput: settings.model?.summarizeToolOutput,
     ideMode,
     chatCompression: settings.model?.chatCompression,

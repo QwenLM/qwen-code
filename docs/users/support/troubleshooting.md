@@ -9,10 +9,17 @@ This guide provides solutions to common issues and debugging tips, including top
 
 ## Authentication or login errors
 
-- **Error: `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` or `unable to get local issuer certificate`**
+- **Error: `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, or `unable to get local issuer certificate`**
   - **Cause:** You may be on a corporate network with a firewall that intercepts and inspects SSL/TLS traffic. This often requires a custom root CA certificate to be trusted by Node.js.
   - **Solution:** Set the `NODE_EXTRA_CA_CERTS` environment variable to the absolute path of your corporate root CA certificate file.
     - Example: `export NODE_EXTRA_CA_CERTS=/path/to/your/corporate-ca.crt`
+
+- **Error: `Device authorization flow failed: fetch failed`**
+  - **Cause:** Node.js could not reach Qwen OAuth endpoints (often a proxy or SSL/TLS trust issue). When available, Qwen Code will also print the underlying error cause (for example: `UNABLE_TO_VERIFY_LEAF_SIGNATURE`).
+  - **Solution:**
+    - Confirm you can access `https://chat.qwen.ai` from the same machine/network.
+    - If you are behind a proxy, set it via `qwen --proxy <url>` (or the `proxy` setting in `settings.json`).
+    - If your network uses a corporate TLS inspection CA, set `NODE_EXTRA_CA_CERTS` as described above.
 
 - **Issue: Unable to display UI after authentication failure**
   - **Cause:** If authentication fails after selecting an authentication type, the `security.auth.selectedType` setting may be persisted in `settings.json`. On restart, the CLI may get stuck trying to authenticate with the failed auth type and fail to display the UI.

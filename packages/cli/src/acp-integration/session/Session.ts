@@ -52,6 +52,8 @@ import type {
   AvailableCommandsUpdate,
   SetModeRequest,
   SetModeResponse,
+  SetModelRequest,
+  SetModelResponse,
   ApprovalModeValue,
   CurrentModeUpdate,
 } from '../schema.js';
@@ -346,6 +348,31 @@ export class Session implements SessionContext {
     this.config.setApprovalMode(approvalMode);
 
     return { modeId: params.modeId };
+  }
+
+  /**
+   * Sets the model for the current session.
+   * Validates the model ID and switches the model via Config.
+   */
+  async setModel(params: SetModelRequest): Promise<SetModelResponse> {
+    const modelId = params.modelId.trim();
+
+    if (!modelId) {
+      throw acp.RequestError.invalidParams('modelId cannot be empty');
+    }
+
+    // Attempt to set the model using config
+    await this.config.setModel(modelId, {
+      reason: 'user_request_acp',
+      context: 'session/set_model',
+    });
+
+    // Get updated model info
+    const currentModel = this.config.getModel();
+
+    return {
+      modelId: currentModel,
+    };
   }
 
   /**

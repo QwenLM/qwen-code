@@ -89,6 +89,9 @@ export default {
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
     'View or change the approval mode for tool usage',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    'Invalid approval mode "{{arg}}". Valid modes: {{modes}}',
+  'Approval mode set to "{{mode}}"': 'Approval mode set to "{{mode}}"',
   'View or change the language setting': 'View or change the language setting',
   'change the theme': 'change the theme',
   'Select Theme': 'Select Theme',
@@ -102,8 +105,8 @@ export default {
   'Theme "{{themeName}}" not found.': 'Theme "{{themeName}}" not found.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Theme "{{themeName}}" not found in selected scope.',
-  'clear the screen and conversation history':
-    'clear the screen and conversation history',
+  'Clear conversation history and free up context':
+    'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
   'open full Qwen Code documentation in your browser':
@@ -283,6 +286,13 @@ export default {
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
   'Enable Welcome Back': 'Enable Welcome Back',
+  'Enable User Feedback': 'Enable User Feedback',
+  'How is Qwen doing this session? (optional)':
+    'How is Qwen doing this session? (optional)',
+  Bad: 'Bad',
+  Good: 'Good',
+  'Not Sure Yet': 'Not Sure Yet',
+  'Any other key': 'Any other key',
   'Disable Loading Phrases': 'Disable Loading Phrases',
   'Screen Reader Mode': 'Screen Reader Mode',
   'IDE Mode': 'IDE Mode',
@@ -612,9 +622,10 @@ export default {
   // ============================================================================
   // Commands - Clear
   // ============================================================================
-  'Clearing terminal and resetting chat.':
-    'Clearing terminal and resetting chat.',
-  'Clearing terminal.': 'Clearing terminal.',
+  'Starting a new session, resetting chat, and clearing terminal.':
+    'Starting a new session, resetting chat, and clearing terminal.',
+  'Starting a new session and clearing.':
+    'Starting a new session and clearing.',
 
   // ============================================================================
   // Commands - Compress
@@ -766,6 +777,21 @@ export default {
     'Authentication timed out. Please try again.',
   'Waiting for auth... (Press ESC or CTRL+C to cancel)':
     'Waiting for auth... (Press ESC or CTRL+C to cancel)',
+  'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.':
+    'Missing API key for OpenAI-compatible auth. Set settings.security.auth.apiKey, or set the {{envKeyHint}} environment variable.',
+  '{{envKeyHint}} environment variable not found.':
+    '{{envKeyHint}} environment variable not found.',
+  '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.':
+    '{{envKeyHint}} environment variable not found. Please set it in your .env file or environment variables.',
+  '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.':
+    '{{envKeyHint}} environment variable not found (or set settings.security.auth.apiKey). Please set it in your .env file or environment variables.',
+  'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.':
+    'Missing API key for OpenAI-compatible auth. Set the {{envKeyHint}} environment variable.',
+  'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.':
+    'Anthropic provider missing required baseUrl in modelProviders[].baseUrl.',
+  'ANTHROPIC_BASE_URL environment variable not found.':
+    'ANTHROPIC_BASE_URL environment variable not found.',
+  'Invalid auth method selected.': 'Invalid auth method selected.',
   'Failed to authenticate. Message: {{message}}':
     'Failed to authenticate. Message: {{message}}',
   'Authenticated successfully with {{authType}} credentials.':
@@ -787,6 +813,15 @@ export default {
   // ============================================================================
   'Select Model': 'Select Model',
   '(Press Esc to close)': '(Press Esc to close)',
+  'Current (effective) configuration': 'Current (effective) configuration',
+  AuthType: 'AuthType',
+  'API Key': 'API Key',
+  unset: 'unset',
+  '(default)': '(default)',
+  '(set)': '(set)',
+  '(not set)': '(not set)',
+  "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
+    "Failed to switch model to '{{modelId}}'.\n\n{{error}}",
   'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)':
     'The latest Qwen Coder model from Alibaba Cloud ModelStudio (version: qwen3-coder-plus-2025-09-23)',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
@@ -935,192 +970,137 @@ export default {
   // ============================================================================
   'Waiting for user confirmation...': 'Waiting for user confirmation...',
   '(esc to cancel, {{time}})': '(esc to cancel, {{time}})',
-  "I'm Feeling Lucky": "I'm Feeling Lucky",
-  'Shipping awesomeness... ': 'Shipping awesomeness... ',
-  'Painting the serifs back on...': 'Painting the serifs back on...',
-  'Navigating the slime mold...': 'Navigating the slime mold...',
-  'Consulting the digital spirits...': 'Consulting the digital spirits...',
-  'Reticulating splines...': 'Reticulating splines...',
-  'Warming up the AI hamsters...': 'Warming up the AI hamsters...',
-  'Asking the magic conch shell...': 'Asking the magic conch shell...',
-  'Generating witty retort...': 'Generating witty retort...',
-  'Polishing the algorithms...': 'Polishing the algorithms...',
-  "Don't rush perfection (or my code)...":
+
+  // ============================================================================
+  // Loading Phrases
+  // ============================================================================
+  WITTY_LOADING_PHRASES: [
+    "I'm Feeling Lucky",
+    'Shipping awesomeness... ',
+    'Painting the serifs back on...',
+    'Navigating the slime mold...',
+    'Consulting the digital spirits...',
+    'Reticulating splines...',
+    'Warming up the AI hamsters...',
+    'Asking the magic conch shell...',
+    'Generating witty retort...',
+    'Polishing the algorithms...',
     "Don't rush perfection (or my code)...",
-  'Brewing fresh bytes...': 'Brewing fresh bytes...',
-  'Counting electrons...': 'Counting electrons...',
-  'Engaging cognitive processors...': 'Engaging cognitive processors...',
-  'Checking for syntax errors in the universe...':
+    'Brewing fresh bytes...',
+    'Counting electrons...',
+    'Engaging cognitive processors...',
     'Checking for syntax errors in the universe...',
-  'One moment, optimizing humor...': 'One moment, optimizing humor...',
-  'Shuffling punchlines...': 'Shuffling punchlines...',
-  'Untangling neural nets...': 'Untangling neural nets...',
-  'Compiling brilliance...': 'Compiling brilliance...',
-  'Loading wit.exe...': 'Loading wit.exe...',
-  'Summoning the cloud of wisdom...': 'Summoning the cloud of wisdom...',
-  'Preparing a witty response...': 'Preparing a witty response...',
-  "Just a sec, I'm debugging reality...":
+    'One moment, optimizing humor...',
+    'Shuffling punchlines...',
+    'Untangling neural nets...',
+    'Compiling brilliance...',
+    'Loading wit.exe...',
+    'Summoning the cloud of wisdom...',
+    'Preparing a witty response...',
     "Just a sec, I'm debugging reality...",
-  'Confuzzling the options...': 'Confuzzling the options...',
-  'Tuning the cosmic frequencies...': 'Tuning the cosmic frequencies...',
-  'Crafting a response worthy of your patience...':
+    'Confuzzling the options...',
+    'Tuning the cosmic frequencies...',
     'Crafting a response worthy of your patience...',
-  'Compiling the 1s and 0s...': 'Compiling the 1s and 0s...',
-  'Resolving dependencies... and existential crises...':
+    'Compiling the 1s and 0s...',
     'Resolving dependencies... and existential crises...',
-  'Defragmenting memories... both RAM and personal...':
     'Defragmenting memories... both RAM and personal...',
-  'Rebooting the humor module...': 'Rebooting the humor module...',
-  'Caching the essentials (mostly cat memes)...':
+    'Rebooting the humor module...',
     'Caching the essentials (mostly cat memes)...',
-  'Optimizing for ludicrous speed': 'Optimizing for ludicrous speed',
-  "Swapping bits... don't tell the bytes...":
+    'Optimizing for ludicrous speed',
     "Swapping bits... don't tell the bytes...",
-  'Garbage collecting... be right back...':
     'Garbage collecting... be right back...',
-  'Assembling the interwebs...': 'Assembling the interwebs...',
-  'Converting coffee into code...': 'Converting coffee into code...',
-  'Updating the syntax for reality...': 'Updating the syntax for reality...',
-  'Rewiring the synapses...': 'Rewiring the synapses...',
-  'Looking for a misplaced semicolon...':
+    'Assembling the interwebs...',
+    'Converting coffee into code...',
+    'Updating the syntax for reality...',
+    'Rewiring the synapses...',
     'Looking for a misplaced semicolon...',
-  "Greasin' the cogs of the machine...": "Greasin' the cogs of the machine...",
-  'Pre-heating the servers...': 'Pre-heating the servers...',
-  'Calibrating the flux capacitor...': 'Calibrating the flux capacitor...',
-  'Engaging the improbability drive...': 'Engaging the improbability drive...',
-  'Channeling the Force...': 'Channeling the Force...',
-  'Aligning the stars for optimal response...':
+    "Greasin' the cogs of the machine...",
+    'Pre-heating the servers...',
+    'Calibrating the flux capacitor...',
+    'Engaging the improbability drive...',
+    'Channeling the Force...',
     'Aligning the stars for optimal response...',
-  'So say we all...': 'So say we all...',
-  'Loading the next great idea...': 'Loading the next great idea...',
-  "Just a moment, I'm in the zone...": "Just a moment, I'm in the zone...",
-  'Preparing to dazzle you with brilliance...':
+    'So say we all...',
+    'Loading the next great idea...',
+    "Just a moment, I'm in the zone...",
     'Preparing to dazzle you with brilliance...',
-  "Just a tick, I'm polishing my wit...":
     "Just a tick, I'm polishing my wit...",
-  "Hold tight, I'm crafting a masterpiece...":
     "Hold tight, I'm crafting a masterpiece...",
-  "Just a jiffy, I'm debugging the universe...":
     "Just a jiffy, I'm debugging the universe...",
-  "Just a moment, I'm aligning the pixels...":
     "Just a moment, I'm aligning the pixels...",
-  "Just a sec, I'm optimizing the humor...":
     "Just a sec, I'm optimizing the humor...",
-  "Just a moment, I'm tuning the algorithms...":
     "Just a moment, I'm tuning the algorithms...",
-  'Warp speed engaged...': 'Warp speed engaged...',
-  'Mining for more Dilithium crystals...':
+    'Warp speed engaged...',
     'Mining for more Dilithium crystals...',
-  "Don't panic...": "Don't panic...",
-  'Following the white rabbit...': 'Following the white rabbit...',
-  'The truth is in here... somewhere...':
+    "Don't panic...",
+    'Following the white rabbit...',
     'The truth is in here... somewhere...',
-  'Blowing on the cartridge...': 'Blowing on the cartridge...',
-  'Loading... Do a barrel roll!': 'Loading... Do a barrel roll!',
-  'Waiting for the respawn...': 'Waiting for the respawn...',
-  'Finishing the Kessel Run in less than 12 parsecs...':
+    'Blowing on the cartridge...',
+    'Loading... Do a barrel roll!',
+    'Waiting for the respawn...',
     'Finishing the Kessel Run in less than 12 parsecs...',
-  "The cake is not a lie, it's just still loading...":
     "The cake is not a lie, it's just still loading...",
-  'Fiddling with the character creation screen...':
     'Fiddling with the character creation screen...',
-  "Just a moment, I'm finding the right meme...":
     "Just a moment, I'm finding the right meme...",
-  "Pressing 'A' to continue...": "Pressing 'A' to continue...",
-  'Herding digital cats...': 'Herding digital cats...',
-  'Polishing the pixels...': 'Polishing the pixels...',
-  'Finding a suitable loading screen pun...':
+    "Pressing 'A' to continue...",
+    'Herding digital cats...',
+    'Polishing the pixels...',
     'Finding a suitable loading screen pun...',
-  'Distracting you with this witty phrase...':
     'Distracting you with this witty phrase...',
-  'Almost there... probably...': 'Almost there... probably...',
-  'Our hamsters are working as fast as they can...':
+    'Almost there... probably...',
     'Our hamsters are working as fast as they can...',
-  'Giving Cloudy a pat on the head...': 'Giving Cloudy a pat on the head...',
-  'Petting the cat...': 'Petting the cat...',
-  'Rickrolling my boss...': 'Rickrolling my boss...',
-  'Never gonna give you up, never gonna let you down...':
+    'Giving Cloudy a pat on the head...',
+    'Petting the cat...',
+    'Rickrolling my boss...',
     'Never gonna give you up, never gonna let you down...',
-  'Slapping the bass...': 'Slapping the bass...',
-  'Tasting the snozberries...': 'Tasting the snozberries...',
-  "I'm going the distance, I'm going for speed...":
+    'Slapping the bass...',
+    'Tasting the snozberries...',
     "I'm going the distance, I'm going for speed...",
-  'Is this the real life? Is this just fantasy?...':
     'Is this the real life? Is this just fantasy?...',
-  "I've got a good feeling about this...":
     "I've got a good feeling about this...",
-  'Poking the bear...': 'Poking the bear...',
-  'Doing research on the latest memes...':
+    'Poking the bear...',
     'Doing research on the latest memes...',
-  'Figuring out how to make this more witty...':
     'Figuring out how to make this more witty...',
-  'Hmmm... let me think...': 'Hmmm... let me think...',
-  'What do you call a fish with no eyes? A fsh...':
+    'Hmmm... let me think...',
     'What do you call a fish with no eyes? A fsh...',
-  'Why did the computer go to therapy? It had too many bytes...':
     'Why did the computer go to therapy? It had too many bytes...',
-  "Why don't programmers like nature? It has too many bugs...":
     "Why don't programmers like nature? It has too many bugs...",
-  'Why do programmers prefer dark mode? Because light attracts bugs...':
     'Why do programmers prefer dark mode? Because light attracts bugs...',
-  'Why did the developer go broke? Because they used up all their cache...':
     'Why did the developer go broke? Because they used up all their cache...',
-  "What can you do with a broken pencil? Nothing, it's pointless...":
     "What can you do with a broken pencil? Nothing, it's pointless...",
-  'Applying percussive maintenance...': 'Applying percussive maintenance...',
-  'Searching for the correct USB orientation...':
+    'Applying percussive maintenance...',
     'Searching for the correct USB orientation...',
-  'Ensuring the magic smoke stays inside the wires...':
     'Ensuring the magic smoke stays inside the wires...',
-  'Rewriting in Rust for no particular reason...':
-    'Rewriting in Rust for no particular reason...',
-  'Trying to exit Vim...': 'Trying to exit Vim...',
-  'Spinning up the hamster wheel...': 'Spinning up the hamster wheel...',
-  "That's not a bug, it's an undocumented feature...":
+    'Trying to exit Vim...',
+    'Spinning up the hamster wheel...',
     "That's not a bug, it's an undocumented feature...",
-  'Engage.': 'Engage.',
-  "I'll be back... with an answer.": "I'll be back... with an answer.",
-  'My other process is a TARDIS...': 'My other process is a TARDIS...',
-  'Communing with the machine spirit...':
+    'Engage.',
+    "I'll be back... with an answer.",
+    'My other process is a TARDIS...',
     'Communing with the machine spirit...',
-  'Letting the thoughts marinate...': 'Letting the thoughts marinate...',
-  'Just remembered where I put my keys...':
+    'Letting the thoughts marinate...',
     'Just remembered where I put my keys...',
-  'Pondering the orb...': 'Pondering the orb...',
-  "I've seen things you people wouldn't believe... like a user who reads loading messages.":
+    'Pondering the orb...',
     "I've seen things you people wouldn't believe... like a user who reads loading messages.",
-  'Initiating thoughtful gaze...': 'Initiating thoughtful gaze...',
-  "What's a computer's favorite snack? Microchips.":
+    'Initiating thoughtful gaze...',
     "What's a computer's favorite snack? Microchips.",
-  "Why do Java developers wear glasses? Because they don't C#.":
     "Why do Java developers wear glasses? Because they don't C#.",
-  'Charging the laser... pew pew!': 'Charging the laser... pew pew!',
-  'Dividing by zero... just kidding!': 'Dividing by zero... just kidding!',
-  'Looking for an adult superviso... I mean, processing.':
+    'Charging the laser... pew pew!',
+    'Dividing by zero... just kidding!',
     'Looking for an adult superviso... I mean, processing.',
-  'Making it go beep boop.': 'Making it go beep boop.',
-  'Buffering... because even AIs need a moment.':
+    'Making it go beep boop.',
     'Buffering... because even AIs need a moment.',
-  'Entangling quantum particles for a faster response...':
     'Entangling quantum particles for a faster response...',
-  'Polishing the chrome... on the algorithms.':
     'Polishing the chrome... on the algorithms.',
-  'Are you not entertained? (Working on it!)':
     'Are you not entertained? (Working on it!)',
-  'Summoning the code gremlins... to help, of course.':
     'Summoning the code gremlins... to help, of course.',
-  'Just waiting for the dial-up tone to finish...':
     'Just waiting for the dial-up tone to finish...',
-  'Recalibrating the humor-o-meter.': 'Recalibrating the humor-o-meter.',
-  'My other loading screen is even funnier.':
+    'Recalibrating the humor-o-meter.',
     'My other loading screen is even funnier.',
-  "Pretty sure there's a cat walking on the keyboard somewhere...":
     "Pretty sure there's a cat walking on the keyboard somewhere...",
-  'Enhancing... Enhancing... Still loading.':
     'Enhancing... Enhancing... Still loading.',
-  "It's not a bug, it's a feature... of this loading screen.":
     "It's not a bug, it's a feature... of this loading screen.",
-  'Have you tried turning it off and on again? (The loading screen, not me.)':
     'Have you tried turning it off and on again? (The loading screen, not me.)',
-  'Constructing additional pylons...': 'Constructing additional pylons...',
+    'Constructing additional pylons...',
+  ],
 };

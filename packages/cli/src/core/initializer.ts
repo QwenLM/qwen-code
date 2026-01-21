@@ -15,6 +15,7 @@ import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
 import { initializeI18n } from '../i18n/index.js';
+import { initializeLlmOutputLanguage } from '../ui/commands/languageCommand.js';
 
 export interface InitializationResult {
   authError: string | null;
@@ -41,7 +42,12 @@ export async function initializeApp(
     'auto';
   await initializeI18n(languageSetting);
 
-  const authType = settings.merged.security?.auth?.selectedType;
+  // Auto-detect and set LLM output language on first use
+  initializeLlmOutputLanguage();
+
+  // Use authType from modelsConfig which respects CLI --auth-type argument
+  // over settings.security.auth.selectedType
+  const authType = config.modelsConfig.getCurrentAuthType();
   const authError = await performInitialAuth(config, authType);
 
   // Fallback to user select when initial authentication fails
@@ -55,7 +61,7 @@ export async function initializeApp(
   const themeError = validateTheme(settings);
 
   const shouldOpenAuthDialog =
-    settings.merged.security?.auth?.selectedType === undefined || !!authError;
+    !config.modelsConfig.wasAuthTypeExplicitlyProvided() || !!authError;
 
   if (config.getIdeMode()) {
     const ideClient = await IdeClient.getInstance();

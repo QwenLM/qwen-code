@@ -8,7 +8,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { updateSettingsFilePreservingFormat } from './commentJson.js';
+import {
+  updateSettingsFilePreservingFormat,
+  applyUpdates,
+} from './commentJson.js';
 
 describe('commentJson', () => {
   let tempDir: string;
@@ -178,5 +181,20 @@ describe('commentJson', () => {
 
       consoleSpy.mockRestore();
     });
+  });
+});
+
+describe('applyUpdates', () => {
+  it('should apply updates correctly', () => {
+    const original = { a: 1, b: { c: 2 } };
+    const updates = { b: { c: 3 } };
+    const result = applyUpdates(original, updates);
+    expect(result).toEqual({ a: 1, b: { c: 3 } });
+  });
+  it('should apply updates correctly when empty', () => {
+    const original = { a: 1, b: { c: 2 } };
+    const updates = { b: {} };
+    const result = applyUpdates(original, updates);
+    expect(result).toEqual({ a: 1, b: {} });
   });
 });

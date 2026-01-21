@@ -17,6 +17,7 @@ import {
 import { WebViewProvider } from './webview/WebViewProvider.js';
 import { registerNewCommands } from './commands/index.js';
 import { ReadonlyFileSystemProvider } from './services/readonlyFileSystemProvider.js';
+import { isWindows } from './utils/platform.js';
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
@@ -312,13 +313,36 @@ export async function activate(context: vscode.ExtensionContext) {
             'qwen-cli',
             'cli.js',
           ).fsPath;
-          const quote = (s: string) => `"${s.replaceAll('"', '\\"')}"`;
-          const qwenCmd = `${quote(process.execPath)} ${quote(cliEntry)}`;
-          const terminal = vscode.window.createTerminal({
+          const execPath = process.execPath;
+
+          const terminalOptions: vscode.TerminalOptions = {
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
             location,
-          });
+          };
+
+          let qwenCmd: string;
+
+          if (isWindows) {
+            // On Windows, try multiple strategies to find a Node.js runtime:
+            // 1. Check if VSCode ships a standalone node.exe alongside Code.exe
+            // 2. Check VSCode's internal Node.js in resources directory
+            // 3. Fall back to using Code.exe with ELECTRON_RUN_AS_NODE=1
+            const quoteCmd = (s: string) => `"${s.replace(/"/g, '""')}"`;
+            const cliQuoted = quoteCmd(cliEntry);
+            // TODO: @yiliang114, temporarily run through node, and later hope to decouple from the local node
+            qwenCmd = `node ${cliQuoted}`;
+            terminalOptions.shellPath = process.env.ComSpec;
+          } else {
+            // macOS/Linux: All VSCode-like IDEs (VSCode, Cursor, Windsurf, etc.)
+            // are Electron-based, so we always need ELECTRON_RUN_AS_NODE=1
+            // to run Node.js scripts using the IDE's bundled runtime.
+            const quotePosix = (s: string) => `"${s.replace(/"/g, '\\"')}"`;
+            const baseCmd = `${quotePosix(execPath)} ${quotePosix(cliEntry)}`;
+            qwenCmd = `ELECTRON_RUN_AS_NODE=1 ${baseCmd}`;
+          }
+
+          const terminal = vscode.window.createTerminal(terminalOptions);
           terminal.show();
           terminal.sendText(qwenCmd);
         }

@@ -38,7 +38,7 @@ export function updateSettingsFilePreservingFormat(
   fs.writeFileSync(filePath, updatedContent, 'utf-8');
 }
 
-function applyUpdates(
+export function applyUpdates(
   current: Record<string, unknown>,
   updates: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -50,6 +50,7 @@ function applyUpdates(
       typeof value === 'object' &&
       value !== null &&
       !Array.isArray(value) &&
+      Object.keys(value).length > 0 &&
       typeof result[key] === 'object' &&
       result[key] !== null &&
       !Array.isArray(result[key])

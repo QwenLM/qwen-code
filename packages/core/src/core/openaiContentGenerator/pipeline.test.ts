@@ -46,6 +46,7 @@ describe('ContentGenerationPipeline', () => {
 
     // Mock converter
     mockConverter = {
+      setModel: vi.fn(),
       convertGeminiRequestToOpenAI: vi.fn(),
       convertOpenAIResponseToGemini: vi.fn(),
       convertOpenAIChunkToGemini: vi.fn(),
@@ -99,6 +100,7 @@ describe('ContentGenerationPipeline', () => {
   describe('constructor', () => {
     it('should initialize with correct configuration', () => {
       expect(mockProvider.buildClient).toHaveBeenCalled();
+      // Converter is constructed once and the model is updated per-request via setModel().
       expect(OpenAIContentConverter).toHaveBeenCalledWith(
         'test-model',
         undefined,
@@ -144,6 +146,9 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert
       expect(result).toBe(mockGeminiResponse);
+      expect(
+        (mockConverter as unknown as { setModel: Mock }).setModel,
+      ).toHaveBeenCalledWith('test-model');
       expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
         request,
       );
@@ -161,6 +166,53 @@ describe('ContentGenerationPipeline', () => {
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
+      );
+    });
+
+    it('should ignore request.model override and always use configured model', async () => {
+      // Arrange
+      const request: GenerateContentParameters = {
+        model: 'override-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'override-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      const result = await pipeline.execute(request, userPromptId);
+
+      // Assert
+      expect(result).toBe(mockGeminiResponse);
+      expect(
+        (mockConverter as unknown as { setModel: Mock }).setModel,
+      ).toHaveBeenCalledWith('test-model');
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'test-model',
+        }),
+        expect.any(Object),
       );
     });
 
@@ -217,6 +269,9 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert
       expect(result).toBe(mockGeminiResponse);
+      expect(
+        (mockConverter as unknown as { setModel: Mock }).setModel,
+      ).toHaveBeenCalledWith('test-model');
       expect(mockConverter.convertGeminiToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
       );

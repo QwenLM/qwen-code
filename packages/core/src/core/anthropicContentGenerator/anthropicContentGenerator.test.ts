@@ -10,6 +10,7 @@ import type {
   GenerateContentParameters,
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
+import type { ContentGeneratorConfig } from '../contentGenerator.js';
 
 // Mock the request tokenizer module BEFORE importing the class that uses it.
 const mockTokenizer = {
@@ -125,6 +126,32 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['User-Agent']).toContain(
       `(${process.platform}; ${process.arch})`,
     );
+  });
+
+  it('merges customHeaders into defaultHeaders (does not replace defaults)', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-test',
+        apiKey: 'test-key',
+        baseUrl: 'https://example.invalid',
+        timeout: 10_000,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+        reasoning: { effort: 'medium' },
+        customHeaders: {
+          'X-Custom': '1',
+        },
+      } as unknown as Record<string, unknown> as ContentGeneratorConfig,
+      mockConfig,
+    );
+
+    const headers = (anthropicState.constructorOptions?.['defaultHeaders'] ||
+      {}) as Record<string, string>;
+    expect(headers['User-Agent']).toContain('QwenCode/1.2.3');
+    expect(headers['anthropic-beta']).toContain('effort-2025-11-24');
+    expect(headers['X-Custom']).toBe('1');
   });
 
   it('adds the effort beta header when reasoning.effort is set', async () => {

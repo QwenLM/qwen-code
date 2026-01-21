@@ -80,10 +80,11 @@ type PermissionHandler = (
 
 /**
  * Sets up an ACP test environment with all necessary utilities.
+ * @param useNewFlag - If true, uses --acp; if false, uses --experimental-acp (for backward compatibility testing)
  */
 function setupAcpTest(
   rig: TestRig,
-  options?: { permissionHandler?: PermissionHandler },
+  options?: { permissionHandler?: PermissionHandler; useNewFlag?: boolean },
 ) {
   const pending = new Map<number, PendingRequest>();
   let nextRequestId = 1;
@@ -95,9 +96,13 @@ function setupAcpTest(
   const permissionHandler =
     options?.permissionHandler ?? (() => ({ optionId: 'proceed_once' }));
 
+  // Use --acp by default, but allow testing with --experimental-acp for backward compatibility
+  const acpFlag =
+    options?.useNewFlag !== false ? '--acp' : '--experimental-acp';
+
   const agent = spawn(
     'node',
-    [rig.bundlePath, '--experimental-acp', '--no-chat-recording'],
+    [rig.bundlePath, acpFlag, '--no-chat-recording'],
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -306,9 +311,9 @@ function setupAcpTest(
     }
   });
 
-  it('returns modes on initialize and allows setting approval mode', async () => {
+  it('returns modes on initialize and allows setting mode and model', async () => {
     const rig = new TestRig();
-    rig.setup('acp approval mode');
+    rig.setup('acp mode and model');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -361,8 +366,14 @@ function setupAcpTest(
       const newSession = (await sendRequest('session/new', {
         cwd: rig.testDir!,
         mcpServers: [],
-      })) as { sessionId: string };
+      })) as {
+        sessionId: string;
+        models: {
+          availableModels: Array<{ modelId: string }>;
+        };
+      };
       expect(newSession.sessionId).toBeTruthy();
+      expect(newSession.models.availableModels.length).toBeGreaterThan(0);
 
       // Test 4: Set approval mode to 'yolo'
       const setModeResult = (await sendRequest('session/set_mode', {
@@ -387,6 +398,15 @@ function setupAcpTest(
       })) as { modeId: string };
       expect(setModeResult3).toBeDefined();
       expect(setModeResult3.modeId).toBe('default');
+
+      // Test 7: Set model using first available model
+      const firstModel = newSession.models.availableModels[0];
+      const setModelResult = (await sendRequest('session/set_model', {
+        sessionId: newSession.sessionId,
+        modelId: firstModel.modelId,
+      })) as { modelId: string };
+      expect(setModelResult).toBeDefined();
+      expect(setModelResult.modelId).toBeTruthy();
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));
@@ -621,3 +641,99 @@ function setupAcpTest(
     }
   });
 });
+
+(IS_SANDBOX ? describe.skip : describe)(
+  'acp flag backward compatibility',
+  () => {
+    it('should work with deprecated --experimental-acp flag and show warning', async () => {
+      const rig = new TestRig();
+      rig.setup('acp backward compatibility');
+
+      const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+        useNewFlag: false,
+      });
+
+      try {
+        const initResult = await sendRequest('initialize', {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+          },
+        });
+        expect(initResult).toBeDefined();
+
+        // Verify deprecation warning is shown
+        const stderrOutput = stderr.join('');
+        expect(stderrOutput).toContain('--experimental-acp is deprecated');
+        expect(stderrOutput).toContain('Please use --acp instead');
+
+        await sendRequest('authenticate', { methodId: 'openai' });
+
+        const newSession = (await sendRequest('session/new', {
+          cwd: rig.testDir!,
+          mcpServers: [],
+        })) as { sessionId: string };
+        expect(newSession.sessionId).toBeTruthy();
+
+        // Verify functionality still works
+        const promptResult = await sendRequest('session/prompt', {
+          sessionId: newSession.sessionId,
+          prompt: [{ type: 'text', text: 'Say hello.' }],
+        });
+        expect(promptResult).toBeDefined();
+      } catch (e) {
+        if (stderr.length) {
+          console.error('Agent stderr:', stderr.join(''));
+        }
+        throw e;
+      } finally {
+        await cleanup();
+      }
+    });
+
+    it('should work with new --acp flag without warnings', async () => {
+      const rig = new TestRig();
+      rig.setup('acp new flag');
+
+      const { sendRequest, cleanup, stderr } = setupAcpTest(rig, {
+        useNewFlag: true,
+      });
+
+      try {
+        const initResult = await sendRequest('initialize', {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: true, writeTextFile: true },
+          },
+        });
+        expect(initResult).toBeDefined();
+
+        // Verify no deprecation warning is shown
+        const stderrOutput = stderr.join('');
+        expect(stderrOutput).not.toContain('--experimental-acp is deprecated');
+
+        await sendRequest('authenticate', { methodId: 'openai' });
+
+        const newSession = (await sendRequest('session/new', {
+          cwd: rig.testDir!,
+          mcpServers: [],
+        })) as { sessionId: string };
+        expect(newSession.sessionId).toBeTruthy();
+
+        // Verify functionality works
+        const promptResult = await sendRequest('session/prompt', {
+          sessionId: newSession.sessionId,
+          prompt: [{ type: 'text', text: 'Say hello.' }],
+        });
+        expect(promptResult).toBeDefined();
+      } catch (e) {
+        if (stderr.length) {
+          console.error('Agent stderr:', stderr.join(''));
+        }
+        throw e;
+      } finally {
+        await cleanup();
+      }
+    });
+  },
+);

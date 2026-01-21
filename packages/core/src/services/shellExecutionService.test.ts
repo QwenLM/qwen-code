@@ -589,7 +589,7 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.error).toBeNull();
       expect(result.aborted).toBe(false);
       expect(result.output).toBe('file1.txt\na warning');
-      expect(handle.pid).toBe(undefined);
+      expect(handle.pid).toBe(12345);
 
       expect(onOutputEventMock).toHaveBeenCalledWith({
         type: 'data',
@@ -818,7 +818,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe on Windows', async () => {
+    it('should use cmd.exe and hide window on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       await simulateExecution('dir "foo bar"', (cp) =>
         cp.emit('exit', 0, null),
@@ -830,6 +830,7 @@ describe('ShellExecutionService child_process fallback', () => {
         expect.objectContaining({
           shell: true,
           detached: false,
+          windowsHide: true,
         }),
       );
     });

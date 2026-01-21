@@ -11,7 +11,7 @@ import type {
   GenerateContentResponse,
 } from '@google/genai';
 import type { GeminiClient } from '../core/client.js';
-import { DEFAULT_GEMINI_FLASH_LITE_MODEL } from '../config/models.js';
+import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { getResponseText, partToString } from './partUtils.js';
 
 /**
@@ -86,7 +86,7 @@ export async function summarizeToolOutput(
       contents,
       toolOutputSummarizerConfig,
       abortSignal,
-      DEFAULT_GEMINI_FLASH_LITE_MODEL,
+      DEFAULT_QWEN_FLASH_MODEL,
     )) as unknown as GenerateContentResponse;
     return getResponseText(parsedResponse) || textToSummarize;
   } catch (error) {
