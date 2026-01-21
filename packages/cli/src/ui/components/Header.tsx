@@ -7,7 +7,13 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import Gradient from 'ink-gradient';
-import { AuthType, shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  isGitRepository,
+  getGitBranch,
+  shortenPath,
+  tildeifyPath,
+} from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { shortAsciiLogo } from './AsciiArt.js';
 import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
@@ -121,6 +127,11 @@ export const Header: React.FC<HeaderProps> = ({
         ? shortenedPath.slice(0, maxPathLength)
         : shortenedPath;
 
+  // Get git branch if cwd is in a legitimate git repo
+  const gitBranch = isGitRepository(workingDirectory)
+    ? getGitBranch(workingDirectory)
+    : undefined;
+
   // Use theme gradient colors if available, otherwise use text colors (excluding primary)
   const gradientColors = theme.ui.gradient || [
     theme.text.secondary,
@@ -175,6 +186,8 @@ export const Header: React.FC<HeaderProps> = ({
         </Text>
         {/* Directory line */}
         <Text color={theme.text.secondary}>{displayPath}</Text>
+        {/* Git branch line (only if in a git repo) */}
+        {gitBranch && <Text color={theme.text.secondary}> ({gitBranch})</Text>}
       </Box>
     </Box>
   );
