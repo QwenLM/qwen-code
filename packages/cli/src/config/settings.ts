@@ -291,11 +291,11 @@ export function needsMigration(settings: Record<string, unknown>): boolean {
 }
 
 /**
- * Migrates V1 (flat) settings directly to the latest version (V3).
+ * Migrates V1 (flat) settings directly to V3.
  * This includes both structural migration (flat -> nested) and boolean
  * inversion (disable* -> enable*), so migrateV2ToV3 will be skipped.
  */
-function migrateV1ToLatest(
+function migrateV1ToV3(
   flatSettings: Record<string, unknown>,
 ): Record<string, unknown> | null {
   if (!needsMigration(flatSettings)) {
@@ -950,7 +950,7 @@ export function loadSettings(
 
         let settingsObject = rawSettings as Record<string, unknown>;
         if (needsMigration(settingsObject)) {
-          const migratedSettings = migrateV1ToLatest(settingsObject);
+          const migratedSettings = migrateV1ToV3(settingsObject);
           if (migratedSettings) {
             if (MIGRATE_V2_OVERWRITE) {
               try {
