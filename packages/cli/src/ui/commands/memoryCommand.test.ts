@@ -299,9 +299,7 @@ describe('memoryCommand', () => {
         services: {
           config: mockConfig,
           settings: {
-            merged: {
-              memoryDiscoveryMaxDirs: 1000,
-            },
+            merged: {},
           } as LoadedSettings,
         },
       });

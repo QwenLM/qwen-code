@@ -289,6 +289,13 @@ export default {
   'Show Citations': 'Quellenangaben anzeigen',
   'Custom Witty Phrases': 'Benutzerdefinierte Witzige Sprüche',
   'Enable Welcome Back': 'Willkommen-zurück aktivieren',
+  'Enable User Feedback': 'Benutzerfeedback aktivieren',
+  'How is Qwen doing this session? (optional)':
+    'Wie macht sich Qwen in dieser Sitzung? (optional)',
+  Bad: 'Schlecht',
+  Good: 'Gut',
+  'Not Sure Yet': 'Noch nicht sicher',
+  'Any other key': 'Beliebige andere Taste',
   'Disable Loading Phrases': 'Ladesprüche deaktivieren',
   'Screen Reader Mode': 'Bildschirmleser-Modus',
   'IDE Mode': 'IDE-Modus',

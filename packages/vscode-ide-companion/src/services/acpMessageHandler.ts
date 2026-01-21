@@ -26,6 +26,7 @@ import type {
 } from '../types/connectionTypes.js';
 import { AcpFileHandler } from '../services/acpFileHandler.js';
 import type { ChildProcess } from 'child_process';
+import { isWindows } from '../utils/platform.js';
 
 /**
  * ACP Message Handler Class
@@ -47,7 +48,7 @@ export class AcpMessageHandler {
   sendResponseMessage(child: ChildProcess | null, response: AcpResponse): void {
     if (child?.stdin) {
       const jsonString = JSON.stringify(response);
-      const lineEnding = process.platform === 'win32' ? '\r\n' : '\n';
+      const lineEnding = isWindows ? '\r\n' : '\n';
       child.stdin.write(jsonString + lineEnding);
     }
   }

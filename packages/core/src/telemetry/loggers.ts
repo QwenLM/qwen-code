@@ -38,6 +38,7 @@ import {
   EVENT_INVALID_CHUNK,
   EVENT_AUTH,
   EVENT_SKILL_LAUNCH,
+  EVENT_USER_FEEDBACK,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -86,6 +87,7 @@ import type {
   InvalidChunkEvent,
   AuthEvent,
   SkillLaunchEvent,
+  UserFeedbackEvent,
 } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
@@ -883,6 +885,35 @@ export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `Skill launch: ${event.skill_name}. Success: ${event.success}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logUserFeedback(
+  config: Config,
+  event: UserFeedbackEvent,
+): void {
+  const uiEvent = {
+    ...event,
+    'event.name': EVENT_USER_FEEDBACK,
+    'event.timestamp': new Date().toISOString(),
+  } as UiEvent;
+  uiTelemetryService.addEvent(uiEvent);
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_USER_FEEDBACK,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `User feedback: Rating ${event.rating} for session ${event.session_id}.`,
     attributes,
   };
   logger.emit(logRecord);

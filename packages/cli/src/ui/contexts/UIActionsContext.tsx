@@ -66,6 +66,10 @@ export interface UIActions {
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
+  // Feedback dialog
+  openFeedbackDialog: () => void;
+  closeFeedbackDialog: () => void;
+  submitFeedback: (rating: number) => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

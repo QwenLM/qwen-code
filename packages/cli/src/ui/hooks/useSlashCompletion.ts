@@ -9,6 +9,7 @@ import { AsyncFzf } from 'fzf';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import {
   CommandKind,
+  type CommandCompletionItem,
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
@@ -215,10 +216,9 @@ function useCommandSuggestions(
             )) || [];
 
           if (!signal.aborted) {
-            const finalSuggestions = results.map((s) => ({
-              label: s,
-              value: s,
-            }));
+            const finalSuggestions = results
+              .map((item) => toSuggestion(item))
+              .filter((suggestion): suggestion is Suggestion => !!suggestion);
             setSuggestions(finalSuggestions);
             setIsLoading(false);
           }
@@ -308,6 +308,20 @@ function useCommandSuggestions(
   }, [parserResult, commandContext, getFzfForCommands, getPrefixSuggestions]);
 
   return { suggestions, isLoading };
+}
+
+function toSuggestion(item: string | CommandCompletionItem): Suggestion | null {
+  if (typeof item === 'string') {
+    return { label: item, value: item };
+  }
+  if (!item.value) {
+    return null;
+  }
+  return {
+    label: item.label ?? item.value,
+    value: item.value,
+    description: item.description,
+  };
 }
 
 function useCompletionPositions(

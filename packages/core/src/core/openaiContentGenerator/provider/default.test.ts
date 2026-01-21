@@ -73,6 +73,26 @@ describe('DefaultOpenAICompatibleProvider', () => {
       });
     });
 
+    it('should merge customHeaders with defaults (and allow overrides)', () => {
+      const providerWithCustomHeaders = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          customHeaders: {
+            'X-Custom': '1',
+            'User-Agent': 'custom-agent',
+          },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const headers = providerWithCustomHeaders.buildHeaders();
+
+      expect(headers).toEqual({
+        'User-Agent': 'custom-agent',
+        'X-Custom': '1',
+      });
+    });
+
     it('should handle unknown CLI version', () => {
       (
         mockCliConfig.getCliVersion as MockedFunction<

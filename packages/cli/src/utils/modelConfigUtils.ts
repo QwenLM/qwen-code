@@ -10,6 +10,7 @@ import {
   type ContentGeneratorConfigSources,
   resolveModelConfig,
   type ModelConfigSourcesInput,
+  type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
 
@@ -43,20 +44,31 @@ export interface ResolvedCliGenerationConfig {
 }
 
 export function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env['OPENAI_API_KEY']) {
-    return AuthType.USE_OPENAI;
-  }
   if (process.env['QWEN_OAUTH']) {
     return AuthType.QWEN_OAUTH;
   }
 
-  if (process.env['GEMINI_API_KEY']) {
+  if (
+    process.env['OPENAI_API_KEY'] &&
+    process.env['OPENAI_MODEL'] &&
+    process.env['OPENAI_BASE_URL']
+  ) {
+    return AuthType.USE_OPENAI;
+  }
+
+  if (process.env['GEMINI_API_KEY'] && process.env['GEMINI_MODEL']) {
     return AuthType.USE_GEMINI;
   }
-  if (process.env['GOOGLE_API_KEY']) {
+
+  if (process.env['GOOGLE_API_KEY'] && process.env['GOOGLE_MODEL']) {
     return AuthType.USE_VERTEX_AI;
   }
-  if (process.env['ANTHROPIC_API_KEY']) {
+
+  if (
+    process.env['ANTHROPIC_API_KEY'] &&
+    process.env['ANTHROPIC_MODEL'] &&
+    process.env['ANTHROPIC_BASE_URL']
+  ) {
     return AuthType.USE_ANTHROPIC;
   }
 
@@ -81,6 +93,21 @@ export function resolveCliGenerationConfig(
 
   const authType = selectedAuthType;
 
+  // Find modelProvider from settings.modelProviders based on authType and model
+  let modelProvider: ProviderModelConfig | undefined;
+  if (authType && settings.modelProviders) {
+    const providers = settings.modelProviders[authType];
+    if (providers && Array.isArray(providers)) {
+      // Try to find by requested model (from CLI or settings)
+      const requestedModel = argv.model || settings.model?.name;
+      if (requestedModel) {
+        modelProvider = providers.find((p) => p.id === requestedModel) as
+          | ProviderModelConfig
+          | undefined;
+      }
+    }
+  }
+
   const configSources: ModelConfigSourcesInput = {
     authType,
     cli: {
@@ -96,6 +123,7 @@ export function resolveCliGenerationConfig(
         | Partial<ContentGeneratorConfig>
         | undefined,
     },
+    modelProvider,
     env,
   };
 
@@ -103,7 +131,7 @@ export function resolveCliGenerationConfig(
 
   // Log warnings if any
   for (const warning of resolved.warnings) {
-    console.warn(`[modelProviderUtils] ${warning}`);
+    console.warn(warning);
   }
 
   // Resolve OpenAI logging config (CLI-specific, not part of core resolver)

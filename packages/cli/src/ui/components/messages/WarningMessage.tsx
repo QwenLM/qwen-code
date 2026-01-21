@@ -18,7 +18,7 @@ export const WarningMessage: React.FC<WarningMessageProps> = ({ text }) => {
   const prefixWidth = 3;
 
   return (
-    <Box flexDirection="row" marginTop={1}>
+    <Box flexDirection="row" marginBottom={1}>
       <Box width={prefixWidth}>
         <Text color={Colors.AccentYellow}>{prefix}</Text>
       </Box>

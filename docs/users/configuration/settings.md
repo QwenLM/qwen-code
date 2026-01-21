@@ -104,7 +104,7 @@ Settings are organized into categories. All settings should be placed within the
 | `model.name`                                       | string  | The Qwen model to use for conversations.                                                                                                                                                                                                                                                                                                                               | `undefined` |
 | `model.maxSessionTurns`                            | number  | Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.                                                                                                                                                                                                                                                                                      | `-1`        |
 | `model.summarizeToolOutput`                        | object  | Enables or disables the summarization of tool output. You can specify the token budget for the summarization using the `tokenBudget` setting. Note: Currently only the `run_shell_command` tool is supported. For example `{"run_shell_command": {"tokenBudget": 2000}}`                                                                                               | `undefined` |
-| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, and `disableCacheControl`, along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.                                                                 | `undefined` |
+| `model.generationConfig`                           | object  | Advanced overrides passed to the underlying content generator. Supports request controls such as `timeout`, `maxRetries`, `disableCacheControl`, and `customHeaders` (custom HTTP headers for API requests), along with fine-tuning knobs under `samplingParams` (for example `temperature`, `top_p`, `max_tokens`). Leave unset to rely on provider defaults.         | `undefined` |
 | `model.chatCompression.contextPercentageThreshold` | number  | Sets the threshold for chat history compression as a percentage of the model's total token limit. This is a value between 0 and 1 that applies to both automatic compression and the manual `/compress` command. For example, a value of `0.6` will trigger compression when the chat history exceeds 60% of the token limit. Use `0` to disable compression entirely. | `0.7`       |
 | `model.skipNextSpeakerCheck`                       | boolean | Skip the next speaker check.                                                                                                                                                                                                                                                                                                                                           | `false`     |
 | `model.skipLoopDetection`                          | boolean | Disables loop detection checks. Loop detection prevents infinite loops in AI responses but can generate false positives that interrupt legitimate workflows. Enable this option if you experience frequent false positive loop detection interruptions.                                                                                                                | `false`     |
@@ -114,12 +114,16 @@ Settings are organized into categories. All settings should be placed within the
 
 **Example model.generationConfig:**
 
-```
+```json
 {
   "model": {
     "generationConfig": {
       "timeout": 60000,
       "disableCacheControl": false,
+      "customHeaders": {
+        "X-Request-ID": "req-123",
+        "X-User-ID": "user-456"
+      },
       "samplingParams": {
         "temperature": 0.2,
         "top_p": 0.8,
@@ -129,6 +133,8 @@ Settings are organized into categories. All settings should be placed within the
   }
 }
 ```
+
+The `customHeaders` field allows you to add custom HTTP headers to all API requests. This is useful for request tracing, monitoring, API gateway routing, or when different models require different headers. If `customHeaders` is defined in `modelProviders[].generationConfig.customHeaders`, it will be used directly; otherwise, headers from `model.generationConfig.customHeaders` will be used. No merging occurs between the two levels.
 
 **model.openAILoggingDir examples:**
 
@@ -154,6 +160,10 @@ Use `modelProviders` to declare curated model lists per auth type that the `/mod
         "generationConfig": {
           "timeout": 60000,
           "maxRetries": 3,
+          "customHeaders": {
+            "X-Model-Version": "v1.0",
+            "X-Request-Priority": "high"
+          },
           "samplingParams": { "temperature": 0.2 }
         }
       }
@@ -215,7 +225,7 @@ Per-field precedence for `generationConfig`:
 3. `settings.model.generationConfig`
 4. Content-generator defaults (`getDefaultGenerationConfig` for OpenAI, `getParameterValue` for Gemini, etc.)
 
-`samplingParams` is treated atomically; provider values replace the entire object. Defaults from the content generator apply last so each provider retains its tuned baseline.
+`samplingParams` and `customHeaders` are both treated atomically; provider values replace the entire object. If `modelProviders[].generationConfig` defines these fields, they are used directly; otherwise, values from `model.generationConfig` are used. No merging occurs between provider and global configuration levels. Defaults from the content generator apply last so each provider retains its tuned baseline.
 
 ##### Selection persistence and recommendations
 
@@ -231,7 +241,6 @@ Per-field precedence for `generationConfig`:
 | ------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
 | `context.fileName`                                | string or array of strings | The name of the context file(s).                                                                                                                                                                                                                                                                                                                                      | `undefined` |
 | `context.importFormat`                            | string                     | The format to use when importing memory.                                                                                                                                                                                                                                                                                                                              | `undefined` |
-| `context.discoveryMaxDirs`                        | number                     | Maximum number of directories to search for memory.                                                                                                                                                                                                                                                                                                                   | `200`       |
 | `context.includeDirectories`                      | array                      | Additional directories to include in the workspace context. Specifies an array of additional absolute or relative paths to include in the workspace context. Missing directories will be skipped with a warning by default. Paths can use `~` to refer to the user's home directory. This setting can be combined with the `--include-directories` command-line flag. | `[]`        |
 | `context.loadFromIncludeDirectories`              | boolean                    | Controls the behavior of the `/memory refresh` command. If set to `true`, `QWEN.md` files should be loaded from all directories that are added. If set to `false`, `QWEN.md` should only be loaded from the current directory.                                                                                                                                        | `false`     |
 | `context.fileFiltering.respectGitIgnore`          | boolean                    | Respect .gitignore files when searching.                                                                                                                                                                                                                                                                                                                              | `true`      |
@@ -300,6 +309,12 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 > [!note]
 >
 > **Note about advanced.tavilyApiKey:** This is a legacy configuration format. For Qwen OAuth users, DashScope provider is automatically available without any configuration. For other authentication types, configure Tavily or Google providers using the new `webSearch` configuration format.
+
+#### experimental
+
+| Setting               | Type    | Description                      | Default |
+| --------------------- | ------- | -------------------------------- | ------- |
+| `experimental.skills` | boolean | Enable experimental Agent Skills | `false` |
 
 #### mcpServers
 
@@ -470,7 +485,7 @@ Arguments passed directly when running the CLI can override other configurations
 | `--telemetry-otlp-protocol`  |       | Sets the OTLP protocol for telemetry (`grpc` or `http`).                                                                                                                                |                                        | Defaults to `grpc`. See [telemetry](../../developers/development/telemetry) for more information.                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `--telemetry-log-prompts`    |       | Enables logging of prompts for telemetry.                                                                                                                                               |                                        | See [telemetry](../../developers/development/telemetry) for more information.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `--checkpointing`            |       | Enables [checkpointing](../features/checkpointing).                                                                                                                                     |                                        |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `--acp`                      |       | Enables ACP mode (Agent Control Protocol). Useful for IDE/editor integrations like [Zed](../integration-zed).                                                                           |                                        | Stable. Replaces the deprecated `--experimental-acp` flag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `--acp`                      |       | Enables ACP mode (Agent Client Protocol). Useful for IDE/editor integrations like [Zed](../integration-zed).                                                                            |                                        | Stable. Replaces the deprecated `--experimental-acp` flag.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `--experimental-skills`      |       | Enables experimental [Agent Skills](../features/skills) (registers the `skill` tool and loads Skills from `.qwen/skills/` and `~/.qwen/skills/`).                                       |                                        | Experimental.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `--extensions`               | `-e`  | Specifies a list of extensions to use for the session.                                                                                                                                  | Extension names                        | If not provided, all available extensions are used. Use the special term `qwen -e none` to disable all extensions. Example: `qwen -e my-extension -e my-other-extension`                                                                                                                                                                                                                                                                                                                                                                                        |
 | `--list-extensions`          | `-l`  | Lists all available extensions and exits.                                                                                                                                               |                                        |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
@@ -519,16 +534,13 @@ Here's a conceptual example of what a context file at the root of a TypeScript p
 
 This example demonstrates how you can provide general project context, specific coding conventions, and even notes about particular files or components. The more relevant and precise your context files are, the better the AI can assist you. Project-specific context files are highly encouraged to establish conventions and context.
 
-- **Hierarchical Loading and Precedence:** The CLI implements a sophisticated hierarchical memory system by loading context files (e.g., `QWEN.md`) from several locations. Content from files lower in this list (more specific) typically overrides or supplements content from files higher up (more general). The exact concatenation order and final context can be inspected using the `/memory show` command. The typical loading order is:
+- **Hierarchical Loading and Precedence:** The CLI implements a hierarchical memory system by loading context files (e.g., `QWEN.md`) from several locations. Content from files lower in this list (more specific) typically overrides or supplements content from files higher up (more general). The exact concatenation order and final context can be inspected using the `/memory show` command. The typical loading order is:
   1. **Global Context File:**
      - Location: `~/.qwen/<configured-context-filename>` (e.g., `~/.qwen/QWEN.md` in your user home directory).
      - Scope: Provides default instructions for all your projects.
   2. **Project Root & Ancestors Context Files:**
      - Location: The CLI searches for the configured context file in the current working directory and then in each parent directory up to either the project root (identified by a `.git` folder) or your home directory.
      - Scope: Provides context relevant to the entire project or a significant portion of it.
-  3. **Sub-directory Context Files (Contextual/Local):**
-     - Location: The CLI also scans for the configured context file in subdirectories _below_ the current working directory (respecting common ignore patterns like `node_modules`, `.git`, etc.). The breadth of this search is limited to 200 directories by default, but can be configured with the `context.discoveryMaxDirs` setting in your `settings.json` file.
-     - Scope: Allows for highly specific instructions relevant to a particular component, module, or subsection of your project.
 - **Concatenation & UI Indication:** The contents of all found context files are concatenated (with separators indicating their origin and path) and provided as part of the system prompt. The CLI footer displays the count of loaded context files, giving you a quick visual cue about the active instructional context.
 - **Importing Content:** You can modularize your context files by importing other Markdown files using the `@path/to/file.md` syntax. For more details, see the [Memory Import Processor documentation](../configuration/memory).
 - **Commands for Memory Management:**

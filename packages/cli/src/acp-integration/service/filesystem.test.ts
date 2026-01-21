@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import { AcpFileSystemService } from './filesystem.js';
+import { ACP_ERROR_CODES } from '../errorCodes.js';
 
 const createFallback = (): FileSystemService => ({
   readTextFile: vi.fn(),
@@ -16,11 +17,13 @@ const createFallback = (): FileSystemService => ({
 
 describe('AcpFileSystemService', () => {
   describe('readTextFile ENOENT handling', () => {
-    it('parses path from ACP ENOENT message (quoted)', async () => {
+    it('converts RESOURCE_NOT_FOUND error to ENOENT', async () => {
+      const resourceNotFoundError = {
+        code: ACP_ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'File not found',
+      };
       const client = {
-        readTextFile: vi
-          .fn()
-          .mockResolvedValue({ content: 'ERROR: ENOENT: "/remote/file.txt"' }),
+        readTextFile: vi.fn().mockRejectedValue(resourceNotFoundError),
       } as unknown as import('../acp.js').Client;
 
       const svc = new AcpFileSystemService(
@@ -30,15 +33,20 @@ describe('AcpFileSystemService', () => {
         createFallback(),
       );
 
-      await expect(svc.readTextFile('/local/file.txt')).rejects.toMatchObject({
+      await expect(svc.readTextFile('/some/file.txt')).rejects.toMatchObject({
         code: 'ENOENT',
-        path: '/remote/file.txt',
+        errno: -2,
+        path: '/some/file.txt',
       });
     });
 
-    it('falls back to requested path when none provided', async () => {
+    it('re-throws other errors unchanged', async () => {
+      const otherError = {
+        code: ACP_ERROR_CODES.INTERNAL_ERROR,
+        message: 'Internal error',
+      };
       const client = {
-        readTextFile: vi.fn().mockResolvedValue({ content: 'ERROR: ENOENT:' }),
+        readTextFile: vi.fn().mockRejectedValue(otherError),
       } as unknown as import('../acp.js').Client;
 
       const svc = new AcpFileSystemService(
@@ -48,12 +56,34 @@ describe('AcpFileSystemService', () => {
         createFallback(),
       );
 
-      await expect(
-        svc.readTextFile('/fallback/path.txt'),
-      ).rejects.toMatchObject({
-        code: 'ENOENT',
-        path: '/fallback/path.txt',
+      await expect(svc.readTextFile('/some/file.txt')).rejects.toMatchObject({
+        code: ACP_ERROR_CODES.INTERNAL_ERROR,
+        message: 'Internal error',
       });
+    });
+
+    it('uses fallback when readTextFile capability is disabled', async () => {
+      const client = {
+        readTextFile: vi.fn(),
+      } as unknown as import('../acp.js').Client;
+
+      const fallback = createFallback();
+      (fallback.readTextFile as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'fallback content',
+      );
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-3',
+        { readTextFile: false, writeTextFile: true },
+        fallback,
+      );
+
+      const result = await svc.readTextFile('/some/file.txt');
+
+      expect(result).toBe('fallback content');
+      expect(fallback.readTextFile).toHaveBeenCalledWith('/some/file.txt');
+      expect(client.readTextFile).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,6 +1,6 @@
 # Zed Editor
 
-> Zed Editor provides native support for AI coding assistants through the Agent Control Protocol (ACP). This integration allows you to use Qwen Code directly within Zed's interface with real-time code suggestions.
+> Zed Editor provides native support for AI coding assistants through the Agent Client Protocol (ACP). This integration allows you to use Qwen Code directly within Zed's interface with real-time code suggestions.
 
 ![Zed Editor Overview](https://img.alicdn.com/imgextra/i1/O1CN01aAhU311GwEoNh27FP_!!6000000000686-2-tps-3024-1898.png)
 
@@ -20,9 +20,9 @@
 
 1. Install Qwen Code CLI:
 
-   ```bash
-   npm install -g qwen-code
-   ```
+```bash
+npm install -g @qwen-code/qwen-code
+```
 
 2. Download and install [Zed Editor](https://zed.dev/)
 

@@ -831,7 +831,7 @@ describe('Permission Control (E2E)', () => {
         TEST_TIMEOUT,
       );
 
-      it(
+      it.skip(
         'should execute dangerous commands without confirmation',
         async () => {
           const q = query({

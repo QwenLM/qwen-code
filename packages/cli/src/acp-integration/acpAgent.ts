@@ -165,30 +165,11 @@ class GeminiAgent {
     this.setupFileSystem(config);
 
     const session = await this.createAndStoreSession(config);
-    const configuredModel = (
-      config.getModel() ||
-      this.config.getModel() ||
-      ''
-    ).trim();
-    const modelId = configuredModel || 'default';
-    const modelName = configuredModel || modelId;
+    const availableModels = this.buildAvailableModels(config);
 
     return {
       sessionId: session.getId(),
-      models: {
-        currentModelId: modelId,
-        availableModels: [
-          {
-            modelId,
-            name: modelName,
-            description: null,
-            _meta: {
-              contextLimit: tokenLimit(modelId),
-            },
-          },
-        ],
-        _meta: null,
-      },
+      models: availableModels,
     };
   }
 
@@ -305,15 +286,29 @@ class GeminiAgent {
   async setMode(params: acp.SetModeRequest): Promise<acp.SetModeResponse> {
     const session = this.sessions.get(params.sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${params.sessionId}`,
+      );
     }
     return session.setMode(params);
+  }
+
+  async setModel(params: acp.SetModelRequest): Promise<acp.SetModelResponse> {
+    const session = this.sessions.get(params.sessionId);
+    if (!session) {
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${params.sessionId}`,
+      );
+    }
+    return session.setModel(params);
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {
     const selectedType = this.settings.merged.security?.auth?.selectedType;
     if (!selectedType) {
-      throw acp.RequestError.authRequired('No Selected Type');
+      throw acp.RequestError.authRequired(
+        'Use Qwen Code CLI to authenticate first.',
+      );
     }
 
     try {
@@ -381,5 +376,44 @@ class GeminiAgent {
     }
 
     return session;
+  }
+
+  private buildAvailableModels(
+    config: Config,
+  ): acp.NewSessionResponse['models'] {
+    const currentModelId = (
+      config.getModel() ||
+      this.config.getModel() ||
+      ''
+    ).trim();
+    const availableModels = config.getAvailableModels();
+
+    const mappedAvailableModels = availableModels.map((model) => ({
+      modelId: model.id,
+      name: model.label,
+      description: model.description ?? null,
+      _meta: {
+        contextLimit: tokenLimit(model.id),
+      },
+    }));
+
+    if (
+      currentModelId &&
+      !mappedAvailableModels.some((model) => model.modelId === currentModelId)
+    ) {
+      mappedAvailableModels.unshift({
+        modelId: currentModelId,
+        name: currentModelId,
+        description: null,
+        _meta: {
+          contextLimit: tokenLimit(currentModelId),
+        },
+      });
+    }
+
+    return {
+      currentModelId,
+      availableModels: mappedAvailableModels,
+    };
   }
 }

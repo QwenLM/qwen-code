@@ -6,6 +6,7 @@
 
 import type { FileSystemService } from '@qwen-code/qwen-code-core';
 import type * as acp from '../acp.js';
+import { ACP_ERROR_CODES } from '../errorCodes.js';
 
 /**
  * ACP client-based implementation of FileSystemService
@@ -23,25 +24,31 @@ export class AcpFileSystemService implements FileSystemService {
       return this.fallback.readTextFile(filePath);
     }
 
-    const response = await this.client.readTextFile({
-      path: filePath,
-      sessionId: this.sessionId,
-      line: null,
-      limit: null,
-    });
+    let response: { content: string };
+    try {
+      response = await this.client.readTextFile({
+        path: filePath,
+        sessionId: this.sessionId,
+        line: null,
+        limit: null,
+      });
+    } catch (error) {
+      const errorCode =
+        typeof error === 'object' && error !== null && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined;
 
-    if (response.content.startsWith('ERROR: ENOENT:')) {
-      // Treat ACP error strings as structured ENOENT errors without
-      // assuming a specific platform format.
-      const match = /^ERROR:\s*ENOENT:\s*(?<path>.*)$/i.exec(response.content);
-      const err = new Error(response.content) as NodeJS.ErrnoException;
-      err.code = 'ENOENT';
-      err.errno = -2;
-      const rawPath = match?.groups?.['path']?.trim();
-      err['path'] = rawPath
-        ? rawPath.replace(/^['"]|['"]$/g, '') || filePath
-        : filePath;
-      throw err;
+      if (errorCode === ACP_ERROR_CODES.RESOURCE_NOT_FOUND) {
+        const err = new Error(
+          `File not found: ${filePath}`,
+        ) as NodeJS.ErrnoException;
+        err.code = 'ENOENT';
+        err.errno = -2;
+        err.path = filePath;
+        throw err;
+      }
+
+      throw error;
     }
 
     return response.content;

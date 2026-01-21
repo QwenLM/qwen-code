@@ -15,6 +15,7 @@ export const AGENT_METHODS = {
   session_prompt: 'session/prompt',
   session_list: 'session/list',
   session_set_mode: 'session/set_mode',
+  session_set_model: 'session/set_model',
 };
 
 export const CLIENT_METHODS = {
@@ -265,6 +266,18 @@ export const modelInfoSchema = z.object({
   modelId: modelIdSchema,
   name: z.string(),
 });
+
+export const setModelRequestSchema = z.object({
+  sessionId: z.string(),
+  modelId: z.string(),
+});
+
+export const setModelResponseSchema = z.object({
+  modelId: z.string(),
+});
+
+export type SetModelRequest = z.infer<typeof setModelRequestSchema>;
+export type SetModelResponse = z.infer<typeof setModelResponseSchema>;
 
 export const sessionModelStateSchema = z.object({
   _meta: acpMetaSchema,
@@ -592,6 +605,7 @@ export const agentResponseSchema = z.union([
   promptResponseSchema,
   listSessionsResponseSchema,
   setModeResponseSchema,
+  setModelResponseSchema,
 ]);
 
 export const requestPermissionRequestSchema = z.object({
@@ -624,6 +638,7 @@ export const agentRequestSchema = z.union([
   promptRequestSchema,
   listSessionsRequestSchema,
   setModeRequestSchema,
+  setModelRequestSchema,
 ]);
 
 export const agentNotificationSchema = sessionNotificationSchema;

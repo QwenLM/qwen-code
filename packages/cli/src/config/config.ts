@@ -9,7 +9,6 @@ import {
   AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
-  DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
   FileDiscoveryService,
   getCurrentGeminiMdFilename,
   loadServerHierarchicalMemory,
@@ -22,7 +21,6 @@ import {
   isToolEnabled,
   SessionService,
   type ResumedSessionData,
-  type FileFilteringOptions,
   type MCPServerConfig,
   type ToolName,
   EditTool,
@@ -170,7 +168,17 @@ function normalizeOutputFormat(
 }
 
 export async function parseArguments(settings: Settings): Promise<CliArgs> {
-  const rawArgv = hideBin(process.argv);
+  let rawArgv = hideBin(process.argv);
+
+  // hack: if the first argument is the CLI entry point, remove it
+  if (
+    rawArgv.length > 0 &&
+    (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli.js'))
+  ) {
+    rawArgv = rawArgv.slice(1);
+  }
+
   const yargsInstance = yargs(rawArgv)
     .locale('en')
     .scriptName('qwen')
@@ -324,7 +332,14 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .option('experimental-skills', {
           type: 'boolean',
           description: 'Enable experimental Skills feature',
-          default: false,
+          default: (() => {
+            const legacySkills = (
+              settings as Settings & {
+                tools?: { experimental?: { skills?: boolean } };
+              }
+            ).tools?.experimental?.skills;
+            return settings.experimental?.skills ?? legacySkills ?? false;
+          })(),
         })
         .option('channel', {
           type: 'string',
@@ -633,7 +648,6 @@ export async function loadHierarchicalGeminiMemory(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
-  fileFilteringOptions?: FileFilteringOptions,
 ): Promise<{ memoryContent: string; fileCount: number }> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
@@ -659,8 +673,6 @@ export async function loadHierarchicalGeminiMemory(
     extensionContextFilePaths,
     folderTrust,
     memoryImportFormat,
-    fileFilteringOptions,
-    settings.context?.discoveryMaxDirs,
   );
 }
 
@@ -730,11 +742,6 @@ export async function loadCliConfig(
 
   const fileService = new FileDiscoveryService(cwd);
 
-  const fileFiltering = {
-    ...DEFAULT_MEMORY_FILE_FILTERING_OPTIONS,
-    ...settings.context?.fileFiltering,
-  };
-
   const includeDirectories = (settings.context?.includeDirectories || [])
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
@@ -751,7 +758,6 @@ export async function loadCliConfig(
     extensionContextFilePaths,
     trustedFolder,
     memoryImportFormat,
-    fileFiltering,
   );
 
   let mcpServers = mergeMcpServers(settings, activeExtensions);
@@ -864,11 +870,10 @@ export async function loadCliConfig(
     }
   };
 
-  if (
-    !interactive &&
-    !argv.experimentalAcp &&
-    inputFormat !== InputFormat.STREAM_JSON
-  ) {
+  // ACP mode check: must include both --acp (current) and --experimental-acp (deprecated).
+  // Without this check, edit, write_file, run_shell_command would be excluded in ACP mode.
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  if (!interactive && !isAcpMode && inputFormat !== InputFormat.STREAM_JSON) {
     switch (approvalMode) {
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:

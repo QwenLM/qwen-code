@@ -8,9 +8,9 @@ import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
-import type { PromptContent } from '../../services/acpSessionManager.js';
-import * as fs from 'fs';
-import * as path from 'path';
+import { ACP_ERROR_CODES } from '../../constants/acpSchema.js';
+
+const AUTH_REQUIRED_CODE_PATTERN = `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`;
 
 /**
  * Session message handler
@@ -518,7 +518,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           createErr instanceof Error ? createErr.message : String(createErr);
         if (
           errorMsg.includes('Authentication required') ||
-          errorMsg.includes('(code: -32000)')
+          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN)
         ) {
           await this.promptLogin(
             'Your login session has expired or is invalid. Please login again to continue using Qwen Code.',
@@ -585,7 +585,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         errorMsg.includes('Session not found') ||
         errorMsg.includes('No active ACP session') ||
         errorMsg.includes('Authentication required') ||
-        errorMsg.includes('(code: -32000)') ||
+        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
         errorMsg.includes('Unauthorized') ||
         errorMsg.includes('Invalid token')
       ) {
@@ -676,7 +676,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for authentication/session expiration errors
       if (
         errorMsg.includes('Authentication required') ||
-        errorMsg.includes('(code: -32000)') ||
+        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
         errorMsg.includes('Unauthorized') ||
         errorMsg.includes('Invalid token') ||
         errorMsg.includes('No active ACP session')
@@ -786,7 +786,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Check for authentication/session expiration errors
         if (
           errorMsg.includes('Authentication required') ||
-          errorMsg.includes('(code: -32000)') ||
+          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
           errorMsg.includes('Unauthorized') ||
           errorMsg.includes('Invalid token') ||
           errorMsg.includes('No active ACP session')
@@ -846,7 +846,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             // Check for authentication/session expiration errors in session creation
             if (
               createErrorMsg.includes('Authentication required') ||
-              createErrorMsg.includes('(code: -32000)') ||
+              createErrorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
               createErrorMsg.includes('Unauthorized') ||
               createErrorMsg.includes('Invalid token') ||
               createErrorMsg.includes('No active ACP session')
@@ -886,7 +886,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for authentication/session expiration errors
       if (
         errorMsg.includes('Authentication required') ||
-        errorMsg.includes('(code: -32000)') ||
+        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
         errorMsg.includes('Unauthorized') ||
         errorMsg.includes('Invalid token') ||
         errorMsg.includes('No active ACP session')
@@ -941,7 +941,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for authentication/session expiration errors
       if (
         errorMsg.includes('Authentication required') ||
-        errorMsg.includes('(code: -32000)') ||
+        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
         errorMsg.includes('Unauthorized') ||
         errorMsg.includes('Invalid token') ||
         errorMsg.includes('No active ACP session')
@@ -991,7 +991,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Check for authentication/session expiration errors
         if (
           errorMsg.includes('Authentication required') ||
-          errorMsg.includes('(code: -32000)') ||
+          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
           errorMsg.includes('Unauthorized') ||
           errorMsg.includes('Invalid token') ||
           errorMsg.includes('No active ACP session')
@@ -1019,7 +1019,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for authentication/session expiration errors
       if (
         errorMsg.includes('Authentication required') ||
-        errorMsg.includes('(code: -32000)') ||
+        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
         errorMsg.includes('Unauthorized') ||
         errorMsg.includes('Invalid token') ||
         errorMsg.includes('No active ACP session')
@@ -1125,7 +1125,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Check for authentication/session expiration errors
         if (
           errorMsg.includes('Authentication required') ||
-          errorMsg.includes('(code: -32000)') ||
+          errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
           errorMsg.includes('Unauthorized') ||
           errorMsg.includes('Invalid token') ||
           errorMsg.includes('No active ACP session')
@@ -1153,7 +1153,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Check for authentication/session expiration errors
       if (
         errorMsg.includes('Authentication required') ||
-        errorMsg.includes('(code: -32000)') ||
+        errorMsg.includes(AUTH_REQUIRED_CODE_PATTERN) ||
         errorMsg.includes('Unauthorized') ||
         errorMsg.includes('Invalid token') ||
         errorMsg.includes('No active ACP session')

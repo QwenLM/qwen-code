@@ -19,6 +19,7 @@ import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { AGENT_METHODS } from '../constants/acpSchema.js';
 import type { PendingRequest } from '../types/connectionTypes.js';
 import type { ChildProcess } from 'child_process';
+import { isWindows } from '../utils/platform.js';
 
 /**
  * Prompt content types for multimodal messages
@@ -109,30 +110,7 @@ export class AcpSessionManager {
   ): void {
     if (child?.stdin) {
       const jsonString = JSON.stringify(message);
-      const lineEnding = process.platform === 'win32' ? '\r\n' : '\n';
-
-      // Debug logging for session_prompt messages
-      if ('method' in message && message.method === 'session/prompt') {
-        console.log('[ACP] Sending session/prompt message');
-        const params = (message as AcpRequest).params as {
-          prompt: PromptContent[];
-        };
-        if (params?.prompt) {
-          console.log('[ACP] Prompt array length:', params.prompt.length);
-          params.prompt.forEach((item: PromptContent, index: number) => {
-            if (item.type === 'image') {
-              console.log(
-                `[ACP] Item ${index} is image: mimeType=${item.mimeType}, data length=${item.data?.length || 0}`,
-              );
-            } else if (item.type === 'text') {
-              console.log(
-                `[ACP] Item ${index} is text: "${item.text?.substring(0, 50)}..."`,
-              );
-            }
-          });
-        }
-      }
-
+      const lineEnding = isWindows ? '\r\n' : '\n';
       child.stdin.write(jsonString + lineEnding);
     }
   }
