@@ -319,7 +319,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         return (
           <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING}>
             <Text color={theme.text.secondary}>
-              ... code is being written ...
+              ... code is being written (use /copy to copy full output) ...
             </Text>
           </Box>
         );
@@ -336,7 +336,10 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
       return (
         <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
           {colorizedTruncatedCode}
-          <Text color={theme.text.secondary}>... generating more ...</Text>
+          <Text color={theme.text.secondary}>
+            ... generating more (use /copy after completion to copy full code)
+            ...
+          </Text>
         </Box>
       );
     }

@@ -233,4 +233,40 @@ Another paragraph.
     expect(output).toContain('Line 3');
     expect(output).toMatchSnapshot();
   });
+
+  describe('truncation messages', () => {
+    it('shows /copy hint when code block is truncated during pending state', () => {
+      // Create a very large code block that will be truncated
+      const largeCodeBlock =
+        '```javascript\n' + 'const x = 1;\n'.repeat(100) + '```';
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={largeCodeBlock}
+          isPending={true}
+          availableTerminalHeight={5} // Very small to trigger truncation
+        />,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('/copy');
+    });
+
+    it('shows /copy hint for unclosed pending code blocks', () => {
+      // Unclosed code block - simulating streaming
+      const unclosedCodeBlock =
+        '```typescript\n' + 'function test() {\n'.repeat(50);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={unclosedCodeBlock}
+          isPending={true}
+          availableTerminalHeight={3} // Very small to trigger truncation
+        />,
+      );
+
+      const output = lastFrame();
+      expect(output).toContain('/copy');
+    });
+  });
 });

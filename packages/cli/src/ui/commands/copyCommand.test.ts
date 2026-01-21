@@ -117,10 +117,11 @@ describe('copyCommand', () => {
 
     const result = await copyCommand.action(mockContext, '');
 
+    // 'Hi there! How can I help you?' = 29 chars, 1 line
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: 'Last output copied to clipboard (29 chars, 1 lines)',
     });
 
     expect(mockCopyToClipboard).toHaveBeenCalledWith(
@@ -144,10 +145,11 @@ describe('copyCommand', () => {
     const result = await copyCommand.action(mockContext, '');
 
     expect(mockCopyToClipboard).toHaveBeenCalledWith('Part 1: Part 2: Part 3');
+    // 'Part 1: Part 2: Part 3' = 22 chars, 1 line
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: 'Last output copied to clipboard (22 chars, 1 lines)',
     });
   });
 
@@ -171,10 +173,11 @@ describe('copyCommand', () => {
     const result = await copyCommand.action(mockContext, '');
 
     expect(mockCopyToClipboard).toHaveBeenCalledWith('Text part more text');
+    // 'Text part more text' = 19 chars, 1 line
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: 'Last output copied to clipboard (19 chars, 1 lines)',
     });
   });
 
@@ -202,10 +205,11 @@ describe('copyCommand', () => {
     const result = await copyCommand.action(mockContext, '');
 
     expect(mockCopyToClipboard).toHaveBeenCalledWith('Second AI response');
+    // 'Second AI response' = 18 chars, 1 line
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: 'Last output copied to clipboard (18 chars, 1 lines)',
     });
   });
 
@@ -294,5 +298,54 @@ describe('copyCommand', () => {
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
+  it('should format large content with k chars notation', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    // Generate content over 1000 chars
+    const largeContent = 'x'.repeat(1500) + '\n' + 'y'.repeat(500);
+    const historyWithLargeContent = [
+      {
+        role: 'model',
+        parts: [{ text: largeContent }],
+      },
+    ];
+
+    mockGetHistory.mockReturnValue(historyWithLargeContent);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '');
+
+    // 2001 chars (1500 + 1 newline + 500), 2 lines
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last output copied to clipboard (2.0k chars, 2 lines)',
+    });
+  });
+
+  it('should count multiple lines correctly', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const multilineContent = 'Line 1\nLine 2\nLine 3\nLine 4\nLine 5';
+    const historyWithMultilineContent = [
+      {
+        role: 'model',
+        parts: [{ text: multilineContent }],
+      },
+    ];
+
+    mockGetHistory.mockReturnValue(historyWithMultilineContent);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const result = await copyCommand.action(mockContext, '');
+
+    // 'Line 1\nLine 2\nLine 3\nLine 4\nLine 5' = 34 chars, 5 lines
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last output copied to clipboard (34 chars, 5 lines)',
+    });
   });
 });
