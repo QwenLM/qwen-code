@@ -553,12 +553,12 @@ export class ModelsConfig {
       detail: 'generationConfig.maxRetries',
     };
 
-    this._generationConfig.disableCacheControl = gc.disableCacheControl;
-    this.generationConfigSources['disableCacheControl'] = {
+    this._generationConfig.enableCacheControl = gc.enableCacheControl;
+    this.generationConfigSources['enableCacheControl'] = {
       kind: 'modelProviders',
       authType: model.authType,
       modelId: model.id,
-      detail: 'generationConfig.disableCacheControl',
+      detail: 'generationConfig.enableCacheControl',
     };
 
     this._generationConfig.schemaCompliance = gc.schemaCompliance;
