@@ -1162,15 +1162,6 @@ const SETTINGS_SCHEMA = {
           'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
         showInDialog: true,
       },
-      extensionManagement: {
-        type: 'boolean',
-        label: 'Extension Management',
-        category: 'Experimental',
-        requiresRestart: true,
-        default: true,
-        description: 'Enable extension management features.',
-        showInDialog: false,
-      },
       visionModelPreview: {
         type: 'boolean',
         label: 'Vision Model Preview',
@@ -1190,39 +1181,6 @@ const SETTINGS_SCHEMA = {
         description:
           'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
         showInDialog: false,
-      },
-    },
-  },
-
-  extensions: {
-    type: 'object',
-    label: 'Extensions',
-    category: 'Extensions',
-    requiresRestart: true,
-    default: {},
-    description: 'Settings for extensions.',
-    showInDialog: false,
-    properties: {
-      disabled: {
-        type: 'array',
-        label: 'Disabled Extensions',
-        category: 'Extensions',
-        requiresRestart: true,
-        default: [] as string[],
-        description: 'List of disabled extensions.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-      workspacesWithMigrationNudge: {
-        type: 'array',
-        label: 'Workspaces with Migration Nudge',
-        category: 'Extensions',
-        requiresRestart: false,
-        default: [] as string[],
-        description:
-          'List of workspaces for which the migration nudge has been shown.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
       },
     },
   },

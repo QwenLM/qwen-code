@@ -30,7 +30,6 @@ import {
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { customDeepMerge, type MergeableObject } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
-import { disableExtension } from './extension.js';
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   let current: SettingDefinition | undefined = undefined;
@@ -81,7 +80,6 @@ const MIGRATION_MAP: Record<string, string> = {
   excludeTools: 'tools.exclude',
   excludeMCPServers: 'mcp.excluded',
   excludedProjectEnvVars: 'advanced.excludedEnvVars',
-  extensionManagement: 'experimental.extensionManagement',
   extensions: 'extensions',
   fileFiltering: 'context.fileFiltering',
   folderTrustFeature: 'security.folderTrust.featureEnabled',
@@ -897,24 +895,9 @@ export function loadSettings(
 
 export function migrateDeprecatedSettings(
   loadedSettings: LoadedSettings,
-  workspaceDir: string = process.cwd(),
 ): void {
   const processScope = (scope: SettingScope) => {
     const settings = loadedSettings.forScope(scope).settings;
-    if (settings.extensions?.disabled) {
-      console.log(
-        `Migrating deprecated extensions.disabled settings from ${scope} settings...`,
-      );
-      for (const extension of settings.extensions.disabled ?? []) {
-        disableExtension(extension, scope, workspaceDir);
-      }
-
-      const newExtensionsValue = { ...settings.extensions };
-      newExtensionsValue.disabled = undefined;
-
-      loadedSettings.setValue(scope, 'extensions', newExtensionsValue);
-    }
-
     const legacySkills = (
       settings as Settings & {
         tools?: { experimental?: { skills?: boolean } };

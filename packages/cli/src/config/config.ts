@@ -21,7 +21,6 @@ import {
   isToolEnabled,
   SessionService,
   type ResumedSessionData,
-  type MCPServerConfig,
   type ToolName,
   EditTool,
   ShellTool,
@@ -41,14 +40,11 @@ import { homedir } from 'node:os';
 
 import { resolvePath } from '../utils/resolvePath.js';
 import { getCliVersion } from '../utils/version.js';
-import type { Extension } from './extension.js';
-import { annotateActiveExtensions } from './extension.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import type { ExtensionEnablementManager } from './extensions/extensionEnablement.js';
 import { buildWebSearchConfig } from './webSearch.js';
 
 // Simple console logger for now - replace with actual logger if available
@@ -555,11 +551,9 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         }),
     )
     // Register MCP subcommands
-    .command(mcpCommand);
-
-  if (settings?.experimental?.extensionManagement ?? true) {
-    yargsInstance.command(extensionsCommand);
-  }
+    .command(mcpCommand)
+    // Register Extension subcommands
+    .command(extensionsCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -634,7 +628,6 @@ export async function loadHierarchicalGeminiMemory(
   includeDirectoriesToReadGemini: readonly string[] = [],
   debugMode: boolean,
   fileService: FileDiscoveryService,
-  settings: Settings,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
@@ -677,29 +670,16 @@ export function isDebugMode(argv: CliArgs): boolean {
 
 export async function loadCliConfig(
   settings: Settings,
-  extensions: Extension[],
-  extensionEnablementManager: ExtensionEnablementManager,
   argv: CliArgs,
   cwd: string = process.cwd(),
+  overrideExtensions?: string[],
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
-
-  const memoryImportFormat = settings.context?.importFormat || 'tree';
 
   const ideMode = settings.ide?.enabled ?? false;
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
   const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
-
-  const allExtensions = annotateActiveExtensions(
-    extensions,
-    cwd,
-    extensionEnablementManager,
-  );
-
-  const activeExtensions = extensions.filter(
-    (_, i) => allExtensions[i].isActive,
-  );
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
@@ -712,22 +692,19 @@ export async function loadCliConfig(
     setServerGeminiMdFilename(getCurrentGeminiMdFilename());
   }
 
-  const extensionContextFilePaths = activeExtensions.flatMap(
-    (e) => e.contextFiles,
-  );
-
   // Automatically load output-language.md if it exists
-  const outputLanguageFilePath = path.join(
+  let outputLanguageFilePath: string | undefined = path.join(
     Storage.getGlobalQwenDir(),
     'output-language.md',
   );
   if (fs.existsSync(outputLanguageFilePath)) {
-    extensionContextFilePaths.push(outputLanguageFilePath);
     if (debugMode) {
       logger.debug(
         `Found output-language.md, adding to context files: ${outputLanguageFilePath}`,
       );
     }
+  } else {
+    outputLanguageFilePath = undefined;
   }
 
   const fileService = new FileDiscoveryService(cwd);
@@ -736,21 +713,6 @@ export async function loadCliConfig(
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
 
-  // Call the (now wrapper) loadHierarchicalGeminiMemory which calls the server's version
-  const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
-    cwd,
-    settings.context?.loadMemoryFromIncludeDirectories
-      ? includeDirectories
-      : [],
-    debugMode,
-    fileService,
-    settings,
-    extensionContextFilePaths,
-    trustedFolder,
-    memoryImportFormat,
-  );
-
-  let mcpServers = mergeMcpServers(settings, activeExtensions);
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
     (argv.inputFormat as InputFormat | undefined) ?? InputFormat.TEXT;
@@ -888,37 +850,22 @@ export async function loadCliConfig(
 
   const excludeTools = mergeExcludeTools(
     settings,
-    activeExtensions,
     extraExcludes.length > 0 ? extraExcludes : undefined,
     argv.excludeTools,
   );
-  const blockedMcpServers: Array<{ name: string; extensionName: string }> = [];
 
-  if (!argv.allowedMcpServerNames) {
-    if (settings.mcp?.allowed) {
-      mcpServers = allowedMcpServers(
-        mcpServers,
-        settings.mcp.allowed,
-        blockedMcpServers,
-      );
-    }
-
-    if (settings.mcp?.excluded) {
-      const excludedNames = new Set(settings.mcp.excluded.filter(Boolean));
-      if (excludedNames.size > 0) {
-        mcpServers = Object.fromEntries(
-          Object.entries(mcpServers).filter(([key]) => !excludedNames.has(key)),
-        );
-      }
-    }
-  }
-
+  let allowedMcpServers: Set<string> | undefined;
+  let excludedMcpServers: Set<string> | undefined;
   if (argv.allowedMcpServerNames) {
-    mcpServers = allowedMcpServers(
-      mcpServers,
-      argv.allowedMcpServerNames,
-      blockedMcpServers,
-    );
+    allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
+    excludedMcpServers = undefined;
+  } else {
+    allowedMcpServers = settings.mcp?.allowed
+      ? new Set(settings.mcp.allowed.filter(Boolean))
+      : undefined;
+    excludedMcpServers = settings.mcp?.excluded
+      ? new Set(settings.mcp.excluded.filter(Boolean))
+      : undefined;
   }
 
   const selectedAuthType =
@@ -986,6 +933,7 @@ export async function loadCliConfig(
     includeDirectories,
     loadMemoryFromIncludeDirectories:
       settings.context?.loadMemoryFromIncludeDirectories || false,
+    importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
     fullContext: argv.allFiles || false,
@@ -995,9 +943,13 @@ export async function loadCliConfig(
     toolDiscoveryCommand: settings.tools?.discoveryCommand,
     toolCallCommand: settings.tools?.callCommand,
     mcpServerCommand: settings.mcp?.serverCommand,
-    mcpServers,
-    userMemory: memoryContent,
-    geminiMdFileCount: fileCount,
+    mcpServers: settings.mcpServers || {},
+    allowedMcpServers: allowedMcpServers
+      ? Array.from(allowedMcpServers)
+      : undefined,
+    excludedMcpServers: excludedMcpServers
+      ? Array.from(excludedMcpServers)
+      : undefined,
     approvalMode,
     accessibility: {
       ...settings.ui?.accessibility,
@@ -1018,15 +970,14 @@ export async function loadCliConfig(
     fileDiscoveryService: fileService,
     bugCommand: settings.advanced?.bugCommand,
     model: resolvedModel,
-    extensionContextFilePaths,
+    outputLanguageFilePath,
     sessionTokenLimit: settings.model?.sessionTokenLimit ?? -1,
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     experimentalSkills: argv.experimentalSkills || false,
     listExtensions: argv.listExtensions || false,
-    extensions: allExtensions,
-    blockedMcpServers,
+    overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
     authType: selectedAuthType,
     inputFormat,
@@ -1068,61 +1019,8 @@ export async function loadCliConfig(
   });
 }
 
-function allowedMcpServers(
-  mcpServers: { [x: string]: MCPServerConfig },
-  allowMCPServers: string[],
-  blockedMcpServers: Array<{ name: string; extensionName: string }>,
-) {
-  const allowedNames = new Set(allowMCPServers.filter(Boolean));
-  if (allowedNames.size > 0) {
-    mcpServers = Object.fromEntries(
-      Object.entries(mcpServers).filter(([key, server]) => {
-        const isAllowed = allowedNames.has(key);
-        if (!isAllowed) {
-          blockedMcpServers.push({
-            name: key,
-            extensionName: server.extensionName || '',
-          });
-        }
-        return isAllowed;
-      }),
-    );
-  } else {
-    blockedMcpServers.push(
-      ...Object.entries(mcpServers).map(([key, server]) => ({
-        name: key,
-        extensionName: server.extensionName || '',
-      })),
-    );
-    mcpServers = {};
-  }
-  return mcpServers;
-}
-
-function mergeMcpServers(settings: Settings, extensions: Extension[]) {
-  const mcpServers = { ...(settings.mcpServers || {}) };
-  for (const extension of extensions) {
-    Object.entries(extension.config.mcpServers || {}).forEach(
-      ([key, server]) => {
-        if (mcpServers[key]) {
-          logger.warn(
-            `Skipping extension MCP config for server with key "${key}" as it already exists.`,
-          );
-          return;
-        }
-        mcpServers[key] = {
-          ...server,
-          extensionName: extension.config.name,
-        };
-      },
-    );
-  }
-  return mcpServers;
-}
-
 function mergeExcludeTools(
   settings: Settings,
-  extensions: Extension[],
   extraExcludes?: string[] | undefined,
   cliExcludeTools?: string[] | undefined,
 ): string[] {
@@ -1131,10 +1029,5 @@ function mergeExcludeTools(
     ...(settings.tools?.exclude || []),
     ...(extraExcludes || []),
   ]);
-  for (const extension of extensions) {
-    for (const tool of extension.config.excludeTools || []) {
-      allExcludeTools.add(tool);
-    }
-  }
   return [...allExcludeTools];
 }

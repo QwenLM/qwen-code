@@ -15,13 +15,8 @@ import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
-import { ExtensionStorage, loadExtensions } from './config/extension.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import {
-  getSettingsWarnings,
-  loadSettings,
-  migrateDeprecatedSettings,
-} from './config/settings.js';
+import { getSettingsWarnings, loadSettings } from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -107,7 +102,6 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   return [];
 }
 
-import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
 import { loadSandboxConfig } from './config/sandboxConfig.js';
 import { runAcpAgent } from './acp-integration/acpAgent.js';
 
@@ -206,7 +200,6 @@ export async function startInteractiveUI(
 export async function main() {
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
-  migrateDeprecatedSettings(settings);
   await cleanupCheckpoints();
 
   let argv = await parseArguments(settings.merged);
@@ -251,9 +244,9 @@ export async function main() {
     if (sandboxConfig) {
       const partialConfig = await loadCliConfig(
         settings.merged,
-        [],
-        new ExtensionEnablementManager(ExtensionStorage.getUserExtensionsDir()),
         argv,
+        undefined,
+        [],
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -335,26 +328,22 @@ export async function main() {
   // to run Gemini CLI. It is now safe to perform expensive initialization that
   // may have side effects.
   {
-    const extensionEnablementManager = new ExtensionEnablementManager(
-      ExtensionStorage.getUserExtensionsDir(),
-      argv.extensions,
-    );
-    const extensions = loadExtensions(extensionEnablementManager);
     const config = await loadCliConfig(
       settings.merged,
-      extensions,
-      extensionEnablementManager,
       argv,
+      process.cwd(),
+      argv.extensions,
     );
     registerCleanup(() => config.shutdown());
 
-    if (config.getListExtensions()) {
-      console.log('Installed extensions:');
-      for (const extension of extensions) {
-        console.log(`- ${extension.config.name}`);
-      }
-      process.exit(0);
-    }
+    // FIXME: list extensions after the config initialize
+    // if (config.getListExtensions()) {
+    //   console.log('Installed extensions:');
+    //   for (const extension of extensions) {
+    //     console.log(`- ${extension.config.name}`);
+    //   }
+    //   process.exit(0);
+    // }
 
     // Setup unified ConsolePatcher based on interactive mode
     const isInteractive = config.isInteractive();
@@ -400,7 +389,7 @@ export async function main() {
     }
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, extensions, argv);
+      return runAcpAgent(config, settings, argv);
     }
 
     let input = config.getQuestion();

@@ -5,19 +5,24 @@
  */
 
 import type { CommandModule } from 'yargs';
-import { loadUserExtensions, toOutputString } from '../../config/extension.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { extensionToOutputString, getExtensionManager } from './utils.js';
+import { t } from '../../i18n/index.js';
 
 export async function handleList() {
   try {
-    const extensions = loadUserExtensions();
-    if (extensions.length === 0) {
-      console.log('No extensions installed.');
+    const extensionManager = await getExtensionManager();
+    const extensions = extensionManager.getLoadedExtensions();
+
+    if (!extensions || extensions.length === 0) {
+      console.log(t('No extensions installed.'));
       return;
     }
     console.log(
       extensions
-        .map((extension, _): string => toOutputString(extension, process.cwd()))
+        .map((extension, _): string =>
+          extensionToOutputString(extension, extensionManager, process.cwd()),
+        )
         .join('\n\n'),
     );
   } catch (error) {
@@ -28,7 +33,7 @@ export async function handleList() {
 
 export const listCommand: CommandModule = {
   command: 'list',
-  describe: 'Lists installed extensions.',
+  describe: t('Lists installed extensions.'),
   builder: (yargs) => yargs,
   handler: async () => {
     await handleList();

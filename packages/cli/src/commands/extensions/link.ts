@@ -5,13 +5,14 @@
  */
 
 import type { CommandModule } from 'yargs';
-import {
-  installExtension,
-  requestConsentNonInteractive,
-} from '../../config/extension.js';
-import type { ExtensionInstallMetadata } from '@qwen-code/qwen-code-core';
-
+import { type ExtensionInstallMetadata } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
+import {
+  requestConsentNonInteractive,
+  requestConsentOrFail,
+} from './consent.js';
+import { getExtensionManager } from './utils.js';
+import { t } from '../../i18n/index.js';
 
 interface InstallArgs {
   path: string;
@@ -23,12 +24,20 @@ export async function handleLink(args: InstallArgs) {
       source: args.path,
       type: 'link',
     };
-    const extensionName = await installExtension(
+    const extensionManager = await getExtensionManager();
+
+    const extension = await extensionManager.installExtension(
       installMetadata,
-      requestConsentNonInteractive,
+      requestConsentOrFail.bind(null, requestConsentNonInteractive),
     );
+    if (!extension) {
+      console.log(t('Link extension failed to install.'));
+      return;
+    }
     console.log(
-      `Extension "${extensionName}" linked successfully and enabled.`,
+      t('Extension "{{name}}" linked successfully and enabled.', {
+        name: extension.name,
+      }),
     );
   } catch (error) {
     console.error(getErrorMessage(error));
@@ -38,12 +47,13 @@ export async function handleLink(args: InstallArgs) {
 
 export const linkCommand: CommandModule = {
   command: 'link <path>',
-  describe:
+  describe: t(
     'Links an extension from a local path. Updates made to the local path will always be reflected.',
+  ),
   builder: (yargs) =>
     yargs
       .positional('path', {
-        describe: 'The name of the extension to link.',
+        describe: t('The name of the extension to link.'),
         type: 'string',
       })
       .check((_) => true),

@@ -38,6 +38,7 @@ import {
   EVENT_INVALID_CHUNK,
   EVENT_AUTH,
   EVENT_SKILL_LAUNCH,
+  EVENT_EXTENSION_UPDATE,
   EVENT_USER_FEEDBACK,
 } from './constants.js';
 import {
@@ -80,6 +81,7 @@ import type {
   ExtensionDisableEvent,
   ExtensionEnableEvent,
   ExtensionUninstallEvent,
+  ExtensionUpdateEvent,
   ExtensionInstallEvent,
   ModelSlashCommandEvent,
   SubagentExecutionEvent,
@@ -797,6 +799,32 @@ export function logExtensionUninstall(
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `Uninstalled extension ${event.extension_name}`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export async function logExtensionUpdateEvent(
+  config: Config,
+  event: ExtensionUpdateEvent,
+): Promise<void> {
+  QwenLogger.getInstance(config)?.logExtensionUpdateEvent(event);
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_EXTENSION_UPDATE,
+    'event.timestamp': new Date().toISOString(),
+    extension_name: event.extension_name,
+    extension_id: event.extension_id,
+    extension_previous_version: event.extension_previous_version,
+    extension_version: event.extension_version,
+    extension_source: event.extension_source,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Updated extension ${event.extension_name} from ${event.extension_previous_version} to ${event.extension_version}`,
     attributes,
   };
   logger.emit(logRecord);

@@ -6,28 +6,36 @@
 
 import { type CommandModule } from 'yargs';
 import { FatalConfigError, getErrorMessage } from '@qwen-code/qwen-code-core';
-import { enableExtension } from '../../config/extension.js';
 import { SettingScope } from '../../config/settings.js';
+import { getExtensionManager } from './utils.js';
+import { t } from '../../i18n/index.js';
 
 interface EnableArgs {
   name: string;
   scope?: string;
 }
 
-export function handleEnable(args: EnableArgs) {
+export async function handleEnable(args: EnableArgs) {
+  const extensionManager = await getExtensionManager();
+
   try {
     if (args.scope?.toLowerCase() === 'workspace') {
-      enableExtension(args.name, SettingScope.Workspace);
+      extensionManager.enableExtension(args.name, SettingScope.Workspace);
     } else {
-      enableExtension(args.name, SettingScope.User);
+      extensionManager.enableExtension(args.name, SettingScope.User);
     }
     if (args.scope) {
       console.log(
-        `Extension "${args.name}" successfully enabled for scope "${args.scope}".`,
+        t('Extension "{{name}}" successfully enabled for scope "{{scope}}".', {
+          name: args.name,
+          scope: args.scope,
+        }),
       );
     } else {
       console.log(
-        `Extension "${args.name}" successfully enabled in all scopes.`,
+        t('Extension "{{name}}" successfully enabled in all scopes.', {
+          name: args.name,
+        }),
       );
     }
   } catch (error) {
@@ -37,16 +45,17 @@ export function handleEnable(args: EnableArgs) {
 
 export const enableCommand: CommandModule = {
   command: 'enable [--scope] <name>',
-  describe: 'Enables an extension.',
+  describe: t('Enables an extension.'),
   builder: (yargs) =>
     yargs
       .positional('name', {
-        describe: 'The name of the extension to enable.',
+        describe: t('The name of the extension to enable.'),
         type: 'string',
       })
       .option('scope', {
-        describe:
+        describe: t(
           'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+        ),
         type: 'string',
       })
       .check((argv) => {
@@ -57,17 +66,18 @@ export const enableCommand: CommandModule = {
             .includes((argv.scope as string).toLowerCase())
         ) {
           throw new Error(
-            `Invalid scope: ${argv.scope}. Please use one of ${Object.values(
-              SettingScope,
-            )
-              .map((s) => s.toLowerCase())
-              .join(', ')}.`,
+            t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
+              scope: argv.scope as string,
+              scopes: Object.values(SettingScope)
+                .map((s) => s.toLowerCase())
+                .join(', '),
+            }),
           );
         }
         return true;
       }),
-  handler: (argv) => {
-    handleEnable({
+  handler: async (argv) => {
+    await handleEnable({
       name: argv['name'] as string,
       scope: argv['scope'] as string,
     });

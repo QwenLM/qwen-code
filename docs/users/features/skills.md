@@ -157,6 +157,18 @@ When `--experimental-skills` is enabled, Qwen Code discovers Skills from:
 
 - Personal Skills: `~/.qwen/skills/`
 - Project Skills: `.qwen/skills/`
+- Extension Skills: Skills provided by installed extensions
+
+### Extension Skills
+
+Extensions can provide custom skills that become available when the extension is enabled. These skills are stored in the extension's `skills/` directory and follow the same format as personal and project skills.
+
+Extension skills are automatically discovered and loaded when:
+
+- The extension is installed and enabled
+- The `--experimental-skills` flag is enabled
+
+To see which extensions provide skills, check the extension's `qwen-extension.json` file for a `skills` field.
 
 To view available Skills, ask Qwen Code directly:
 

@@ -37,6 +37,7 @@ import {
   getErrorMessage,
   getAllGeminiMdFilenames,
   ShellExecutionService,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -76,6 +77,9 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
+import { type CommandMigrationNudgeResult } from './CommandFormatMigrationNudge.js';
+import { useCommandMigration } from './hooks/useCommandMigration.js';
+import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import { type UpdateObject } from './utils/updateCheck.js';
 import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
@@ -83,10 +87,13 @@ import { ConsolePatcher } from './utils/ConsolePatcher.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
-import { useWorkspaceMigration } from './hooks/useWorkspaceMigration.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
-import { useExtensionUpdates } from './hooks/useExtensionUpdates.js';
+import {
+  useExtensionUpdates,
+  useConfirmUpdateRequests,
+  useSettingInputRequests,
+} from './hooks/useExtensionUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
@@ -97,6 +104,10 @@ import { processVisionSwitchOutcome } from './hooks/useVisionAutoSwitch.js';
 import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import {
+  requestConsentInteractive,
+  requestConsentOrFail,
+} from '../commands/extensions/consent.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
@@ -157,15 +168,43 @@ export const AppContainer = (props: AppContainerProps) => {
     config.isTrustedFolder(),
   );
 
-  const extensions = config.getExtensions();
+  const extensionManager = config.getExtensionManager();
+
+  const { addConfirmUpdateExtensionRequest, confirmUpdateExtensionRequests } =
+    useConfirmUpdateRequests();
+
+  const { addSettingInputRequest, settingInputRequests } =
+    useSettingInputRequests();
+
+  extensionManager.setRequestConsent(
+    requestConsentOrFail.bind(null, (description) =>
+      requestConsentInteractive(description, addConfirmUpdateExtensionRequest),
+    ),
+  );
+
+  extensionManager.setRequestSetting(
+    (setting) =>
+      new Promise<string>((resolve, reject) => {
+        addSettingInputRequest({
+          settingName: setting.name,
+          settingDescription: setting.description,
+          sensitive: setting.sensitive ?? false,
+          onSubmit: (value) => {
+            resolve(value);
+          },
+          onCancel: () => {
+            reject(new Error('Setting input cancelled'));
+          },
+        });
+      }),
+  );
+
   const {
     extensionsUpdateState,
     extensionsUpdateStateInternal,
     dispatchExtensionStateUpdate,
-    confirmUpdateExtensionRequests,
-    addConfirmUpdateExtensionRequest,
   } = useExtensionUpdates(
-    extensions,
+    extensionManager,
     historyManager.addItem,
     config.getWorkingDir(),
   );
@@ -431,13 +470,6 @@ export const AppContainer = (props: AppContainerProps) => {
     remount: refreshStatic,
   });
 
-  const {
-    showWorkspaceMigrationDialog,
-    workspaceExtensions,
-    onWorkspaceMigrationDialogOpen,
-    onWorkspaceMigrationDialogClose,
-  } = useWorkspaceMigration(settings);
-
   const { toggleVimEnabled } = useVimMode();
 
   const {
@@ -573,7 +605,6 @@ export const AppContainer = (props: AppContainerProps) => {
           : [],
         config.getDebugMode(),
         config.getFileService(),
-        settings.merged,
         config.getExtensionContextFilePaths(),
         config.isTrustedFolder(),
         settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
@@ -839,6 +870,13 @@ export const AppContainer = (props: AppContainerProps) => {
       !idePromptAnswered,
   );
 
+  // Command migration nudge
+  const {
+    showMigrationNudge: shouldShowCommandMigrationNudge,
+    tomlFiles: commandMigrationTomlFiles,
+    setShowMigrationNudge: setShowCommandMigrationNudge,
+  } = useCommandMigration(settings, config.storage);
+
   const [showErrorDetails, setShowErrorDetails] = useState<boolean>(false);
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
@@ -932,6 +970,92 @@ export const AppContainer = (props: AppContainerProps) => {
       setIdePromptAnswered(true);
     },
     [handleSlashCommand, settings],
+  );
+
+  const handleCommandMigrationComplete = useCallback(
+    async (result: CommandMigrationNudgeResult) => {
+      setShowCommandMigrationNudge(false);
+
+      if (result.userSelection === 'yes') {
+        // Perform migration for both workspace and user levels
+        try {
+          const results = [];
+
+          // Migrate workspace commands
+          const workspaceCommandsDir = config.storage.getProjectCommandsDir();
+          const workspaceResult = await migrateTomlCommands({
+            commandDir: workspaceCommandsDir,
+            createBackup: true,
+            deleteOriginal: false,
+          });
+          if (
+            workspaceResult.convertedFiles.length > 0 ||
+            workspaceResult.failedFiles.length > 0
+          ) {
+            results.push({ level: 'workspace', result: workspaceResult });
+          }
+
+          // Migrate user commands
+          const userCommandsDir = Storage.getUserCommandsDir();
+          const userResult = await migrateTomlCommands({
+            commandDir: userCommandsDir,
+            createBackup: true,
+            deleteOriginal: false,
+          });
+          if (
+            userResult.convertedFiles.length > 0 ||
+            userResult.failedFiles.length > 0
+          ) {
+            results.push({ level: 'user', result: userResult });
+          }
+
+          // Report results
+          for (const { level, result: migrationResult } of results) {
+            if (
+              migrationResult.success &&
+              migrationResult.convertedFiles.length > 0
+            ) {
+              historyManager.addItem(
+                {
+                  type: MessageType.INFO,
+                  text: `[${level}] Successfully migrated ${migrationResult.convertedFiles.length} command file${migrationResult.convertedFiles.length > 1 ? 's' : ''} to Markdown format. Original files backed up as .toml.backup`,
+                },
+                Date.now(),
+              );
+            }
+
+            if (migrationResult.failedFiles.length > 0) {
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text: `[${level}] Failed to migrate ${migrationResult.failedFiles.length} file${migrationResult.failedFiles.length > 1 ? 's' : ''}:\n${migrationResult.failedFiles.map((f) => `  • ${f.file}: ${f.error}`).join('\n')}`,
+                },
+                Date.now(),
+              );
+            }
+          }
+
+          if (results.length === 0) {
+            historyManager.addItem(
+              {
+                type: MessageType.INFO,
+                text: 'No TOML files found to migrate.',
+              },
+              Date.now(),
+            );
+          }
+        } catch (error) {
+          historyManager.addItem(
+            {
+              type: MessageType.ERROR,
+              text: `❌ Migration failed: ${getErrorMessage(error)}`,
+            },
+            Date.now(),
+          );
+        }
+      }
+    },
+    [historyManager, setShowCommandMigrationNudge, config.storage],
   );
 
   const { elapsedTime, currentLoadingPhrase } = useLoadingIndicator(
@@ -1176,12 +1300,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const dialogsVisible =
     showWelcomeBackDialog ||
-    showWorkspaceMigrationDialog ||
     shouldShowIdePrompt ||
+    shouldShowCommandMigrationNudge ||
     isFolderTrustDialogOpen ||
     !!shellConfirmationRequest ||
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
+    settingInputRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
@@ -1243,6 +1368,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
+      settingInputRequests,
       loopDetectionConfirmationRequest,
       geminiMdFileCount,
       streamingState,
@@ -1256,6 +1382,8 @@ export const AppContainer = (props: AppContainerProps) => {
       suggestionsWidth,
       isInputActive,
       shouldShowIdePrompt,
+      shouldShowCommandMigrationNudge,
+      commandMigrationTomlFiles,
       isFolderTrustDialogOpen: isFolderTrustDialogOpen ?? false,
       isTrustedFolder,
       constrainHeight,
@@ -1272,8 +1400,6 @@ export const AppContainer = (props: AppContainerProps) => {
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
-      showWorkspaceMigrationDialog,
-      workspaceExtensions,
       currentModel,
       contextFileNames,
       errorCount,
@@ -1334,6 +1460,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellConfirmationRequest,
       confirmationRequest,
       confirmUpdateExtensionRequests,
+      settingInputRequests,
       loopDetectionConfirmationRequest,
       geminiMdFileCount,
       streamingState,
@@ -1347,6 +1474,8 @@ export const AppContainer = (props: AppContainerProps) => {
       suggestionsWidth,
       isInputActive,
       shouldShowIdePrompt,
+      shouldShowCommandMigrationNudge,
+      commandMigrationTomlFiles,
       isFolderTrustDialogOpen,
       isTrustedFolder,
       constrainHeight,
@@ -1363,8 +1492,6 @@ export const AppContainer = (props: AppContainerProps) => {
       historyRemountKey,
       messageQueue,
       showAutoAcceptIndicator,
-      showWorkspaceMigrationDialog,
-      workspaceExtensions,
       contextFileNames,
       errorCount,
       availableTerminalHeight,
@@ -1422,14 +1549,13 @@ export const AppContainer = (props: AppContainerProps) => {
       setShellModeActive,
       vimHandleInput,
       handleIdePromptComplete,
+      handleCommandMigrationComplete,
       handleFolderTrustSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
       handleClearScreen,
-      onWorkspaceMigrationDialogOpen,
-      onWorkspaceMigrationDialogClose,
       // Vision switch dialog
       handleVisionSwitchSelect,
       // Welcome back dialog
@@ -1465,14 +1591,13 @@ export const AppContainer = (props: AppContainerProps) => {
       setShellModeActive,
       vimHandleInput,
       handleIdePromptComplete,
+      handleCommandMigrationComplete,
       handleFolderTrustSelect,
       setConstrainHeight,
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
       handleClearScreen,
-      onWorkspaceMigrationDialogOpen,
-      onWorkspaceMigrationDialogClose,
       handleVisionSwitchSelect,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,

@@ -182,6 +182,7 @@ export default {
   'Project Level ({{path}})': 'Уровень проекта ({{path}})',
   'User Level ({{path}})': 'Уровень пользователя ({{path}})',
   'Built-in Agents': 'Встроенные агенты',
+  'Extension Agents': 'Агенты расширений',
   'Using: {{count}} agents': 'Используется: {{count}} агент(ов)',
   'View Agent': 'Просмотреть агента',
   'Edit Agent': 'Редактировать агента',
@@ -387,6 +388,137 @@ export default {
   'List active extensions': 'Показать активные расширения',
   'Update extensions. Usage: update <extension-names>|--all':
     'Обновить расширения. Использование: update <extension-names>|--all',
+  'Disable an extension': 'Отключить расширение',
+  'Enable an extension': 'Включить расширение',
+  'Install an extension from a git repo or local path':
+    'Установить расширение из Git-репозитория или локального пути',
+  'Uninstall an extension': 'Удалить расширение',
+  'No extensions installed.': 'Расширения не установлены.',
+  'Usage: /extensions update <extension-names>|--all':
+    'Использование: /extensions update <имена-расширений>|--all',
+  'Extension "{{name}}" not found.': 'Расширение "{{name}}" не найдено.',
+  'No extensions to update.': 'Нет расширений для обновления.',
+  'Usage: /extensions install <source>':
+    'Использование: /extensions install <источник>',
+  'Installing extension from "{{source}}"...':
+    'Установка расширения из "{{source}}"...',
+  'Extension "{{name}}" installed successfully.':
+    'Расширение "{{name}}" успешно установлено.',
+  'Failed to install extension from "{{source}}": {{error}}':
+    'Не удалось установить расширение из "{{source}}": {{error}}',
+  'Usage: /extensions uninstall <extension-name>':
+    'Использование: /extensions uninstall <имя-расширения>',
+  'Uninstalling extension "{{name}}"...': 'Удаление расширения "{{name}}"...',
+  'Extension "{{name}}" uninstalled successfully.':
+    'Расширение "{{name}}" успешно удалено.',
+  'Failed to uninstall extension "{{name}}": {{error}}':
+    'Не удалось удалить расширение "{{name}}": {{error}}',
+  'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]':
+    'Использование: /extensions {{command}} <расширение> [--scope=<user|workspace>]',
+  'Unsupported scope "{{scope}}", should be one of "user" or "workspace"':
+    'Неподдерживаемая область "{{scope}}", должна быть "user" или "workspace"',
+  'Extension "{{name}}" disabled for scope "{{scope}}"':
+    'Расширение "{{name}}" отключено для области "{{scope}}"',
+  'Extension "{{name}}" enabled for scope "{{scope}}"':
+    'Расширение "{{name}}" включено для области "{{scope}}"',
+  'Do you want to continue? [Y/n]: ': 'Хотите продолжить? [Y/n]: ',
+  'Do you want to continue?': 'Хотите продолжить?',
+  'Installing extension "{{name}}".': 'Установка расширения "{{name}}".',
+  '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
+    '**Расширения могут вызывать неожиданное поведение. Убедитесь, что вы изучили источник расширения и доверяете автору.**',
+  'This extension will run the following MCP servers:':
+    'Это расширение запустит следующие MCP-серверы:',
+  local: 'локальный',
+  remote: 'удалённый',
+  'This extension will add the following commands: {{commands}}.':
+    'Это расширение добавит следующие команды: {{commands}}.',
+  'This extension will append info to your QWEN.md context using {{fileName}}':
+    'Это расширение добавит информацию в ваш контекст QWEN.md с помощью {{fileName}}',
+  'This extension will exclude the following core tools: {{tools}}':
+    'Это расширение исключит следующие основные инструменты: {{tools}}',
+  'This extension will install the following skills:':
+    'Это расширение установит следующие навыки:',
+  'This extension will install the following subagents:':
+    'Это расширение установит следующие подагенты:',
+  'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
+  '--ref and --auto-update are not applicable for marketplace extensions.':
+    '--ref и --auto-update неприменимы для расширений из маркетплейса.',
+  'Extension "{{name}}" installed successfully and enabled.':
+    'Расширение "{{name}}" успешно установлено и включено.',
+  'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
+    'Устанавливает расширение из URL Git-репозитория, локального пути или маркетплейса Claude (marketplace-url:plugin-name).',
+  'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
+    'URL GitHub, локальный путь или источник в маркетплейсе (marketplace-url:plugin-name) устанавливаемого расширения.',
+  'The git ref to install from.': 'Git-ссылка для установки.',
+  'Enable auto-update for this extension.':
+    'Включить автообновление для этого расширения.',
+  'Enable pre-release versions for this extension.':
+    'Включить пре-релизные версии для этого расширения.',
+  'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
+    'Подтвердить риски безопасности установки расширения и пропустить запрос подтверждения.',
+  'The source argument must be provided.':
+    'Необходимо указать аргумент источника.',
+  'Extension "{{name}}" successfully uninstalled.':
+    'Расширение "{{name}}" успешно удалено.',
+  'Uninstalls an extension.': 'Удаляет расширение.',
+  'The name or source path of the extension to uninstall.':
+    'Имя или путь к источнику удаляемого расширения.',
+  'Please include the name of the extension to uninstall as a positional argument.':
+    'Пожалуйста, укажите имя удаляемого расширения как позиционный аргумент.',
+  'Enables an extension.': 'Включает расширение.',
+  'The name of the extension to enable.': 'Имя включаемого расширения.',
+  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+    'Область для включения расширения. Если не задана, будет включено во всех областях.',
+  'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
+    'Расширение "{{name}}" успешно включено для области "{{scope}}".',
+  'Extension "{{name}}" successfully enabled in all scopes.':
+    'Расширение "{{name}}" успешно включено во всех областях.',
+  'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
+    'Недопустимая область: {{scope}}. Пожалуйста, используйте одну из {{scopes}}.',
+  'Disables an extension.': 'Отключает расширение.',
+  'The name of the extension to disable.': 'Имя отключаемого расширения.',
+  'The scope to disable the extenison in.':
+    'Область для отключения расширения.',
+  'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
+    'Расширение "{{name}}" успешно отключено для области "{{scope}}".',
+  'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
+    'Расширение "{{name}}" успешно обновлено: {{oldVersion}} → {{newVersion}}.',
+  'Unable to install extension "{{name}}" due to missing install metadata':
+    'Невозможно установить расширение "{{name}}" из-за отсутствия метаданных установки',
+  'Extension "{{name}}" is already up to date.':
+    'Расширение "{{name}}" уже актуально.',
+  'Updates all extensions or a named extension to the latest version.':
+    'Обновляет все расширения или указанное расширение до последней версии.',
+  'The name of the extension to update.': 'Имя обновляемого расширения.',
+  'Update all extensions.': 'Обновить все расширения.',
+  'Either an extension name or --all must be provided':
+    'Необходимо указать имя расширения или --all',
+  'Lists installed extensions.': 'Показывает установленные расширения.',
+  'Link extension failed to install.':
+    'Не удалось установить связанное расширение.',
+  'Extension "{{name}}" linked successfully and enabled.':
+    'Расширение "{{name}}" успешно связано и включено.',
+  'Links an extension from a local path. Updates made to the local path will always be reflected.':
+    'Связывает расширение из локального пути. Изменения в локальном пути будут всегда отражаться.',
+  'The name of the extension to link.': 'Имя связываемого расширения.',
+  'Set a specific setting for an extension.':
+    'Установить конкретную настройку для расширения.',
+  'Name of the extension to configure.': 'Имя настраиваемого расширения.',
+  'The setting to configure (name or env var).':
+    'Настройка для конфигурирования (имя или переменная окружения).',
+  'The scope to set the setting in.': 'Область для установки настройки.',
+  'List all settings for an extension.': 'Показать все настройки расширения.',
+  'Name of the extension.': 'Имя расширения.',
+  'Extension "{{name}}" has no settings to configure.':
+    'Расширение "{{name}}" не имеет настроек для конфигурирования.',
+  'Settings for "{{name}}":': 'Настройки для "{{name}}":',
+  '(workspace)': '(рабочее пространство)',
+  '(user)': '(пользователь)',
+  '[not set]': '[не задано]',
+  '[value stored in keychain]': '[значение хранится в связке ключей]',
+  'Manage extension settings.': 'Управление настройками расширений.',
+  'You need to specify a command (set or list).':
+    'Необходимо указать команду (set или list).',
   'manage IDE integration': 'Управление интеграцией с IDE',
   'check status of IDE integration': 'Проверить статус интеграции с IDE',
   'install required IDE companion for {{ideName}}':
@@ -1014,6 +1146,19 @@ export default {
     'Время начала сессии недоступно, невозможно рассчитать статистику.',
 
   // ============================================================================
+  // Command Format Migration
+  // ============================================================================
+  'Command Format Migration': 'Миграция формата команд',
+  'Found {{count}} TOML command file:': 'Найден {{count}} файл команд TOML:',
+  'Found {{count}} TOML command files:':
+    'Найдено {{count}} файлов команд TOML:',
+  '... and {{count}} more': '... и ещё {{count}}',
+  'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
+    'Формат TOML устарел. Хотите перенести их в формат Markdown?',
+  '(Backups will be created and original files will be preserved)':
+    '(Будут созданы резервные копии, исходные файлы будут сохранены)',
+
+  // ============================================================================
   // Loading Phrases
   // ============================================================================
   'Waiting for user confirmation...':
@@ -1154,4 +1299,55 @@ export default {
     'Пробовали выключить и включить снова? (Экран загрузки, не меня!)',
     'Нужно построить больше пилонов...',
   ],
+
+  // ============================================================================
+  // Extension Settings Input
+  // ============================================================================
+  'Enter value...': 'Введите значение...',
+  'Enter sensitive value...': 'Введите секретное значение...',
+  'Press Enter to submit, Escape to cancel':
+    'Нажмите Enter для отправки, Escape для отмены',
+
+  // ============================================================================
+  // Command Migration Tool
+  // ============================================================================
+  'Markdown file already exists: {{filename}}':
+    'Markdown-файл уже существует: {{filename}}',
+  'TOML Command Format Deprecation Notice':
+    'Уведомление об устаревании формата TOML',
+  'Found {{count}} command file(s) in TOML format:':
+    'Найдено {{count}} файл(ов) команд в формате TOML:',
+  'The TOML format for commands is being deprecated in favor of Markdown format.':
+    'Формат TOML для команд устаревает в пользу формата Markdown.',
+  'Markdown format is more readable and easier to edit.':
+    'Формат Markdown более читаемый и простой для редактирования.',
+  'You can migrate these files automatically using:':
+    'Вы можете автоматически мигрировать эти файлы с помощью:',
+  'Or manually convert each file:': 'Или вручную конвертировать каждый файл:',
+  'TOML: prompt = "..." / description = "..."':
+    'TOML: prompt = "..." / description = "..."',
+  'Markdown: YAML frontmatter + content':
+    'Markdown: YAML frontmatter + содержимое',
+  'The migration tool will:': 'Инструмент миграции:',
+  'Convert TOML files to Markdown': 'Конвертирует TOML-файлы в Markdown',
+  'Create backups of original files': 'Создаёт резервные копии исходных файлов',
+  'Preserve all command functionality': 'Сохраняет всю функциональность команд',
+  'TOML format will continue to work for now, but migration is recommended.':
+    'Формат TOML пока продолжит работать, но миграция рекомендуется.',
+
+  // ============================================================================
+  // Extensions - Explore Command
+  // ============================================================================
+  'Open extensions page in your browser':
+    'Открыть страницу расширений в браузере',
+  'Unknown extensions source: {{source}}.':
+    'Неизвестный источник расширений: {{source}}.',
+  'Would open extensions page in your browser: {{url}} (skipped in test environment)':
+    'Страница расширений была бы открыта в браузере: {{url}} (пропущено в тестовой среде)',
+  'View available extensions at {{url}}':
+    'Посмотреть доступные расширения на {{url}}',
+  'Opening extensions page in your browser: {{url}}':
+    'Открываем страницу расширений в браузере: {{url}}',
+  'Failed to open browser. Check out the extensions gallery at {{url}}':
+    'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
 };

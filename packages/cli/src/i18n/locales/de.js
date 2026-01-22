@@ -157,6 +157,7 @@ export default {
   'Project Level ({{path}})': 'Projektebene ({{path}})',
   'User Level ({{path}})': 'Benutzerebene ({{path}})',
   'Built-in Agents': 'Integrierte Agenten',
+  'Extension Agents': 'Erweiterungs-Agenten',
   'Using: {{count}} agents': 'Verwendet: {{count}} Agenten',
   'View Agent': 'Agent anzeigen',
   'Edit Agent': 'Agent bearbeiten',
@@ -365,6 +366,147 @@ export default {
   'List active extensions': 'Aktive Erweiterungen auflisten',
   'Update extensions. Usage: update <extension-names>|--all':
     'Erweiterungen aktualisieren. Verwendung: update <Erweiterungsnamen>|--all',
+  'Disable an extension': 'Erweiterung deaktivieren',
+  'Enable an extension': 'Erweiterung aktivieren',
+  'Install an extension from a git repo or local path':
+    'Erweiterung aus Git-Repository oder lokalem Pfad installieren',
+  'Uninstall an extension': 'Erweiterung deinstallieren',
+  'No extensions installed.': 'Keine Erweiterungen installiert.',
+  'Usage: /extensions update <extension-names>|--all':
+    'Verwendung: /extensions update <Erweiterungsnamen>|--all',
+  'Extension "{{name}}" not found.': 'Erweiterung "{{name}}" nicht gefunden.',
+  'No extensions to update.': 'Keine Erweiterungen zum Aktualisieren.',
+  'Usage: /extensions install <source>':
+    'Verwendung: /extensions install <Quelle>',
+  'Installing extension from "{{source}}"...':
+    'Installiere Erweiterung von "{{source}}"...',
+  'Extension "{{name}}" installed successfully.':
+    'Erweiterung "{{name}}" erfolgreich installiert.',
+  'Failed to install extension from "{{source}}": {{error}}':
+    'Fehler beim Installieren der Erweiterung von "{{source}}": {{error}}',
+  'Usage: /extensions uninstall <extension-name>':
+    'Verwendung: /extensions uninstall <Erweiterungsname>',
+  'Uninstalling extension "{{name}}"...':
+    'Deinstalliere Erweiterung "{{name}}"...',
+  'Extension "{{name}}" uninstalled successfully.':
+    'Erweiterung "{{name}}" erfolgreich deinstalliert.',
+  'Failed to uninstall extension "{{name}}": {{error}}':
+    'Fehler beim Deinstallieren der Erweiterung "{{name}}": {{error}}',
+  'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]':
+    'Verwendung: /extensions {{command}} <Erweiterung> [--scope=<user|workspace>]',
+  'Unsupported scope "{{scope}}", should be one of "user" or "workspace"':
+    'Nicht unterstützter Bereich "{{scope}}", sollte "user" oder "workspace" sein',
+  'Extension "{{name}}" disabled for scope "{{scope}}"':
+    'Erweiterung "{{name}}" für Bereich "{{scope}}" deaktiviert',
+  'Extension "{{name}}" enabled for scope "{{scope}}"':
+    'Erweiterung "{{name}}" für Bereich "{{scope}}" aktiviert',
+  'Do you want to continue? [Y/n]: ': 'Möchten Sie fortfahren? [Y/n]: ',
+  'Do you want to continue?': 'Möchten Sie fortfahren?',
+  'Installing extension "{{name}}".':
+    'Erweiterung "{{name}}" wird installiert.',
+  '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
+    '**Erweiterungen können unerwartetes Verhalten verursachen. Stellen Sie sicher, dass Sie die Erweiterungsquelle untersucht haben und dem Autor vertrauen.**',
+  'This extension will run the following MCP servers:':
+    'Diese Erweiterung wird folgende MCP-Server ausführen:',
+  local: 'lokal',
+  remote: 'remote',
+  'This extension will add the following commands: {{commands}}.':
+    'Diese Erweiterung wird folgende Befehle hinzufügen: {{commands}}.',
+  'This extension will append info to your QWEN.md context using {{fileName}}':
+    'Diese Erweiterung wird Informationen zu Ihrem QWEN.md-Kontext mit {{fileName}} hinzufügen',
+  'This extension will exclude the following core tools: {{tools}}':
+    'Diese Erweiterung wird folgende Kernwerkzeuge ausschließen: {{tools}}',
+  'This extension will install the following skills:':
+    'Diese Erweiterung wird folgende Fähigkeiten installieren:',
+  'This extension will install the following subagents:':
+    'Diese Erweiterung wird folgende Unteragenten installieren:',
+  'Installation cancelled for "{{name}}".':
+    'Installation von "{{name}}" abgebrochen.',
+  '--ref and --auto-update are not applicable for marketplace extensions.':
+    '--ref und --auto-update sind nicht anwendbar für Marketplace-Erweiterungen.',
+  'Extension "{{name}}" installed successfully and enabled.':
+    'Erweiterung "{{name}}" erfolgreich installiert und aktiviert.',
+  'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
+    'Installiert eine Erweiterung von einer Git-Repository-URL, einem lokalen Pfad oder dem Claude-Marketplace (marketplace-url:plugin-name).',
+  'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
+    'Die GitHub-URL, der lokale Pfad oder die Marketplace-Quelle (marketplace-url:plugin-name) der zu installierenden Erweiterung.',
+  'The git ref to install from.': 'Die Git-Referenz für die Installation.',
+  'Enable auto-update for this extension.':
+    'Automatisches Update für diese Erweiterung aktivieren.',
+  'Enable pre-release versions for this extension.':
+    'Pre-Release-Versionen für diese Erweiterung aktivieren.',
+  'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
+    'Sicherheitsrisiken der Erweiterungsinstallation bestätigen und Bestätigungsaufforderung überspringen.',
+  'The source argument must be provided.':
+    'Das Quellargument muss angegeben werden.',
+  'Extension "{{name}}" successfully uninstalled.':
+    'Erweiterung "{{name}}" erfolgreich deinstalliert.',
+  'Uninstalls an extension.': 'Deinstalliert eine Erweiterung.',
+  'The name or source path of the extension to uninstall.':
+    'Der Name oder Quellpfad der zu deinstallierenden Erweiterung.',
+  'Please include the name of the extension to uninstall as a positional argument.':
+    'Bitte geben Sie den Namen der zu deinstallierenden Erweiterung als Positionsargument an.',
+  'Enables an extension.': 'Aktiviert eine Erweiterung.',
+  'The name of the extension to enable.':
+    'Der Name der zu aktivierenden Erweiterung.',
+  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+    'Der Bereich, in dem die Erweiterung aktiviert werden soll. Wenn nicht gesetzt, wird sie in allen Bereichen aktiviert.',
+  'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
+    'Erweiterung "{{name}}" erfolgreich für Bereich "{{scope}}" aktiviert.',
+  'Extension "{{name}}" successfully enabled in all scopes.':
+    'Erweiterung "{{name}}" erfolgreich in allen Bereichen aktiviert.',
+  'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
+    'Ungültiger Bereich: {{scope}}. Bitte verwenden Sie einen von {{scopes}}.',
+  'Disables an extension.': 'Deaktiviert eine Erweiterung.',
+  'The name of the extension to disable.':
+    'Der Name der zu deaktivierenden Erweiterung.',
+  'The scope to disable the extenison in.':
+    'Der Bereich, in dem die Erweiterung deaktiviert werden soll.',
+  'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
+    'Erweiterung "{{name}}" erfolgreich für Bereich "{{scope}}" deaktiviert.',
+  'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
+    'Erweiterung "{{name}}" erfolgreich aktualisiert: {{oldVersion}} → {{newVersion}}.',
+  'Unable to install extension "{{name}}" due to missing install metadata':
+    'Erweiterung "{{name}}" kann aufgrund fehlender Installationsmetadaten nicht installiert werden',
+  'Extension "{{name}}" is already up to date.':
+    'Erweiterung "{{name}}" ist bereits aktuell.',
+  'Updates all extensions or a named extension to the latest version.':
+    'Aktualisiert alle Erweiterungen oder eine benannte Erweiterung auf die neueste Version.',
+  'The name of the extension to update.':
+    'Der Name der zu aktualisierenden Erweiterung.',
+  'Update all extensions.': 'Alle Erweiterungen aktualisieren.',
+  'Either an extension name or --all must be provided':
+    'Entweder ein Erweiterungsname oder --all muss angegeben werden',
+  'Lists installed extensions.': 'Listet installierte Erweiterungen auf.',
+  'Link extension failed to install.':
+    'Verknüpfte Erweiterung konnte nicht installiert werden.',
+  'Extension "{{name}}" linked successfully and enabled.':
+    'Erweiterung "{{name}}" erfolgreich verknüpft und aktiviert.',
+  'Links an extension from a local path. Updates made to the local path will always be reflected.':
+    'Verknüpft eine Erweiterung von einem lokalen Pfad. Änderungen am lokalen Pfad werden immer widergespiegelt.',
+  'The name of the extension to link.':
+    'Der Name der zu verknüpfenden Erweiterung.',
+  'Set a specific setting for an extension.':
+    'Legt eine bestimmte Einstellung für eine Erweiterung fest.',
+  'Name of the extension to configure.':
+    'Name der zu konfigurierenden Erweiterung.',
+  'The setting to configure (name or env var).':
+    'Die zu konfigurierende Einstellung (Name oder Umgebungsvariable).',
+  'The scope to set the setting in.':
+    'Der Bereich, in dem die Einstellung gesetzt werden soll.',
+  'List all settings for an extension.':
+    'Listet alle Einstellungen einer Erweiterung auf.',
+  'Name of the extension.': 'Name der Erweiterung.',
+  'Extension "{{name}}" has no settings to configure.':
+    'Erweiterung "{{name}}" hat keine zu konfigurierenden Einstellungen.',
+  'Settings for "{{name}}":': 'Einstellungen für "{{name}}":',
+  '(workspace)': '(Arbeitsbereich)',
+  '(user)': '(Benutzer)',
+  '[not set]': '[nicht gesetzt]',
+  '[value stored in keychain]': '[Wert in Schlüsselbund gespeichert]',
+  'Manage extension settings.': 'Erweiterungseinstellungen verwalten.',
+  'You need to specify a command (set or list).':
+    'Sie müssen einen Befehl angeben (set oder list).',
   'manage IDE integration': 'IDE-Integration verwalten',
   'check status of IDE integration': 'Status der IDE-Integration prüfen',
   'install required IDE companion for {{ideName}}':
@@ -1003,6 +1145,19 @@ export default {
     'Sitzungsstartzeit nicht verfügbar, Statistiken können nicht berechnet werden.',
 
   // ============================================================================
+  // Command Format Migration
+  // ============================================================================
+  'Command Format Migration': 'Befehlsformat-Migration',
+  'Found {{count}} TOML command file:': '{{count}} TOML-Befehlsdatei gefunden:',
+  'Found {{count}} TOML command files:':
+    '{{count}} TOML-Befehlsdateien gefunden:',
+  '... and {{count}} more': '... und {{count}} weitere',
+  'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
+    'Das TOML-Format ist veraltet. Möchten Sie sie ins Markdown-Format migrieren?',
+  '(Backups will be created and original files will be preserved)':
+    '(Backups werden erstellt und Originaldateien werden beibehalten)',
+
+  // ============================================================================
   // Loading Phrases
   // ============================================================================
   'Waiting for user confirmation...': 'Warten auf Benutzerbestätigung...',
@@ -1140,4 +1295,54 @@ export default {
     'Haben Sie versucht, es aus- und wieder einzuschalten? (Den Ladebildschirm, nicht mich.)',
     'Zusätzliche Pylonen werden gebaut...',
   ],
+
+  // ============================================================================
+  // Extension Settings Input
+  // ============================================================================
+  'Enter value...': 'Wert eingeben...',
+  'Enter sensitive value...': 'Sensiblen Wert eingeben...',
+  'Press Enter to submit, Escape to cancel':
+    'Enter zum Absenden, Escape zum Abbrechen drücken',
+
+  // ============================================================================
+  // Command Migration Tool
+  // ============================================================================
+  'Markdown file already exists: {{filename}}':
+    'Markdown-Datei existiert bereits: {{filename}}',
+  'TOML Command Format Deprecation Notice':
+    'TOML-Befehlsformat Veraltet-Hinweis',
+  'Found {{count}} command file(s) in TOML format:':
+    '{{count}} Befehlsdatei(en) im TOML-Format gefunden:',
+  'The TOML format for commands is being deprecated in favor of Markdown format.':
+    'Das TOML-Format für Befehle wird zugunsten des Markdown-Formats eingestellt.',
+  'Markdown format is more readable and easier to edit.':
+    'Das Markdown-Format ist lesbarer und einfacher zu bearbeiten.',
+  'You can migrate these files automatically using:':
+    'Sie können diese Dateien automatisch migrieren mit:',
+  'Or manually convert each file:': 'Oder jede Datei manuell konvertieren:',
+  'TOML: prompt = "..." / description = "..."':
+    'TOML: prompt = "..." / description = "..."',
+  'Markdown: YAML frontmatter + content': 'Markdown: YAML-Frontmatter + Inhalt',
+  'The migration tool will:': 'Das Migrationstool wird:',
+  'Convert TOML files to Markdown': 'TOML-Dateien in Markdown konvertieren',
+  'Create backups of original files':
+    'Sicherungen der Originaldateien erstellen',
+  'Preserve all command functionality': 'Alle Befehlsfunktionen beibehalten',
+  'TOML format will continue to work for now, but migration is recommended.':
+    'Das TOML-Format funktioniert vorerst weiter, aber eine Migration wird empfohlen.',
+
+  // ============================================================================
+  // Extensions - Explore Command
+  // ============================================================================
+  'Open extensions page in your browser': 'Erweiterungsseite im Browser öffnen',
+  'Unknown extensions source: {{source}}.':
+    'Unbekannte Erweiterungsquelle: {{source}}.',
+  'Would open extensions page in your browser: {{url}} (skipped in test environment)':
+    'Würde Erweiterungsseite im Browser öffnen: {{url}} (übersprungen in Testumgebung)',
+  'View available extensions at {{url}}':
+    'Verfügbare Erweiterungen ansehen unter {{url}}',
+  'Opening extensions page in your browser: {{url}}':
+    'Erweiterungsseite wird im Browser geöffnet: {{url}}',
+  'Failed to open browser. Check out the extensions gallery at {{url}}':
+    'Browser konnte nicht geöffnet werden. Besuchen Sie die Erweiterungsgalerie unter {{url}}',
 };

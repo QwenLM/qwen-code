@@ -6,17 +6,18 @@
 
 import { Box, Text } from 'ink';
 import { IdeIntegrationNudge } from '../IdeIntegrationNudge.js';
+import { CommandFormatMigrationNudge } from '../CommandFormatMigrationNudge.js';
 import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
+import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
-import { WorkspaceMigrationDialog } from './WorkspaceMigrationDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
@@ -76,20 +77,19 @@ export const DialogManager = ({
   if (uiState.showIdeRestartPrompt) {
     return <IdeTrustChangeDialog reason={uiState.ideTrustRestartReason} />;
   }
-  if (uiState.showWorkspaceMigrationDialog) {
-    return (
-      <WorkspaceMigrationDialog
-        workspaceExtensions={uiState.workspaceExtensions}
-        onOpen={uiActions.onWorkspaceMigrationDialogOpen}
-        onClose={uiActions.onWorkspaceMigrationDialogClose}
-      />
-    );
-  }
   if (uiState.shouldShowIdePrompt) {
     return (
       <IdeIntegrationNudge
         ide={uiState.currentIDE!}
         onComplete={uiActions.handleIdePromptComplete}
+      />
+    );
+  }
+  if (uiState.shouldShowCommandMigrationNudge) {
+    return (
+      <CommandFormatMigrationNudge
+        tomlFiles={uiState.commandMigrationTomlFiles}
+        onComplete={uiActions.handleCommandMigrationComplete}
       />
     );
   }
@@ -128,6 +128,21 @@ export const DialogManager = ({
       <ConsentPrompt
         prompt={request.prompt}
         onConfirm={request.onConfirm}
+        terminalWidth={terminalWidth}
+      />
+    );
+  }
+  if (uiState.settingInputRequests.length > 0) {
+    const request = uiState.settingInputRequests[0];
+    // Use settingName as key to force re-mount when switching between different settings
+    return (
+      <SettingInputPrompt
+        key={request.settingName}
+        settingName={request.settingName}
+        settingDescription={request.settingDescription}
+        sensitive={request.sensitive}
+        onSubmit={request.onSubmit}
+        onCancel={request.onCancel}
         terminalWidth={terminalWidth}
       />
     );

@@ -75,7 +75,9 @@ vi.mock('../tools/tool-registry', () => {
 });
 
 vi.mock('../utils/memoryDiscovery.js', () => ({
-  loadServerHierarchicalMemory: vi.fn(),
+  loadServerHierarchicalMemory: vi
+    .fn()
+    .mockResolvedValue({ memoryContent: '', fileCount: 0 }),
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
@@ -225,6 +227,7 @@ describe('Server Config (config.ts)', () => {
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
     usageStatisticsEnabled: false,
+    overrideExtensions: [],
   };
 
   beforeEach(() => {
@@ -1322,7 +1325,10 @@ describe('BaseLlmClient Lifecycle', () => {
     const authType = AuthType.USE_GEMINI;
     const mockContentConfig = { model: 'gemini-flash', apiKey: 'test-key' };
 
-    vi.mocked(createContentGeneratorConfig).mockReturnValue(mockContentConfig);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: mockContentConfig,
+      sources: {},
+    });
 
     await config.refreshAuth(authType);
 

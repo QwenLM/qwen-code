@@ -58,7 +58,11 @@ export const ActionSelectionStep = ({
     },
   ];
 
-  const actions = selectedAgent?.isBuiltin
+  // Extension-level agents are also read-only (like builtin)
+  const isReadOnly =
+    selectedAgent?.isBuiltin || selectedAgent?.level === 'extension';
+
+  const actions = isReadOnly
     ? allActions.filter(
         (action) => action.value === 'view' || action.value === 'back',
       )

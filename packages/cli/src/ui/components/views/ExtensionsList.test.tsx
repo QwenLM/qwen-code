@@ -18,7 +18,6 @@ const mockUseUIState = vi.mocked(useUIState);
 const mockExtensions = [
   { name: 'ext-one', version: '1.0.0', isActive: true },
   { name: 'ext-two', version: '2.1.0', isActive: true },
-  { name: 'ext-disabled', version: '3.0.0', isActive: false },
 ];
 
 describe('<ExtensionsList />', () => {
@@ -29,20 +28,12 @@ describe('<ExtensionsList />', () => {
   const mockUIState = (
     extensions: unknown[],
     extensionsUpdateState: Map<string, ExtensionUpdateState>,
-    disabledExtensions: string[] = [],
   ) => {
     mockUseUIState.mockReturnValue({
       commandContext: createMockCommandContext({
         services: {
           config: {
             getExtensions: () => extensions,
-          },
-          settings: {
-            merged: {
-              extensions: {
-                disabled: disabledExtensions,
-              },
-            },
           },
         },
       }),
@@ -58,12 +49,11 @@ describe('<ExtensionsList />', () => {
   });
 
   it('should render a list of extensions with their version and status', () => {
-    mockUIState(mockExtensions, new Map(), ['ext-disabled']);
+    mockUIState(mockExtensions, new Map());
     const { lastFrame } = render(<ExtensionsList />);
     const output = lastFrame();
     expect(output).toContain('ext-one (v1.0.0) - active');
     expect(output).toContain('ext-two (v2.1.0) - active');
-    expect(output).toContain('ext-disabled (v3.0.0) - disabled');
   });
 
   it('should display "unknown state" if an extension has no update state', () => {
