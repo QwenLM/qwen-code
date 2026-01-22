@@ -11,12 +11,14 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import {
   McpClient,
   MCPDiscoveryState,
+  MCPServerStatus,
   populateMcpServerCommand,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { EventEmitter } from 'node:events';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
@@ -136,5 +138,44 @@ export class McpClientManager {
 
   getDiscoveryState(): MCPDiscoveryState {
     return this.discoveryState;
+  }
+
+  async readResource(
+    serverName: string,
+    uri: string,
+  ): Promise<ReadResourceResult> {
+    let client = this.clients.get(serverName);
+    if (!client) {
+      const servers = populateMcpServerCommand(
+        this.mcpServers,
+        this.mcpServerCommand,
+      );
+      const serverConfig = servers[serverName];
+      if (!serverConfig) {
+        throw new Error(`MCP server '${serverName}' is not configured.`);
+      }
+
+      const sdkCallback = isSdkMcpServerConfig(serverConfig)
+        ? this.sendSdkMcpMessage
+        : undefined;
+
+      client = new McpClient(
+        serverName,
+        serverConfig,
+        this.toolRegistry,
+        this.promptRegistry,
+        this.workspaceContext,
+        this.debugMode,
+        sdkCallback,
+      );
+      this.clients.set(serverName, client);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+
+    if (client.getStatus() !== MCPServerStatus.CONNECTED) {
+      await client.connect();
+    }
+
+    return client.readResource(uri);
   }
 }
