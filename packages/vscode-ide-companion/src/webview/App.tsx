@@ -424,30 +424,17 @@ export const App: React.FC = () => {
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
-    (optionId: string, customMessage?: string) => {
+    (optionId: string) => {
       // Forward the selected optionId directly to extension as ACP permission response
       // Expected values include: 'proceed_once', 'proceed_always', 'cancel', 'proceed_always_server', etc.
-      // If customMessage is provided, it will be sent as user feedback to the AI
       vscode.postMessage({
         type: 'permissionResponse',
-        data: { optionId, customMessage },
+        data: { optionId },
       });
-
-      // If user provided custom feedback, display it as a user message in the chat
-      // This provides visual feedback that the message was sent to the AI
-      if (customMessage?.trim()) {
-        messageHandling.addMessage({
-          role: 'user',
-          content: customMessage.trim(),
-          timestamp: Date.now(),
-        });
-        // Set waiting state since AI will respond to this feedback
-        messageHandling.setWaitingForResponse('Processing your feedback...');
-      }
 
       setPermissionRequest(null);
     },
-    [vscode, messageHandling],
+    [vscode],
   );
 
   // Handle completion selection
