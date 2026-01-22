@@ -114,6 +114,73 @@ export class McpClientManager {
   }
 
   /**
+   * Connects to a single MCP server and discovers its tools/prompts.
+   * The connected client is tracked so it can be closed by {@link stop}.
+   *
+   * This is primarily used for on-demand re-discovery flows (e.g. after OAuth).
+   */
+  async discoverMcpToolsForServer(
+    serverName: string,
+    cliConfig: Config,
+  ): Promise<void> {
+    const servers = populateMcpServerCommand(
+      this.mcpServers,
+      this.mcpServerCommand,
+    );
+    const serverConfig = servers[serverName];
+    if (!serverConfig) {
+      return;
+    }
+
+    // Ensure we don't leak an existing connection for this server.
+    const existingClient = this.clients.get(serverName);
+    if (existingClient) {
+      try {
+        await existingClient.disconnect();
+      } catch (error) {
+        console.error(
+          `Error stopping client '${serverName}': ${getErrorMessage(error)}`,
+        );
+      } finally {
+        this.clients.delete(serverName);
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+      }
+    }
+
+    // For SDK MCP servers, pass the sendSdkMcpMessage callback.
+    const sdkCallback = isSdkMcpServerConfig(serverConfig)
+      ? this.sendSdkMcpMessage
+      : undefined;
+
+    const client = new McpClient(
+      serverName,
+      serverConfig,
+      this.toolRegistry,
+      this.promptRegistry,
+      this.workspaceContext,
+      this.debugMode,
+      sdkCallback,
+    );
+
+    this.clients.set(serverName, client);
+    this.eventEmitter?.emit('mcp-client-update', this.clients);
+
+    try {
+      await client.connect();
+      await client.discover(cliConfig);
+    } catch (error) {
+      // Log the error but don't throw: callers expect best-effort discovery.
+      console.error(
+        `Error during discovery for server '${serverName}': ${getErrorMessage(
+          error,
+        )}`,
+      );
+    } finally {
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+  }
+
+  /**
    * Stops all running local MCP servers and closes all client connections.
    * This is the cleanup method to be called on application exit.
    */

@@ -15,7 +15,6 @@ import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import type { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { connectAndDiscover } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -283,19 +282,10 @@ export class ToolRegistry {
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
-    const mcpServers = this.config.getMcpServers() ?? {};
-    const serverConfig = mcpServers[serverName];
-    if (serverConfig) {
-      await connectAndDiscover(
-        serverName,
-        serverConfig,
-        this,
-        this.config.getPromptRegistry(),
-        this.config.getDebugMode(),
-        this.config.getWorkspaceContext(),
-        this.config,
-      );
-    }
+    await this.mcpClientManager.discoverMcpToolsForServer(
+      serverName,
+      this.config,
+    );
   }
 
   private async discoverAndRegisterToolsFromCommand(): Promise<void> {
@@ -482,5 +472,18 @@ export class ToolRegistry {
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
     return this.tools.get(name);
+  }
+
+  /**
+   * Stops all MCP clients and cleans up resources.
+   * This method is idempotent and safe to call multiple times.
+   */
+  async stop(): Promise<void> {
+    try {
+      await this.mcpClientManager.stop();
+    } catch (error) {
+      // Log but don't throw - cleanup should be best-effort
+      console.error('Error stopping MCP clients:', error);
+    }
   }
 }

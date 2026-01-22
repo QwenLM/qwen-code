@@ -348,6 +348,10 @@ export async function main() {
     );
     registerCleanup(() => config.shutdown());
 
+    // Register cleanup for MCP clients as early as possible
+    // This ensures MCP server subprocesses are properly terminated on exit
+    registerCleanup(() => config.shutdown());
+
     if (config.getListExtensions()) {
       console.log('Installed extensions:');
       for (const extension of extensions) {
