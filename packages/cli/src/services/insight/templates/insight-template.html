@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Qwen Code Insights</title>
+    <style>
+        {{STYLES_PLACEHOLDER}}
+    </style>
+</head>
+<body>
+    <div class="min-h-screen" id="container">
+        <div class="mx-auto max-w-6xl px-6 py-10 md:py-12">
+            <header class="mb-8 space-y-3 text-center">
+                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+                    Insights
+                </p>
+                <h1 class="text-3xl font-semibold text-slate-900 md:text-4xl">
+                    Qwen Code Insights
+                </h1>
+                <p class="text-sm text-slate-600">
+                    Your personalized coding journey and patterns
+                </p>
+                <p class="text-xs text-slate-400" id="generated-time">
+                    Generated: {{GENERATED_TIME}}
+                </p>
+            </header>
+
+            {{CONTENT_PLACEHOLDER}}
+
+            <div class="mt-6 flex justify-center">
+                <button
+                    id="export-btn"
+                    class="group inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-soft transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 hover:-translate-y-[1px] hover:shadow-lg active:translate-y-[1px]"
+                    onclick="handleExport()"
+                >
+                    Export as Image
+                    <span class="text-slate-200 transition group-hover:translate-x-0.5">
+                        →
+                    </span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CDN Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+    <!-- Application Data -->
+    <script>
+        window.INSIGHT_DATA = {{DATA_PLACEHOLDER}};
+        {{SCRIPTS_PLACEHOLDER}}
+    </script>
+</body>
+</html>
