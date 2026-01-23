@@ -8,42 +8,43 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { spawn } from 'child_process';
 import { join } from 'path';
 import os from 'os';
-import { registerCleanup } from '../../utils/cleanup.js';
-import net from 'net';
+import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 
-// Track the insight server subprocess so we can terminate it on quit
-let insightServerProcess: import('child_process').ChildProcess | null = null;
+// Open file in default browser
+async function openFileInBrowser(filePath: string): Promise<void> {
+  const { exec } = await import('child_process');
+  const { promisify } = await import('util');
+  const execAsync = promisify(exec);
 
-// Find an available port starting from a default port
-async function findAvailablePort(startingPort: number = 3000): Promise<number> {
-  return new Promise((resolve, reject) => {
-    let port = startingPort;
+  // Convert to file:// URL for cross-platform compatibility
+  const fileUrl = `file://${filePath.replace(/\\/g, '/')}`;
 
-    const checkPort = () => {
-      const server = net.createServer();
-
-      server.listen(port, () => {
-        server.once('close', () => {
-          resolve(port);
-        });
-        server.close();
-      });
-
-      server.on('error', (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EADDRINUSE') {
-          port++; // Try next port
-          checkPort();
-        } else {
-          reject(err);
-        }
-      });
-    };
-
-    checkPort();
-  });
+  try {
+    switch (process.platform) {
+      case 'darwin': // macOS
+        await execAsync(`open "${fileUrl}"`);
+        break;
+      case 'win32': // Windows
+        await execAsync(`start "" "${fileUrl}"`);
+        break;
+      default: // Linux and others
+        await execAsync(`xdg-open "${fileUrl}"`);
+    }
+  } catch (error) {
+    // If opening fails, try with local file path
+    switch (process.platform) {
+      case 'darwin': // macOS
+        await execAsync(`open "${filePath}"`);
+        break;
+      case 'win32': // Windows
+        await execAsync(`start "" "${filePath}"`);
+        break;
+      default: // Linux and others
+        await execAsync(`xdg-open "${filePath}"`);
+    }
+  }
 }
 
 export const insightCommand: SlashCommand = {
@@ -56,135 +57,71 @@ export const insightCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   action: async (context: CommandContext) => {
     try {
-      context.ui.setDebugMessage(t('Starting insight server...'));
-
-      // If there's an existing insight server process, terminate it first
-      if (insightServerProcess && !insightServerProcess.killed) {
-        insightServerProcess.kill();
-        insightServerProcess = null;
-      }
-
-      // Find an available port
-      const availablePort = await findAvailablePort(3000);
+      context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
+      const insightGenerator = new StaticInsightGenerator();
 
-      // Path to the insight server script
-      const insightScriptPath = join(
-        process.cwd(),
-        'packages',
-        'cli',
-        'src',
-        'services',
-        'insightServer.ts',
-      );
-
-      // Spawn the insight server process
-      const serverProcess = spawn('npx', ['tsx', insightScriptPath], {
-        stdio: 'pipe',
-        env: {
-          ...process.env,
-          NODE_ENV: 'production',
-          BASE_DIR: projectsDir,
-          PORT: String(availablePort),
-        },
-      });
-
-      // Store the server process for cleanup
-      insightServerProcess = serverProcess;
-
-      // Register cleanup function to terminate the server process on quit
-      registerCleanup(() => {
-        if (insightServerProcess && !insightServerProcess.killed) {
-          insightServerProcess.kill();
-          insightServerProcess = null;
-        }
-      });
-
-      serverProcess.stderr.on('data', (data) => {
-        // Forward error output to parent process stderr
-        process.stderr.write(`Insight server error: ${data}`);
-
-        context.ui.addItem(
-          {
-            type: MessageType.ERROR,
-            text: `Insight server error: ${data.toString()}`,
-          },
-          Date.now(),
-        );
-      });
-
-      serverProcess.on('close', (code) => {
-        console.log(`Insight server process exited with code ${code}`);
-        context.ui.setDebugMessage(t('Insight server stopped.'));
-        // Reset the reference when the process closes
-        if (insightServerProcess === serverProcess) {
-          insightServerProcess = null;
-        }
-      });
-
-      const url = `http://localhost:${availablePort}`;
-
-      // Open browser automatically
-      const openBrowser = async () => {
-        try {
-          const { exec } = await import('child_process');
-          const { promisify } = await import('util');
-          const execAsync = promisify(exec);
-
-          switch (process.platform) {
-            case 'darwin': // macOS
-              await execAsync(`open ${url}`);
-              break;
-            case 'win32': // Windows
-              await execAsync(`start ${url}`);
-              break;
-            default: // Linux and others
-              await execAsync(`xdg-open ${url}`);
-          }
-
-          context.ui.addItem(
-            {
-              type: MessageType.INFO,
-              text: `Insight server started. Visit: ${url}`,
-            },
-            Date.now(),
-          );
-        } catch (err) {
-          console.error('Failed to open browser automatically:', err);
-          context.ui.addItem(
-            {
-              type: MessageType.INFO,
-              text: `Insight server started. Please visit: ${url}`,
-            },
-            Date.now(),
-          );
-        }
-      };
-
-      // Wait for the server to start (give it some time to bind to the port)
-      setTimeout(openBrowser, 1000);
-
-      // Inform the user that the server is running
       context.ui.addItem(
         {
           type: MessageType.INFO,
-          text: t(
-            'Insight server started. Check your browser for the visualization.',
-          ),
+          text: t('Processing your chat history...'),
         },
         Date.now(),
       );
+
+      // Generate the static insight HTML file
+      const outputPath = await insightGenerator.generateStaticInsight(projectsDir);
+
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Insight report generated successfully!'),
+        },
+        Date.now(),
+      );
+
+      // Open the file in the default browser
+      try {
+        await openFileInBrowser(outputPath);
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Opening insights in your browser: {{path}}', {
+              path: outputPath,
+            }),
+          },
+          Date.now(),
+        );
+      } catch (browserError) {
+        console.error('Failed to open browser automatically:', browserError);
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Insights generated at: {{path}}. Please open this file in your browser.', {
+              path: outputPath,
+            }),
+          },
+          Date.now(),
+        );
+      }
+
+      context.ui.setDebugMessage(t('Insights ready.'));
+
     } catch (error) {
       context.ui.addItem(
         {
           type: MessageType.ERROR,
-          text: t('Failed to start insight server: {{error}}', {
+          text: t('Failed to generate insights: {{error}}', {
             error: (error as Error).message,
           }),
         },
         Date.now(),
       );
+
+      console.error('Insight generation error:', error);
     }
   },
 };
