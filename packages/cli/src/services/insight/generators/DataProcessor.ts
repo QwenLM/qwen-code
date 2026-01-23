@@ -6,6 +6,7 @@
 
 import fs from 'fs/promises';
 import path from 'path';
+import { read as readJsonlFile } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
   HeatMapData,
@@ -13,33 +14,7 @@ import type {
   AchievementData,
   StreakData,
 } from '../types/StaticInsightTypes.js';
-
-// Define ChatRecord interface locally to avoid import issues
-interface ChatRecord {
-  uuid: string;
-  parentUuid: string | null;
-  sessionId: string;
-  timestamp: string;
-  usageMetadata?: {
-    promptTokenCount?: number;
-    candidatesTokenCount?: number;
-    totalTokenCount?: number;
-  };
-}
-
-// Simple JSONL reader function
-async function readJsonlFile<T>(filePath: string): Promise<T[]> {
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return content
-      .split('\n')
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as T);
-  } catch (error) {
-    console.error(`Error reading JSONL file ${filePath}:`, error);
-    return [];
-  }
-}
+import type { ChatRecord } from '@qwen-code/qwen-code-core';
 
 export class DataProcessor {
   // Helper function to format date as YYYY-MM-DD
