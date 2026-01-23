@@ -6,7 +6,6 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-// Import from the existing insight server for now to avoid module resolution issues
 import type {
   InsightData,
   HeatMapData,
@@ -34,8 +33,8 @@ async function readJsonlFile<T>(filePath: string): Promise<T[]> {
     const content = await fs.readFile(filePath, 'utf-8');
     return content
       .split('\n')
-      .filter(line => line.trim())
-      .map(line => JSON.parse(line) as T);
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as T);
   } catch (error) {
     console.error(`Error reading JSONL file ${filePath}:`, error);
     return [];
@@ -43,12 +42,6 @@ async function readJsonlFile<T>(filePath: string): Promise<T[]> {
 }
 
 export class DataProcessor {
-  private debugLog(message: string) {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] ${message}`;
-    console.log(logMessage);
-  }
-
   // Helper function to format date as YYYY-MM-DD
   private formatDate(date: Date): string {
     return date.toISOString().split('T')[0];
@@ -243,7 +236,7 @@ export class DataProcessor {
             chatFiles = files.filter((file) => file.endsWith('.jsonl'));
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-              this.debugLog(
+              console.log(
                 `Error reading chats directory for project ${projectDir}: ${error}`,
               );
             }
@@ -295,9 +288,9 @@ export class DataProcessor {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         // Base directory doesn't exist, return empty insights
-        this.debugLog(`Base directory does not exist: ${baseDir}`);
+        console.log(`Base directory does not exist: ${baseDir}`);
       } else {
-        this.debugLog(`Error reading base directory: ${error}`);
+        console.log(`Error reading base directory: ${error}`);
       }
     }
 
@@ -335,7 +328,11 @@ export class DataProcessor {
     }
 
     // Calculate achievements
-    const achievements = this.calculateAchievements(activeHours, heatmap, tokenUsage);
+    const achievements = this.calculateAchievements(
+      activeHours,
+      heatmap,
+      tokenUsage,
+    );
 
     return {
       heatmap,

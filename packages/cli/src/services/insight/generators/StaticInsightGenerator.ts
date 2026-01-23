@@ -20,12 +20,6 @@ export class StaticInsightGenerator {
     this.templateRenderer = new TemplateRenderer();
   }
 
-  private debugLog(message: string) {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] ${message}`;
-    console.log(logMessage);
-  }
-
   // Ensure the output directory exists
   private async ensureOutputDirectory(): Promise<string> {
     const outputDir = path.join(os.homedir(), '.qwen', 'insights');
@@ -36,14 +30,13 @@ export class StaticInsightGenerator {
   // Generate the static insight HTML file
   async generateStaticInsight(baseDir: string): Promise<string> {
     try {
-      this.debugLog('Starting static insight generation...');
-
       // Process data
-      this.debugLog('Processing insight data...');
-      const insights: InsightData = await this.dataProcessor.generateInsights(baseDir);
+      console.log('Processing insight data...');
+      const insights: InsightData =
+        await this.dataProcessor.generateInsights(baseDir);
 
       // Render HTML
-      this.debugLog('Rendering HTML template...');
+      console.log('Rendering HTML template...');
       const html = await this.templateRenderer.renderInsightHTML(insights);
 
       // Ensure output directory exists
@@ -51,36 +44,14 @@ export class StaticInsightGenerator {
       const outputPath = path.join(outputDir, 'insight.html');
 
       // Write the HTML file
-      this.debugLog(`Writing HTML file to: ${outputPath}`);
+      console.log(`Writing HTML file to: ${outputPath}`);
       await fs.writeFile(outputPath, html, 'utf-8');
 
-      this.debugLog('Static insight generation completed successfully');
+      console.log('Static insight generation completed successfully');
       return outputPath;
     } catch (error) {
-      this.debugLog(`Error generating static insight: ${error}`);
+      console.log(`Error generating static insight: ${error}`);
       throw error;
     }
-  }
-
-  // Get the default output path
-  getDefaultOutputPath(): string {
-    return path.join(os.homedir(), '.qwen', 'insights', 'insight.html');
-  }
-
-  // Check if insight file exists
-  async insightFileExists(): Promise<boolean> {
-    try {
-      const outputPath = this.getDefaultOutputPath();
-      await fs.access(outputPath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  // Get insight file stats (for checking modification time)
-  async getInsightFileStats() {
-    const outputPath = this.getDefaultOutputPath();
-    return await fs.stat(outputPath);
   }
 }
