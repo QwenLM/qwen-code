@@ -25,27 +25,22 @@
           </p>
         </header>
 
-        <div class="mt-6 flex justify-center">
-          <button
-            id="export-btn"
-            class="group inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-soft transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 hover:-translate-y-[1px] hover:shadow-lg active:translate-y-[1px]"
-            onclick="handleExport()"
-          >
-            Export as Image
-            <span class="text-slate-200 transition group-hover:translate-x-0.5">
-              →
-            </span>
-          </button>
-        </div>
+        <!-- React App Mount Point -->
+        <div id="react-root"></div>
       </div>
     </div>
+
+    <!-- React CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
     <!-- CDN Libraries -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 
     <!-- Application Data -->
-    <script>
+    <script type="text/babel">
       window.INSIGHT_DATA = {{DATA_PLACEHOLDER}};
       {{SCRIPTS_PLACEHOLDER}}
     </script>
