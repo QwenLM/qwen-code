@@ -32,7 +32,7 @@ async function openFileInBrowser(filePath: string): Promise<void> {
       default: // Linux and others
         await execAsync(`xdg-open "${fileUrl}"`);
     }
-  } catch (error) {
+  } catch (_error) {
     // If opening fails, try with local file path
     switch (process.platform) {
       case 'darwin': // macOS
@@ -71,7 +71,8 @@ export const insightCommand: SlashCommand = {
       );
 
       // Generate the static insight HTML file
-      const outputPath = await insightGenerator.generateStaticInsight(projectsDir);
+      const outputPath =
+        await insightGenerator.generateStaticInsight(projectsDir);
 
       context.ui.addItem(
         {
@@ -100,16 +101,18 @@ export const insightCommand: SlashCommand = {
         context.ui.addItem(
           {
             type: MessageType.INFO,
-            text: t('Insights generated at: {{path}}. Please open this file in your browser.', {
-              path: outputPath,
-            }),
+            text: t(
+              'Insights generated at: {{path}}. Please open this file in your browser.',
+              {
+                path: outputPath,
+              },
+            ),
           },
           Date.now(),
         );
       }
 
       context.ui.setDebugMessage(t('Insights ready.'));
-
     } catch (error) {
       context.ui.addItem(
         {
