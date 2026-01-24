@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -37,6 +37,7 @@
     "@opentelemetry/sdk-node": "^0.203.0",
     "@types/html-to-text": "^9.0.4",
     "@xterm/headless": "5.5.0",
+    "@iarna/toml": "^2.2.5",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
     "async-mutex": "^0.5.0",
@@ -59,11 +60,13 @@
     "mnemonist": "^0.40.3",
     "open": "^10.1.2",
     "openai": "5.11.0",
+    "prompts": "^2.4.2",
     "picomatch": "^4.0.1",
     "shell-quote": "^1.8.3",
     "simple-git": "^3.28.0",
     "strip-ansi": "^7.1.0",
-    "tiktoken": "^1.0.21",
+    "tar": "^7.5.2",
+    "extract-zip": "^2.0.1",
     "undici": "^6.22.0",
     "uuid": "^9.0.1",
     "ws": "^8.18.0"
@@ -85,6 +88,8 @@
     "@types/minimatch": "^5.1.2",
     "@types/picomatch": "^4.0.1",
     "@types/ws": "^8.5.10",
+    "@types/tar": "^6.1.13",
+    "@types/prompts": "^2.4.9",
     "msw": "^2.3.4",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"

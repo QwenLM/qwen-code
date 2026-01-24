@@ -75,7 +75,9 @@ vi.mock('../tools/tool-registry', () => {
 });
 
 vi.mock('../utils/memoryDiscovery.js', () => ({
-  loadServerHierarchicalMemory: vi.fn(),
+  loadServerHierarchicalMemory: vi
+    .fn()
+    .mockResolvedValue({ memoryContent: '', fileCount: 0 }),
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
@@ -157,6 +159,25 @@ vi.mock('../services/gitService.js', () => {
   return { GitService: GitServiceMock };
 });
 
+vi.mock('../skills/skill-manager.js', () => {
+  const SkillManagerMock = vi.fn();
+  SkillManagerMock.prototype.startWatching = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.stopWatching = vi.fn();
+  return { SkillManager: SkillManagerMock };
+});
+
+vi.mock('../subagents/subagent-manager.js', () => {
+  const SubagentManagerMock = vi.fn();
+  SubagentManagerMock.prototype.loadSessionSubagents = vi.fn();
+  SubagentManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  return { SubagentManager: SubagentManagerMock };
+});
+
 vi.mock('../ide/ide-client.js', () => ({
   IdeClient: {
     getInstance: vi.fn().mockResolvedValue({
@@ -206,6 +227,7 @@ describe('Server Config (config.ts)', () => {
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
     usageStatisticsEnabled: false,
+    overrideExtensions: [],
   };
 
   beforeEach(() => {
@@ -1303,7 +1325,10 @@ describe('BaseLlmClient Lifecycle', () => {
     const authType = AuthType.USE_GEMINI;
     const mockContentConfig = { model: 'gemini-flash', apiKey: 'test-key' };
 
-    vi.mocked(createContentGeneratorConfig).mockReturnValue(mockContentConfig);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: mockContentConfig,
+      sources: {},
+    });
 
     await config.refreshAuth(authType);
 

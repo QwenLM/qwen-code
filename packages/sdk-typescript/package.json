@@ -46,8 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
-    "zod": "^3.25.0",
-    "tiktoken": "^1.0.21"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
+
 const AUTH_ERROR_PATTERNS = [
   'Authentication required', // Standard authentication request message
-  '(code: -32000)', // RPC error code -32000 indicates authentication failure
+  `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`, // RPC error code indicates auth failure
   'Unauthorized', // HTTP unauthorized error
   'Invalid token', // Invalid token
   'Session expired', // Session expired

@@ -64,7 +64,8 @@ describe('aboutCommand', () => {
   });
 
   it('should have the correct name and description', () => {
-    expect(aboutCommand.name).toBe('about');
+    expect(aboutCommand.name).toBe('status');
+    expect(aboutCommand.altNames).toEqual(['about']);
     expect(aboutCommand.description).toBe('show version info');
   });
 

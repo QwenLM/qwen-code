@@ -266,29 +266,21 @@ describe('gemini.tsx main function', () => {
         throw new MockProcessExitError(code);
       });
 
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
+    const { loadCliConfig, parseArguments } =
+      await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
     const cleanupModule = await import('./utils/cleanup.js');
-    const extensionModule = await import('./config/extension.js');
     const validatorModule = await import('./validateNonInterActiveAuth.js');
     const streamJsonModule = await import('./nonInteractive/session.js');
     const initializerModule = await import('./core/initializer.js');
     const startupWarningsModule = await import('./utils/startupWarnings.js');
-    const userStartupWarningsModule = await import(
-      './utils/userStartupWarnings.js'
-    );
+    const userStartupWarningsModule =
+      await import('./utils/userStartupWarnings.js');
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
     vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => {});
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
-    vi.spyOn(extensionModule, 'loadExtensions').mockReturnValue([]);
-    vi.spyOn(
-      extensionModule.ExtensionStorage,
-      'getUserExtensionsDir',
-    ).mockReturnValue('/tmp/extensions');
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
       authError: null,
       themeError: null,
@@ -417,12 +409,10 @@ describe('gemini.tsx main function kitty protocol', () => {
   });
 
   it('should call setRawMode and detectAndEnableKittyProtocol when isInteractive is true', async () => {
-    const { detectAndEnableKittyProtocol } = await import(
-      './ui/utils/kittyProtocolDetector.js'
-    );
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
+    const { detectAndEnableKittyProtocol } =
+      await import('./ui/utils/kittyProtocolDetector.js');
+    const { loadCliConfig, parseArguments } =
+      await import('./config/config.js');
     const { loadSettings } = await import('./config/settings.js');
     vi.mocked(loadCliConfig).mockResolvedValue({
       isInteractive: () => true,
@@ -456,7 +446,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       promptInteractive: undefined,
       query: undefined,
       allFiles: undefined,
-      showMemoryUsage: undefined,
       yolo: undefined,
       approvalMode: undefined,
       telemetry: undefined,

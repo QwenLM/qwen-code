@@ -191,7 +191,7 @@ describe('ModelsConfig', () => {
     expect(gc.apiKeyEnvKey).toBe('API_KEY_SHARED');
   });
 
-  it('should preserve settings generationConfig when model is updated via updateCredentials even if it matches modelProviders', () => {
+  it('should use provider config when modelId exists in registry even after updateCredentials', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
         {
@@ -213,7 +213,7 @@ describe('ModelsConfig', () => {
       initialAuthType: AuthType.USE_OPENAI,
       modelProvidersConfig,
       generationConfig: {
-        model: 'model-a',
+        model: 'custom-model',
         samplingParams: { temperature: 0.9, max_tokens: 999 },
         timeout: 9999,
         maxRetries: 9,
@@ -235,30 +235,30 @@ describe('ModelsConfig', () => {
       },
     });
 
-    // User manually updates the model via updateCredentials (e.g. key prompt flow).
-    // Even if the model ID matches a modelProviders entry, we must not apply provider defaults
-    // that would overwrite settings.model.generationConfig.
-    modelsConfig.updateCredentials({ model: 'model-a' });
+    // User manually updates credentials via updateCredentials.
+    // Note: In practice, handleAuthSelect prevents using a modelId that matches a provider model,
+    // but if syncAfterAuthRefresh is called with a modelId that exists in registry,
+    // we should use provider config.
+    modelsConfig.updateCredentials({ apiKey: 'manual-key' });
 
-    modelsConfig.syncAfterAuthRefresh(
-      AuthType.USE_OPENAI,
-      modelsConfig.getModel(),
-    );
+    // syncAfterAuthRefresh with a modelId that exists in registry should use provider config
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'model-a');
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.model).toBe('model-a');
-    expect(gc.samplingParams?.temperature).toBe(0.9);
-    expect(gc.samplingParams?.max_tokens).toBe(999);
-    expect(gc.timeout).toBe(9999);
-    expect(gc.maxRetries).toBe(9);
+    // Provider config should be applied
+    expect(gc.samplingParams?.temperature).toBe(0.1);
+    expect(gc.samplingParams?.max_tokens).toBe(123);
+    expect(gc.timeout).toBe(111);
+    expect(gc.maxRetries).toBe(1);
   });
 
-  it('should preserve settings generationConfig across multiple auth refreshes after updateCredentials', () => {
+  it('should preserve settings generationConfig when modelId does not exist in registry', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
         {
-          id: 'model-a',
-          name: 'Model A',
+          id: 'provider-model',
+          name: 'Provider Model',
           baseUrl: 'https://api.example.com/v1',
           envKey: 'API_KEY_A',
           generationConfig: {
@@ -270,11 +270,12 @@ describe('ModelsConfig', () => {
       ],
     };
 
+    // Simulate settings with a custom model (not in registry)
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
       modelProvidersConfig,
       generationConfig: {
-        model: 'model-a',
+        model: 'custom-model',
         samplingParams: { temperature: 0.9, max_tokens: 999 },
         timeout: 9999,
         maxRetries: 9,
@@ -296,25 +297,21 @@ describe('ModelsConfig', () => {
       },
     });
 
+    // User manually sets credentials for a custom model (not in registry)
     modelsConfig.updateCredentials({
       apiKey: 'manual-key',
       baseUrl: 'https://manual.example.com/v1',
-      model: 'model-a',
+      model: 'custom-model',
     });
 
-    // First auth refresh
-    modelsConfig.syncAfterAuthRefresh(
-      AuthType.USE_OPENAI,
-      modelsConfig.getModel(),
-    );
+    // First auth refresh - modelId doesn't exist in registry, so credentials should be preserved
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'custom-model');
     // Second auth refresh should still preserve settings generationConfig
-    modelsConfig.syncAfterAuthRefresh(
-      AuthType.USE_OPENAI,
-      modelsConfig.getModel(),
-    );
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'custom-model');
 
     const gc = currentGenerationConfig(modelsConfig);
-    expect(gc.model).toBe('model-a');
+    expect(gc.model).toBe('custom-model');
+    // Settings-sourced generation config should be preserved since modelId doesn't exist in registry
     expect(gc.samplingParams?.temperature).toBe(0.9);
     expect(gc.samplingParams?.max_tokens).toBe(999);
     expect(gc.timeout).toBe(9999);
@@ -680,5 +677,121 @@ describe('ModelsConfig', () => {
     // Both should be consistent
     expect(modelsConfig.getModel()).toBe('updated-model');
     expect(modelsConfig.getGenerationConfig().model).toBe('updated-model');
+  });
+
+  describe('getAllAvailableModels', () => {
+    it('should return all models across all authTypes', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'openai-model-1',
+            name: 'OpenAI Model 1',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+          {
+            id: 'openai-model-2',
+            name: 'OpenAI Model 2',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'anthropic-model-1',
+            name: 'Anthropic Model 1',
+            baseUrl: 'https://api.anthropic.com/v1',
+            envKey: 'ANTHROPIC_API_KEY',
+          },
+        ],
+        gemini: [
+          {
+            id: 'gemini-model-1',
+            name: 'Gemini Model 1',
+            baseUrl: 'https://generativelanguage.googleapis.com/v1',
+            envKey: 'GEMINI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig,
+      });
+
+      const allModels = modelsConfig.getAllAvailableModels();
+
+      // Should include qwen-oauth models (hard-coded)
+      const qwenModels = allModels.filter(
+        (m) => m.authType === AuthType.QWEN_OAUTH,
+      );
+      expect(qwenModels.length).toBeGreaterThan(0);
+
+      // Should include openai models
+      const openaiModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_OPENAI,
+      );
+      expect(openaiModels.length).toBe(2);
+      expect(openaiModels.map((m) => m.id)).toContain('openai-model-1');
+      expect(openaiModels.map((m) => m.id)).toContain('openai-model-2');
+
+      // Should include anthropic models
+      const anthropicModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_ANTHROPIC,
+      );
+      expect(anthropicModels.length).toBe(1);
+      expect(anthropicModels[0].id).toBe('anthropic-model-1');
+
+      // Should include gemini models
+      const geminiModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_GEMINI,
+      );
+      expect(geminiModels.length).toBe(1);
+      expect(geminiModels[0].id).toBe('gemini-model-1');
+    });
+
+    it('should return empty array when no models are registered', () => {
+      const modelsConfig = new ModelsConfig();
+
+      const allModels = modelsConfig.getAllAvailableModels();
+
+      // Should still include qwen-oauth models (hard-coded)
+      expect(allModels.length).toBeGreaterThan(0);
+      const qwenModels = allModels.filter(
+        (m) => m.authType === AuthType.QWEN_OAUTH,
+      );
+      expect(qwenModels.length).toBeGreaterThan(0);
+    });
+
+    it('should return models with correct structure', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'test-model',
+            name: 'Test Model',
+            description: 'A test model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'TEST_API_KEY',
+            capabilities: {
+              vision: true,
+            },
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig,
+      });
+
+      const allModels = modelsConfig.getAllAvailableModels();
+      const testModel = allModels.find((m) => m.id === 'test-model');
+
+      expect(testModel).toBeDefined();
+      expect(testModel?.id).toBe('test-model');
+      expect(testModel?.label).toBe('Test Model');
+      expect(testModel?.description).toBe('A test model');
+      expect(testModel?.authType).toBe(AuthType.USE_OPENAI);
+      expect(testModel?.isVision).toBe(true);
+      expect(testModel?.capabilities?.vision).toBe(true);
+    });
   });
 });

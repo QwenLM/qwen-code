@@ -4,28 +4,49 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, type MockInstance } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type MockInstance,
+} from 'vitest';
 import { handleInstall, installCommand } from './install.js';
 import yargs from 'yargs';
 
 const mockInstallExtension = vi.hoisted(() => vi.fn());
+const mockRefreshCache = vi.hoisted(() => vi.fn());
+const mockParseInstallSource = vi.hoisted(() => vi.fn());
 const mockRequestConsentNonInteractive = vi.hoisted(() => vi.fn());
-const mockStat = vi.hoisted(() => vi.fn());
+const mockRequestConsentOrFail = vi.hoisted(() => vi.fn());
+const mockIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
+const mockLoadSettings = vi.hoisted(() => vi.fn());
 
-vi.mock('../../config/extension.js', () => ({
-  installExtension: mockInstallExtension,
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  ExtensionManager: vi.fn().mockImplementation(() => ({
+    installExtension: mockInstallExtension,
+    refreshCache: mockRefreshCache,
+  })),
+  parseInstallSource: mockParseInstallSource,
+}));
+
+vi.mock('./consent.js', () => ({
   requestConsentNonInteractive: mockRequestConsentNonInteractive,
+  requestConsentOrFail: mockRequestConsentOrFail,
+}));
+
+vi.mock('../../config/trustedFolders.js', () => ({
+  isWorkspaceTrusted: mockIsWorkspaceTrusted,
+}));
+
+vi.mock('../../config/settings.js', () => ({
+  loadSettings: mockLoadSettings,
 }));
 
 vi.mock('../../utils/errors.js', () => ({
   getErrorMessage: vi.fn((error: Error) => error.message),
-}));
-
-vi.mock('node:fs/promises', () => ({
-  stat: mockStat,
-  default: {
-    stat: mockStat,
-  },
 }));
 
 describe('extensions install command', () => {
@@ -51,17 +72,21 @@ describe('handleInstall', () => {
     processSpy = vi
       .spyOn(process, 'exit')
       .mockImplementation(() => undefined as never);
+    mockRefreshCache.mockResolvedValue(undefined);
+    mockLoadSettings.mockReturnValue({ merged: {} });
+    mockIsWorkspaceTrusted.mockReturnValue(true);
   });
 
   afterEach(() => {
-    mockInstallExtension.mockClear();
-    mockRequestConsentNonInteractive.mockClear();
-    mockStat.mockClear();
-    vi.resetAllMocks();
+    vi.clearAllMocks();
   });
 
   it('should install an extension from a http source', async () => {
-    mockInstallExtension.mockResolvedValue('http-extension');
+    mockParseInstallSource.mockResolvedValue({
+      type: 'http',
+      url: 'http://google.com',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'http-extension' });
 
     await handleInstall({
       source: 'http://google.com',
@@ -73,7 +98,11 @@ describe('handleInstall', () => {
   });
 
   it('should install an extension from a https source', async () => {
-    mockInstallExtension.mockResolvedValue('https-extension');
+    mockParseInstallSource.mockResolvedValue({
+      type: 'https',
+      url: 'https://google.com',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'https-extension' });
 
     await handleInstall({
       source: 'https://google.com',
@@ -85,7 +114,11 @@ describe('handleInstall', () => {
   });
 
   it('should install an extension from a git source', async () => {
-    mockInstallExtension.mockResolvedValue('git-extension');
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'git-extension' });
 
     await handleInstall({
       source: 'git@some-url',
@@ -97,7 +130,9 @@ describe('handleInstall', () => {
   });
 
   it('throws an error from an unknown source', async () => {
-    mockStat.mockRejectedValue(new Error('ENOENT: no such file or directory'));
+    mockParseInstallSource.mockRejectedValue(
+      new Error('Install source not found.'),
+    );
     await handleInstall({
       source: 'test://google.com',
     });
@@ -107,7 +142,11 @@ describe('handleInstall', () => {
   });
 
   it('should install an extension from a sso source', async () => {
-    mockInstallExtension.mockResolvedValue('sso-extension');
+    mockParseInstallSource.mockResolvedValue({
+      type: 'sso',
+      url: 'sso://google.com',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'sso-extension' });
 
     await handleInstall({
       source: 'sso://google.com',
@@ -119,8 +158,12 @@ describe('handleInstall', () => {
   });
 
   it('should install an extension from a local path', async () => {
-    mockInstallExtension.mockResolvedValue('local-extension');
-    mockStat.mockResolvedValue({});
+    mockParseInstallSource.mockResolvedValue({
+      type: 'local',
+      path: '/some/path',
+    });
+    mockInstallExtension.mockResolvedValue({ name: 'local-extension' });
+
     await handleInstall({
       source: '/some/path',
     });
@@ -131,6 +174,10 @@ describe('handleInstall', () => {
   });
 
   it('should throw an error if install extension fails', async () => {
+    mockParseInstallSource.mockResolvedValue({
+      type: 'git',
+      url: 'git@some-url',
+    });
     mockInstallExtension.mockRejectedValue(
       new Error('Install extension failed'),
     );

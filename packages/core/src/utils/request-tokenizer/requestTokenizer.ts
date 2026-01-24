@@ -10,18 +10,14 @@ import type {
   Part,
   PartUnion,
 } from '@google/genai';
-import type {
-  RequestTokenizer,
-  TokenizerConfig,
-  TokenCalculationResult,
-} from './types.js';
+import type { TokenCalculationResult } from './types.js';
 import { TextTokenizer } from './textTokenizer.js';
 import { ImageTokenizer } from './imageTokenizer.js';
 
 /**
- * Simple request tokenizer that handles text and image content serially
+ * Simple request token estimator that handles text and image content serially
  */
-export class DefaultRequestTokenizer implements RequestTokenizer {
+export class RequestTokenizer {
   private textTokenizer: TextTokenizer;
   private imageTokenizer: ImageTokenizer;
 
@@ -35,14 +31,8 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
    */
   async calculateTokens(
     request: CountTokensParameters,
-    config: TokenizerConfig = {},
   ): Promise<TokenCalculationResult> {
     const startTime = performance.now();
-
-    // Apply configuration
-    if (config.textEncoding) {
-      this.textTokenizer = new TextTokenizer(config.textEncoding);
-    }
 
     try {
       // Process request content and group by type
@@ -112,9 +102,8 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
     if (textContents.length === 0) return 0;
 
     try {
-      const tokenCounts =
-        await this.textTokenizer.calculateTokensBatch(textContents);
-      return tokenCounts.reduce((sum, count) => sum + count, 0);
+      // Avoid per-part rounding inflation by estimating once on the combined text.
+      return await this.textTokenizer.calculateTokens(textContents.join(''));
     } catch (error) {
       console.warn('Error calculating text tokens:', error);
       // Fallback: character-based estimation
@@ -177,10 +166,8 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
     if (otherContents.length === 0) return 0;
 
     try {
-      // Treat other content as text for token calculation
-      const tokenCounts =
-        await this.textTokenizer.calculateTokensBatch(otherContents);
-      return tokenCounts.reduce((sum, count) => sum + count, 0);
+      // Treat other content as text, and avoid per-item rounding inflation.
+      return await this.textTokenizer.calculateTokens(otherContents.join(''));
     } catch (error) {
       console.warn('Error calculating other content tokens:', error);
       // Fallback: character-based estimation
@@ -264,7 +251,18 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
           otherContents,
         );
       }
+      return;
     }
+
+    // Some request shapes (e.g. CountTokensParameters) allow passing parts directly
+    // instead of wrapping them in a { parts: [...] } Content object.
+    this.processPart(
+      content as Part | string,
+      textContents,
+      imageContents,
+      audioContents,
+      otherContents,
+    );
   }
 
   /**
@@ -324,18 +322,6 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
       }
     } catch (error) {
       console.warn('Failed to serialize unknown part type:', error);
-    }
-  }
-
-  /**
-   * Dispose of resources
-   */
-  async dispose(): Promise<void> {
-    try {
-      // Dispose of tokenizers
-      this.textTokenizer.dispose();
-    } catch (error) {
-      console.warn('Error disposing request tokenizer:', error);
     }
   }
 }

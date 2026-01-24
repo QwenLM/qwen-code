@@ -6,11 +6,11 @@ Subagents are specialized AI assistants that handle specific types of tasks with
 
 Subagents are independent AI assistants that:
 
-- **Specialize in specific tasks** - Each Subagent is configured with a focused system prompt for particular types of work
-- **Have separate context** - They maintain their own conversation history, separate from your main chat
-- **Use controlled tools** - You can configure which tools each Subagent has access to
-- **Work autonomously** - Once given a task, they work independently until completion or failure
-- **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
+- **Specialize in specific tasks** - Each Subagent is configured with a focused system prompt for particular types of work
+- **Have separate context** - They maintain their own conversation history, separate from your main chat
+- **Use controlled tools** - You can configure which tools each Subagent has access to
+- **Work autonomously** - Once given a task, they work independently until completion or failure
+- **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
 ## Key Benefits
 
@@ -59,7 +59,7 @@ AI: I'll delegate this to your testing specialist Subagents.
 
 ### CLI Commands
 
-Subagents are managed through the `/agents` slash command and its subcommands:
+Subagents are managed through the `/agents` slash command and its subcommands:
 
 **Usage:**：`/agents create`。Creates a new Subagent through a guided step wizard.
 
@@ -67,12 +67,26 @@ Subagents are managed through the `/agents` slash command and its subcommands:
 
 ### Storage Locations
 
-Subagents are stored as Markdown files in two locations:
+Subagents are stored as Markdown files in multiple locations:
 
-- **Project-level**: `.qwen/agents/` (takes precedence)
-- **User-level**: `~/.qwen/agents/` (fallback)
+- **Project-level**: `.qwen/agents/` (highest precedence)
+- **User-level**: `~/.qwen/agents/` (fallback)
+- **Extension-level**: Provided by installed extensions
 
-This allows you to have both project-specific agents and personal agents that work across all projects.
+This allows you to have project-specific agents, personal agents that work across all projects, and extension-provided agents that add specialized capabilities.
+
+### Extension Subagents
+
+Extensions can provide custom subagents that become available when the extension is enabled. These agents are stored in the extension's `agents/` directory and follow the same format as personal and project agents.
+
+Extension subagents:
+
+- Are automatically discovered when the extension is enabled
+- Appear in the `/agents manage` dialog under "Extension Agents" section
+- Cannot be edited directly (edit the extension source instead)
+- Follow the same configuration format as user-defined agents
+
+To see which extensions provide subagents, check the extension's `qwen-extension.json` file for an `agents` field.
 
 ### File Format
 
@@ -398,7 +412,7 @@ description: Helps with testing, documentation, code review, and deployment
 ---
 ```
 
-**Why:** Focused agents produce better results and are easier to maintain.
+**Why:** Focused agents produce better results and are easier to maintain.
 
 #### Clear Specialization
 
@@ -422,7 +436,7 @@ description: Works on frontend development tasks
 ---
 ```
 
-**Why:** Specific expertise leads to more targeted and effective assistance.
+**Why:** Specific expertise leads to more targeted and effective assistance.
 
 #### Actionable Descriptions
 
@@ -440,7 +454,7 @@ description: Reviews code for security vulnerabilities, performance issues, and 
 description: A helpful code reviewer
 ```
 
-**Why:** Clear descriptions help the main AI choose the right agent for each task.
+**Why:** Clear descriptions help the main AI choose the right agent for each task.
 
 ### Configuration Best Practices
 

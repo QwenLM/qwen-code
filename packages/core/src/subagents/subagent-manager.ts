@@ -178,6 +178,15 @@ export class SubagentManager {
       return userConfig;
     }
 
+    // Try extension level
+    const extensionConfig = await this.findSubagentByNameAtLevel(
+      name,
+      'extension',
+    );
+    if (extensionConfig) {
+      return extensionConfig;
+    }
+
     // Try built-in agents as fallback
     return BuiltinAgentRegistry.getBuiltinAgent(name);
   }
@@ -259,11 +268,22 @@ export class SubagentManager {
    * @param level - Specific level to delete from, or undefined to delete from both
    * @throws SubagentError if deletion fails
    */
-  async deleteSubagent(name: string, level?: SubagentLevel): Promise<void> {
+  async deleteSubagent(
+    name: string,
+    level?: SubagentLevel,
+    extensionName?: string,
+  ): Promise<void> {
     // Check if it's a built-in agent first
     if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
       throw new SubagentError(
         `Cannot delete built-in subagent "${name}"`,
+        SubagentErrorCode.INVALID_CONFIG,
+        name,
+      );
+    }
+    if (level === 'extension') {
+      throw new SubagentError(
+        `Cannot delete subagent "${name}" in extension "${extensionName}", If needed, you can directly uninstall extension.`,
         SubagentErrorCode.INVALID_CONFIG,
         name,
       );
@@ -345,7 +365,7 @@ export class SubagentManager {
     // Normal mode: load from project, user, and builtin levels
     const levelsToCheck: SubagentLevel[] = options.level
       ? [options.level]
-      : ['project', 'user', 'builtin'];
+      : ['project', 'user', 'builtin', 'extension'];
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.subagentsCache !== null;
@@ -389,8 +409,16 @@ export class SubagentManager {
             break;
           case 'level': {
             // Project comes before user, user comes before builtin, session comes last
-            const levelOrder = { project: 0, user: 1, builtin: 2, session: 3 };
-            comparison = levelOrder[a.level] - levelOrder[b.level];
+            const levelOrder = {
+              project: 0,
+              user: 1,
+              builtin: 2,
+              session: 3,
+              extension: 4,
+            };
+            comparison =
+              levelOrder[a.level as SubagentLevel] -
+              levelOrder[b.level as SubagentLevel];
             break;
           }
           default:
@@ -432,10 +460,10 @@ export class SubagentManager {
    *
    * @private
    */
-  private async refreshCache(): Promise<void> {
+  async refreshCache(): Promise<void> {
     const subagentsCache = new Map();
 
-    const levels: SubagentLevel[] = ['project', 'user', 'builtin'];
+    const levels: SubagentLevel[] = ['project', 'user', 'builtin', 'extension'];
 
     for (const level of levels) {
       const levelSubagents = await this.listSubagentsAtLevel(level);
@@ -502,71 +530,7 @@ export class SubagentManager {
     filePath: string,
     level: SubagentLevel,
   ): SubagentConfig {
-    try {
-      // Split frontmatter and content
-      const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-      const match = content.match(frontmatterRegex);
-
-      if (!match) {
-        throw new Error('Invalid format: missing YAML frontmatter');
-      }
-
-      const [, frontmatterYaml, systemPrompt] = match;
-
-      // Parse YAML frontmatter
-      const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
-
-      // Extract required fields and convert to strings
-      const nameRaw = frontmatter['name'];
-      const descriptionRaw = frontmatter['description'];
-
-      if (nameRaw == null || nameRaw === '') {
-        throw new Error('Missing "name" in frontmatter');
-      }
-
-      if (descriptionRaw == null || descriptionRaw === '') {
-        throw new Error('Missing "description" in frontmatter');
-      }
-
-      // Convert to strings (handles numbers, booleans, etc.)
-      const name = String(nameRaw);
-      const description = String(descriptionRaw);
-
-      // Extract optional fields
-      const tools = frontmatter['tools'] as string[] | undefined;
-      const modelConfig = frontmatter['modelConfig'] as
-        | Record<string, unknown>
-        | undefined;
-      const runConfig = frontmatter['runConfig'] as
-        | Record<string, unknown>
-        | undefined;
-      const color = frontmatter['color'] as string | undefined;
-
-      const config: SubagentConfig = {
-        name,
-        description,
-        tools,
-        systemPrompt: systemPrompt.trim(),
-        filePath,
-        modelConfig: modelConfig as Partial<ModelConfig>,
-        runConfig: runConfig as Partial<RunConfig>,
-        color,
-        level,
-      };
-
-      // Validate the parsed configuration
-      const validation = this.validator.validateConfig(config);
-      if (!validation.isValid) {
-        throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
-      }
-
-      return config;
-    } catch (error) {
-      throw new SubagentError(
-        `Failed to parse subagent file: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        SubagentErrorCode.INVALID_CONFIG,
-      );
-    }
+    return parseSubagentContent(content, filePath, level, this.validator);
   }
 
   /**
@@ -811,6 +775,11 @@ export class SubagentManager {
       return BuiltinAgentRegistry.getBuiltinAgents();
     }
 
+    if (level === 'extension') {
+      const extensions = this.config.getActiveExtensions();
+      return extensions.flatMap((extension) => extension.agents || []);
+    }
+
     const projectRoot = this.config.getProjectRoot();
     const homeDir = os.homedir();
     const isHomeDirectory = path.resolve(projectRoot) === path.resolve(homeDir);
@@ -892,5 +861,112 @@ export class SubagentManager {
     }
 
     return false; // Name is already in use
+  }
+}
+
+export async function loadSubagentFromDir(
+  baseDir: string,
+): Promise<SubagentConfig[]> {
+  try {
+    const files = await fs.readdir(baseDir);
+    const subagents: SubagentConfig[] = [];
+
+    for (const file of files) {
+      if (!file.endsWith('.md')) continue;
+
+      const filePath = path.join(baseDir, file);
+
+      try {
+        const content = await fs.readFile(filePath, 'utf8');
+        const config = parseSubagentContent(
+          content,
+          filePath,
+          'extension',
+          new SubagentValidator(),
+        );
+        subagents.push(config);
+      } catch (_error) {
+        // Ignore invalid files
+        continue;
+      }
+    }
+
+    return subagents;
+  } catch (_error) {
+    // Directory doesn't exist or can't be read
+    return [];
+  }
+}
+
+function parseSubagentContent(
+  content: string,
+  filePath: string,
+  level: SubagentLevel,
+  validator: SubagentValidator,
+): SubagentConfig {
+  try {
+    // Split frontmatter and content
+    const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
+    const match = content.match(frontmatterRegex);
+
+    if (!match) {
+      throw new Error('Invalid format: missing YAML frontmatter');
+    }
+
+    const [, frontmatterYaml, systemPrompt] = match;
+
+    // Parse YAML frontmatter
+    const frontmatter = parseYaml(frontmatterYaml) as Record<string, unknown>;
+
+    // Extract required fields and convert to strings
+    const nameRaw = frontmatter['name'];
+    const descriptionRaw = frontmatter['description'];
+
+    if (nameRaw == null || nameRaw === '') {
+      throw new Error('Missing "name" in frontmatter');
+    }
+
+    if (descriptionRaw == null || descriptionRaw === '') {
+      throw new Error('Missing "description" in frontmatter');
+    }
+
+    // Convert to strings (handles numbers, booleans, etc.)
+    const name = String(nameRaw);
+    const description = String(descriptionRaw);
+
+    // Extract optional fields
+    const tools = frontmatter['tools'] as string[] | undefined;
+    const modelConfig = frontmatter['modelConfig'] as
+      | Record<string, unknown>
+      | undefined;
+    const runConfig = frontmatter['runConfig'] as
+      | Record<string, unknown>
+      | undefined;
+    const color = frontmatter['color'] as string | undefined;
+
+    const config: SubagentConfig = {
+      name,
+      description,
+      tools,
+      systemPrompt: systemPrompt.trim(),
+      filePath,
+      modelConfig: modelConfig as Partial<ModelConfig>,
+      runConfig: runConfig as Partial<RunConfig>,
+      color,
+      level,
+    };
+
+    // Validate the parsed configuration
+    const validation = validator.validateConfig(config);
+    if (!validation.isValid) {
+      throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
+    }
+
+    return config;
+  } catch (error) {
+    throw new SubagentError(
+      `Failed to parse subagent file: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      SubagentErrorCode.INVALID_CONFIG,
+    );
   }
 }

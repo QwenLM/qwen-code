@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ModelProvidersConfig } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ContentGeneratorConfig,
+  ModelProvidersConfig,
+} from '@qwen-code/qwen-code-core';
 import {
   AuthEvent,
   AuthType,
@@ -214,11 +218,19 @@ export const useAuthCommand = (
 
       if (authType === AuthType.USE_OPENAI) {
         if (credentials) {
-          config.updateCredentials({
-            apiKey: credentials.apiKey,
-            baseUrl: credentials.baseUrl,
-            model: credentials.model,
-          });
+          // Pass settings.model.generationConfig to updateCredentials so it can be merged
+          // after clearing provider-sourced config. This ensures settings.json generationConfig
+          // fields (e.g., samplingParams, timeout) are preserved.
+          const settingsGenerationConfig = settings.merged.model
+            ?.generationConfig as Partial<ContentGeneratorConfig> | undefined;
+          config.updateCredentials(
+            {
+              apiKey: credentials.apiKey,
+              baseUrl: credentials.baseUrl,
+              model: credentials.model,
+            },
+            settingsGenerationConfig,
+          );
           await performAuth(authType, credentials);
         }
         return;
@@ -226,7 +238,13 @@ export const useAuthCommand = (
 
       await performAuth(authType);
     },
-    [config, performAuth, isProviderManagedModel, onAuthError],
+    [
+      config,
+      performAuth,
+      isProviderManagedModel,
+      onAuthError,
+      settings.merged.model?.generationConfig,
+    ],
   );
 
   const openAuthDialog = useCallback(() => {

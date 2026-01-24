@@ -35,7 +35,7 @@ index 0000000..e69de29
         <DiffRenderer
           diffContent={newFileDiffContent}
           filename="test.py"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -63,7 +63,7 @@ index 0000000..e69de29
         <DiffRenderer
           diffContent={newFileDiffContent}
           filename="test.unknown"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -88,7 +88,7 @@ index 0000000..e69de29
 `;
     render(
       <OverflowProvider>
-        <DiffRenderer diffContent={newFileDiffContent} terminalWidth={80} />
+        <DiffRenderer diffContent={newFileDiffContent} contentWidth={80} />
       </OverflowProvider>,
     );
     expect(mockColorizeCode).toHaveBeenCalledWith(
@@ -115,7 +115,7 @@ index 0000001..0000002 100644
         <DiffRenderer
           diffContent={existingFileDiffContent}
           filename="test.txt"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -145,7 +145,7 @@ index 1234567..1234567 100644
         <DiffRenderer
           diffContent={noChangeDiff}
           filename="file.txt"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -156,7 +156,7 @@ index 1234567..1234567 100644
   it('should handle empty diff content', () => {
     const { lastFrame } = render(
       <OverflowProvider>
-        <DiffRenderer diffContent="" terminalWidth={80} />
+        <DiffRenderer diffContent="" contentWidth={80} />
       </OverflowProvider>,
     );
     expect(lastFrame()).toContain('No diff content');
@@ -182,7 +182,7 @@ index 123..456 100644
         <DiffRenderer
           diffContent={diffWithGap}
           filename="file.txt"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -219,7 +219,7 @@ index abc..def 100644
         <DiffRenderer
           diffContent={diffWithSmallGap}
           filename="file.txt"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -291,7 +291,7 @@ index 123..789 100644
             <DiffRenderer
               diffContent={diffWithMultipleHunks}
               filename="multi.js"
-              terminalWidth={terminalWidth}
+              contentWidth={terminalWidth}
               availableTerminalHeight={height}
             />
           </OverflowProvider>,
@@ -323,7 +323,7 @@ fileDiff Index: file.txt
         <DiffRenderer
           diffContent={newFileDiff}
           filename="TEST"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );
@@ -353,7 +353,7 @@ fileDiff Index: Dockerfile
         <DiffRenderer
           diffContent={newFileDiff}
           filename="Dockerfile"
-          terminalWidth={80}
+          contentWidth={80}
         />
       </OverflowProvider>,
     );

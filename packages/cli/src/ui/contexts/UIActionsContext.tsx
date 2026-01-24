@@ -7,6 +7,7 @@
 import { createContext, useContext } from 'react';
 import { type Key } from '../hooks/useKeypress.js';
 import { type IdeIntegrationNudgeResult } from '../IdeIntegrationNudge.js';
+import { type CommandMigrationNudgeResult } from '../CommandFormatMigrationNudge.js';
 import { type FolderTrustChoice } from '../components/FolderTrustDialog.js';
 import {
   type AuthType,
@@ -19,6 +20,8 @@ import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
 import { type OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
 
 export interface UIActions {
+  openThemeDialog: () => void;
+  openEditorDialog: () => void;
   handleThemeSelect: (
     themeName: string | undefined,
     scope: SettingScope,
@@ -46,14 +49,13 @@ export interface UIActions {
   setShellModeActive: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;
   handleIdePromptComplete: (result: IdeIntegrationNudgeResult) => void;
+  handleCommandMigrationComplete: (result: CommandMigrationNudgeResult) => void;
   handleFolderTrustSelect: (choice: FolderTrustChoice) => void;
   setConstrainHeight: (value: boolean) => void;
   onEscapePromptChange: (show: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
   handleClearScreen: () => void;
-  onWorkspaceMigrationDialogOpen: () => void;
-  onWorkspaceMigrationDialogClose: () => void;
   // Vision switch dialog
   handleVisionSwitchSelect: (outcome: VisionSwitchOutcome) => void;
   // Welcome back dialog
@@ -66,6 +68,10 @@ export interface UIActions {
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
+  // Feedback dialog
+  openFeedbackDialog: () => void;
+  closeFeedbackDialog: () => void;
+  submitFeedback: (rating: number) => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

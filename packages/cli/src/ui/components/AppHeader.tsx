@@ -9,7 +9,6 @@ import { Header } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { useUIState } from '../contexts/UIStateContext.js';
 
 interface AppHeaderProps {
   version: string;
@@ -18,16 +17,25 @@ interface AppHeaderProps {
 export const AppHeader = ({ version }: AppHeaderProps) => {
   const settings = useSettings();
   const config = useConfig();
-  const { nightly } = useUIState();
+
+  const contentGeneratorConfig = config.getContentGeneratorConfig();
+  const authType = contentGeneratorConfig?.authType;
+  const model = config.getModel();
+  const targetDir = config.getTargetDir();
+  const showBanner = !config.getScreenReader();
+  const showTips = !(settings.merged.ui?.hideTips || config.getScreenReader());
 
   return (
     <Box flexDirection="column">
-      {!(settings.merged.ui?.hideBanner || config.getScreenReader()) && (
-        <Header version={version} nightly={nightly} />
+      {showBanner && (
+        <Header
+          version={version}
+          authType={authType}
+          model={model}
+          workingDirectory={targetDir}
+        />
       )}
-      {!(settings.merged.ui?.hideTips || config.getScreenReader()) && (
-        <Tips config={config} />
-      )}
+      {showTips && <Tips />}
     </Box>
   );
 };

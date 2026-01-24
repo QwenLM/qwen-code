@@ -8,6 +8,8 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execCommand } from '@qwen-code/qwen-code-core';
 
+const MACOS_CLIPBOARD_TIMEOUT_MS = 1500;
+
 /**
  * Checks if the system clipboard contains an image (macOS only for now)
  * @returns true if clipboard contains an image
@@ -19,7 +21,13 @@ export async function clipboardHasImage(): Promise<boolean> {
 
   try {
     // Use osascript to check clipboard type
-    const { stdout } = await execCommand('osascript', ['-e', 'clipboard info']);
+    const { stdout } = await execCommand(
+      'osascript',
+      ['-e', 'clipboard info'],
+      {
+        timeout: MACOS_CLIPBOARD_TIMEOUT_MS,
+      },
+    );
     const imageRegex =
       /«class PNGf»|TIFF picture|JPEG picture|GIF picture|«class JPEG»|«class TIFF»/;
     return imageRegex.test(stdout);
@@ -80,7 +88,9 @@ export async function saveClipboardImage(
         end try
       `;
 
-      const { stdout } = await execCommand('osascript', ['-e', script]);
+      const { stdout } = await execCommand('osascript', ['-e', script], {
+        timeout: MACOS_CLIPBOARD_TIMEOUT_MS,
+      });
 
       if (stdout.trim() === 'success') {
         // Verify the file was created and has content

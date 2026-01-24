@@ -19,6 +19,8 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ChatCompletionToolWithCache } from './types.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
 // Mock OpenAI
 vi.mock('openai', () => ({
@@ -32,6 +34,10 @@ vi.mock('openai', () => ({
   })),
 }));
 
+vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
+  buildRuntimeFetchOptions: vi.fn(),
+}));
+
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
@@ -39,6 +45,11 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    const mockedBuildRuntimeFetchOptions =
+      buildRuntimeFetchOptions as unknown as MockedFunction<
+        (sdkType: 'openai') => OpenAIRuntimeFetchOptions
+      >;
+    mockedBuildRuntimeFetchOptions.mockReturnValue(undefined);
 
     // Mock ContentGeneratorConfig
     mockContentGeneratorConfig = {
@@ -185,18 +196,20 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     it('should create OpenAI client with DashScope configuration', () => {
       const client = provider.buildClient();
 
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-api-key',
-        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        timeout: 60000,
-        maxRetries: 2,
-        defaultHeaders: {
-          'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-          'X-DashScope-CacheControl': 'enable',
-          'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-          'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
-        },
-      });
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'test-api-key',
+          baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          timeout: 60000,
+          maxRetries: 2,
+          defaultHeaders: {
+            'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
+            'X-DashScope-CacheControl': 'enable',
+            'X-DashScope-UserAgent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
+            'X-DashScope-AuthType': AuthType.QWEN_OAUTH,
+          },
+        }),
+      );
 
       expect(client).toBeDefined();
     });
@@ -207,13 +220,15 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       provider.buildClient();
 
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-api-key',
-        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        timeout: DEFAULT_TIMEOUT,
-        maxRetries: DEFAULT_MAX_RETRIES,
-        defaultHeaders: expect.any(Object),
-      });
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'test-api-key',
+          baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          timeout: DEFAULT_TIMEOUT,
+          maxRetries: DEFAULT_MAX_RETRIES,
+          defaultHeaders: expect.any(Object),
+        }),
+      );
     });
   });
 

@@ -204,6 +204,18 @@ export class ModelsConfig {
   }
 
   /**
+   * Get all available models across all authTypes
+   */
+  getAllAvailableModels(): AvailableModel[] {
+    const allModels: AvailableModel[] = [];
+    for (const authType of Object.values(AuthType)) {
+      const models = this.modelRegistry.getModelsForAuthType(authType);
+      allModels.push(...models);
+    }
+    return allModels;
+  }
+
+  /**
    * Check if a model exists for the given authType
    */
   hasModel(authType: AuthType, modelId: string): boolean {
@@ -308,18 +320,53 @@ export class ModelsConfig {
   }
 
   /**
+   * Merge settings generation config, preserving existing values.
+   * Used when provider-sourced config is cleared but settings should still apply.
+   */
+  mergeSettingsGenerationConfig(
+    settingsGenerationConfig?: Partial<ContentGeneratorConfig>,
+  ): void {
+    if (!settingsGenerationConfig) {
+      return;
+    }
+
+    for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      if (
+        !(field in this._generationConfig) &&
+        field in settingsGenerationConfig
+      ) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (this._generationConfig as any)[field] =
+          settingsGenerationConfig[field];
+        this.generationConfigSources[field] = {
+          kind: 'settings',
+          detail: `model.generationConfig.${field}`,
+        };
+      }
+    }
+  }
+
+  /**
    * Update credentials in generation config.
    * Sets a flag to prevent syncAfterAuthRefresh from overriding these credentials.
    *
    * When credentials are manually set, we clear all provider-sourced configuration
    * to maintain provider atomicity (either fully applied or not at all).
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
+   *
+   * @param settingsGenerationConfig Optional generation config from settings.json
+   *                                  to merge after clearing provider-sourced config.
+   *                                  This ensures settings.model.generationConfig fields
+   *                                  (e.g., samplingParams, timeout) are preserved.
    */
-  updateCredentials(credentials: {
-    apiKey?: string;
-    baseUrl?: string;
-    model?: string;
-  }): void {
+  updateCredentials(
+    credentials: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+    },
+    settingsGenerationConfig?: Partial<ContentGeneratorConfig>,
+  ): void {
     /**
      * If any fields are updated here, we treat the resulting config as manually overridden
      * and avoid applying modelProvider defaults during the next auth refresh.
@@ -359,6 +406,14 @@ export class ModelsConfig {
     this.strictModelProviderSelection = false;
     // Clear apiKeyEnvKey to prevent validation from requiring environment variable
     this._generationConfig.apiKeyEnvKey = undefined;
+
+    // After clearing provider-sourced config, merge settings.model.generationConfig
+    // to ensure fields like samplingParams, timeout, etc. are preserved.
+    // This follows the resolution strategy where settings.model.generationConfig
+    // has lower priority than programmatic overrides but should still be applied.
+    if (settingsGenerationConfig) {
+      this.mergeSettingsGenerationConfig(settingsGenerationConfig);
+    }
   }
 
   /**
@@ -587,50 +642,88 @@ export class ModelsConfig {
   }
 
   /**
-   * Called by Config.refreshAuth to sync state after auth refresh.
-   *
-   * IMPORTANT: If credentials were manually set via updateCredentials(),
-   * we should NOT override them with modelProvider defaults.
-   * This handles the case where user inputs credentials via OpenAIKeyPrompt
-   * after removing environment variables for a previously selected model.
+   * Sync state after auth refresh with fallback strategy:
+   * 1. If modelId can be found in modelRegistry, use the config from modelRegistry.
+   * 2. Otherwise, if existing credentials exist in resolved generationConfig from other sources
+   *    (not modelProviders), preserve them and update authType/modelId only.
+   * 3. Otherwise, fall back to default model for the authType.
+   * 4. If no default is available, leave the generationConfig incomplete and let
+   *    resolveContentGeneratorConfigWithSources throw exceptions as expected.
    */
   syncAfterAuthRefresh(authType: AuthType, modelId?: string): void {
-    // Check if we have manually set credentials that should be preserved
-    const preserveManualCredentials = this.hasManualCredentials;
+    this.strictModelProviderSelection = false;
+    const previousAuthType = this.currentAuthType;
+    this.currentAuthType = authType;
 
-    // If credentials were manually set, don't apply modelProvider defaults
-    // Just update the authType and preserve the manually set credentials
-    if (preserveManualCredentials && authType === AuthType.USE_OPENAI) {
-      this.strictModelProviderSelection = false;
-      this.currentAuthType = authType;
+    // Step 1: If modelId exists in registry, always use config from modelRegistry
+    // Manual credentials won't have a modelId that matches a provider model (handleAuthSelect prevents it),
+    // so if modelId exists in registry, we should always use provider config.
+    // This handles provider switching even within the same authType.
+    if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
+      const resolved = this.modelRegistry.getModel(authType, modelId);
+      if (resolved) {
+        this.applyResolvedModelDefaults(resolved);
+        this.strictModelProviderSelection = true;
+        return;
+      }
+    }
+
+    // Step 2: Check if there are existing credentials from other sources (not modelProviders)
+    const apiKeySource = this.generationConfigSources['apiKey'];
+    const baseUrlSource = this.generationConfigSources['baseUrl'];
+    const hasExistingCredentials =
+      (this._generationConfig.apiKey &&
+        apiKeySource?.kind !== 'modelProviders') ||
+      (this._generationConfig.baseUrl &&
+        baseUrlSource?.kind !== 'modelProviders');
+
+    // Only preserve credentials if:
+    // 1. AuthType hasn't changed (credentials are authType-specific), AND
+    // 2. The modelId doesn't exist in the registry (if it did, we would have used provider config in Step 1), AND
+    // 3. Either:
+    //    a. We have manual credentials (set via updateCredentials), OR
+    //    b. We have existing credentials
+    // Note: Even if authType hasn't changed, switching to a different provider model (that exists in registry)
+    // will use provider config (Step 1), not preserve old credentials. This ensures credentials change when
+    // switching providers, independent of authType changes.
+    const isAuthTypeChange = previousAuthType !== authType;
+    const shouldPreserveCredentials =
+      !isAuthTypeChange &&
+      (modelId === undefined ||
+        !this.modelRegistry.hasModel(authType, modelId)) &&
+      (this.hasManualCredentials || hasExistingCredentials);
+
+    if (shouldPreserveCredentials) {
+      // Preserve existing credentials, just update authType and modelId if provided
       if (modelId) {
         this._generationConfig.model = modelId;
+        if (!this.generationConfigSources['model']) {
+          this.generationConfigSources['model'] = {
+            kind: 'programmatic',
+            detail: 'auth refresh (preserved credentials)',
+          };
+        }
       }
       return;
     }
 
-    this.strictModelProviderSelection = false;
+    // Step 3: Fall back to default model for the authType
+    const defaultModel =
+      this.modelRegistry.getDefaultModelForAuthType(authType);
+    if (defaultModel) {
+      this.applyResolvedModelDefaults(defaultModel);
+      return;
+    }
 
-    if (modelId && this.modelRegistry.hasModel(authType, modelId)) {
-      const resolved = this.modelRegistry.getModel(authType, modelId);
-      if (resolved) {
-        // Ensure applyResolvedModelDefaults can correctly apply authType-specific
-        // behavior (e.g., Qwen OAuth placeholder token) by setting currentAuthType
-        // before applying defaults.
-        this.currentAuthType = authType;
-        this.applyResolvedModelDefaults(resolved);
-      }
-    } else {
-      // If the provided modelId doesn't exist in the registry for the new authType,
-      // use the default model for that authType instead of keeping the old model.
-      // This handles the case where switching from one authType (e.g., OPENAI with
-      // env vars) to another (e.g., qwen-oauth) - we should use the default model
-      // for the new authType, not the old model.
-      this.currentAuthType = authType;
-      const defaultModel =
-        this.modelRegistry.getDefaultModelForAuthType(authType);
-      if (defaultModel) {
-        this.applyResolvedModelDefaults(defaultModel);
+    // Step 4: No default available - leave generationConfig incomplete
+    // resolveContentGeneratorConfigWithSources will throw exceptions as expected
+    if (modelId) {
+      this._generationConfig.model = modelId;
+      if (!this.generationConfigSources['model']) {
+        this.generationConfigSources['model'] = {
+          kind: 'programmatic',
+          detail: 'auth refresh (no default model)',
+        };
       }
     }
   }

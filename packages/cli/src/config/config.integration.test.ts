@@ -231,18 +231,21 @@ describe('Configuration Integration Tests', () => {
       expect(config.getExtensionContextFilePaths()).toEqual([]);
     });
 
-    it('should correctly store and return extension context file paths', () => {
-      const contextFiles = ['/path/to/file1.txt', '/path/to/file2.js'];
+    it('should correctly store and return extension context file paths with outputLanguageFilePath', () => {
+      const outputLanguageFilePath = '/path/to/language.txt';
       const configParams: ConfigParameters = {
         cwd: '/tmp',
         generationConfig: TEST_CONTENT_GENERATOR_CONFIG,
         embeddingModel: 'test-embedding-model',
         targetDir: tempDir,
         debugMode: false,
-        extensionContextFilePaths: contextFiles,
+        outputLanguageFilePath,
       };
       const config = new Config(configParams);
-      expect(config.getExtensionContextFilePaths()).toEqual(contextFiles);
+      // outputLanguageFilePath should be included in extension context file paths
+      expect(config.getExtensionContextFilePaths()).toContain(
+        outputLanguageFilePath,
+      );
     });
   });
 

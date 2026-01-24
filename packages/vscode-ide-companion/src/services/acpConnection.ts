@@ -5,6 +5,7 @@
  */
 
 import { JSONRPC_VERSION } from '../types/acpTypes.js';
+import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 import type {
   AcpMessage,
   AcpPermissionRequest,
@@ -232,12 +233,34 @@ export class AcpConnection {
         })
         .catch((error) => {
           if ('id' in message && typeof message.id === 'number') {
+            const errorMessage =
+              error instanceof Error
+                ? error.message
+                : typeof error === 'object' &&
+                    error !== null &&
+                    'message' in error &&
+                    typeof (error as { message: unknown }).message === 'string'
+                  ? (error as { message: string }).message
+                  : String(error);
+
+            let errorCode: number = ACP_ERROR_CODES.INTERNAL_ERROR;
+            const errorCodeValue =
+              typeof error === 'object' && error !== null && 'code' in error
+                ? (error as { code?: unknown }).code
+                : undefined;
+
+            if (typeof errorCodeValue === 'number') {
+              errorCode = errorCodeValue;
+            } else if (errorCodeValue === 'ENOENT') {
+              errorCode = ACP_ERROR_CODES.RESOURCE_NOT_FOUND;
+            }
+
             this.messageHandler.sendResponseMessage(this.child, {
               jsonrpc: JSONRPC_VERSION,
               id: message.id,
               error: {
-                code: -32603,
-                message: error instanceof Error ? error.message : String(error),
+                code: errorCode,
+                message: errorMessage,
               },
             });
           }

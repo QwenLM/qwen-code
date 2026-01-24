@@ -112,6 +112,62 @@ You are a helpful assistant with this skill.
       expect(config.filePath).toBe(validSkillConfig.filePath);
     });
 
+    it('should parse markdown with CRLF line endings', () => {
+      const markdownCrlf = `---\r
+name: test-skill\r
+description: A test skill\r
+---\r
+\r
+You are a helpful assistant with this skill.\r
+`;
+
+      const config = manager.parseSkillContent(
+        markdownCrlf,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.name).toBe('test-skill');
+      expect(config.description).toBe('A test skill');
+      expect(config.body).toBe('You are a helpful assistant with this skill.');
+    });
+
+    it('should parse markdown with UTF-8 BOM', () => {
+      const markdownWithBom = `\uFEFF---
+name: test-skill
+description: A test skill
+---
+
+You are a helpful assistant with this skill.
+`;
+
+      const config = manager.parseSkillContent(
+        markdownWithBom,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.name).toBe('test-skill');
+      expect(config.description).toBe('A test skill');
+    });
+
+    it('should parse markdown when body is empty and file ends after frontmatter', () => {
+      const frontmatterOnly = `---
+name: test-skill
+description: A test skill
+---`;
+
+      const config = manager.parseSkillContent(
+        frontmatterOnly,
+        validSkillConfig.filePath,
+        'project',
+      );
+
+      expect(config.name).toBe('test-skill');
+      expect(config.description).toBe('A test skill');
+      expect(config.body).toBe('');
+    });
+
     it('should parse content with allowedTools', () => {
       const markdownWithTools = `---
 name: test-skill

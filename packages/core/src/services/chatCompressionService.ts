@@ -14,7 +14,6 @@ import { getCompressionPrompt } from '../core/prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
-import { getInitialChatHistory } from '../utils/environmentContext.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -163,9 +162,25 @@ export class ChatCompressionService {
     );
     const summary = getResponseText(summaryResponse) ?? '';
     const isSummaryEmpty = !summary || summary.trim().length === 0;
+    const compressionUsageMetadata = summaryResponse.usageMetadata;
+    const compressionInputTokenCount =
+      compressionUsageMetadata?.promptTokenCount;
+    let compressionOutputTokenCount =
+      compressionUsageMetadata?.candidatesTokenCount;
+    if (
+      compressionOutputTokenCount === undefined &&
+      typeof compressionUsageMetadata?.totalTokenCount === 'number' &&
+      typeof compressionInputTokenCount === 'number'
+    ) {
+      compressionOutputTokenCount = Math.max(
+        0,
+        compressionUsageMetadata.totalTokenCount - compressionInputTokenCount,
+      );
+    }
 
     let newTokenCount = originalTokenCount;
     let extraHistory: Content[] = [];
+    let canCalculateNewTokenCount = false;
 
     if (!isSummaryEmpty) {
       extraHistory = [
@@ -180,16 +195,26 @@ export class ChatCompressionService {
         ...historyToKeep,
       ];
 
-      // Use a shared utility to construct the initial history for an accurate token count.
-      const fullNewHistory = await getInitialChatHistory(config, extraHistory);
-
-      // Estimate token count 1 token ≈ 4 characters
-      newTokenCount = Math.floor(
-        fullNewHistory.reduce(
-          (total, content) => total + JSON.stringify(content).length,
+      // Best-effort token math using *only* model-reported token counts.
+      //
+      // Note: compressionInputTokenCount includes the compression prompt and
+      // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
+      // compressionOutputTokenCount may include non-persisted tokens (thoughts).
+      // We accept these inaccuracies to avoid local token estimation.
+      if (
+        typeof compressionInputTokenCount === 'number' &&
+        compressionInputTokenCount > 0 &&
+        typeof compressionOutputTokenCount === 'number' &&
+        compressionOutputTokenCount > 0
+      ) {
+        canCalculateNewTokenCount = true;
+        newTokenCount = Math.max(
           0,
-        ) / 4,
-      );
+          originalTokenCount -
+            (compressionInputTokenCount - 1000) +
+            compressionOutputTokenCount,
+        );
+      }
     }
 
     logChatCompression(
@@ -197,6 +222,8 @@ export class ChatCompressionService {
       makeChatCompressionEvent({
         tokens_before: originalTokenCount,
         tokens_after: newTokenCount,
+        compression_input_token_count: compressionInputTokenCount,
+        compression_output_token_count: compressionOutputTokenCount,
       }),
     );
 
@@ -207,6 +234,16 @@ export class ChatCompressionService {
           originalTokenCount,
           newTokenCount: originalTokenCount,
           compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+        },
+      };
+    } else if (!canCalculateNewTokenCount) {
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
         },
       };
     } else if (newTokenCount > originalTokenCount) {

@@ -27,10 +27,8 @@ import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
 import { SettingScope } from '../config/settings.js';
 import { z } from 'zod';
-import { ExtensionStorage, type Extension } from '../config/extension.js';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
-import { ExtensionEnablementManager } from '../config/extensions/extensionEnablement.js';
 
 // Import the modular Session class
 import { Session } from './session/Session.js';
@@ -38,7 +36,6 @@ import { Session } from './session/Session.js';
 export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
-  extensions: Extension[],
   argv: CliArgs,
 ) {
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
@@ -51,8 +48,7 @@ export async function runAcpAgent(
   console.debug = console.error;
 
   new acp.AgentSideConnection(
-    (client: acp.Client) =>
-      new GeminiAgent(config, settings, extensions, argv, client),
+    (client: acp.Client) => new GeminiAgent(config, settings, argv, client),
     stdout,
     stdin,
   );
@@ -65,7 +61,6 @@ class GeminiAgent {
   constructor(
     private config: Config,
     private settings: LoadedSettings,
-    private extensions: Extension[],
     private argv: CliArgs,
     private client: acp.Client,
   ) {}
@@ -165,30 +160,11 @@ class GeminiAgent {
     this.setupFileSystem(config);
 
     const session = await this.createAndStoreSession(config);
-    const configuredModel = (
-      config.getModel() ||
-      this.config.getModel() ||
-      ''
-    ).trim();
-    const modelId = configuredModel || 'default';
-    const modelName = configuredModel || modelId;
+    const availableModels = this.buildAvailableModels(config);
 
     return {
       sessionId: session.getId(),
-      models: {
-        currentModelId: modelId,
-        availableModels: [
-          {
-            modelId,
-            name: modelName,
-            description: null,
-            _meta: {
-              contextLimit: tokenLimit(modelId),
-            },
-          },
-        ],
-        _meta: null,
-      },
+      models: availableModels,
     };
   }
 
@@ -233,16 +209,7 @@ class GeminiAgent {
       continue: false,
     };
 
-    const config = await loadCliConfig(
-      settings,
-      this.extensions,
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        this.argv.extensions,
-      ),
-      argvForSession,
-      cwd,
-    );
+    const config = await loadCliConfig(settings, argvForSession, cwd);
 
     await config.initialize();
     return config;
@@ -323,15 +290,29 @@ class GeminiAgent {
   async setMode(params: acp.SetModeRequest): Promise<acp.SetModeResponse> {
     const session = this.sessions.get(params.sessionId);
     if (!session) {
-      throw new Error(`Session not found: ${params.sessionId}`);
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${params.sessionId}`,
+      );
     }
     return session.setMode(params);
+  }
+
+  async setModel(params: acp.SetModelRequest): Promise<acp.SetModelResponse> {
+    const session = this.sessions.get(params.sessionId);
+    if (!session) {
+      throw acp.RequestError.invalidParams(
+        `Session not found for id: ${params.sessionId}`,
+      );
+    }
+    return session.setModel(params);
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {
     const selectedType = this.settings.merged.security?.auth?.selectedType;
     if (!selectedType) {
-      throw acp.RequestError.authRequired('No Selected Type');
+      throw acp.RequestError.authRequired(
+        'Use Qwen Code CLI to authenticate first.',
+      );
     }
 
     try {
@@ -399,5 +380,44 @@ class GeminiAgent {
     }
 
     return session;
+  }
+
+  private buildAvailableModels(
+    config: Config,
+  ): acp.NewSessionResponse['models'] {
+    const currentModelId = (
+      config.getModel() ||
+      this.config.getModel() ||
+      ''
+    ).trim();
+    const availableModels = config.getAvailableModels();
+
+    const mappedAvailableModels = availableModels.map((model) => ({
+      modelId: model.id,
+      name: model.label,
+      description: model.description ?? null,
+      _meta: {
+        contextLimit: tokenLimit(model.id),
+      },
+    }));
+
+    if (
+      currentModelId &&
+      !mappedAvailableModels.some((model) => model.modelId === currentModelId)
+    ) {
+      mappedAvailableModels.unshift({
+        modelId: currentModelId,
+        name: currentModelId,
+        description: null,
+        _meta: {
+          contextLimit: tokenLimit(currentModelId),
+        },
+      });
+    }
+
+    return {
+      currentModelId,
+      availableModels: mappedAvailableModels,
+    };
   }
 }

@@ -4,36 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { TextTokenizer } from './textTokenizer.js';
-
-// Mock tiktoken at the top level with hoisted functions
-const mockEncode = vi.hoisted(() => vi.fn());
-const mockFree = vi.hoisted(() => vi.fn());
-const mockGetEncoding = vi.hoisted(() => vi.fn());
-
-vi.mock('tiktoken', () => ({
-  get_encoding: mockGetEncoding,
-}));
 
 describe('TextTokenizer', () => {
   let tokenizer: TextTokenizer;
-  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    vi.resetAllMocks();
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    // Default mock implementation
-    mockGetEncoding.mockReturnValue({
-      encode: mockEncode,
-      free: mockFree,
-    });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    tokenizer?.dispose();
+    tokenizer = new TextTokenizer();
   });
 
   describe('constructor', () => {
@@ -42,17 +20,14 @@ describe('TextTokenizer', () => {
       expect(tokenizer).toBeInstanceOf(TextTokenizer);
     });
 
-    it('should create tokenizer with custom encoding', () => {
-      tokenizer = new TextTokenizer('gpt2');
+    it('should create tokenizer with custom encoding (for backward compatibility)', () => {
+      tokenizer = new TextTokenizer();
       expect(tokenizer).toBeInstanceOf(TextTokenizer);
+      // Note: encoding name is accepted but not used
     });
   });
 
   describe('calculateTokens', () => {
-    beforeEach(() => {
-      tokenizer = new TextTokenizer();
-    });
-
     it('should return 0 for empty text', async () => {
       const result = await tokenizer.calculateTokens('');
       expect(result).toBe(0);
@@ -69,99 +44,77 @@ describe('TextTokenizer', () => {
       expect(result2).toBe(0);
     });
 
-    it('should calculate tokens using tiktoken when available', async () => {
-      const testText = 'Hello, world!';
-      const mockTokens = [1, 2, 3, 4, 5]; // 5 tokens
-      mockEncode.mockReturnValue(mockTokens);
-
+    it('should calculate tokens using character-based estimation for ASCII text', async () => {
+      const testText = 'Hello, world!'; // 13 ASCII chars
       const result = await tokenizer.calculateTokens(testText);
+      // 13 / 4 = 3.25 -> ceil = 4
+      expect(result).toBe(4);
+    });
 
-      expect(mockGetEncoding).toHaveBeenCalledWith('cl100k_base');
-      expect(mockEncode).toHaveBeenCalledWith(testText);
+    it('should calculate tokens for code (ASCII)', async () => {
+      const code = 'function test() { return 42; }'; // 30 ASCII chars
+      const result = await tokenizer.calculateTokens(code);
+      // 30 / 4 = 7.5 -> ceil = 8
+      expect(result).toBe(8);
+    });
+
+    it('should calculate tokens for non-ASCII text (CJK)', async () => {
+      const unicodeText = '你好世界'; // 4 non-ASCII chars
+      const result = await tokenizer.calculateTokens(unicodeText);
+      // 4 * 1.1 = 4.4 -> ceil = 5
       expect(result).toBe(5);
     });
 
-    it('should use fallback calculation when tiktoken fails to load', async () => {
-      mockGetEncoding.mockImplementation(() => {
-        throw new Error('Failed to load tiktoken');
-      });
-
-      const testText = 'Hello, world!'; // 13 characters
-      const result = await tokenizer.calculateTokens(testText);
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Failed to load tiktoken with encoding cl100k_base:',
-        expect.any(Error),
-      );
-      // Fallback: Math.ceil(13 / 4) = 4
+    it('should calculate tokens for mixed ASCII and non-ASCII text', async () => {
+      const mixedText = 'Hello 世界'; // 6 ASCII + 2 non-ASCII
+      const result = await tokenizer.calculateTokens(mixedText);
+      // (6 / 4) + (2 * 1.1) = 1.5 + 2.2 = 3.7 -> ceil = 4
       expect(result).toBe(4);
     });
 
-    it('should use fallback calculation when encoding fails', async () => {
-      mockEncode.mockImplementation(() => {
-        throw new Error('Encoding failed');
-      });
-
-      const testText = 'Hello, world!'; // 13 characters
-      const result = await tokenizer.calculateTokens(testText);
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Error encoding text with tiktoken:',
-        expect.any(Error),
-      );
-      // Fallback: Math.ceil(13 / 4) = 4
-      expect(result).toBe(4);
+    it('should calculate tokens for emoji', async () => {
+      const emojiText = '🌍'; // 2 UTF-16 code units (non-ASCII)
+      const result = await tokenizer.calculateTokens(emojiText);
+      // 2 * 1.1 = 2.2 -> ceil = 3
+      expect(result).toBe(3);
     });
 
     it('should handle very long text', async () => {
-      const longText = 'a'.repeat(10000);
-      const mockTokens = new Array(2500); // 2500 tokens
-      mockEncode.mockReturnValue(mockTokens);
-
+      const longText = 'a'.repeat(10000); // 10000 ASCII chars
       const result = await tokenizer.calculateTokens(longText);
-
+      // 10000 / 4 = 2500 -> ceil = 2500
       expect(result).toBe(2500);
     });
 
-    it('should handle unicode characters', async () => {
-      const unicodeText = '你好世界 🌍';
-      const mockTokens = [1, 2, 3, 4, 5, 6];
-      mockEncode.mockReturnValue(mockTokens);
-
-      const result = await tokenizer.calculateTokens(unicodeText);
-
-      expect(result).toBe(6);
+    it('should handle text with only whitespace', async () => {
+      const whitespaceText = '   \n\t  '; // 7 ASCII chars
+      const result = await tokenizer.calculateTokens(whitespaceText);
+      // 7 / 4 = 1.75 -> ceil = 2
+      expect(result).toBe(2);
     });
 
-    it('should use custom encoding when specified', async () => {
-      tokenizer = new TextTokenizer('gpt2');
-      const testText = 'Hello, world!';
-      const mockTokens = [1, 2, 3];
-      mockEncode.mockReturnValue(mockTokens);
+    it('should handle special characters and symbols', async () => {
+      const specialText = '!@#$%^&*()_+-=[]{}|;:,.<>?'; // 26 ASCII chars
+      const result = await tokenizer.calculateTokens(specialText);
+      // 26 / 4 = 6.5 -> ceil = 7
+      expect(result).toBe(7);
+    });
 
-      const result = await tokenizer.calculateTokens(testText);
-
-      expect(mockGetEncoding).toHaveBeenCalledWith('gpt2');
-      expect(result).toBe(3);
+    it('should handle very short text', async () => {
+      const result = await tokenizer.calculateTokens('a');
+      // 1 / 4 = 0.25 -> ceil = 1
+      expect(result).toBe(1);
     });
   });
 
   describe('calculateTokensBatch', () => {
-    beforeEach(() => {
-      tokenizer = new TextTokenizer();
-    });
-
     it('should process multiple texts and return token counts', async () => {
       const texts = ['Hello', 'world', 'test'];
-      mockEncode
-        .mockReturnValueOnce([1, 2]) // 2 tokens for 'Hello'
-        .mockReturnValueOnce([3, 4, 5]) // 3 tokens for 'world'
-        .mockReturnValueOnce([6]); // 1 token for 'test'
-
       const result = await tokenizer.calculateTokensBatch(texts);
-
-      expect(result).toEqual([2, 3, 1]);
-      expect(mockEncode).toHaveBeenCalledTimes(3);
+      // 'Hello' = 5 / 4 = 1.25 -> ceil = 2
+      // 'world' = 5 / 4 = 1.25 -> ceil = 2
+      // 'test' = 4 / 4 = 1 -> ceil = 1
+      expect(result).toEqual([2, 2, 1]);
     });
 
     it('should handle empty array', async () => {
@@ -171,177 +124,156 @@ describe('TextTokenizer', () => {
 
     it('should handle array with empty strings', async () => {
       const texts = ['', 'hello', ''];
-      mockEncode.mockReturnValue([1, 2, 3]); // Only called for 'hello'
-
       const result = await tokenizer.calculateTokensBatch(texts);
-
-      expect(result).toEqual([0, 3, 0]);
-      expect(mockEncode).toHaveBeenCalledTimes(1);
-      expect(mockEncode).toHaveBeenCalledWith('hello');
+      // '' = 0
+      // 'hello' = 5 / 4 = 1.25 -> ceil = 2
+      // '' = 0
+      expect(result).toEqual([0, 2, 0]);
     });
 
-    it('should use fallback calculation when tiktoken fails to load', async () => {
-      mockGetEncoding.mockImplementation(() => {
-        throw new Error('Failed to load tiktoken');
-      });
-
-      const texts = ['Hello', 'world']; // 5 and 5 characters
+    it('should handle mixed ASCII and non-ASCII texts', async () => {
+      const texts = ['Hello', '世界', 'Hello 世界'];
       const result = await tokenizer.calculateTokensBatch(texts);
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Failed to load tiktoken with encoding cl100k_base:',
-        expect.any(Error),
-      );
-      // Fallback: Math.ceil(5/4) = 2 for both
-      expect(result).toEqual([2, 2]);
-    });
-
-    it('should use fallback calculation when encoding fails during batch processing', async () => {
-      mockEncode.mockImplementation(() => {
-        throw new Error('Encoding failed');
-      });
-
-      const texts = ['Hello', 'world']; // 5 and 5 characters
-      const result = await tokenizer.calculateTokensBatch(texts);
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Error encoding texts with tiktoken:',
-        expect.any(Error),
-      );
-      // Fallback: Math.ceil(5/4) = 2 for both
-      expect(result).toEqual([2, 2]);
+      // 'Hello' = 5 / 4 = 1.25 -> ceil = 2
+      // '世界' = 2 * 1.1 = 2.2 -> ceil = 3
+      // 'Hello 世界' = (6/4) + (2*1.1) = 1.5 + 2.2 = 3.7 -> ceil = 4
+      expect(result).toEqual([2, 3, 4]);
     });
 
     it('should handle null and undefined values in batch', async () => {
       const texts = [null, 'hello', undefined, 'world'] as unknown as string[];
-      mockEncode
-        .mockReturnValueOnce([1, 2, 3]) // 3 tokens for 'hello'
-        .mockReturnValueOnce([4, 5]); // 2 tokens for 'world'
-
       const result = await tokenizer.calculateTokensBatch(texts);
+      // null = 0
+      // 'hello' = 5 / 4 = 1.25 -> ceil = 2
+      // undefined = 0
+      // 'world' = 5 / 4 = 1.25 -> ceil = 2
+      expect(result).toEqual([0, 2, 0, 2]);
+    });
 
-      expect(result).toEqual([0, 3, 0, 2]);
+    it('should process large batches efficiently', async () => {
+      const texts = Array.from({ length: 1000 }, (_, i) => `text${i}`);
+      const result = await tokenizer.calculateTokensBatch(texts);
+      expect(result).toHaveLength(1000);
+      // Verify results are reasonable
+      result.forEach((count) => {
+        expect(count).toBeGreaterThan(0);
+        expect(count).toBeLessThan(10); // 'textNNN' should be less than 10 tokens
+      });
     });
   });
 
-  describe('dispose', () => {
-    beforeEach(() => {
-      tokenizer = new TextTokenizer();
+  describe('backward compatibility', () => {
+    it('should accept encoding parameter in constructor', () => {
+      const tokenizer1 = new TextTokenizer();
+      const tokenizer2 = new TextTokenizer();
+      const tokenizer3 = new TextTokenizer();
+
+      expect(tokenizer1).toBeInstanceOf(TextTokenizer);
+      expect(tokenizer2).toBeInstanceOf(TextTokenizer);
+      expect(tokenizer3).toBeInstanceOf(TextTokenizer);
     });
 
-    it('should free tiktoken encoding when disposing', async () => {
-      // Initialize the encoding by calling calculateTokens
-      await tokenizer.calculateTokens('test');
+    it('should produce same results regardless of encoding parameter', async () => {
+      const text = 'Hello, world!';
+      const tokenizer1 = new TextTokenizer();
+      const tokenizer2 = new TextTokenizer();
+      const tokenizer3 = new TextTokenizer();
 
-      tokenizer.dispose();
+      const result1 = await tokenizer1.calculateTokens(text);
+      const result2 = await tokenizer2.calculateTokens(text);
+      const result3 = await tokenizer3.calculateTokens(text);
 
-      expect(mockFree).toHaveBeenCalled();
+      // All should use character-based estimation, ignoring encoding parameter
+      expect(result1).toBe(result2);
+      expect(result2).toBe(result3);
+      expect(result1).toBe(4); // 13 / 4 = 3.25 -> ceil = 4
     });
 
-    it('should handle disposal when encoding is not initialized', () => {
-      expect(() => tokenizer.dispose()).not.toThrow();
-      expect(mockFree).not.toHaveBeenCalled();
+    it('should maintain async interface for calculateTokens', async () => {
+      const result = tokenizer.calculateTokens('test');
+      expect(result).toBeInstanceOf(Promise);
+      await expect(result).resolves.toBe(1);
     });
 
-    it('should handle disposal when encoding is null', async () => {
-      // Force encoding to be null by making tiktoken fail
-      mockGetEncoding.mockImplementation(() => {
-        throw new Error('Failed to load');
-      });
-
-      await tokenizer.calculateTokens('test');
-
-      expect(() => tokenizer.dispose()).not.toThrow();
-      expect(mockFree).not.toHaveBeenCalled();
-    });
-
-    it('should handle errors during disposal gracefully', async () => {
-      await tokenizer.calculateTokens('test');
-
-      mockFree.mockImplementation(() => {
-        throw new Error('Free failed');
-      });
-
-      tokenizer.dispose();
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Error freeing tiktoken encoding:',
-        expect.any(Error),
-      );
-    });
-
-    it('should allow multiple calls to dispose', async () => {
-      await tokenizer.calculateTokens('test');
-
-      tokenizer.dispose();
-      tokenizer.dispose(); // Second call should not throw
-
-      expect(mockFree).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  describe('lazy initialization', () => {
-    beforeEach(() => {
-      tokenizer = new TextTokenizer();
-    });
-
-    it('should not initialize tiktoken until first use', () => {
-      expect(mockGetEncoding).not.toHaveBeenCalled();
-    });
-
-    it('should initialize tiktoken on first calculateTokens call', async () => {
-      await tokenizer.calculateTokens('test');
-      expect(mockGetEncoding).toHaveBeenCalledTimes(1);
-    });
-
-    it('should not reinitialize tiktoken on subsequent calls', async () => {
-      await tokenizer.calculateTokens('test1');
-      await tokenizer.calculateTokens('test2');
-
-      expect(mockGetEncoding).toHaveBeenCalledTimes(1);
-    });
-
-    it('should initialize tiktoken on first calculateTokensBatch call', async () => {
-      await tokenizer.calculateTokensBatch(['test']);
-      expect(mockGetEncoding).toHaveBeenCalledTimes(1);
+    it('should maintain async interface for calculateTokensBatch', async () => {
+      const result = tokenizer.calculateTokensBatch(['test']);
+      expect(result).toBeInstanceOf(Promise);
+      await expect(result).resolves.toEqual([1]);
     });
   });
 
   describe('edge cases', () => {
-    beforeEach(() => {
-      tokenizer = new TextTokenizer();
-    });
-
-    it('should handle very short text', async () => {
-      const result = await tokenizer.calculateTokens('a');
-
-      if (mockGetEncoding.mock.calls.length > 0) {
-        // If tiktoken was called, use its result
-        expect(mockEncode).toHaveBeenCalledWith('a');
-      } else {
-        // If tiktoken failed, should use fallback: Math.ceil(1/4) = 1
-        expect(result).toBe(1);
-      }
-    });
-
-    it('should handle text with only whitespace', async () => {
-      const whitespaceText = '   \n\t  ';
-      const mockTokens = [1];
-      mockEncode.mockReturnValue(mockTokens);
-
-      const result = await tokenizer.calculateTokens(whitespaceText);
-
+    it('should handle text with only newlines', async () => {
+      const text = '\n\n\n'; // 3 ASCII chars
+      const result = await tokenizer.calculateTokens(text);
+      // 3 / 4 = 0.75 -> ceil = 1
       expect(result).toBe(1);
     });
 
-    it('should handle special characters and symbols', async () => {
-      const specialText = '!@#$%^&*()_+-=[]{}|;:,.<>?';
-      const mockTokens = new Array(10);
-      mockEncode.mockReturnValue(mockTokens);
+    it('should handle text with tabs', async () => {
+      const text = '\t\t\t\t'; // 4 ASCII chars
+      const result = await tokenizer.calculateTokens(text);
+      // 4 / 4 = 1 -> ceil = 1
+      expect(result).toBe(1);
+    });
 
-      const result = await tokenizer.calculateTokens(specialText);
+    it('should handle surrogate pairs correctly', async () => {
+      // Character outside BMP (Basic Multilingual Plane)
+      const text = '𝕳𝖊𝖑𝖑𝖔'; // Mathematical bold letters (2 UTF-16 units each)
+      const result = await tokenizer.calculateTokens(text);
+      // Each character is 2 UTF-16 units, all non-ASCII
+      // Total: 10 non-ASCII units
+      // 10 * 1.1 = 11 -> ceil = 11
+      expect(result).toBe(11);
+    });
 
-      expect(result).toBe(10);
+    it('should handle combining characters', async () => {
+      // e + combining acute accent
+      const text = 'e\u0301'; // 2 chars: 'e' (ASCII) + combining acute (non-ASCII)
+      const result = await tokenizer.calculateTokens(text);
+      // ASCII: 1 / 4 = 0.25
+      // Non-ASCII: 1 * 1.1 = 1.1
+      // Total: 0.25 + 1.1 = 1.35 -> ceil = 2
+      expect(result).toBe(2);
+    });
+
+    it('should handle accented characters', async () => {
+      const text = 'café'; // 'caf' = 3 ASCII, 'é' = 1 non-ASCII
+      const result = await tokenizer.calculateTokens(text);
+      // ASCII: 3 / 4 = 0.75
+      // Non-ASCII: 1 * 1.1 = 1.1
+      // Total: 0.75 + 1.1 = 1.85 -> ceil = 2
+      expect(result).toBe(2);
+    });
+
+    it('should handle various unicode scripts', async () => {
+      const cyrillic = 'Привет'; // 6 non-ASCII chars
+      const arabic = 'مرحبا'; // 5 non-ASCII chars
+      const japanese = 'こんにちは'; // 5 non-ASCII chars
+
+      const result1 = await tokenizer.calculateTokens(cyrillic);
+      const result2 = await tokenizer.calculateTokens(arabic);
+      const result3 = await tokenizer.calculateTokens(japanese);
+
+      // All should use 1.1 tokens per char
+      expect(result1).toBe(7); // 6 * 1.1 = 6.6 -> ceil = 7
+      expect(result2).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
+      expect(result3).toBe(6); // 5 * 1.1 = 5.5 -> ceil = 6
+    });
+  });
+
+  describe('large inputs', () => {
+    it('should handle very long text', async () => {
+      const longText = 'a'.repeat(200000); // 200k characters
+      const result = await tokenizer.calculateTokens(longText);
+      expect(result).toBe(50000); // 200000 / 4
+    });
+
+    it('should handle large batches', async () => {
+      const texts = Array.from({ length: 5000 }, () => 'Hello, world!');
+      const result = await tokenizer.calculateTokensBatch(texts);
+      expect(result).toHaveLength(5000);
+      expect(result[0]).toBe(4);
     });
   });
 });

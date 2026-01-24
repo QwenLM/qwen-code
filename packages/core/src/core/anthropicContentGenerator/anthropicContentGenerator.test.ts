@@ -19,9 +19,7 @@ const mockTokenizer = {
 };
 
 vi.mock('../../utils/request-tokenizer/index.js', () => ({
-  getDefaultTokenizer: vi.fn(() => mockTokenizer),
-  DefaultRequestTokenizer: vi.fn(() => mockTokenizer),
-  disposeDefaultTokenizer: vi.fn(),
+  RequestTokenEstimator: vi.fn(() => mockTokenizer),
 }));
 
 type AnthropicCreateArgs = [unknown, { signal?: AbortSignal }?];
@@ -352,9 +350,7 @@ describe('AnthropicContentGenerator', () => {
       };
 
       const result = await generator.countTokens(request);
-      expect(mockTokenizer.calculateTokens).toHaveBeenCalledWith(request, {
-        textEncoding: 'cl100k_base',
-      });
+      expect(mockTokenizer.calculateTokens).toHaveBeenCalledWith(request);
       expect(result.totalTokens).toBe(50);
     });
 

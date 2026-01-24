@@ -36,6 +36,8 @@ import {
 import * as path from 'node:path';
 import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
+import { useUIState } from '../contexts/UIStateContext.js';
+import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -52,6 +54,9 @@ export interface InputPromptProps {
   setShellModeActive: (value: boolean) => void;
   approvalMode: ApprovalMode;
   onEscapePromptChange?: (showPrompt: boolean) => void;
+  onToggleShortcuts?: () => void;
+  showShortcuts?: boolean;
+  onSuggestionsVisibilityChange?: (visible: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
 }
@@ -96,10 +101,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   setShellModeActive,
   approvalMode,
   onEscapePromptChange,
+  onToggleShortcuts,
+  showShortcuts,
+  onSuggestionsVisibilityChange,
   vimHandleInput,
   isEmbeddedShellFocused,
 }) => {
   const isShellFocused = useShellFocusState();
+  const uiState = useUIState();
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -135,6 +144,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandContext,
     reverseSearchActive,
     config,
+    // Suppress completion when history navigation just occurred
+    !justNavigatedHistory,
   );
 
   const reverseSearchCompletion = useReverseSearchCompletion(
@@ -219,9 +230,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const inputHistory = useInputHistory({
     userMessages,
     onSubmit: handleSubmitAndClear,
-    isActive:
-      (!completion.showSuggestions || completion.suggestions.length === 1) &&
-      !shellModeActive,
+    // History navigation (Ctrl+P/N) now always works since completion navigation
+    // only uses arrow keys. Only disable in shell mode.
+    isActive: !shellModeActive,
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,
   });
@@ -326,6 +337,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
+      // Intercept feedback dialog option keys (1, 2) when dialog is open
+      if (
+        uiState.isFeedbackDialogOpen &&
+        (FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)
+      ) {
+        return;
+      }
+
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
         if (escPressCount > 0 || showEscapePrompt) {
@@ -338,9 +357,29 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         buffer.text === '' &&
         !completion.showSuggestions
       ) {
+        // Hide shortcuts when toggling shell mode
+        if (showShortcuts && onToggleShortcuts) {
+          onToggleShortcuts();
+        }
         setShellModeActive(!shellModeActive);
         buffer.setText(''); // Clear the '!' from input
         return;
+      }
+
+      // Toggle keyboard shortcuts display with "?" when buffer is empty
+      if (
+        key.sequence === '?' &&
+        buffer.text === '' &&
+        !completion.showSuggestions &&
+        onToggleShortcuts
+      ) {
+        onToggleShortcuts();
+        return;
+      }
+
+      // Hide shortcuts on any other key press
+      if (showShortcuts && onToggleShortcuts) {
+        onToggleShortcuts();
       }
 
       if (keyMatchers[Command.ESCAPE](key)) {
@@ -670,6 +709,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       recentPasteTime,
       commandSearchActive,
       commandSearchCompletion,
+      onToggleShortcuts,
+      showShortcuts,
+      uiState,
     ],
   );
 
@@ -689,6 +731,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const activeCompletion = getActiveCompletion();
   const shouldShowSuggestions = activeCompletion.showSuggestions;
 
+  // Notify parent about suggestions visibility changes
+  useEffect(() => {
+    if (onSuggestionsVisibilityChange) {
+      onSuggestionsVisibilityChange(shouldShowSuggestions);
+    }
+  }, [shouldShowSuggestions, onSuggestionsVisibilityChange]);
+
   const showAutoAcceptStyling =
     !shellModeActive && approvalMode === ApprovalMode.AUTO_EDIT;
   const showYoloStyling =
@@ -700,10 +749,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     statusColor = theme.ui.symbol;
     statusText = t('Shell mode');
   } else if (showYoloStyling) {
-    statusColor = theme.status.error;
+    statusColor = theme.status.errorDim;
     statusText = t('YOLO mode');
   } else if (showAutoAcceptStyling) {
-    statusColor = theme.status.warning;
+    statusColor = theme.status.warningDim;
     statusText = t('Accepting edits');
   }
 
@@ -721,7 +770,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         borderLeft={false}
         borderRight={false}
         borderColor={borderColor}
-        paddingX={1}
       >
         <Text
           color={statusColor ?? theme.text.accent}
@@ -852,7 +900,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         </Box>
       </Box>
       {shouldShowSuggestions && (
-        <Box paddingRight={2}>
+        <Box marginLeft={2} marginRight={2}>
           <SuggestionsDisplay
             suggestions={activeCompletion.suggestions}
             activeIndex={activeCompletion.activeSuggestionIndex}

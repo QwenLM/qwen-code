@@ -4,13 +4,12 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
+import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
 /**
  * Default provider for standard OpenAI-compatible APIs
  */
-export class DefaultOpenAICompatibleProvider
-  implements OpenAICompatibleProvider
-{
+export class DefaultOpenAICompatibleProvider implements OpenAICompatibleProvider {
   protected contentGeneratorConfig: ContentGeneratorConfig;
   protected cliConfig: Config;
 
@@ -43,12 +42,16 @@ export class DefaultOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
+    // Configure fetch options to ensure user-configured timeout works as expected
+    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    const fetchOptions = buildRuntimeFetchOptions('openai');
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
       timeout,
       maxRetries,
       defaultHeaders,
+      ...(fetchOptions ? { fetchOptions } : {}),
     });
   }
 

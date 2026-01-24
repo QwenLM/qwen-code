@@ -181,12 +181,8 @@ export class ToolRegistry {
   ) {
     this.config = config;
     this.mcpClientManager = new McpClientManager(
-      this.config.getMcpServers() ?? {},
-      this.config.getMcpServerCommand(),
+      this.config,
       this,
-      this.config.getPromptRegistry(),
-      this.config.getDebugMode(),
-      this.config.getWorkspaceContext(),
       eventEmitter,
       sendSdkMcpMessage,
     );

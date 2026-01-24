@@ -36,6 +36,7 @@ export function tildeifyPath(path: string): string {
 
 /**
  * Shortens a path string if it exceeds maxLen, prioritizing the start and end segments.
+ * Shows root + first segment + "..." + end segments when middle segments are omitted.
  * Example: /path/to/a/very/long/file.txt -> /path/.../long/file.txt
  */
 export function shortenPath(filePath: string, maxLen: number = 80): string {
@@ -43,65 +44,82 @@ export function shortenPath(filePath: string, maxLen: number = 80): string {
     return filePath;
   }
 
+  const separator = path.sep;
+  const ellipsis = '...';
+
+  // Simple fallback for very short maxLen
+  if (maxLen < 10) {
+    return filePath.substring(0, maxLen - 3) + ellipsis;
+  }
+
   const parsedPath = path.parse(filePath);
   const root = parsedPath.root;
-  const separator = path.sep;
-
-  // Get segments of the path *after* the root
   const relativePath = filePath.substring(root.length);
-  const segments = relativePath.split(separator).filter((s) => s !== ''); // Filter out empty segments
+  const segments = relativePath.split(separator).filter((s) => s !== '');
 
-  // Handle cases with no segments after root (e.g., "/", "C:\") or only one segment
-  if (segments.length <= 1) {
-    // Fall back to simple start/end truncation for very short paths or single segments
-    const keepLen = Math.floor((maxLen - 3) / 2);
-    // Ensure keepLen is not negative if maxLen is very small
-    if (keepLen <= 0) {
-      return filePath.substring(0, maxLen - 3) + '...';
+  // Handle edge cases: no segments or single segment
+  if (segments.length === 0) {
+    return root.length <= maxLen
+      ? root
+      : root.substring(0, maxLen - 3) + ellipsis;
+  }
+
+  if (segments.length === 1) {
+    const full = root + segments[0];
+    if (full.length <= maxLen) {
+      return full;
     }
+    const keepLen = Math.floor((maxLen - 3) / 2);
+    const start = full.substring(0, keepLen);
+    const end = full.substring(full.length - keepLen);
+    return `${start}${ellipsis}${end}`;
+  }
+
+  // For 2+ segments: build from start and end, insert "..." if there's a gap
+  const startPart = root + segments[0]; // Always include root and first segment
+
+  // Collect segments from the end, working backwards
+  const endSegments: string[] = [];
+
+  for (let i = segments.length - 1; i >= 1; i--) {
+    const segment = segments[i];
+
+    // Calculate what the total would be if we add this segment
+    const endPart = [segment, ...endSegments].join(separator);
+    const needsEllipsis = i > 1; // If we're not at segment[1], there's a gap
+
+    let candidateResult: string;
+    if (needsEllipsis) {
+      candidateResult = startPart + separator + ellipsis + separator + endPart;
+    } else {
+      candidateResult = startPart + separator + endPart;
+    }
+
+    if (candidateResult.length <= maxLen) {
+      endSegments.unshift(segment);
+
+      // If we've reached segment[1], we have all segments - return immediately
+      if (i === 1) {
+        return candidateResult;
+      }
+    } else {
+      break; // Can't add more segments
+    }
+  }
+
+  // Build final result
+  if (endSegments.length === 0) {
+    // Couldn't fit any end segments - use simple truncation
+    const keepLen = Math.floor((maxLen - 3) / 2);
     const start = filePath.substring(0, keepLen);
     const end = filePath.substring(filePath.length - keepLen);
-    return `${start}...${end}`;
+    return `${start}${ellipsis}${end}`;
   }
 
-  const firstDir = segments[0];
-  const lastSegment = segments[segments.length - 1];
-  const startComponent = root + firstDir;
-
-  const endPartSegments: string[] = [];
-  // Base length: separator + "..." + lastDir
-  let currentLength = separator.length + lastSegment.length;
-
-  // Iterate backwards through segments (excluding the first one)
-  for (let i = segments.length - 2; i >= 0; i--) {
-    const segment = segments[i];
-    // Length needed if we add this segment: current + separator + segment
-    const lengthWithSegment = currentLength + separator.length + segment.length;
-
-    if (lengthWithSegment <= maxLen) {
-      endPartSegments.unshift(segment); // Add to the beginning of the end part
-      currentLength = lengthWithSegment;
-    } else {
-      break;
-    }
-  }
-
-  let result = endPartSegments.join(separator) + separator + lastSegment;
-
-  if (currentLength > maxLen) {
-    return result;
-  }
-
-  // Construct the final path
-  result = startComponent + separator + result;
-
-  // As a final check, if the result is somehow still too long
-  // truncate the result string from the beginning, prefixing with "...".
-  if (result.length > maxLen) {
-    return '...' + result.substring(result.length - maxLen - 3);
-  }
-
-  return result;
+  // We have some end segments but not all - there's a gap, insert ellipsis
+  return (
+    startPart + separator + ellipsis + separator + endSegments.join(separator)
+  );
 }
 
 /**

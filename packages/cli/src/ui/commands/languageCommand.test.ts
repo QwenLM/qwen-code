@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import { type CommandContext, CommandKind } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 // Mock i18n module
 vi.mock('../../i18n/index.js', () => ({
@@ -71,10 +72,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 
 // Import modules after mocking
 import * as i18n from '../../i18n/index.js';
-import {
-  languageCommand,
-  initializeLlmOutputLanguage,
-} from './languageCommand.js';
+import { languageCommand } from './languageCommand.js';
+import { initializeLlmOutputLanguage } from '../../utils/languageUtils.js';
 
 describe('languageCommand', () => {
   let mockContext: CommandContext;
@@ -165,11 +164,13 @@ describe('languageCommand', () => {
       });
     });
 
-    it('should show LLM output language when set', async () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue(
-        '# CRITICAL: Chinese Output Language Rule - HIGHEST PRIORITY',
-      );
+    it('should show LLM output language when explicitly set', async () => {
+      // Set the outputLanguage setting explicitly
+      mockContext.services.settings = {
+        ...mockContext.services.settings,
+        merged: { general: { outputLanguage: 'Chinese' } },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
 
       // Make t() function handle interpolation for this test
       vi.mocked(i18n.t).mockImplementation(
@@ -192,7 +193,7 @@ describe('languageCommand', () => {
         messageType: 'info',
         content: expect.stringContaining('Current UI language:'),
       });
-      // Verify it correctly parses "Chinese" from the template format
+      // Verify it shows "Chinese" for the explicitly set language
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -200,16 +201,14 @@ describe('languageCommand', () => {
       });
     });
 
-    it('should parse Unicode LLM output language from marker', async () => {
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue(
-        [
-          '# ⚠️ CRITICAL: 中文 Output Language Rule - HIGHEST PRIORITY ⚠️',
-          '<!-- qwen-code:llm-output-language: 中文 -->',
-          '',
-          'Some other content...',
-        ].join('\n'),
-      );
+    it('should show auto-detected language when set to auto', async () => {
+      // Set the outputLanguage setting to 'auto'
+      mockContext.services.settings = {
+        ...mockContext.services.settings,
+        merged: { general: { outputLanguage: 'auto' } },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
 
       vi.mocked(i18n.t).mockImplementation(
         (key: string, params?: Record<string, string>) => {
@@ -226,10 +225,16 @@ describe('languageCommand', () => {
 
       const result = await languageCommand.action(mockContext, '');
 
+      // Verify it shows "Auto (detect from system) → Chinese"
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining('中文'),
+        content: expect.stringContaining('Auto (detect from system)'),
+      });
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('Chinese'),
       });
     });
   });
@@ -404,7 +409,7 @@ describe('languageCommand', () => {
       });
     });
 
-    it('should create LLM output language rule file', async () => {
+    it('should save LLM output language setting', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
       }
@@ -414,18 +419,16 @@ describe('languageCommand', () => {
         'output Chinese',
       );
 
-      expect(fs.mkdirSync).toHaveBeenCalled();
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('output-language.md'),
-        expect.stringContaining('Chinese'),
-        'utf-8',
+      // Verify setting was saved (rule file is updated on restart)
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(), // SettingScope.User
+        'general.outputLanguage',
+        'Chinese',
       );
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining(
-          'LLM output language rule file generated',
-        ),
+        content: expect.stringContaining('LLM output language set to'),
       });
     });
 
@@ -453,10 +456,11 @@ describe('languageCommand', () => {
 
       await languageCommand.action(mockContext, 'output ru');
 
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('output-language.md'),
-        expect.stringContaining('Russian'),
-        'utf-8',
+      // Verify setting was saved with normalized value
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'Russian',
       );
     });
 
@@ -467,28 +471,36 @@ describe('languageCommand', () => {
 
       await languageCommand.action(mockContext, 'output de');
 
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('output-language.md'),
-        expect.stringContaining('German'),
-        'utf-8',
+      // Verify setting was saved with normalized value
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'German',
       );
     });
 
-    it('should handle file write errors gracefully', async () => {
-      vi.mocked(fs.writeFileSync).mockImplementation(() => {
-        throw new Error('Permission denied');
-      });
-
+    it('should save setting without immediate rule file update', async () => {
+      // Even though rule file updates happen on restart, the setting should still be saved
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
       }
 
-      const result = await languageCommand.action(mockContext, 'output German');
+      const result = await languageCommand.action(
+        mockContext,
+        'output Spanish',
+      );
 
+      // Verify setting was saved
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'Spanish',
+      );
+      // Verify success message (no error about file generation)
       expect(result).toEqual({
         type: 'message',
-        messageType: 'error',
-        content: expect.stringContaining('Failed to generate'),
+        messageType: 'info',
+        content: expect.stringContaining('LLM output language set to'),
       });
     });
   });
@@ -586,24 +598,23 @@ describe('languageCommand', () => {
       expect(outputSubcommand?.kind).toBe(CommandKind.BUILT_IN);
     });
 
-    it('should have action that generates rule file', async () => {
+    it('should have action that saves setting', async () => {
       if (!outputSubcommand?.action) {
         throw new Error('Output subcommand must have an action.');
       }
 
-      // Ensure mocks are properly set for this test
-      vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
-      vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
-
       const result = await outputSubcommand.action(mockContext, 'French');
 
-      expect(fs.writeFileSync).toHaveBeenCalled();
+      // Verify setting was saved (rule file is updated on restart)
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'French',
+      );
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining(
-          'LLM output language rule file generated',
-        ),
+        content: expect.stringContaining('LLM output language set to'),
       });
     });
   });
@@ -688,6 +699,7 @@ describe('languageCommand', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
       vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
       vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
+      vi.mocked(fs.readFileSync).mockImplementation(() => '');
     });
 
     it('should create file when it does not exist', () => {
@@ -704,12 +716,48 @@ describe('languageCommand', () => {
       );
     });
 
-    it('should NOT overwrite existing file', () => {
+    it('should NOT overwrite existing file when content matches resolved language', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('en');
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        `# Output language preference: English
+<!-- qwen-code:llm-output-language: English -->
+`,
+      );
 
       initializeLlmOutputLanguage();
 
       expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should overwrite existing file when output language setting differs', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        `# Output language preference: English
+<!-- qwen-code:llm-output-language: English -->
+`,
+      );
+
+      initializeLlmOutputLanguage('Japanese');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Japanese'),
+        'utf-8',
+      );
+    });
+
+    it('should resolve auto setting to detected system language', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
+
+      initializeLlmOutputLanguage('auto');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Chinese'),
+        'utf-8',
+      );
     });
 
     it('should detect Chinese locale and create Chinese rule file', () => {

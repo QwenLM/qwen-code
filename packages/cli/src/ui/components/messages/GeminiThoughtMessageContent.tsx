@@ -13,7 +13,7 @@ interface GeminiThoughtMessageContentProps {
   text: string;
   isPending: boolean;
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
 }
 
 /**
@@ -22,17 +22,17 @@ interface GeminiThoughtMessageContentProps {
  */
 export const GeminiThoughtMessageContent: React.FC<
   GeminiThoughtMessageContentProps
-> = ({ text, isPending, availableTerminalHeight, terminalWidth }) => {
+> = ({ text, isPending, availableTerminalHeight, contentWidth }) => {
   const originalPrefix = '✦ ';
   const prefixWidth = originalPrefix.length;
 
   return (
-    <Box flexDirection="column" paddingLeft={prefixWidth} marginBottom={1}>
+    <Box flexDirection="column" paddingLeft={prefixWidth}>
       <MarkdownDisplay
         text={text}
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
-        terminalWidth={terminalWidth}
+        contentWidth={contentWidth - prefixWidth}
         textColor={theme.text.secondary}
       />
     </Box>

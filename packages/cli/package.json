@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -33,13 +33,13 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.7.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.8.0"
   },
   "dependencies": {
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
-    "@qwen-code/qwen-code-core": "file:../core",
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@qwen-code/qwen-code-core": "file:../core",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
     "command-exists": "^1.2.9",
@@ -63,9 +63,7 @@
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",
     "strip-json-comments": "^3.1.1",
-    "tar": "^7.5.2",
     "undici": "^6.22.0",
-    "extract-zip": "^2.0.1",
     "update-notifier": "^7.3.1",
     "wrap-ansi": "9.0.2",
     "yargs": "^17.7.2",
@@ -74,6 +72,7 @@
   "devDependencies": {
     "@babel/runtime": "^7.27.6",
     "@google/gemini-cli-test-utils": "file:../test-utils",
+    "@qwen-code/qwen-code-test-utils": "file:../test-utils",
     "@testing-library/react": "^16.3.0",
     "@types/archiver": "^6.0.3",
     "@types/command-exists": "^1.2.3",
@@ -84,7 +83,6 @@
     "@types/react-dom": "^19.1.6",
     "@types/semver": "^7.7.0",
     "@types/shell-quote": "^1.7.5",
-    "@types/tar": "^6.1.13",
     "@types/yargs": "^17.0.32",
     "archiver": "^7.0.1",
     "ink-testing-library": "^4.0.0",
@@ -92,8 +90,7 @@
     "pretty-format": "^30.0.2",
     "react-dom": "^19.1.0",
     "typescript": "^5.3.3",
-    "vitest": "^3.1.1",
-    "@qwen-code/qwen-code-test-utils": "file:../test-utils"
+    "vitest": "^3.1.1"
   },
   "engines": {
     "node": ">=20"
