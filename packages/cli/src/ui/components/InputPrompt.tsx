@@ -133,6 +133,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   ]);
   const [expandedSuggestionIndex, setExpandedSuggestionIndex] =
     useState<number>(-1);
+  // Track when we just accepted a file suggestion - Enter should submit next
+  const [justAcceptedSuggestion, setJustAcceptedSuggestion] = useState(false);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
 
@@ -248,12 +250,25 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, [
     justNavigatedHistory,
-    buffer.text,
     resetCompletionState,
     setJustNavigatedHistory,
     resetReverseSearchCompletionState,
     resetCommandSearchCompletionState,
   ]);
+
+  // Reset "just accepted suggestion" flag when user types or cursor moves
+  useEffect(() => {
+    if (justAcceptedSuggestion) {
+      // Only keep the flag if we're still in file completion context with cursor at end
+      const [row, col] = buffer.cursor;
+      const line = buffer.lines[row] || '';
+      const isAtEnd = col >= line.length;
+      const hasTrailingSpace = line.endsWith(' ');
+      if (!isAtEnd || !hasTrailingSpace) {
+        setJustAcceptedSuggestion(false);
+      }
+    }
+  }, [buffer.lines, buffer.cursor, justAcceptedSuggestion]);
 
   // Handle clipboard image pasting with Ctrl+V
   const handleClipboardImage = useCallback(async () => {
@@ -530,7 +545,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       // If the command is a perfect match, pressing enter should execute it.
-      if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+      // But don't do this when @ file suggestions are active (to allow trailing space handling).
+      const isFileSuggestionActive =
+        completion.showSuggestions &&
+        completion.suggestions.some(
+          (s) => s.value.startsWith('@') || s.value.includes('/'),
+        );
+      if (
+        completion.isPerfectMatch &&
+        keyMatchers[Command.RETURN](key) &&
+        !isFileSuggestionActive
+      ) {
         handleSubmitAndClear(buffer.text);
         return;
       }
@@ -549,18 +574,55 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key)) {
-          if (completion.suggestions.length > 0) {
-            const targetIndex =
-              completion.activeSuggestionIndex === -1
-                ? 0 // Default to the first if none is active
-                : completion.activeSuggestionIndex;
-            if (targetIndex < completion.suggestions.length) {
-              completion.handleAutocomplete(targetIndex);
-              setExpandedSuggestionIndex(-1); // Reset expansion after selection
+        // Handle @ file suggestion acceptance with two-step Enter:
+        // 1. First Enter: accepts the first suggested file
+        // 2. Second Enter: submits the command
+        const isSlashCommandContext = buffer.text.startsWith('/');
+        const isAtFileCompletion =
+          isSlashCommandContext && completion.showSuggestions;
+        const isReturnKey = key.name === 'return';
+        const isTabKey = key.name === 'tab';
+        const isAcceptSuggestionKey =
+          keyMatchers[Command.ACCEPT_SUGGESTION](key);
+
+        // Check if we should submit (second Enter after accepting suggestion)
+        if (
+          isReturnKey &&
+          isAtFileCompletion &&
+          justAcceptedSuggestion &&
+          buffer.text.trim()
+        ) {
+          setJustAcceptedSuggestion(false);
+          handleSubmitAndClear(buffer.text);
+          return;
+        }
+
+        // Handle suggestion acceptance:
+        // - Tab: always accept suggestion
+        // - Enter in slash context: accept first suggestion (if none active) or submit (if already accepted)
+        const shouldAcceptSuggestion =
+          (isTabKey && isAcceptSuggestionKey) ||
+          (isReturnKey && isAtFileCompletion && !justAcceptedSuggestion);
+
+        if (shouldAcceptSuggestion && completion.suggestions.length > 0) {
+          const targetIndex =
+            completion.activeSuggestionIndex === -1
+              ? 0 // Default to the first if none is active
+              : completion.activeSuggestionIndex;
+          if (targetIndex < completion.suggestions.length) {
+            completion.handleAutocomplete(targetIndex);
+            setExpandedSuggestionIndex(-1);
+            // Mark that we just accepted a suggestion - next Enter should submit
+            if (isReturnKey) {
+              setJustAcceptedSuggestion(true);
             }
           }
           return;
+        }
+
+        // Reset the flag when user types something after accepting suggestion
+        if (justAcceptedSuggestion && isReturnKey && !isAtFileCompletion) {
+          setJustAcceptedSuggestion(false);
         }
       }
 
@@ -712,6 +774,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       onToggleShortcuts,
       showShortcuts,
       uiState,
+      justAcceptedSuggestion,
     ],
   );
 
