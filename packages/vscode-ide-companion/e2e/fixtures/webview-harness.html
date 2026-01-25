@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Qwen Code Webview Harness</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+      }
+      #root {
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body data-extension-uri="https://example.com/">
+    <div id="root"></div>
+    <script>
+      window.__postedMessages = [];
+      window.__vscodeState = {};
+      window.__EXTENSION_URI__ =
+        document.body.getAttribute('data-extension-uri') || '';
+      window.acquireVsCodeApi = () => ({
+        postMessage: (message) => window.__postedMessages.push(message),
+        getState: () => window.__vscodeState,
+        setState: (state) => {
+          window.__vscodeState = state;
+        },
+      });
+    </script>
+    <script src="../../dist/webview.js"></script>
+  </body>
+</html>

@@ -11,9 +11,6 @@ import importPlugin from 'eslint-plugin-import';
 
 export default [
   {
-    files: ['**/*.ts', '**/*.tsx'],
-  },
-  {
     files: ['**/*.js', '**/*.cjs', '**/*.mjs'],
     languageOptions: {
       ecmaVersion: 2022,
@@ -28,7 +25,91 @@ export default [
       },
     },
   },
+  // Default config for all TS files (general) - no React hooks rules
   {
+    files: ['**/*.ts'],
+    plugins: {
+      '@typescript-eslint': typescriptEslint,
+      import: importPlugin,
+    },
+
+    languageOptions: {
+      parser: tsParser,
+      ecmaVersion: 2022,
+      sourceType: 'module',
+    },
+
+    rules: {
+      '@typescript-eslint/naming-convention': [
+        'warn',
+        {
+          selector: 'import',
+          format: ['camelCase', 'PascalCase'],
+        },
+      ],
+      'react-hooks/rules-of-hooks': 'off',  // Disable for all .ts files by default
+      'react-hooks/exhaustive-deps': 'off', // Disable for all .ts files by default
+      // Restrict deep imports but allow known-safe exceptions used by the webview
+      // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
+      // - ./styles/**: local CSS modules loaded by the webview
+      'import/no-internal-modules': [
+        'error',
+        {
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
+        },
+      ],
+
+      curly: 'warn',
+      eqeqeq: 'warn',
+      'no-throw-literal': 'warn',
+      semi: 'warn',
+    },
+  },
+  // Specific config for test files (override above) - no React hooks rules
+  {
+    files: ['**/*{test,spec}.{ts,tsx}', '**/__tests__/**', '**/test/**', 'e2e/**', 'e2e-vscode/**'],
+    plugins: {
+      '@typescript-eslint': typescriptEslint,
+      import: importPlugin,
+    },
+
+    languageOptions: {
+      parser: tsParser,
+      ecmaVersion: 2022,
+      sourceType: 'module',
+    },
+
+    rules: {
+      '@typescript-eslint/naming-convention': [
+        'warn',
+        {
+          selector: 'import',
+          format: ['camelCase', 'PascalCase'],
+        },
+      ],
+      'react-hooks/rules-of-hooks': 'off',  // Explicitly disable for test files
+      'react-hooks/exhaustive-deps': 'off', // Explicitly disable for test files
+      // Restrict deep imports but allow known-safe exceptions used by the webview
+      // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
+      // - ./styles/**: local CSS modules loaded by the webview
+      'import/no-internal-modules': [
+        'error',
+        {
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
+        },
+      ],
+
+      curly: 'warn',
+      eqeqeq: 'warn',
+      'no-throw-literal': 'warn',
+      semi: 'warn',
+    },
+  },
+  // JSX/TSX files in src - enable React hooks rules (most specific - should override others)
+  {
+    files: ['src/**/*.{tsx,jsx}'],
     plugins: {
       '@typescript-eslint': typescriptEslint,
       'react-hooks': reactHooks,
@@ -54,15 +135,63 @@ export default [
           format: ['camelCase', 'PascalCase'],
         },
       ],
-      'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'error',
+      'react-hooks/rules-of-hooks': 'error',      // Enable React hooks rule for JSX/TSX files in src
+      'react-hooks/exhaustive-deps': 'error',    // Enable React hooks rule for JSX/TSX files in src
       // Restrict deep imports but allow known-safe exceptions used by the webview
       // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
       // - ./styles/**: local CSS modules loaded by the webview
       'import/no-internal-modules': [
         'error',
         {
-          allow: ['react-dom/client', './styles/**'],
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
+        },
+      ],
+
+      curly: 'warn',
+      eqeqeq: 'warn',
+      'no-throw-literal': 'warn',
+      semi: 'warn',
+    },
+  },
+  // Special webview TS files that are used in React context - enable React hooks rules
+  {
+    files: ['src/webview/**/*.ts'],
+    plugins: {
+      '@typescript-eslint': typescriptEslint,
+      'react-hooks': reactHooks,
+      import: importPlugin,
+    },
+
+    languageOptions: {
+      parser: tsParser,
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      parserOptions: {
+        ecmaFeatures: {
+          jsx: true,
+        },
+      },
+    },
+
+    rules: {
+      '@typescript-eslint/naming-convention': [
+        'warn',
+        {
+          selector: 'import',
+          format: ['camelCase', 'PascalCase'],
+        },
+      ],
+      'react-hooks/rules-of-hooks': 'error',      // Enable React hooks rule for webview .ts files
+      'react-hooks/exhaustive-deps': 'error',    // Enable React hooks rule for webview .ts files
+      // Restrict deep imports but allow known-safe exceptions used by the webview
+      // - react-dom/client: required for React 18's createRoot API
+      // - react-dom/test-utils: required for testing React components
+      // - ./styles/**: local CSS modules loaded by the webview
+      'import/no-internal-modules': [
+        'error',
+        {
+          allow: ['react-dom/client', 'react-dom/test-utils', './styles/**'],
         },
       ],
 
