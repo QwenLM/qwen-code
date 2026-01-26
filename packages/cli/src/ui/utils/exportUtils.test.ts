@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   extractTextFromContent,
   transformToMarkdown,
@@ -256,51 +256,12 @@ describe('exportUtils', () => {
   });
 
   describe('loadHtmlTemplate', () => {
-    beforeEach(() => {
-      vi.stubGlobal('fetch', vi.fn());
-    });
-
-    afterEach(() => {
-      vi.unstubAllGlobals();
-    });
-
-    it('should load HTML template from URL', async () => {
-      const mockTemplate = '<html><body>Test Template</body></html>';
-      const mockResponse = {
-        ok: true,
-        text: vi.fn().mockResolvedValue(mockTemplate),
-      };
-      vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
-
+    it('should load HTML template from bundled constant', async () => {
       const result = await loadHtmlTemplate();
 
-      expect(result).toBe(mockTemplate);
-      expect(fetch).toHaveBeenCalledWith(
-        'https://raw.githubusercontent.com/QwenLM/qwen-code/main/template_portable.html',
-      );
-    });
-
-    it('should throw error when fetch fails', async () => {
-      const mockResponse = {
-        ok: false,
-        status: 404,
-        statusText: 'Not Found',
-      };
-      vi.mocked(fetch).mockResolvedValue(mockResponse as unknown as Response);
-
-      await expect(loadHtmlTemplate()).rejects.toThrow(
-        'Failed to fetch HTML template: 404 Not Found',
-      );
-    });
-
-    it('should throw error when network request fails', async () => {
-      const networkError = new Error('Network error');
-      vi.mocked(fetch).mockRejectedValue(networkError);
-
-      await expect(loadHtmlTemplate()).rejects.toThrow(
-        'Failed to load HTML template',
-      );
-      await expect(loadHtmlTemplate()).rejects.toThrow('Network error');
+      expect(result).toContain('<!DOCTYPE html>');
+      expect(result).toContain('Qwen Code Chat Export');
+      expect(result).toContain('id="chat-data"');
     });
   });
 
@@ -370,6 +331,42 @@ describe('exportUtils', () => {
 
       expect(result).toContain('"sessionId": "test"');
       expect(result).not.toContain('DATA_PLACEHOLDER');
+    });
+
+    it('should escape unsafe JSON sequences in HTML', () => {
+      const template = `
+        <html>
+          <body>
+            <script id="chat-data" type="application/json">
+              // DATA_PLACEHOLDER: Your JSONL data will be injected here
+            </script>
+          </body>
+        </html>
+      `;
+
+      const data = {
+        sessionId: 'test-session-id',
+        startTime: '2025-01-01T00:00:00Z',
+        messages: [
+          {
+            uuid: 'uuid-1',
+            parentUuid: null,
+            sessionId: 'test-session-id',
+            timestamp: '2025-01-01T00:00:00Z',
+            type: 'user',
+            cwd: '/test',
+            version: '1.0.0',
+            message: {
+              parts: [{ text: '</script><div>unsafe</div>' }] as Part[],
+            } as Content,
+          },
+        ] as ChatRecord[],
+      };
+
+      const result = injectDataIntoHtmlTemplate(template, data);
+
+      expect(result).toContain('\\u003c/script');
+      expect(result).not.toContain('</script><div>unsafe</div>');
     });
   });
 
