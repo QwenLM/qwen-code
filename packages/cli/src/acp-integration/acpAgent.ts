@@ -32,6 +32,10 @@ import { loadCliConfig } from '../config/config.js';
 
 // Import the modular Session class
 import { Session } from './session/Session.js';
+import {
+  formatAcpModelId,
+  parseAcpBaseModelId,
+} from '../utils/acpModelUtils.js';
 
 export async function runAcpAgent(
   config: Config,
@@ -367,15 +371,24 @@ class GeminiAgent {
   private buildAvailableModels(
     config: Config,
   ): acp.NewSessionResponse['models'] {
-    const currentModelId = (
+    const rawCurrentModelId = (
       config.getModel() ||
       this.config.getModel() ||
       ''
     ).trim();
-    const availableModels = config.getAvailableModels();
+    const currentAuthType = config.getAuthType();
+    const allConfiguredModels = config.getAllConfiguredModels();
+
+    const baseCurrentModelId = parseAcpBaseModelId(rawCurrentModelId);
+    const currentModelId =
+      currentAuthType && baseCurrentModelId
+        ? formatAcpModelId(baseCurrentModelId, currentAuthType)
+        : baseCurrentModelId;
+
+    const availableModels = allConfiguredModels;
 
     const mappedAvailableModels = availableModels.map((model) => ({
-      modelId: model.id,
+      modelId: formatAcpModelId(model.id, model.authType),
       name: model.label,
       description: model.description ?? null,
       _meta: {
@@ -392,7 +405,7 @@ class GeminiAgent {
         name: currentModelId,
         description: null,
         _meta: {
-          contextLimit: tokenLimit(currentModelId),
+          contextLimit: tokenLimit(baseCurrentModelId),
         },
       });
     }

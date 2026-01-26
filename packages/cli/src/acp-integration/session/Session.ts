@@ -19,6 +19,7 @@ import type {
   SubAgentEventEmitter,
 } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   ApprovalMode,
   convertToFunctionResponse,
   DiscoveredMCPTool,
@@ -58,6 +59,10 @@ import type {
   CurrentModeUpdate,
 } from '../schema.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import {
+  formatAcpModelId,
+  parseAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 
 // Import modular session components
 import type { SessionContext, ToolCallStartParams } from './types.js';
@@ -355,23 +360,39 @@ export class Session implements SessionContext {
    * Validates the model ID and switches the model via Config.
    */
   async setModel(params: SetModelRequest): Promise<SetModelResponse> {
-    const modelId = params.modelId.trim();
+    const rawModelId = params.modelId.trim();
 
-    if (!modelId) {
+    if (!rawModelId) {
       throw acp.RequestError.invalidParams('modelId cannot be empty');
     }
 
-    // Attempt to set the model using config
-    await this.config.setModel(modelId, {
-      reason: 'user_request_acp',
-      context: 'session/set_model',
-    });
+    const parsed = parseAcpModelOption(rawModelId);
+    const previousAuthType = this.config.getAuthType?.();
+    const selectedAuthType = parsed.authType ?? previousAuthType;
+
+    if (!selectedAuthType) {
+      throw acp.RequestError.invalidParams('authType cannot be determined');
+    }
+
+    await this.config.switchModel(
+      selectedAuthType,
+      parsed.modelId,
+      selectedAuthType !== previousAuthType &&
+        selectedAuthType === AuthType.QWEN_OAUTH
+        ? { requireCachedCredentials: true }
+        : undefined,
+      {
+        reason: 'user_request_acp',
+        context: 'session/set_model',
+      },
+    );
 
     // Get updated model info
     const currentModel = this.config.getModel();
+    const currentAuthType = this.config.getAuthType?.() ?? selectedAuthType;
 
     return {
-      modelId: currentModel,
+      modelId: formatAcpModelId(currentModel, currentAuthType),
     };
   }
 

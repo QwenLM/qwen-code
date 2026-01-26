@@ -954,6 +954,14 @@ export class Config {
   }
 
   /**
+   * Get all configured models across authTypes.
+   * Delegates to ModelsConfig.
+   */
+  getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
+    return this._modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
    * Switch authType+model via registry-backed selection.
    * This triggers a refresh of the ContentGenerator when required (always on authType changes).
    * For qwen-oauth model switches that are hot-update safe, this may update in place.

@@ -204,13 +204,40 @@ export class ModelsConfig {
   }
 
   /**
-   * Get all available models across all authTypes
+   * Get all configured models across authTypes.
+   *
+   * Notes:
+   * - By default, returns models across all authTypes.
+   * - qwen-oauth models are always ordered first.
    */
-  getAllAvailableModels(): AvailableModel[] {
+  getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
+    const inputAuthTypes =
+      authTypes && authTypes.length > 0 ? authTypes : Object.values(AuthType);
+
+    // De-duplicate while preserving the original order.
+    const seen = new Set<AuthType>();
+    const uniqueAuthTypes: AuthType[] = [];
+    for (const authType of inputAuthTypes) {
+      if (!seen.has(authType)) {
+        seen.add(authType);
+        uniqueAuthTypes.push(authType);
+      }
+    }
+
+    // Force qwen-oauth to the front (if requested / defaulted in).
+    const orderedAuthTypes: AuthType[] = [];
+    if (uniqueAuthTypes.includes(AuthType.QWEN_OAUTH)) {
+      orderedAuthTypes.push(AuthType.QWEN_OAUTH);
+    }
+    for (const authType of uniqueAuthTypes) {
+      if (authType !== AuthType.QWEN_OAUTH) {
+        orderedAuthTypes.push(authType);
+      }
+    }
+
     const allModels: AvailableModel[] = [];
-    for (const authType of Object.values(AuthType)) {
-      const models = this.modelRegistry.getModelsForAuthType(authType);
-      allModels.push(...models);
+    for (const authType of orderedAuthTypes) {
+      allModels.push(...this.modelRegistry.getModelsForAuthType(authType));
     }
     return allModels;
   }

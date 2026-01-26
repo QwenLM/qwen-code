@@ -11,6 +11,7 @@ import {
   AuthType,
   ModelSlashCommandEvent,
   logModelSlashCommand,
+  type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSource,
   type ContentGeneratorConfigSources,
@@ -21,10 +22,7 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import {
-  getAvailableModelsForAuthType,
-  MAINLINE_CODER,
-} from '../models/availableModels.js';
+import { MAINLINE_CODER } from '../models/availableModels.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 
@@ -154,13 +152,17 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const sources = readSourcesFromConfig(config);
 
   const availableModelEntries = useMemo(() => {
-    const allAuthTypes = Object.values(AuthType) as AuthType[];
-    const modelsByAuthType = allAuthTypes
-      .map((t) => ({
-        authType: t,
-        models: getAvailableModelsForAuthType(t, config ?? undefined),
-      }))
-      .filter((x) => x.models.length > 0);
+    const allModels = config ? config.getAllConfiguredModels() : [];
+
+    // Group models by authType
+    const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
+    for (const model of allModels) {
+      const authType = model.authType;
+      if (!modelsByAuthTypeMap.has(authType)) {
+        modelsByAuthTypeMap.set(authType, []);
+      }
+      modelsByAuthTypeMap.get(authType)!.push(model);
+    }
 
     // Fixed order: qwen-oauth first, then others in a stable order
     const authTypeOrder: AuthType[] = [
@@ -171,15 +173,14 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       AuthType.USE_VERTEX_AI,
     ];
 
-    // Filter to only include authTypes that have models
-    const availableAuthTypes = new Set(modelsByAuthType.map((x) => x.authType));
+    // Filter to only include authTypes that have models and maintain order
+    const availableAuthTypes = new Set(modelsByAuthTypeMap.keys());
     const orderedAuthTypes = authTypeOrder.filter((t) =>
       availableAuthTypes.has(t),
     );
 
     return orderedAuthTypes.flatMap((t) => {
-      const models =
-        modelsByAuthType.find((x) => x.authType === t)?.models ?? [];
+      const models = modelsByAuthTypeMap.get(t) ?? [];
       return models.map((m) => ({ authType: t, model: m }));
     });
   }, [config]);

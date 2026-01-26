@@ -47,30 +47,36 @@ const renderComponent = (
     setValue: vi.fn(),
   } as unknown as LoadedSettings;
 
-  const mockConfig = contextValue
-    ? ({
-        // --- Functions used by ModelDialog ---
-        getModel: vi.fn(() => MAINLINE_CODER),
-        setModel: vi.fn().mockResolvedValue(undefined),
-        switchModel: vi.fn().mockResolvedValue(undefined),
-        getAuthType: vi.fn(() => 'qwen-oauth'),
+  const mockConfig = {
+    // --- Functions used by ModelDialog ---
+    getModel: vi.fn(() => MAINLINE_CODER),
+    setModel: vi.fn().mockResolvedValue(undefined),
+    switchModel: vi.fn().mockResolvedValue(undefined),
+    getAuthType: vi.fn(() => 'qwen-oauth'),
+    getAllConfiguredModels: vi.fn(() =>
+      AVAILABLE_MODELS_QWEN.map((m) => ({
+        id: m.id,
+        label: m.label,
+        description: m.description || '',
+        authType: AuthType.QWEN_OAUTH,
+      })),
+    ),
 
-        // --- Functions used by ClearcutLogger ---
-        getUsageStatisticsEnabled: vi.fn(() => true),
-        getSessionId: vi.fn(() => 'mock-session-id'),
-        getDebugMode: vi.fn(() => false),
-        getContentGeneratorConfig: vi.fn(() => ({
-          authType: AuthType.QWEN_OAUTH,
-          model: MAINLINE_CODER,
-        })),
-        getUseSmartEdit: vi.fn(() => false),
-        getUseModelRouter: vi.fn(() => false),
-        getProxy: vi.fn(() => undefined),
+    // --- Functions used by ClearcutLogger ---
+    getUsageStatisticsEnabled: vi.fn(() => true),
+    getSessionId: vi.fn(() => 'mock-session-id'),
+    getDebugMode: vi.fn(() => false),
+    getContentGeneratorConfig: vi.fn(() => ({
+      authType: AuthType.QWEN_OAUTH,
+      model: MAINLINE_CODER,
+    })),
+    getUseSmartEdit: vi.fn(() => false),
+    getUseModelRouter: vi.fn(() => false),
+    getProxy: vi.fn(() => undefined),
 
-        // --- Spread test-specific overrides ---
-        ...contextValue,
-      } as unknown as Config)
-    : undefined;
+    // --- Spread test-specific overrides ---
+    ...(contextValue ?? {}),
+  } as unknown as Config;
 
   const renderResult = render(
     <SettingsContext.Provider value={mockSettings}>
@@ -308,6 +314,14 @@ describe('<ModelDialog />', () => {
             {
               getModel: mockGetModel,
               getAuthType: mockGetAuthType,
+              getAllConfiguredModels: vi.fn(() =>
+                AVAILABLE_MODELS_QWEN.map((m) => ({
+                  id: m.id,
+                  label: m.label,
+                  description: m.description || '',
+                  authType: AuthType.QWEN_OAUTH,
+                })),
+              ),
             } as unknown as Config
           }
         >
@@ -322,6 +336,14 @@ describe('<ModelDialog />', () => {
     const newMockConfig = {
       getModel: mockGetModel,
       getAuthType: mockGetAuthType,
+      getAllConfiguredModels: vi.fn(() =>
+        AVAILABLE_MODELS_QWEN.map((m) => ({
+          id: m.id,
+          label: m.label,
+          description: m.description || '',
+          authType: AuthType.QWEN_OAUTH,
+        })),
+      ),
     } as unknown as Config;
 
     rerender(

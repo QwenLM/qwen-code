@@ -679,8 +679,8 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getGenerationConfig().model).toBe('updated-model');
   });
 
-  describe('getAllAvailableModels', () => {
-    it('should return all models across all authTypes', () => {
+  describe('getAllConfiguredModels', () => {
+    it('should return all models across all authTypes and put qwen-oauth first', () => {
       const modelProvidersConfig: ModelProvidersConfig = {
         openai: [
           {
@@ -718,7 +718,23 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      const allModels = modelsConfig.getAllAvailableModels();
+      const allModels = modelsConfig.getAllConfiguredModels();
+
+      // qwen-oauth models should be ordered first
+      const firstNonQwenIndex = allModels.findIndex(
+        (m) => m.authType !== AuthType.QWEN_OAUTH,
+      );
+      expect(firstNonQwenIndex).toBeGreaterThan(0);
+      expect(
+        allModels
+          .slice(0, firstNonQwenIndex)
+          .every((m) => m.authType === AuthType.QWEN_OAUTH),
+      ).toBe(true);
+      expect(
+        allModels
+          .slice(firstNonQwenIndex)
+          .every((m) => m.authType !== AuthType.QWEN_OAUTH),
+      ).toBe(true);
 
       // Should include qwen-oauth models (hard-coded)
       const qwenModels = allModels.filter(
@@ -752,7 +768,7 @@ describe('ModelsConfig', () => {
     it('should return empty array when no models are registered', () => {
       const modelsConfig = new ModelsConfig();
 
-      const allModels = modelsConfig.getAllAvailableModels();
+      const allModels = modelsConfig.getAllConfiguredModels();
 
       // Should still include qwen-oauth models (hard-coded)
       expect(allModels.length).toBeGreaterThan(0);
@@ -782,7 +798,7 @@ describe('ModelsConfig', () => {
         modelProvidersConfig,
       });
 
-      const allModels = modelsConfig.getAllAvailableModels();
+      const allModels = modelsConfig.getAllConfiguredModels();
       const testModel = allModels.find((m) => m.id === 'test-model');
 
       expect(testModel).toBeDefined();
@@ -792,6 +808,57 @@ describe('ModelsConfig', () => {
       expect(testModel?.authType).toBe(AuthType.USE_OPENAI);
       expect(testModel?.isVision).toBe(true);
       expect(testModel?.capabilities?.vision).toBe(true);
+    });
+
+    it('should support filtering by authTypes and still put qwen-oauth first when included', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'openai-model-1',
+            name: 'OpenAI Model 1',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'anthropic-model-1',
+            name: 'Anthropic Model 1',
+            baseUrl: 'https://api.anthropic.com/v1',
+            envKey: 'ANTHROPIC_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig,
+      });
+
+      // Filter: OpenAI only (should not include qwen-oauth)
+      const openaiOnly = modelsConfig.getAllConfiguredModels([
+        AuthType.USE_OPENAI,
+      ]);
+      expect(openaiOnly.every((m) => m.authType === AuthType.USE_OPENAI)).toBe(
+        true,
+      );
+      expect(openaiOnly.map((m) => m.id)).toContain('openai-model-1');
+
+      // Filter: include qwen-oauth but request it later -> still ordered first
+      const withQwen = modelsConfig.getAllConfiguredModels([
+        AuthType.USE_OPENAI,
+        AuthType.QWEN_OAUTH,
+        AuthType.USE_ANTHROPIC,
+      ]);
+      expect(withQwen.length).toBeGreaterThan(0);
+      const firstNonQwenIndex = withQwen.findIndex(
+        (m) => m.authType !== AuthType.QWEN_OAUTH,
+      );
+      expect(firstNonQwenIndex).toBeGreaterThan(0);
+      expect(
+        withQwen
+          .slice(0, firstNonQwenIndex)
+          .every((m) => m.authType === AuthType.QWEN_OAUTH),
+      ).toBe(true);
     });
   });
 });
