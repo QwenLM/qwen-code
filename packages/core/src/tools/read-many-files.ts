@@ -28,6 +28,7 @@ import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { ToolErrorType } from './tool-error.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
 
 /**
  * Parameters for the ReadManyFilesTool.
@@ -238,6 +239,10 @@ ${finalExclusionPatternsForDescription
 
         const fullPath = path.resolve(this.config.getTargetDir(), relativePath);
         if (
+          !isPathWithinRoot(
+            fullPath,
+            this.config.storage.getProjectTempDir(),
+          ) &&
           !this.config.getWorkspaceContext().isPathWithinWorkspace(fullPath)
         ) {
           skippedFiles.push({

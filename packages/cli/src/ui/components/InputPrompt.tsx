@@ -256,52 +256,63 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   ]);
 
   // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(async () => {
-    try {
-      if (await clipboardHasImage()) {
-        const imagePath = await saveClipboardImage(config.getTargetDir());
-        if (imagePath) {
-          // Clean up old images
-          cleanupOldClipboardImages(config.getTargetDir()).catch(() => {
-            // Ignore cleanup errors
-          });
+  const handleClipboardImage = useCallback(
+    async (validated = false) => {
+      try {
+        const hasImage = validated || (await clipboardHasImage());
+        if (hasImage) {
+          const imagePath = await saveClipboardImage(
+            config.storage.getProjectTempDir(),
+          );
+          if (imagePath) {
+            // Clean up old images
+            cleanupOldClipboardImages(config.storage.getProjectTempDir()).catch(
+              () => {
+                // Ignore cleanup errors
+              },
+            );
 
-          // Get relative path from current directory
-          const relativePath = path.relative(config.getTargetDir(), imagePath);
+            // Get relative path from current directory
+            const relativePath = path.relative(
+              config.getTargetDir(),
+              imagePath,
+            );
 
-          // Insert @path reference at cursor position
-          const insertText = `@${relativePath}`;
-          const currentText = buffer.text;
-          const [row, col] = buffer.cursor;
+            // Insert @path reference at cursor position
+            const insertText = `@${relativePath}`;
+            const currentText = buffer.text;
+            const [row, col] = buffer.cursor;
 
-          // Calculate offset from row/col
-          let offset = 0;
-          for (let i = 0; i < row; i++) {
-            offset += buffer.lines[i].length + 1; // +1 for newline
+            // Calculate offset from row/col
+            let offset = 0;
+            for (let i = 0; i < row; i++) {
+              offset += buffer.lines[i].length + 1; // +1 for newline
+            }
+            offset += col;
+
+            // Add spaces around the path if needed
+            let textToInsert = insertText;
+            const charBefore = offset > 0 ? currentText[offset - 1] : '';
+            const charAfter =
+              offset < currentText.length ? currentText[offset] : '';
+
+            if (charBefore && charBefore !== ' ' && charBefore !== '\n') {
+              textToInsert = ' ' + textToInsert;
+            }
+            if (!charAfter || (charAfter !== ' ' && charAfter !== '\n')) {
+              textToInsert = textToInsert + ' ';
+            }
+
+            // Insert at cursor position
+            buffer.replaceRangeByOffset(offset, offset, textToInsert);
           }
-          offset += col;
-
-          // Add spaces around the path if needed
-          let textToInsert = insertText;
-          const charBefore = offset > 0 ? currentText[offset - 1] : '';
-          const charAfter =
-            offset < currentText.length ? currentText[offset] : '';
-
-          if (charBefore && charBefore !== ' ' && charBefore !== '\n') {
-            textToInsert = ' ' + textToInsert;
-          }
-          if (!charAfter || (charAfter !== ' ' && charAfter !== '\n')) {
-            textToInsert = textToInsert + ' ';
-          }
-
-          // Insert at cursor position
-          buffer.replaceRangeByOffset(offset, offset, textToInsert);
         }
+      } catch (error) {
+        console.error('Error handling clipboard image:', error);
       }
-    } catch (error) {
-      console.error('Error handling clipboard image:', error);
-    }
-  }, [buffer, config]);
+    },
+    [buffer, config],
+  );
 
   const handleInput = useCallback(
     (key: Key) => {
@@ -329,7 +340,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }, 500);
 
         // Ensure we never accidentally interpret paste as regular input.
-        buffer.handleInput(key);
+        if (key.pasteImage) {
+          handleClipboardImage(true);
+        } else {
+          buffer.handleInput(key);
+        }
         return;
       }
 
