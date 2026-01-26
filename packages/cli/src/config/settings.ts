@@ -30,6 +30,7 @@ import {
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { customDeepMerge, type MergeableObject } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   let current: SettingDefinition | undefined = undefined;
@@ -747,7 +748,7 @@ export function loadSettings(
                   'utf-8',
                 );
               } catch (e) {
-                console.error(
+                writeStderrLine(
                   `Error migrating settings file on disk: ${getErrorMessage(
                     e,
                   )}`,
@@ -769,7 +770,7 @@ export function loadSettings(
                 'utf-8',
               );
             } catch (e) {
-              console.error(
+              writeStderrLine(
                 `Error adding version to settings file: ${getErrorMessage(e)}`,
               );
             }
@@ -907,9 +908,6 @@ export function migrateDeprecatedSettings(
       legacySkills !== undefined &&
       settings.experimental?.skills === undefined
     ) {
-      console.log(
-        `Migrating deprecated tools.experimental.skills setting from ${scope} settings...`,
-      );
       loadedSettings.setValue(scope, 'experimental.skills', legacySkills);
     }
   };
@@ -939,7 +937,8 @@ export function saveSettings(settingsFile: SettingsFile): void {
       settingsToSave as Record<string, unknown>,
     );
   } catch (error) {
-    console.error('Error saving user settings file:', error);
+    writeStderrLine('Error saving user settings file.');
+    writeStderrLine(error instanceof Error ? error.message : String(error));
     throw error;
   }
 }

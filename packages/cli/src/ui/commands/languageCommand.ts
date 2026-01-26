@@ -25,6 +25,9 @@ import {
   resolveOutputLanguage,
   updateOutputLanguageFile,
 } from '../../utils/languageUtils.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('LANGUAGE_COMMAND');
 
 /**
  * Gets the current LLM output language setting and its resolved value.
@@ -94,7 +97,7 @@ async function setUiLanguage(
     try {
       services.settings.setValue(SettingScope.User, 'general.language', lang);
     } catch (error) {
-      console.warn('Failed to save language setting:', error);
+      debugLogger.warn('Failed to save language setting:', error);
     }
   }
 
@@ -136,7 +139,7 @@ async function setOutputLanguage(
           settingValue,
         );
       } catch (error) {
-        console.warn('Failed to save output language setting:', error);
+        debugLogger.warn('Failed to save output language setting:', error);
       }
     }
 

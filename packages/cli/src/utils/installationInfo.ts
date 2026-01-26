@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isGitRepository } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -20,6 +20,8 @@ export enum PackageManager {
   NPX = 'npx',
   UNKNOWN = 'unknown',
 }
+
+const debugLogger = createDebugLogger('INSTALLATION_INFO');
 
 export interface InstallationInfo {
   packageManager: PackageManager;
@@ -170,7 +172,7 @@ export function getInstallationInfo(
         : 'Installed with npm. Attempting to automatically update now...',
     };
   } catch (error) {
-    console.log(error);
+    debugLogger.error('Failed to detect installation info:', error);
     return { packageManager: PackageManager.UNKNOWN, isGlobal: false };
   }
 }

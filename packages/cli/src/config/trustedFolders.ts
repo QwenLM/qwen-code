@@ -15,6 +15,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import stripJsonComments from 'strip-json-comments';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 export const TRUSTED_FOLDERS_FILENAME = 'trustedFolders.json';
 export const SETTINGS_DIRECTORY_NAME = '.qwen';
@@ -184,7 +185,8 @@ export function saveTrustedFolders(
       { encoding: 'utf-8', mode: 0o600 },
     );
   } catch (error) {
-    console.error('Error saving trusted folders file:', error);
+    writeStderrLine('Error saving trusted folders file.');
+    writeStderrLine(error instanceof Error ? error.message : String(error));
   }
 }
 

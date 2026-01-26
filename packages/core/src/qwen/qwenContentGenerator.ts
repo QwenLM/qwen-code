@@ -19,11 +19,13 @@ import type {
 } from '@google/genai';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 /**
  * Qwen Content Generator that uses Qwen OAuth tokens with automatic refresh
  */
 export class QwenContentGenerator extends OpenAIContentGenerator {
+  private readonly debugLogger = createDebugLogger('QWEN');
   private qwenClient: IQwenOAuth2Client;
   private sharedManager: SharedTokenManager;
   private currentToken?: string;
@@ -102,7 +104,7 @@ export class QwenContentGenerator extends OpenAIContentGenerator {
       if (this.isAuthError(error)) {
         throw error;
       }
-      console.warn('Failed to get token from shared manager:', error);
+      this.debugLogger.warn('Failed to get token from shared manager:', error);
       throw new Error(
         'Failed to obtain valid Qwen access token. Please re-authenticate.',
       );

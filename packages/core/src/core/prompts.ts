@@ -12,6 +12,9 @@ import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_CONFIG_DIR } from '../tools/memoryTool.js';
 import type { GenerateContentConfig } from '@google/genai';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PROMPTS');
 
 export function resolvePathFromEnv(envVar?: string): {
   isSwitch: boolean;
@@ -46,7 +49,7 @@ export function resolvePathFromEnv(envVar?: string): {
       }
     } catch (error) {
       // If os.homedir() fails, we catch the error instead of crashing.
-      console.warn(
+      debugLogger.warn(
         `Could not resolve home directory for path: ${trimmedEnvVar}`,
         error,
       );
@@ -774,7 +777,7 @@ function getToolCallExamples(model?: string): string {
       case 'general':
         return generalToolCallExamples;
       default:
-        console.warn(
+        debugLogger.warn(
           `Unknown QWEN_CODE_TOOL_CALL_STYLE value: ${toolCallStyle}. Using model-based detection.`,
         );
         break;

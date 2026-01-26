@@ -10,6 +10,9 @@ import { type BaseLlmClient } from '../core/baseLlmClient.js';
 import { LruCache } from './LruCache.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { promptIdContext } from './promptIdContext.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('LLM_EDIT_FIXER');
 
 const MAX_CACHE_SIZE = 50;
 
@@ -112,7 +115,7 @@ export async function FixLLMEditWithInstruction(
   let promptId = promptIdContext.getStore();
   if (!promptId) {
     promptId = `llm-fixer-fallback-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    console.warn(
+    debugLogger.warn(
       `Could not find promptId in context. This is unexpected. Using a fallback ID: ${promptId}`,
     );
   }

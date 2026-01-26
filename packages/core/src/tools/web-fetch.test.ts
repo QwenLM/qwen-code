@@ -36,6 +36,7 @@ describe('WebFetchTool', () => {
       setApprovalMode: vi.fn(),
       getProxy: vi.fn(),
       getGeminiClient: mockGetGeminiClient,
+      getSessionId: vi.fn(() => 'test-session-id'),
     } as unknown as Config;
   });
 

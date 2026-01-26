@@ -29,6 +29,9 @@ import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('ANTHROPIC');
 
 type StreamingBlockState = {
   type: string;
@@ -117,7 +120,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         totalTokens: result.totalTokens,
       };
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         'Failed to calculate tokens with tokenizer, ' +
           'falling back to simple method:',
         error,

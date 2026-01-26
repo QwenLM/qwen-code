@@ -8,6 +8,9 @@ import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('INSTALLATION');
 
 export class InstallationManager {
   private getInstallationIdPath(): string {
@@ -48,7 +51,7 @@ export class InstallationManager {
 
       return installationId;
     } catch (error) {
-      console.error(
+      debugLogger.error(
         'Error accessing installation ID file, generating ephemeral ID:',
         error,
       );

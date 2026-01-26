@@ -34,12 +34,15 @@ import type {
   SubAgentErrorEvent,
   SubAgentApprovalRequestEvent,
 } from '../subagents/subagent-events.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 export interface TaskParams {
   description: string;
   prompt: string;
   subagent_type: string;
 }
+
+const debugLogger = createDebugLogger('TASK');
 
 /**
  * Task tool that enables primary agents to delegate tasks to specialized subagents.
@@ -103,7 +106,7 @@ export class TaskTool extends BaseDeclarativeTool<TaskParams, ToolResult> {
       this.availableSubagents = await this.subagentManager.listSubagents();
       this.updateDescriptionAndSchema();
     } catch (error) {
-      console.warn('Failed to load subagents for Task tool:', error);
+      debugLogger.warn('Failed to load subagents for Task tool:', error);
       this.availableSubagents = [];
       this.updateDescriptionAndSchema();
     } finally {
@@ -550,7 +553,7 @@ class TaskToolInvocation extends BaseToolInvocation<TaskParams, ToolResult> {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(`[TaskTool] Error running subagent: ${errorMessage}`);
+      debugLogger.error(`[TaskTool] Error running subagent: ${errorMessage}`);
 
       const errorDisplay: TaskResultDisplay = {
         ...this.currentDisplay!,

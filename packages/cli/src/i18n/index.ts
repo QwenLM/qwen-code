@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   type SupportedLanguage,
   getLanguageNameFromLocale,
@@ -25,7 +26,6 @@ type TranslationValue = string | string[];
 type TranslationDict = Record<string, TranslationValue>;
 const translationCache: Record<string, TranslationDict> = {};
 const loadingPromises: Record<string, Promise<TranslationDict>> = {};
-
 // Path helpers
 const getBuiltinLocalesDir = (): string => {
   const __filename = fileURLToPath(import.meta.url);
@@ -143,16 +143,13 @@ async function loadTranslationsAsync(
       } catch (error) {
         // Log warning but continue to next directory
         if (isUser) {
-          console.warn(
-            `Failed to load translations from user directory for ${lang}:`,
-            error,
+          writeStderrLine(
+            `Failed to load translations from user directory for ${lang}: ${error instanceof Error ? error.message : String(error)}`,
           );
         } else {
-          console.warn(`Failed to load JS translations for ${lang}:`, error);
-          if (error instanceof Error) {
-            console.warn(`Error details: ${error.message}`);
-            console.warn(`Stack: ${error.stack}`);
-          }
+          writeStderrLine(
+            `Failed to load JS translations for ${lang}: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
         // Continue to next directory
         continue;
@@ -211,7 +208,7 @@ export function setLanguage(lang: SupportedLanguage | 'auto'): void {
     const userJsPath = getLocalePath(resolvedLang, true);
     const builtinJsPath = getLocalePath(resolvedLang, false);
     if (fs.existsSync(userJsPath) || fs.existsSync(builtinJsPath)) {
-      console.warn(
+      writeStderrLine(
         `Language file for ${resolvedLang} requires async loading. ` +
           `Use setLanguageAsync() instead, or call initializeI18n() first.`,
       );

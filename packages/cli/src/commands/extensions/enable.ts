@@ -7,6 +7,7 @@
 import { type CommandModule } from 'yargs';
 import { FatalConfigError, getErrorMessage } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
@@ -25,14 +26,14 @@ export async function handleEnable(args: EnableArgs) {
       extensionManager.enableExtension(args.name, SettingScope.User);
     }
     if (args.scope) {
-      console.log(
+      writeStdoutLine(
         t('Extension "{{name}}" successfully enabled for scope "{{scope}}".', {
           name: args.name,
           scope: args.scope,
         }),
       );
     } else {
-      console.log(
+      writeStdoutLine(
         t('Extension "{{name}}" successfully enabled in all scopes.', {
           name: args.name,
         }),

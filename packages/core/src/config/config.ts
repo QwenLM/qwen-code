@@ -107,6 +107,11 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import {
+  createDebugLogger,
+  setDebugLogSession,
+  type DebugLogger,
+} from '../utils/debugLogger.js';
 
 import {
   ModelsConfig,
@@ -402,6 +407,7 @@ export interface ConfigInitializeOptions {
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
@@ -510,6 +516,8 @@ export class Config {
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
     this.sessionData = params.sessionData;
+    setDebugLogSession(this);
+    this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
@@ -709,7 +717,6 @@ export class Config {
       this.shouldLoadMemoryFromIncludeDirectories()
         ? this.getWorkspaceContext().getDirectories()
         : [],
-      this.getDebugMode(),
       this.getFileService(),
       this.getExtensionContextFilePaths(),
       this.isTrustedFolder(),
@@ -807,6 +814,10 @@ export class Config {
     return this.sessionId;
   }
 
+  getDebugLogger(): DebugLogger {
+    return this.debugLogger;
+  }
+
   /**
    * Releases resources owned by the config instance.
    */
@@ -823,6 +834,8 @@ export class Config {
   ): string {
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
+    setDebugLogSession(this);
+    this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
@@ -1570,10 +1583,9 @@ export class Config {
 
       if (!toolName) {
         // Log warning and skip this tool instead of crashing
-        console.warn(
-          `[Config] Skipping tool registration: ${className} is missing static Name property. ` +
-            `Tools must define a static Name property to be registered. ` +
-            `Location: config.ts:registerCoreTool`,
+        this.debugLogger.warn(
+          `Skipping tool registration: ${className} is missing static Name property. ` +
+            `Tools must define a static Name property to be registered.`,
         );
         return;
       }
@@ -1582,8 +1594,8 @@ export class Config {
         try {
           registry.registerTool(new ToolClass(...args));
         } catch (error) {
-          console.error(
-            `[Config] Failed to register tool ${className} (${toolName}):`,
+          this.debugLogger.error(
+            `Failed to register tool ${className} (${toolName}):`,
             error,
           );
           throw error; // Re-throw after logging context
@@ -1645,7 +1657,7 @@ export class Config {
     }
 
     await registry.discoverAllTools();
-    console.debug('ToolRegistry created', registry.getAllToolNames());
+    this.debugLogger.debug('ToolRegistry created', registry.getAllToolNames());
     return registry;
   }
 }

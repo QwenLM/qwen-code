@@ -7,6 +7,7 @@
 import { type CommandModule } from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getExtensionManager } from './utils.js';
 import { t } from '../../i18n/index.js';
 
@@ -23,14 +24,14 @@ export async function handleDisable(args: DisableArgs) {
     } else {
       extensionManager.disableExtension(args.name, SettingScope.User);
     }
-    console.log(
+    writeStdoutLine(
       t('Extension "{{name}}" successfully disabled for scope "{{scope}}".', {
         name: args.name,
         scope: args.scope || SettingScope.User,
       }),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }

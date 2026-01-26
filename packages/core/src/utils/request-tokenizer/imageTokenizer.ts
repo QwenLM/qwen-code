@@ -6,6 +6,9 @@
 
 import type { ImageMetadata } from './types.js';
 import { isSupportedImageMimeType } from './supportedImageFormats.js';
+import { createDebugLogger } from '../debugLogger.js';
+
+const debugLogger = createDebugLogger('IMAGE_TOKENIZER');
 
 /**
  * Image tokenizer for calculating image tokens based on dimensions
@@ -44,7 +47,7 @@ export class ImageTokenizer {
     try {
       // Check if the MIME type is supported
       if (!isSupportedImageMimeType(mimeType)) {
-        console.warn(`Unsupported image format: ${mimeType}`);
+        debugLogger.warn(`Unsupported image format: ${mimeType}`);
         // Return default metadata for unsupported formats
         return {
           width: 512,
@@ -65,7 +68,7 @@ export class ImageTokenizer {
         dataSize: buffer.length,
       };
     } catch (error) {
-      console.warn('Failed to extract image metadata:', error);
+      debugLogger.warn('Failed to extract image metadata:', error);
       // Return default metadata for fallback
       return {
         width: 512,
@@ -320,7 +323,7 @@ export class ImageTokenizer {
         const metadata = await this.extractImageMetadata(data, mimeType);
         results.push(this.calculateTokens(metadata));
       } catch (error) {
-        console.warn('Error calculating tokens for image:', error);
+        debugLogger.warn('Error calculating tokens for image:', error);
         // Return minimum tokens as fallback
         results.push(
           ImageTokenizer.MIN_TOKENS_PER_IMAGE +
@@ -499,7 +502,7 @@ export class ImageTokenizer {
     }
 
     // Fallback: return default dimensions if we can't parse the structure
-    console.warn('Could not extract HEIC dimensions, using default');
+    debugLogger.warn('Could not extract HEIC dimensions, using default');
     return { width: 512, height: 512 };
   }
 }

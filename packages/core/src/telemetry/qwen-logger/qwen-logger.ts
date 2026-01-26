@@ -54,6 +54,10 @@ import type {
   RumOS,
 } from './event-types.js';
 import type { Config } from '../../config/config.js';
+import {
+  createDebugLogger,
+  type DebugLogger,
+} from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
@@ -91,6 +95,7 @@ export interface LogResponse {
 export class QwenLogger {
   private static instance: QwenLogger;
   private config?: Config;
+  private debugLogger: DebugLogger;
   private readonly installationManager: InstallationManager;
 
   /**
@@ -121,6 +126,7 @@ export class QwenLogger {
 
   private constructor(config: Config) {
     this.config = config;
+    this.debugLogger = createDebugLogger('QWEN_LOGGER');
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
     this.installationManager = new InstallationManager();
     this.userId = this.generateUserId();
@@ -154,15 +160,13 @@ export class QwenLogger {
 
       this.events.push(event);
 
-      if (wasAtCapacity && this.config?.getDebugMode()) {
-        console.debug(
+      if (wasAtCapacity) {
+        this.debugLogger.debug(
           `QwenLogger: Dropped old event to prevent memory leak (queue size: ${this.events.size})`,
         );
       }
     } catch (error) {
-      if (this.config?.getDebugMode()) {
-        console.error('QwenLogger: Failed to enqueue log event.', error);
-      }
+      this.debugLogger.error('QwenLogger: Failed to enqueue log event.', error);
     }
   }
 
@@ -266,27 +270,21 @@ export class QwenLogger {
     }
 
     this.flushToRum().catch((error) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
+      this.debugLogger.debug('Error flushing to RUM:', error);
     });
   }
 
   async flushToRum(): Promise<LogResponse> {
     if (this.isFlushInProgress) {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          'QwenLogger: Flush already in progress, marking pending flush.',
-        );
-      }
+      this.debugLogger.debug(
+        'QwenLogger: Flush already in progress, marking pending flush.',
+      );
       this.pendingFlush = true;
       return Promise.resolve({});
     }
     this.isFlushInProgress = true;
 
-    if (this.config?.getDebugMode()) {
-      console.log('Flushing log events to RUM.');
-    }
+    this.debugLogger.debug('Flushing log events to RUM.');
     if (this.events.size === 0) {
       this.isFlushInProgress = false;
       return {};
@@ -338,9 +336,7 @@ export class QwenLogger {
       this.lastFlushTime = Date.now();
       return {};
     } catch (error) {
-      if (this.config?.getDebugMode()) {
-        console.error('RUM flush failed.', error);
-      }
+      this.debugLogger.error('RUM flush failed.', error);
 
       // Re-queue failed events for retry
       this.requeueFailedEvents(eventsToSend);
@@ -353,9 +349,7 @@ export class QwenLogger {
         this.pendingFlush = false;
         // Fire and forget the pending flush
         this.flushToRum().catch((error) => {
-          if (this.config?.getDebugMode()) {
-            console.debug('Error in pending flush to RUM:', error);
-          }
+          this.debugLogger.debug('Error in pending flush to RUM:', error);
         });
       }
     }
@@ -366,12 +360,10 @@ export class QwenLogger {
     // Flush all pending events with the old session ID first.
     // If flush fails, discard the pending events to avoid mixing sessions.
     await this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          'Error flushing pending events before session start:',
-          error,
-        );
-      }
+      this.debugLogger.debug(
+        'Error flushing pending events before session start:',
+        error,
+      );
     });
 
     // Clear any remaining events (discard if flush failed)
@@ -402,9 +394,7 @@ export class QwenLogger {
     // Flush start event immediately
     this.enqueueLogEvent(applicationEvent);
     this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
+      this.debugLogger.debug('Error flushing to RUM:', error);
     });
   }
 
@@ -414,9 +404,7 @@ export class QwenLogger {
     // Flush immediately on session end.
     this.enqueueLogEvent(applicationEvent);
     this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
+      this.debugLogger.debug('Error flushing to RUM:', error);
     });
   }
 
@@ -917,8 +905,8 @@ export class QwenLogger {
     const eventsToRetry = eventsToSend.slice(-MAX_RETRY_EVENTS); // Keep only the most recent events
 
     // Log a warning if we're dropping events
-    if (eventsToSend.length > MAX_RETRY_EVENTS && this.config?.getDebugMode()) {
-      console.warn(
+    if (eventsToSend.length > MAX_RETRY_EVENTS) {
+      this.debugLogger.warn(
         `QwenLogger: Dropping ${
           eventsToSend.length - MAX_RETRY_EVENTS
         } events due to retry queue limit. Total events: ${
@@ -932,11 +920,9 @@ export class QwenLogger {
     const numEventsToRequeue = Math.min(eventsToRetry.length, availableSpace);
 
     if (numEventsToRequeue === 0) {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          `QwenLogger: No events re-queued (queue size: ${this.events.size})`,
-        );
-      }
+      this.debugLogger.debug(
+        `QwenLogger: No events re-queued (queue size: ${this.events.size})`,
+      );
       return;
     }
 
@@ -955,11 +941,9 @@ export class QwenLogger {
       this.events.pop();
     }
 
-    if (this.config?.getDebugMode()) {
-      console.debug(
-        `QwenLogger: Re-queued ${numEventsToRequeue} events for retry (queue size: ${this.events.size})`,
-      );
-    }
+    this.debugLogger.debug(
+      `QwenLogger: Re-queued ${numEventsToRequeue} events for retry (queue size: ${this.events.size})`,
+    );
   }
 }
 

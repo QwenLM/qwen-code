@@ -16,6 +16,7 @@ const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
 const IDE_DIR_NAME = 'ide';
+const DEBUG_DIR_NAME = 'debug';
 
 export class Storage {
   private readonly targetDir: string;
@@ -58,6 +59,14 @@ export class Storage {
 
   static getGlobalTempDir(): string {
     return path.join(Storage.getGlobalQwenDir(), TMP_DIR_NAME);
+  }
+
+  static getGlobalDebugDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), DEBUG_DIR_NAME);
+  }
+
+  static getDebugLogPath(sessionId: string): string {
+    return path.join(Storage.getGlobalDebugDir(), `${sessionId}.txt`);
   }
 
   static getGlobalIdeDir(): string {

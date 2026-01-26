@@ -14,6 +14,9 @@ import {
 } from './types.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_OAUTH_MODELS } from './constants.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
 export { QWEN_OAUTH_MODELS } from './constants.js';
 
@@ -62,8 +65,8 @@ export class ModelRegistry {
         const authType = validateAuthTypeKey(rawKey);
 
         if (!authType) {
-          console.warn(
-            `[ModelRegistry] Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+          debugLogger.warn(
+            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
           );
           continue;
         }

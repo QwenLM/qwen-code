@@ -14,6 +14,9 @@ import type { Config } from '../config/config.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LS');
 
 /**
  * Parameters for the LS tool
@@ -202,7 +205,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
           });
         } catch (error) {
           // Log error internally but don't fail the whole listing
-          console.error(`Error accessing ${fullPath}: ${error}`);
+          debugLogger.warn(`Error accessing ${fullPath}: ${error}`);
         }
       }
 

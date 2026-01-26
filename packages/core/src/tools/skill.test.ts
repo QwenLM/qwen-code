@@ -156,16 +156,12 @@ describe('SkillTool', () => {
         new Error('Loading failed'),
       );
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-      new SkillTool(config);
+      const failedSkillTool = new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to load skills for Skills tool:',
-        expect.any(Error),
+      expect(failedSkillTool.description).toContain(
+        'No skills are currently configured',
       );
-      consoleSpy.mockRestore();
     });
   });
 
@@ -375,10 +371,6 @@ describe('SkillTool', () => {
         new Error('Loading failed'),
       );
 
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-
       const params: SkillParams = {
         skill: 'code-review',
       };
@@ -391,8 +383,6 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to load skill');
       expect(llmText).toContain('Loading failed');
-
-      consoleSpy.mockRestore();
     });
 
     it('should not require confirmation', async () => {

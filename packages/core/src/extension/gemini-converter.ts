@@ -15,6 +15,9 @@ import type { ExtensionConfig } from './extensionManager.js';
 import type { ExtensionSetting } from './extensionSettings.js';
 import { ExtensionStorage } from './storage.js';
 import { convertTomlToMarkdown } from '../utils/toml-to-markdown-converter.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
 export interface GeminiExtensionConfig {
   name: string;
@@ -165,7 +168,7 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
       // Delete original TOML file
       fs.unlinkSync(tomlPath);
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `Warning: Failed to convert command file ${relativeFile}: ${error instanceof Error ? error.message : String(error)}`,
       );
       // Continue with other files even if one fails

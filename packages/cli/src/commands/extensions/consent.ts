@@ -9,6 +9,7 @@ import type { ConfirmationRequest } from '../../ui/types.js';
 import chalk from 'chalk';
 import prompts from 'prompts';
 import { t } from '../../i18n/index.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 /**
  * Requests consent from the user to perform an action, by reading a Y/n
@@ -22,7 +23,7 @@ import { t } from '../../i18n/index.js';
 export async function requestConsentNonInteractive(
   consentDescription: string,
 ): Promise<boolean> {
-  console.info(consentDescription);
+  writeStdoutLine(consentDescription);
   const result = await promptForConsentNonInteractive(
     t('Do you want to continue? [Y/n]: '),
   );

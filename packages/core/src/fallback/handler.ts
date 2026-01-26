@@ -6,6 +6,9 @@
 
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('FALLBACK');
 
 export async function handleFallback(
   config: Config,
@@ -56,17 +59,17 @@ async function handleQwenOAuthError(error?: unknown): Promise<string | null> {
     errorMessage.includes('too many requests');
 
   if (isAuthError) {
-    console.warn('Qwen OAuth authentication error detected:', errorMessage);
+    debugLogger.warn('Qwen OAuth authentication error detected:', errorMessage);
     // The QwenContentGenerator should automatically handle token refresh
     // If it still fails, it likely means the refresh token is also expired
-    console.log(
+    debugLogger.info(
       'Note: If this persists, you may need to re-authenticate with Qwen OAuth',
     );
     return null;
   }
 
   if (isRateLimitError) {
-    console.warn('Qwen API rate limit encountered:', errorMessage);
+    debugLogger.warn('Qwen API rate limit encountered:', errorMessage);
     // For rate limiting, we don't need to do anything special
     // The retry mechanism will handle the backoff
     return null;

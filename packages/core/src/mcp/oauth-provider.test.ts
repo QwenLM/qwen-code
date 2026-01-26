@@ -6,6 +6,17 @@
 
 import { vi } from 'vitest';
 
+// Mock debugLogger
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 // Mock dependencies AT THE TOP
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 vi.mock('../utils/secure-browser-launcher.js', () => ({
@@ -938,7 +949,7 @@ describe('MCPOAuthProvider', () => {
       expect(tokenStorage.deleteCredentials).toHaveBeenCalledWith(
         'test-server',
       );
-      expect(console.error).toHaveBeenCalledWith(
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
         expect.stringContaining('Failed to refresh token'),
       );
     });

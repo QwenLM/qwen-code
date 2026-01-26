@@ -11,6 +11,7 @@ import {
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -68,13 +69,13 @@ export async function handleInstall(args: InstallArgs) {
       },
       requestConsent,
     );
-    console.log(
+    writeStdoutLine(
       t('Extension "{{name}}" installed successfully and enabled.', {
         name: extension.name,
       }),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }

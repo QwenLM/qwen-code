@@ -15,6 +15,9 @@ import type {
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import type { ContentGenerator } from './contentGenerator.js';
@@ -262,9 +265,7 @@ export class GeminiClient {
         contextLines.join('\n'),
       ];
 
-      if (this.config.getDebugMode()) {
-        console.log(contextParts.join('\n'));
-      }
+      debugLogger.debug(contextParts.join('\n'));
       return {
         contextParts,
         newIdeContext: currentIdeContext,
@@ -394,9 +395,7 @@ export class GeminiClient {
         changeLines.join('\n'),
       ];
 
-      if (this.config.getDebugMode()) {
-        console.log(contextParts.join('\n'));
-      }
+      debugLogger.debug(contextParts.join('\n'));
       return {
         contextParts,
         newIdeContext: currentIdeContext,

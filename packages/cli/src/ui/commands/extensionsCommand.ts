@@ -18,10 +18,12 @@ import {
   parseInstallSource,
   type ExtensionUpdateInfo,
 } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import open from 'open';
 import { extensionToOutputString } from '../../commands/extensions/utils.js';
 
+const debugLogger = createDebugLogger('EXTENSIONS_COMMAND');
 const EXTENSION_EXPLORE_URL = {
   Gemini: 'https://geminicli.com/extensions/',
   ClaudeCode: 'https://claudemarketplaces.com/',
@@ -240,7 +242,7 @@ async function updateAction(context: CommandContext, args: string) {
 async function installAction(context: CommandContext, args: string) {
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
-    console.error(
+    debugLogger.error(
       `Cannot ${context.invocation?.name} extensions in this environment`,
     );
     return;
@@ -297,7 +299,7 @@ async function installAction(context: CommandContext, args: string) {
 async function uninstallAction(context: CommandContext, args: string) {
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
-    console.error(
+    debugLogger.error(
       `Cannot ${context.invocation?.name} extensions in this environment`,
     );
     return;
@@ -357,7 +359,7 @@ function getEnableDisableContext(
 } | null {
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
-    console.error(
+    debugLogger.error(
       `Cannot ${context.invocation?.name} extensions in this environment`,
     );
     return null;
@@ -479,7 +481,7 @@ async function enableAction(context: CommandContext, args: string) {
 async function detailAction(context: CommandContext, args: string) {
   const extensionManager = context.services.config?.getExtensionManager();
   if (!(extensionManager instanceof ExtensionManager)) {
-    console.error(
+    debugLogger.error(
       `Cannot ${context.invocation?.name} extensions in this environment`,
     );
     return;

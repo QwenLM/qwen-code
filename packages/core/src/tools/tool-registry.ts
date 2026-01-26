@@ -23,8 +23,11 @@ import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 type ToolParams = Record<string, unknown>;
+
+const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
@@ -198,7 +201,7 @@ export class ToolRegistry {
         tool = tool.asFullyQualifiedTool();
       } else {
         // Decide on behavior: throw error, log warning, or allow overwrite
-        console.warn(
+        debugLogger.warn(
           `Tool with name "${tool.name}" is already registered. Overwriting.`,
         );
       }
@@ -356,8 +359,10 @@ export class ToolRegistry {
           }
 
           if (code !== 0) {
-            console.error(`Command failed with code ${code}`);
-            console.error(stderr);
+            debugLogger.error(
+              `Tool discovery command failed with code ${code}`,
+            );
+            debugLogger.error(stderr);
             return reject(
               new Error(`Tool discovery command failed with exit code ${code}`),
             );
@@ -390,7 +395,7 @@ export class ToolRegistry {
       // register each function as a tool
       for (const func of functions) {
         if (!func.name) {
-          console.warn('Discovered a tool with no name. Skipping.');
+          debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
         }
         const parameters =
@@ -409,7 +414,7 @@ export class ToolRegistry {
         );
       }
     } catch (e) {
-      console.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
+      debugLogger.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
       throw e;
     }
   }

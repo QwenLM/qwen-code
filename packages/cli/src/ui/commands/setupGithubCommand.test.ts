@@ -219,20 +219,13 @@ describe('updateGitignore', () => {
   });
 
   it('handles permission errors gracefully', async () => {
-    const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
-
     const fsModule = await import('node:fs');
     const writeFileSpy = vi
       .spyOn(fsModule.promises, 'writeFile')
       .mockRejectedValue(new Error('Permission denied'));
 
     await expect(updateGitignore(scratchDir)).resolves.toBeUndefined();
-    expect(consoleSpy).toHaveBeenCalledWith(
-      'Failed to update .gitignore:',
-      expect.any(Error),
-    );
 
     writeFileSpy.mockRestore();
-    consoleSpy.mockRestore();
   });
 });

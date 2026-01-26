@@ -118,10 +118,6 @@ describe('ToolRegistry', () => {
     } as fs.Stats);
     config = new Config(baseConfigParams);
     toolRegistry = new ToolRegistry(config);
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'debug').mockImplementation(() => {});
-    vi.spyOn(console, 'log').mockImplementation(() => {});
 
     mockMcpClientConnect.mockReset().mockResolvedValue(undefined);
     mockStdioTransportClose.mockReset();

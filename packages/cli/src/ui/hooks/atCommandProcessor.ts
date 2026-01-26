@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { PartListUnion, PartUnion } from '@google/genai';
 import type { AnyToolInvocation, Config } from '@qwen-code/qwen-code-core';
 import {
+  createDebugLogger,
   getErrorMessage,
   isNodeError,
   unescapePath,
@@ -35,6 +36,8 @@ interface AtCommandPart {
   type: 'text' | 'atPath';
   content: string;
 }
+
+const debugLogger = createDebugLogger('AT_COMMAND_PROCESSOR');
 
 /**
  * Parses a query string to find all '@<path>' commands and text segments.
@@ -280,7 +283,7 @@ export async function handleAtCommand({
                 );
               }
             } catch (globError) {
-              console.error(
+              debugLogger.error(
                 `Error during glob search for ${pathName}: ${getErrorMessage(globError)}`,
               );
               onDebugMessage(
@@ -293,7 +296,7 @@ export async function handleAtCommand({
             );
           }
         } else {
-          console.error(
+          debugLogger.error(
             `Error stating path ${pathName}: ${getErrorMessage(error)}`,
           );
           onDebugMessage(
@@ -372,7 +375,7 @@ export async function handleAtCommand({
     }
 
     const message = `Ignored ${totalIgnored} files:\n${messages.join('\n')}`;
-    console.log(message);
+    debugLogger.info(message);
     onDebugMessage(message);
   }
 

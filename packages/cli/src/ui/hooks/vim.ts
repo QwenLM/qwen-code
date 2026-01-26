@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useReducer, useEffect } from 'react';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
@@ -15,6 +16,8 @@ export type VimMode = 'NORMAL' | 'INSERT';
 const DIGIT_MULTIPLIER = 10;
 const DEFAULT_COUNT = 1;
 const DIGIT_1_TO_9 = /^[1-9]$/;
+
+const debugLogger = createDebugLogger('VIM_MODE');
 
 // Command types
 const CMD_TYPES = {
@@ -394,7 +397,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         normalizedKey = normalizeKey(key);
       } catch (error) {
         // Handle malformed key inputs gracefully
-        console.warn('Malformed key input in vim mode:', key, error);
+        debugLogger.warn('Malformed key input in vim mode:', key, error);
         return false;
       }
 

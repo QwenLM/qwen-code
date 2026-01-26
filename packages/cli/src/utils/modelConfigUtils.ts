@@ -13,6 +13,7 @@ import {
   type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { writeStderrLine } from './stdioHelpers.js';
 
 export interface CliGenerationConfigInputs {
   argv: {
@@ -131,7 +132,7 @@ export function resolveCliGenerationConfig(
 
   // Log warnings if any
   for (const warning of resolved.warnings) {
-    console.warn(warning);
+    writeStderrLine(warning);
   }
 
   // Resolve OpenAI logging config (CLI-specific, not part of core resolver)

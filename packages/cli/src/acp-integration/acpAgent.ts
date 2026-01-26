@@ -11,6 +11,7 @@ import {
   APPROVAL_MODES,
   AuthType,
   clearCachedCredentialFile,
+  createDebugLogger,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCPServerConfig,
@@ -32,6 +33,8 @@ import { loadCliConfig } from '../config/config.js';
 
 // Import the modular Session class
 import { Session } from './session/Session.js';
+
+const debugLogger = createDebugLogger('ACP_AGENT');
 
 export async function runAcpAgent(
   config: Config,
@@ -301,7 +304,7 @@ class GeminiAgent {
       // Use true for the second argument to ensure only cached credentials are used
       await config.refreshAuth(selectedType, true);
     } catch (e) {
-      console.error(`Authentication failed: ${e}`);
+      debugLogger.error(`Authentication failed: ${e}`);
       throw acp.RequestError.authRequired(
         'Authentication failed: ' + (e as Error).message,
       );

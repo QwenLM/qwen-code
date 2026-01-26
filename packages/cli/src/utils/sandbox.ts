@@ -19,6 +19,7 @@ import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core';
 import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
 import { randomBytes } from 'node:crypto';
+import { writeStdoutLine, writeStderrLine } from './stdioHelpers.js';
 
 const execAsync = promisify(exec);
 
@@ -81,7 +82,7 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
     );
     if (debugEnv) {
       // Use stderr so it doesn't clutter normal STDOUT output (e.g. in `--prompt` runs).
-      console.error(
+      writeStderrLine(
         'INFO: Using current user UID/GID in Linux sandbox. Set SANDBOX_SET_UID_GID=false to disable.',
       );
     }
@@ -210,7 +211,7 @@ export async function start_sandbox(
         );
       }
       // Log on STDERR so it doesn't clutter the output on STDOUT
-      console.error(`using macos seatbelt (profile: ${profile}) ...`);
+      writeStderrLine(`using macos seatbelt (profile: ${profile}) ...`);
       // if DEBUG is set, convert to --inspect-brk in NODE_OPTIONS
       const nodeOptions = [
         ...(process.env['DEBUG'] ? ['--inspect-brk'] : []),
@@ -299,7 +300,7 @@ export async function start_sandbox(
         });
         // install handlers to stop proxy on exit/signal
         const stopProxy = () => {
-          console.log('stopping proxy ...');
+          writeStdoutLine('stopping proxy ...');
           if (proxyProcess?.pid) {
             process.kill(-proxyProcess.pid, 'SIGTERM');
           }
@@ -313,7 +314,7 @@ export async function start_sandbox(
         //   console.info(data.toString());
         // });
         proxyProcess.stderr?.on('data', (data) => {
-          console.error(data.toString());
+          writeStderrLine(data.toString());
         });
         proxyProcess.on('close', (code, signal) => {
           if (sandboxProcess?.pid) {
@@ -323,7 +324,7 @@ export async function start_sandbox(
             `Proxy command '${proxyCommand}' exited with code ${code}, signal ${signal}`,
           );
         });
-        console.log('waiting for proxy to start ...');
+        writeStdoutLine('waiting for proxy to start ...');
         await execAsync(
           `until timeout 0.25 curl -s http://localhost:8877; do sleep 0.25; done`,
         );
@@ -342,7 +343,7 @@ export async function start_sandbox(
       });
     }
 
-    console.error(`hopping into sandbox (command: ${config.command}) ...`);
+    writeStderrLine(`hopping into sandbox (command: ${config.command}) ...`);
 
     // determine full path for gemini-cli to distinguish linked vs installed setting
     const gcPath = fs.realpathSync(process.argv[1]);
@@ -367,7 +368,7 @@ export async function start_sandbox(
             'run `npm link ./packages/cli` under QwenCode-cli repo to switch to linked binary.',
         );
       } else {
-        console.error('building sandbox ...');
+        writeStderrLine('building sandbox ...');
         const gcRoot = gcPath.split('/packages/')[0];
         // if project folder has sandbox.Dockerfile under project settings folder, use that
         let buildArgs = '';
@@ -376,7 +377,7 @@ export async function start_sandbox(
           'sandbox.Dockerfile',
         );
         if (isCustomProjectSandbox) {
-          console.error(`using ${projectSandboxDockerfile} for sandbox`);
+          writeStderrLine(`using ${projectSandboxDockerfile} for sandbox`);
           buildArgs += `-f ${path.resolve(projectSandboxDockerfile)} -i ${image}`;
         }
         execSync(
@@ -491,7 +492,7 @@ export async function start_sandbox(
               `Missing mount path '${from}' listed in SANDBOX_MOUNTS`,
             );
           }
-          console.error(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
+          writeStderrLine(`SANDBOX_MOUNTS: ${from} -> ${to} (${opts})`);
           args.push('--volume', mount);
         }
       }
@@ -557,7 +558,7 @@ export async function start_sandbox(
       containerName = `gemini-cli-integration-test-${randomBytes(4).toString(
         'hex',
       )}`;
-      console.log(`ContainerName: ${containerName}`);
+      writeStdoutLine(`ContainerName: ${containerName}`);
     } else {
       let index = 0;
       const containerNameCheck = execSync(
@@ -569,7 +570,7 @@ export async function start_sandbox(
         index++;
       }
       containerName = `${imageName}-${index}`;
-      console.log(`ContainerName (regular): ${containerName}`);
+      writeStdoutLine(`ContainerName (regular): ${containerName}`);
     }
     args.push('--name', containerName, '--hostname', containerName);
 
@@ -691,7 +692,7 @@ export async function start_sandbox(
       for (let env of process.env['SANDBOX_ENV'].split(',')) {
         if ((env = env.trim())) {
           if (env.includes('=')) {
-            console.error(`SANDBOX_ENV: ${env}`);
+            writeStderrLine(`SANDBOX_ENV: ${env}`);
             args.push('--env', env);
           } else {
             throw new FatalSandboxError(
@@ -795,7 +796,7 @@ export async function start_sandbox(
       });
       // install handlers to stop proxy on exit/signal
       const stopProxy = () => {
-        console.log('stopping proxy container ...');
+        writeStdoutLine('stopping proxy container ...');
         execSync(`${config.command} rm -f ${SANDBOX_PROXY_NAME}`);
       };
       process.on('exit', stopProxy);
@@ -807,7 +808,7 @@ export async function start_sandbox(
       //   console.info(data.toString());
       // });
       proxyProcess.stderr?.on('data', (data) => {
-        console.error(data.toString().trim());
+        writeStderrLine(data.toString().trim());
       });
       proxyProcess.on('close', (code, signal) => {
         if (sandboxProcess?.pid) {
@@ -817,7 +818,7 @@ export async function start_sandbox(
           `Proxy container command '${proxyContainerCommand}' exited with code ${code}, signal ${signal}`,
         );
       });
-      console.log('waiting for proxy to start ...');
+      writeStdoutLine('waiting for proxy to start ...');
       await execAsync(
         `until timeout 0.25 curl -s http://localhost:8877; do sleep 0.25; done`,
       );
@@ -836,14 +837,14 @@ export async function start_sandbox(
 
     return new Promise<number>((resolve, reject) => {
       sandboxProcess.on('error', (err) => {
-        console.error('Sandbox process error:', err);
+        writeStderrLine(`Sandbox process error: ${err}`);
         reject(err);
       });
 
       sandboxProcess?.on('close', (code, signal) => {
         process.stdin.resume();
         if (code !== 0 && code !== null) {
-          console.error(
+          writeStderrLine(
             `Sandbox process exited with code: ${code}, signal: ${signal}`,
           );
         }
@@ -869,7 +870,7 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
     }
 
     checkProcess.on('error', (err) => {
-      console.warn(
+      writeStderrLine(
         `Failed to start '${sandbox}' command for image check: ${err.message}`,
       );
       resolve(false);
@@ -887,7 +888,7 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
 }
 
 async function pullImage(sandbox: string, image: string): Promise<boolean> {
-  console.info(`Attempting to pull image ${image} using ${sandbox}...`);
+  writeStdoutLine(`Attempting to pull image ${image} using ${sandbox}...`);
   return new Promise((resolve) => {
     const args = ['pull', image];
     const pullProcess = spawn(sandbox, args, { stdio: 'pipe' });
@@ -895,16 +896,16 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
     let stderrData = '';
 
     const onStdoutData = (data: Buffer) => {
-      console.info(data.toString().trim()); // Show pull progress
+      writeStdoutLine(data.toString().trim()); // Show pull progress
     };
 
     const onStderrData = (data: Buffer) => {
       stderrData += data.toString();
-      console.error(data.toString().trim()); // Show pull errors/info from the command itself
+      writeStderrLine(data.toString().trim()); // Show pull errors/info from the command itself
     };
 
     const onError = (err: Error) => {
-      console.warn(
+      writeStderrLine(
         `Failed to start '${sandbox} pull ${image}' command: ${err.message}`,
       );
       cleanup();
@@ -913,11 +914,11 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
 
     const onClose = (code: number | null) => {
       if (code === 0) {
-        console.info(`Successfully pulled image ${image}.`);
+        writeStdoutLine(`Successfully pulled image ${image}.`);
         cleanup();
         resolve(true);
       } else {
-        console.warn(
+        writeStderrLine(
           `Failed to pull image ${image}. '${sandbox} pull ${image}' exited with code ${code}.`,
         );
         if (stderrData.trim()) {
@@ -957,13 +958,13 @@ async function ensureSandboxImageIsPresent(
   sandbox: string,
   image: string,
 ): Promise<boolean> {
-  console.info(`Checking for sandbox image: ${image}`);
+  writeStdoutLine(`Checking for sandbox image: ${image}`);
   if (await imageExists(sandbox, image)) {
-    console.info(`Sandbox image ${image} found locally.`);
+    writeStdoutLine(`Sandbox image ${image} found locally.`);
     return true;
   }
 
-  console.info(`Sandbox image ${image} not found locally.`);
+  writeStdoutLine(`Sandbox image ${image} not found locally.`);
   if (image === LOCAL_DEV_SANDBOX_IMAGE_NAME) {
     // user needs to build the image themselves
     return false;
@@ -972,17 +973,17 @@ async function ensureSandboxImageIsPresent(
   if (await pullImage(sandbox, image)) {
     // After attempting to pull, check again to be certain
     if (await imageExists(sandbox, image)) {
-      console.info(`Sandbox image ${image} is now available after pulling.`);
+      writeStdoutLine(`Sandbox image ${image} is now available after pulling.`);
       return true;
     } else {
-      console.warn(
+      writeStderrLine(
         `Sandbox image ${image} still not found after a pull attempt. This might indicate an issue with the image name or registry, or the pull command reported success but failed to make the image available.`,
       );
       return false;
     }
   }
 
-  console.error(
+  writeStderrLine(
     `Failed to obtain sandbox image ${image} after check and pull attempt.`,
   );
   return false; // Pull command failed or image still not present

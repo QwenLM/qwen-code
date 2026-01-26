@@ -150,16 +150,12 @@ describe('TaskTool', () => {
         new Error('Loading failed'),
       );
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-      new TaskTool(config);
+      const failedTaskTool = new TaskTool(config);
       await vi.runAllTimersAsync();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to load subagents for Task tool:',
-        expect.any(Error),
+      expect(failedTaskTool.description).toContain(
+        'No subagents are currently configured',
       );
-      consoleSpy.mockRestore();
     });
   });
 

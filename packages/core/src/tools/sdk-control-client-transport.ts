@@ -18,6 +18,9 @@
  */
 
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MCP_SDK_TRANSPORT');
 
 /**
  * Callback to send MCP messages to SDK via control plane
@@ -43,7 +46,6 @@ export interface SdkControlClientTransportOptions {
 export class SdkControlClientTransport {
   private serverName: string;
   private sendMcpMessage: SendMcpMessageCallback;
-  private debugMode: boolean;
   private started = false;
 
   // Transport interface callbacks
@@ -54,7 +56,8 @@ export class SdkControlClientTransport {
   constructor(options: SdkControlClientTransportOptions) {
     this.serverName = options.serverName;
     this.sendMcpMessage = options.sendMcpMessage;
-    this.debugMode = options.debugMode ?? false;
+    // Note: debugMode option is preserved for API compatibility but no longer used
+    // since debugLogger now always writes to the session logfile
   }
 
   /**
@@ -67,12 +70,7 @@ export class SdkControlClientTransport {
     }
 
     this.started = true;
-
-    if (this.debugMode) {
-      console.error(
-        `[SdkControlClientTransport] Started for server '${this.serverName}'`,
-      );
-    }
+    debugLogger.debug(`Started for server '${this.serverName}'`);
   }
 
   /**
@@ -88,35 +86,24 @@ export class SdkControlClientTransport {
       );
     }
 
-    if (this.debugMode) {
-      console.error(
-        `[SdkControlClientTransport] Sending message to '${this.serverName}':`,
-        JSON.stringify(message),
-      );
-    }
+    debugLogger.debug(
+      `Sending message to '${this.serverName}': ${JSON.stringify(message)}`,
+    );
 
     try {
       // Send message to SDK and wait for response
       const response = await this.sendMcpMessage(this.serverName, message);
 
-      if (this.debugMode) {
-        console.error(
-          `[SdkControlClientTransport] Received response from '${this.serverName}':`,
-          JSON.stringify(response),
-        );
-      }
+      debugLogger.debug(
+        `Received response from '${this.serverName}': ${JSON.stringify(response)}`,
+      );
 
       // Deliver response via onmessage callback
       if (this.onmessage) {
         this.onmessage(response);
       }
     } catch (error) {
-      if (this.debugMode) {
-        console.error(
-          `[SdkControlClientTransport] Error sending to '${this.serverName}':`,
-          error,
-        );
-      }
+      debugLogger.error(`Error sending to '${this.serverName}': ${error}`);
 
       if (this.onerror) {
         this.onerror(error instanceof Error ? error : new Error(String(error)));
@@ -135,12 +122,7 @@ export class SdkControlClientTransport {
     }
 
     this.started = false;
-
-    if (this.debugMode) {
-      console.error(
-        `[SdkControlClientTransport] Closed for server '${this.serverName}'`,
-      );
-    }
+    debugLogger.debug(`Closed for server '${this.serverName}'`);
 
     if (this.onclose) {
       this.onclose();

@@ -8,6 +8,7 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   OAuthToken,
   OAuthCredentials,
@@ -18,6 +19,8 @@ import {
   DEFAULT_SERVICE_NAME,
   FORCE_ENCRYPTED_FILE_ENV_VAR,
 } from './token-storage/index.js';
+
+const debugLogger = createDebugLogger('MCP_OAUTH');
 
 /**
  * Class for managing MCP OAuth token storage and retrieval.
@@ -68,7 +71,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
     } catch (error) {
       // File doesn't exist or is invalid, return empty map
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error(
+        debugLogger.error(
           `Failed to load MCP OAuth tokens: ${getErrorMessage(error)}`,
         );
       }
@@ -102,7 +105,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
         { mode: 0o600 }, // Restrict file permissions
       );
     } catch (error) {
-      console.error(
+      debugLogger.error(
         `Failed to save MCP OAuth token: ${getErrorMessage(error)}`,
       );
       throw error;
@@ -181,7 +184,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
           });
         }
       } catch (error) {
-        console.error(
+        debugLogger.error(
           `Failed to remove MCP OAuth token: ${getErrorMessage(error)}`,
         );
       }
@@ -216,7 +219,7 @@ export class MCPOAuthTokenStorage implements TokenStorage {
       await fs.unlink(tokenFile);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error(
+        debugLogger.error(
           `Failed to clear MCP OAuth tokens: ${getErrorMessage(error)}`,
         );
       }

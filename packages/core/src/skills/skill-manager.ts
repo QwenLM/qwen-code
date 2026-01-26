@@ -19,6 +19,9 @@ import type {
 import { SkillError, SkillErrorCode } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL_MANAGER');
 
 const QWEN_CONFIG_DIR = '.qwen';
 const SKILLS_CONFIG_DIR = 'skills';
@@ -57,7 +60,7 @@ export class SkillManager {
       try {
         listener();
       } catch (error) {
-        console.warn('Skill change listener threw an error:', error);
+        debugLogger.warn('Skill change listener threw an error:', error);
       }
     }
   }
@@ -214,7 +217,7 @@ export class SkillManager {
   stopWatching(): void {
     for (const watcher of this.watchers.values()) {
       void watcher.close().catch((error) => {
-        console.warn('Failed to close skills watcher:', error);
+        debugLogger.warn('Failed to close skills watcher:', error);
       });
     }
     this.watchers.clear();
@@ -426,7 +429,7 @@ export class SkillManager {
           // Skip directories without valid SKILL.md
           if (error instanceof SkillError) {
             // Parse error was already recorded
-            console.warn(
+            debugLogger.warn(
               `Failed to parse skill at ${skillDir}: ${error.message}`,
             );
           }
@@ -486,7 +489,7 @@ export class SkillManager {
           .get(existingPath)
           ?.close()
           .catch((error) => {
-            console.warn(
+            debugLogger.warn(
               `Failed to close skills watcher for ${existingPath}:`,
               error,
             );
@@ -508,11 +511,11 @@ export class SkillManager {
             this.scheduleRefresh();
           })
           .on('error', (error) => {
-            console.warn(`Skills watcher error for ${watchPath}:`, error);
+            debugLogger.warn(`Skills watcher error for ${watchPath}:`, error);
           });
         this.watchers.set(watchPath, watcher);
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `Failed to watch skills directory at ${watchPath}:`,
           error,
         );
@@ -536,7 +539,7 @@ export class SkillManager {
     try {
       await fs.mkdir(baseDir, { recursive: true });
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `Failed to create user skills directory at ${baseDir}:`,
         error,
       );

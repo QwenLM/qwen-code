@@ -263,10 +263,7 @@ describe('modifyWithEditor', () => {
   });
 
   it('should handle temp file cleanup errors gracefully', async () => {
-    const consoleErrorSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-    vi.spyOn(fs, 'unlinkSync').mockImplementation(() => {
+    const unlinkSpy = vi.spyOn(fs, 'unlinkSync').mockImplementation(() => {
       throw new Error('Failed to delete file');
     });
 
@@ -278,12 +275,7 @@ describe('modifyWithEditor', () => {
       vi.fn(),
     );
 
-    expect(consoleErrorSpy).toHaveBeenCalledTimes(2);
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Error deleting temp diff file:'),
-    );
-
-    consoleErrorSpy.mockRestore();
+    expect(unlinkSpy).toHaveBeenCalledTimes(2);
   });
 
   it('should create temp files with correct naming with extension', async () => {

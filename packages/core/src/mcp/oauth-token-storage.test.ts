@@ -12,6 +12,17 @@ import { FORCE_ENCRYPTED_FILE_ENV_VAR } from './token-storage/index.js';
 import type { OAuthCredentials, OAuthToken } from './token-storage/types.js';
 import { QWEN_DIR } from '../utils/paths.js';
 
+// Mock debugLogger
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 // Mock dependencies
 vi.mock('node:fs', () => ({
   promises: {
@@ -72,7 +83,6 @@ describe('MCPOAuthTokenStorage', () => {
       tokenStorage = new MCPOAuthTokenStorage();
 
       vi.clearAllMocks();
-      vi.spyOn(console, 'error');
     });
 
     afterEach(() => {
@@ -87,7 +97,7 @@ describe('MCPOAuthTokenStorage', () => {
         const tokens = await tokenStorage.getAllCredentials();
 
         expect(tokens.size).toBe(0);
-        expect(console.error).not.toHaveBeenCalled();
+        expect(mockDebugLogger.error).not.toHaveBeenCalled();
       });
 
       it('should load tokens from file successfully', async () => {
@@ -110,7 +120,7 @@ describe('MCPOAuthTokenStorage', () => {
         const tokens = await tokenStorage.getAllCredentials();
 
         expect(tokens.size).toBe(0);
-        expect(console.error).toHaveBeenCalledWith(
+        expect(mockDebugLogger.error).toHaveBeenCalledWith(
           expect.stringContaining('Failed to load MCP OAuth tokens'),
         );
       });
@@ -122,7 +132,7 @@ describe('MCPOAuthTokenStorage', () => {
         const tokens = await tokenStorage.getAllCredentials();
 
         expect(tokens.size).toBe(0);
-        expect(console.error).toHaveBeenCalledWith(
+        expect(mockDebugLogger.error).toHaveBeenCalledWith(
           expect.stringContaining('Failed to load MCP OAuth tokens'),
         );
       });
@@ -188,7 +198,7 @@ describe('MCPOAuthTokenStorage', () => {
           tokenStorage.saveToken('test-server', mockToken),
         ).rejects.toThrow('Disk full');
 
-        expect(console.error).toHaveBeenCalledWith(
+        expect(mockDebugLogger.error).toHaveBeenCalledWith(
           expect.stringContaining('Failed to save MCP OAuth token'),
         );
       });
@@ -281,7 +291,7 @@ describe('MCPOAuthTokenStorage', () => {
 
         await tokenStorage.deleteCredentials('test-server');
 
-        expect(console.error).toHaveBeenCalledWith(
+        expect(mockDebugLogger.error).toHaveBeenCalledWith(
           expect.stringContaining('Failed to remove MCP OAuth token'),
         );
       });
@@ -347,7 +357,7 @@ describe('MCPOAuthTokenStorage', () => {
 
         await tokenStorage.clearAll();
 
-        expect(console.error).not.toHaveBeenCalled();
+        expect(mockDebugLogger.error).not.toHaveBeenCalled();
       });
 
       it('should handle other file errors gracefully', async () => {
@@ -355,7 +365,7 @@ describe('MCPOAuthTokenStorage', () => {
 
         await tokenStorage.clearAll();
 
-        expect(console.error).toHaveBeenCalledWith(
+        expect(mockDebugLogger.error).toHaveBeenCalledWith(
           expect.stringContaining('Failed to clear MCP OAuth tokens'),
         );
       });
@@ -368,7 +378,6 @@ describe('MCPOAuthTokenStorage', () => {
       tokenStorage = new MCPOAuthTokenStorage();
 
       vi.clearAllMocks();
-      vi.spyOn(console, 'error');
     });
 
     afterEach(() => {

@@ -33,6 +33,7 @@ import { IdeClient } from '../ide/ide-client.js';
 import { FixLLMEditWithInstruction } from '../utils/llm-edit-fixer.js';
 import { applyReplacement } from './edit.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 interface ReplacementContext {
   params: EditToolParams;
@@ -46,6 +47,8 @@ interface ReplacementResult {
   finalOldString: string;
   finalNewString: string;
 }
+
+const debugLogger = createDebugLogger('SMART_EDIT');
 
 function restoreTrailingNewline(
   originalContent: string,
@@ -571,12 +574,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         throw error;
       }
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.log(`Error preparing edit: ${errorMsg}`);
+      debugLogger.warn(`Error preparing edit: ${errorMsg}`);
       return false;
     }
 
     if (editData.error) {
-      console.log(`Error: ${editData.error.display}`);
+      debugLogger.warn(`Error: ${editData.error.display}`);
       return false;
     }
 

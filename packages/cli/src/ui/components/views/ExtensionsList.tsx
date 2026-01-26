@@ -7,6 +7,9 @@
 import { Box, Text } from 'ink';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { ExtensionUpdateState } from '../../state/extensions.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('EXTENSIONS_LIST');
 
 export const ExtensionsList = () => {
   const { extensionsUpdateState, commandContext } = useUIState();
@@ -47,7 +50,7 @@ export const ExtensionsList = () => {
               stateColor = 'green';
               break;
             default:
-              console.error(`Unhandled ExtensionUpdateState ${state}`);
+              debugLogger.error(`Unhandled ExtensionUpdateState ${state}`);
               break;
           }
 

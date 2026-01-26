@@ -6,6 +6,9 @@
 
 import { reportError } from '../utils/errorReporting.js';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SUBAGENT');
 import { type ToolCallRequestInfo } from '../core/turn.js';
 import {
   CoreToolScheduler,
@@ -515,7 +518,7 @@ export class SubAgentScope {
         } as SubAgentRoundEvent);
       }
     } catch (error) {
-      console.error('Error during subagent execution:', error);
+      debugLogger.error('Error during subagent execution:', error);
       this.terminateMode = SubagentTerminateMode.ERROR;
       this.eventEmitter?.emit(SubAgentEventType.ERROR, {
         subagentId: this.subagentId,

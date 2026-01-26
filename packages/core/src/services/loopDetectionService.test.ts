@@ -644,6 +644,12 @@ describe('LoopDetectionService LLM Checks', () => {
       getGeminiClient: () => mockGeminiClient,
       getBaseLlmClient: () => mockBaseLlmClient,
       getDebugMode: () => false,
+      getDebugLogger: () => ({
+        debug: () => {},
+        info: () => {},
+        warn: () => {},
+        error: () => {},
+      }),
       getTelemetryEnabled: () => true,
       getModel: () => 'test-model',
     } as unknown as Config;

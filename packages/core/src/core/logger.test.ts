@@ -72,6 +72,20 @@ vi.mock('../utils/session.js', () => ({
   sessionId: 'test-session-id',
 }));
 
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: () => ({
+      debug: (...args: unknown[]) => console.debug(...args),
+      info: (...args: unknown[]) => console.info(...args),
+      warn: (...args: unknown[]) => console.warn(...args),
+      error: (...args: unknown[]) => console.error(...args),
+    }),
+  };
+});
+
 describe('Logger', () => {
   let logger: Logger;
   const testSessionId = 'test-session-id';

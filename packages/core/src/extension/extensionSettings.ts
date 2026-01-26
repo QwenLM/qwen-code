@@ -13,6 +13,9 @@ import type { ExtensionConfig } from './extensionManager.js';
 import prompts from 'prompts';
 import { EXTENSION_SETTINGS_FILENAME } from './variables.js';
 import { KeychainTokenStorage } from '../mcp/token-storage/keychain-token-storage.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('EXT_SETTINGS');
 
 export interface ExtensionSetting {
   name: string;
@@ -211,7 +214,9 @@ export async function updateSetting(
 ): Promise<void> {
   const { name: extensionName, settings } = extensionConfig;
   if (!settings || settings.length === 0) {
-    console.log('This extension does not have any settings.');
+    debugLogger.debug(
+      `updateSetting: Extension "${extensionName}" has no settings`,
+    );
     return;
   }
 
@@ -220,7 +225,9 @@ export async function updateSetting(
   );
 
   if (!settingToUpdate) {
-    console.log(`Setting ${settingKey} not found.`);
+    debugLogger.debug(
+      `updateSetting: Setting "${settingKey}" not found for extension "${extensionName}"`,
+    );
     return;
   }
 

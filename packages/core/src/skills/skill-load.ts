@@ -2,6 +2,9 @@ import type { SkillConfig, SkillValidationResult } from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL_LOAD');
 
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
@@ -26,7 +29,7 @@ export async function loadSkillsFromDir(
         const config = parseSkillContent(content, skillManifest);
         skills.push(config);
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `Failed to parse skill at ${skillDir}: ${error instanceof Error ? error.message : 'Unknown error'}`,
         );
         continue;
