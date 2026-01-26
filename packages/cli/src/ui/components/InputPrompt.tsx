@@ -38,6 +38,16 @@ import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
+
+/**
+ * Represents an attachment (e.g., pasted image) displayed above the input prompt
+ */
+export interface Attachment {
+  id: string; // Unique identifier (timestamp)
+  path: string; // Full file path
+  filename: string; // Filename only (for display)
+}
+
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -115,6 +125,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [recentPasteTime, setRecentPasteTime] = useState<number | null>(null);
   const pasteTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Attachment state for clipboard images
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [isAttachmentMode, setIsAttachmentMode] = useState(false);
+  const [selectedAttachmentIndex, setSelectedAttachmentIndex] = useState(-1);
 
   const [dirs, setDirs] = useState<readonly string[]>(
     config.getWorkspaceContext().getDirectories(),
@@ -202,10 +217,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (shellModeActive) {
         shellHistory.addCommandToHistory(submittedValue);
       }
+
+      // Convert attachments to @references and prepend to the message
+      let finalMessage = submittedValue;
+      if (attachments.length > 0) {
+        const attachmentRefs = attachments
+          .map((att) => `@${path.relative(config.getTargetDir(), att.path)}`)
+          .join(' ');
+        finalMessage = `${attachmentRefs}\n\n${submittedValue.trim()}`;
+      }
+
       // Clear the buffer *before* calling onSubmit to prevent potential re-submission
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
-      onSubmit(submittedValue);
+      onSubmit(finalMessage);
+
+      // Clear attachments after submit
+      setAttachments([]);
+      setIsAttachmentMode(false);
+      setSelectedAttachmentIndex(-1);
+
       resetCompletionState();
       resetReverseSearchCompletionState();
     },
@@ -216,6 +247,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       shellModeActive,
       shellHistory,
       resetReverseSearchCompletionState,
+      attachments,
+      config,
     ],
   );
 
@@ -272,47 +305,36 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
               },
             );
 
-            // Get relative path from current directory
-            const relativePath = path.relative(
-              config.getTargetDir(),
-              imagePath,
-            );
-
-            // Insert @path reference at cursor position
-            const insertText = `@${relativePath}`;
-            const currentText = buffer.text;
-            const [row, col] = buffer.cursor;
-
-            // Calculate offset from row/col
-            let offset = 0;
-            for (let i = 0; i < row; i++) {
-              offset += buffer.lines[i].length + 1; // +1 for newline
-            }
-            offset += col;
-
-            // Add spaces around the path if needed
-            let textToInsert = insertText;
-            const charBefore = offset > 0 ? currentText[offset - 1] : '';
-            const charAfter =
-              offset < currentText.length ? currentText[offset] : '';
-
-            if (charBefore && charBefore !== ' ' && charBefore !== '\n') {
-              textToInsert = ' ' + textToInsert;
-            }
-            if (!charAfter || (charAfter !== ' ' && charAfter !== '\n')) {
-              textToInsert = textToInsert + ' ';
-            }
-
-            // Insert at cursor position
-            buffer.replaceRangeByOffset(offset, offset, textToInsert);
+            // Add as attachment instead of inserting @reference into text
+            const filename = path.basename(imagePath);
+            const newAttachment: Attachment = {
+              id: String(Date.now()),
+              path: imagePath,
+              filename,
+            };
+            setAttachments((prev) => [...prev, newAttachment]);
           }
         }
       } catch (error) {
         console.error('Error handling clipboard image:', error);
       }
     },
-    [buffer, config],
+    [config],
   );
+
+  // Handle deletion of an attachment from the list
+  const handleAttachmentDelete = useCallback((index: number) => {
+    setAttachments((prev) => {
+      const newList = prev.filter((_, i) => i !== index);
+      if (newList.length === 0) {
+        setIsAttachmentMode(false);
+        setSelectedAttachmentIndex(-1);
+      } else {
+        setSelectedAttachmentIndex(Math.min(index, newList.length - 1));
+      }
+      return newList;
+    });
+  }, []);
 
   const handleInput = useCallback(
     (key: Key) => {
@@ -579,6 +601,55 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      // Attachment mode handling - process before history navigation
+      if (isAttachmentMode && attachments.length > 0) {
+        if (key.name === 'left') {
+          setSelectedAttachmentIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (key.name === 'right') {
+          setSelectedAttachmentIndex((i) =>
+            Math.min(attachments.length - 1, i + 1),
+          );
+          return;
+        }
+        if (keyMatchers[Command.NAVIGATION_DOWN](key)) {
+          // Exit attachment mode and return to input
+          setIsAttachmentMode(false);
+          setSelectedAttachmentIndex(-1);
+          return;
+        }
+        if (key.name === 'backspace' || key.name === 'delete') {
+          handleAttachmentDelete(selectedAttachmentIndex);
+          return;
+        }
+        if (key.name === 'return' || key.name === 'escape') {
+          setIsAttachmentMode(false);
+          setSelectedAttachmentIndex(-1);
+          return;
+        }
+        // For other keys, exit attachment mode and let input handle them
+        setIsAttachmentMode(false);
+        setSelectedAttachmentIndex(-1);
+        // Continue to process the key in input
+      }
+
+      // Enter attachment mode when pressing up at the first line with attachments
+      if (
+        !isAttachmentMode &&
+        attachments.length > 0 &&
+        !shellModeActive &&
+        !reverseSearchActive &&
+        !commandSearchActive &&
+        buffer.visualCursor[0] === 0 &&
+        buffer.visualScrollRow === 0 &&
+        keyMatchers[Command.NAVIGATION_UP](key)
+      ) {
+        setIsAttachmentMode(true);
+        setSelectedAttachmentIndex(attachments.length - 1);
+        return;
+      }
+
       if (!shellModeActive) {
         if (keyMatchers[Command.REVERSE_SEARCH](key)) {
           setCommandSearchActive(true);
@@ -727,6 +798,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       onToggleShortcuts,
       showShortcuts,
       uiState,
+      isAttachmentMode,
+      attachments,
+      selectedAttachmentIndex,
+      handleAttachmentDelete,
     ],
   );
 
@@ -778,6 +853,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   return (
     <>
+      {attachments.length > 0 && (
+        <Box marginLeft={2} marginBottom={0}>
+          <Text color={theme.text.secondary}>{t('Attachments: ')}</Text>
+          {attachments.map((att, idx) => (
+            <Text
+              key={att.id}
+              color={
+                isAttachmentMode && idx === selectedAttachmentIndex
+                  ? theme.status.success
+                  : theme.text.secondary
+              }
+            >
+              [{att.filename}]{idx < attachments.length - 1 ? ' ' : ''}
+            </Text>
+          ))}
+        </Box>
+      )}
       <Box
         borderStyle="single"
         borderTop={true}
@@ -932,6 +1024,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             expandedIndex={expandedSuggestionIndex}
           />
+        </Box>
+      )}
+      {/* Attachment hints - show when there are attachments and no suggestions visible */}
+      {attachments.length > 0 && !shouldShowSuggestions && (
+        <Box marginLeft={2} marginRight={2}>
+          <Text color={theme.text.secondary}>
+            {isAttachmentMode
+              ? t('← → select, Delete to remove, ↓ to exit')
+              : t('↑ to manage attachments')}
+          </Text>
         </Box>
       )}
     </>

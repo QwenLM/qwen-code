@@ -421,7 +421,7 @@ export async function cleanupOldClipboardImages(
       ) {
         const filePath = path.join(tempDir, file);
         const stats = await fs.stat(filePath);
-        if (stats.mtimeMs < oneHourAgo) {
+        if (stats.atimeMs < oneHourAgo) {
           await fs.unlink(filePath);
         }
       }
