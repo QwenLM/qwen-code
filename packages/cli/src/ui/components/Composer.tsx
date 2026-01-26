@@ -56,14 +56,16 @@ export const Composer = () => {
     <Box flexDirection="column" marginTop={1}>
       {!uiState.embeddedShellFocused && (
         <LoadingIndicator
+          // Hide loading phrases when enableLoadingPhrases is explicitly false.
+          // Using === false ensures phrases show by default when undefined.
           thought={
             uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.disableLoadingPhrases
+            config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.thought
           }
           currentLoadingPhrase={
-            config.getAccessibility()?.disableLoadingPhrases
+            config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.currentLoadingPhrase
           }
