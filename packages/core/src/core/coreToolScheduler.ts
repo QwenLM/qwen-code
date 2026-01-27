@@ -29,7 +29,9 @@ import {
   logToolOutputTruncated,
   ToolOutputTruncatedEvent,
   InputFormat,
+  SkillTool,
 } from '../index.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { Part, PartListUnion } from '@google/genai';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
@@ -594,17 +596,28 @@ export class CoreToolScheduler {
   }
 
   /**
-   * Generates a suggestion string for a tool name that was not found in the registry.
-   * Uses Levenshtein distance to suggest similar tool names for hallucinated or misspelled tools.
-   * Note: Excluded tools are handled separately before calling this method, so this only
-   * handles the case where a tool is truly not found (hallucinated or typo).
-   * @param unknownToolName The tool name that was not found.
-   * @param topN The number of suggestions to return. Defaults to 3.
-   * @returns A suggestion string like " Did you mean 'tool'?" or " Did you mean one of: 'tool1', 'tool2'?",
-   *          or an empty string if no suggestions are found.
+   * Generates error message for unknown tool. Returns early with skill-specific
+   * message if the name matches a skill, otherwise uses Levenshtein suggestions.
    */
+  private getToolNotFoundMessage(unknownToolName: string, topN = 3): string {
+    // Check if the unknown tool name matches an available skill name.
+    // This handles the case where the model tries to invoke a skill as a tool
+    // (e.g., Tool: "pdf" instead of Tool: "Skill" with skill: "pdf")
+    const skillTool = this.toolRegistry.getTool(ToolNames.SKILL);
+    if (skillTool instanceof SkillTool) {
+      const availableSkillNames = skillTool.getAvailableSkillNames();
+      if (availableSkillNames.includes(unknownToolName)) {
+        return `"${unknownToolName}" is a skill name, not a tool name. To use this skill, invoke the "${ToolNames.SKILL}" tool with parameter: skill: "${unknownToolName}"`;
+      }
+    }
+
+    // Standard "not found" message with Levenshtein suggestions
+    const suggestion = this.getToolSuggestion(unknownToolName, topN);
+    return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
+  }
+
+  /** Suggests similar tool names using Levenshtein distance. */
   private getToolSuggestion(unknownToolName: string, topN = 3): string {
-    // Use Levenshtein distance to find similar tool names from the registry.
     const allToolNames = this.toolRegistry.getAllToolNames();
 
     const matches = allToolNames.map((toolName) => ({
@@ -711,8 +724,7 @@ export class CoreToolScheduler {
           const toolInstance = this.toolRegistry.getTool(reqInfo.name);
           if (!toolInstance) {
             // Tool is not in registry and not excluded - likely hallucinated or typo
-            const suggestion = this.getToolSuggestion(reqInfo.name);
-            const errorMessage = `Tool "${reqInfo.name}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
+            const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
             return {
               status: 'error',
               request: reqInfo,
