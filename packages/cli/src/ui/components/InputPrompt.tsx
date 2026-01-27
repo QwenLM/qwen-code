@@ -781,6 +781,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       showShortcuts,
       uiState,
       uiActions,
+      justAcceptedSuggestion,
     ],
   );
 
@@ -979,8 +980,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             userInput={buffer.text}
             mode={
               buffer.text.startsWith('/') &&
-                !reverseSearchActive &&
-                !commandSearchActive
+              !reverseSearchActive &&
+              !commandSearchActive
                 ? 'slash'
                 : 'reverse'
             }
