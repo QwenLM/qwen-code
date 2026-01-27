@@ -88,14 +88,9 @@ export const AUTH_ENV_MAPPINGS = {
 } as const satisfies Record<AuthType, AuthEnvMapping>;
 
 export const DEFAULT_MODELS = {
-  openai: 'qwen3-coder-plus',
+  openai: 'qwen3-coder-next',
   'qwen-oauth': DEFAULT_QWEN_MODEL,
 } as Partial<Record<AuthType, string>>;
-
-export const QWEN_OAUTH_ALLOWED_MODELS = [
-  DEFAULT_QWEN_MODEL,
-  'vision-model',
-] as const;
 
 /**
  * Hard-coded Qwen OAuth models that are always available.
@@ -103,9 +98,16 @@ export const QWEN_OAUTH_ALLOWED_MODELS = [
  */
 export const QWEN_OAUTH_MODELS: ModelConfig[] = [
   {
+    id: 'qwen3-coder-next',
+    name: 'qwen3-coder-next',
+    description: 'The latest Qwen Coder model from Alibaba Cloud ModelStudio',
+    capabilities: { vision: false },
+  },
+  {
     id: 'coder-model',
     name: 'coder-model',
-    description: 'The latest Qwen Coder model from Alibaba Cloud ModelStudio',
+    description:
+      'The stable qwen3-coder-plus model from Alibaba Cloud ModelStudio',
     capabilities: { vision: false },
   },
   {
@@ -115,3 +117,11 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     capabilities: { vision: true },
   },
 ];
+
+/**
+ * Derive allowed models from QWEN_OAUTH_MODELS for authorization.
+ * This ensures single source of truth (SSOT).
+ */
+export const QWEN_OAUTH_ALLOWED_MODELS = QWEN_OAUTH_MODELS.map(
+  (model) => model.id,
+) as readonly string[];

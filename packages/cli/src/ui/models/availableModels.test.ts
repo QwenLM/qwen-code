@@ -11,26 +11,23 @@ import {
   getOpenAIAvailableModelFromEnv,
   isVisionModel,
   getDefaultVisionModel,
-  AVAILABLE_MODELS_QWEN,
   MAINLINE_VLM,
   MAINLINE_CODER,
 } from './availableModels.js';
 import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 
 describe('availableModels', () => {
-  describe('AVAILABLE_MODELS_QWEN', () => {
+  describe('Qwen models', () => {
+    const qwenModels = getFilteredQwenModels(true);
+
     it('should include coder model', () => {
-      const coderModel = AVAILABLE_MODELS_QWEN.find(
-        (m) => m.id === MAINLINE_CODER,
-      );
+      const coderModel = qwenModels.find((m) => m.id === MAINLINE_CODER);
       expect(coderModel).toBeDefined();
       expect(coderModel?.isVision).toBeFalsy();
     });
 
     it('should include vision model', () => {
-      const visionModel = AVAILABLE_MODELS_QWEN.find(
-        (m) => m.id === MAINLINE_VLM,
-      );
+      const visionModel = qwenModels.find((m) => m.id === MAINLINE_VLM);
       expect(visionModel).toBeDefined();
       expect(visionModel?.isVision).toBe(true);
     });
@@ -39,7 +36,8 @@ describe('availableModels', () => {
   describe('getFilteredQwenModels', () => {
     it('should return all models when vision preview is enabled', () => {
       const models = getFilteredQwenModels(true);
-      expect(models.length).toBe(AVAILABLE_MODELS_QWEN.length);
+      const expected = getAvailableModelsForAuthType(AuthType.QWEN_OAUTH);
+      expect(models.length).toBe(expected.length);
     });
 
     it('should filter out vision models when preview is disabled', () => {
@@ -91,23 +89,34 @@ describe('availableModels', () => {
 
     it('should return hard-coded qwen models for qwen-oauth', () => {
       const models = getAvailableModelsForAuthType(AuthType.QWEN_OAUTH);
-      expect(models).toEqual(AVAILABLE_MODELS_QWEN);
+      expect(models).toEqual(getFilteredQwenModels(true));
     });
 
-    it('should return hard-coded qwen models even when config is provided', () => {
+    it('should use config models for qwen-oauth when config is provided', () => {
       const mockConfig = {
-        getAvailableModels: vi
-          .fn()
-          .mockReturnValue([
-            { id: 'custom', label: 'Custom', authType: AuthType.QWEN_OAUTH },
-          ]),
+        getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+          {
+            id: 'custom',
+            label: 'Custom',
+            description: 'Custom model',
+            authType: AuthType.QWEN_OAUTH,
+            isVision: false,
+          },
+        ]),
       } as unknown as Config;
 
       const models = getAvailableModelsForAuthType(
         AuthType.QWEN_OAUTH,
         mockConfig,
       );
-      expect(models).toEqual(AVAILABLE_MODELS_QWEN);
+      expect(models).toEqual([
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: 'Custom model',
+          isVision: false,
+        },
+      ]);
     });
 
     it('should use config.getAvailableModels for openai authType when available', () => {

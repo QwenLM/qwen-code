@@ -115,12 +115,13 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Commercial Qwen3-Coder-Plus: 1M token context
   [/^qwen3-coder-plus(-.*)?$/, LIMITS['1m']], // catches "qwen3-coder-plus" and date variants
+  [/^qwen3-coder-next(-.*)?$/, LIMITS['1m']], // catches "qwen3-coder-next" and date variants
 
   // Commercial Qwen3-Coder-Flash: 1M token context
   [/^qwen3-coder-flash(-.*)?$/, LIMITS['1m']], // catches "qwen3-coder-flash" and date variants
 
   // Generic coder-model: same as qwen3-coder-plus (1M token context)
-  [/^coder-model$/, LIMITS['1m']],
+  [/^coder-model(-.*)?$/, LIMITS['1m']],
 
   // Commercial Qwen3-Max-Preview: 256K token context
   [/^qwen3-max(-preview)?(-.*)?$/, LIMITS['256k']], // catches "qwen3-max" or "qwen3-max-preview" and date variants
@@ -198,9 +199,10 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Qwen3-Coder-Plus: 65,536 max output tokens
   [/^qwen3-coder-plus(-.*)?$/, LIMITS['64k']],
+  [/^qwen3-coder-next(-.*)?$/, LIMITS['64k']],
 
   // Generic coder-model: same as qwen3-coder-plus (64K max output tokens)
-  [/^coder-model$/, LIMITS['64k']],
+  [/^coder-model(-.*)?$/, LIMITS['64k']],
 
   // Qwen3-Max: 65,536 max output tokens
   [/^qwen3-max(-preview)?(-.*)?$/, LIMITS['64k']],
