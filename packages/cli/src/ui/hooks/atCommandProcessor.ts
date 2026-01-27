@@ -11,6 +11,7 @@ import type { AnyToolInvocation, Config } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
+  Storage,
   unescapePath,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, IndividualToolCallDisplay } from '../types.js';
@@ -193,7 +194,7 @@ export async function handleAtCommand({
     const workspaceContext = config.getWorkspaceContext();
 
     // Check if path is in project temp directory
-    const projectTempDir = config.storage.getProjectTempDir();
+    const projectTempDir = Storage.getGlobalTempDir();
     const absolutePathName = path.isAbsolute(pathName)
       ? pathName
       : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);

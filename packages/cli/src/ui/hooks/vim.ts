@@ -266,8 +266,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         return false; // Let InputPrompt handle completion
       }
 
-      // Let InputPrompt handle Ctrl+V for clipboard image pasting
-      if (normalizedKey.ctrl && normalizedKey.name === 'v') {
+      // Let InputPrompt handle Ctrl+V or Cmd+V for clipboard image pasting
+      if (
+        (normalizedKey.ctrl || normalizedKey.meta) &&
+        normalizedKey.name === 'v'
+      ) {
         return false; // Let InputPrompt handle clipboard functionality
       }
 

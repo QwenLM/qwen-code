@@ -22,7 +22,7 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, Storage } from '@qwen-code/qwen-code-core';
 import {
   parseInputForHighlighting,
   buildSegmentsForVisualSlice,
@@ -289,38 +289,31 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   ]);
 
   // Handle clipboard image pasting with Ctrl+V
-  const handleClipboardImage = useCallback(
-    async (validated = false) => {
-      try {
-        const hasImage = validated || (await clipboardHasImage());
-        if (hasImage) {
-          const imagePath = await saveClipboardImage(
-            config.storage.getProjectTempDir(),
-          );
-          if (imagePath) {
-            // Clean up old images
-            cleanupOldClipboardImages(config.storage.getProjectTempDir()).catch(
-              () => {
-                // Ignore cleanup errors
-              },
-            );
+  const handleClipboardImage = useCallback(async (validated = false) => {
+    try {
+      const hasImage = validated || (await clipboardHasImage());
+      if (hasImage) {
+        const imagePath = await saveClipboardImage(Storage.getGlobalTempDir());
+        if (imagePath) {
+          // Clean up old images
+          cleanupOldClipboardImages(Storage.getGlobalTempDir()).catch(() => {
+            // Ignore cleanup errors
+          });
 
-            // Add as attachment instead of inserting @reference into text
-            const filename = path.basename(imagePath);
-            const newAttachment: Attachment = {
-              id: String(Date.now()),
-              path: imagePath,
-              filename,
-            };
-            setAttachments((prev) => [...prev, newAttachment]);
-          }
+          // Add as attachment instead of inserting @reference into text
+          const filename = path.basename(imagePath);
+          const newAttachment: Attachment = {
+            id: String(Date.now()),
+            path: imagePath,
+            filename,
+          };
+          setAttachments((prev) => [...prev, newAttachment]);
         }
-      } catch (error) {
-        console.error('Error handling clipboard image:', error);
       }
-    },
-    [config],
-  );
+    } catch (error) {
+      console.error('Error handling clipboard image:', error);
+    }
+  }, []);
 
   // Handle deletion of an attachment from the list
   const handleAttachmentDelete = useCallback((index: number) => {
