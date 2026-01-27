@@ -45,7 +45,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
     vi.clearAllMocks();
     const mockedBuildRuntimeFetchOptions =
       buildRuntimeFetchOptions as unknown as MockedFunction<
-        (sdkType: 'openai') => OpenAIRuntimeFetchOptions
+        (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
       >;
     mockedBuildRuntimeFetchOptions.mockReturnValue(undefined);
 
@@ -61,6 +61,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
     // Mock Config
     mockCliConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getProxy: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     provider = new DefaultOpenAICompatibleProvider(

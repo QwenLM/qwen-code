@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { EnvHttpProxyAgent } from 'undici';
+import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 
 /**
  * JavaScript runtime type
@@ -29,7 +29,7 @@ export function detectRuntime(): Runtime {
  */
 export type OpenAIRuntimeFetchOptions =
   | {
-      dispatcher?: EnvHttpProxyAgent;
+      dispatcher?: Dispatcher;
       timeout?: false;
     }
   | undefined;
@@ -54,12 +54,14 @@ export type SDKType = 'openai' | 'anthropic';
  */
 export function buildRuntimeFetchOptions(
   sdkType: 'openai',
+  proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options for Anthropic SDK
  */
 export function buildRuntimeFetchOptions(
   sdkType: 'anthropic',
+  proxyUrl?: string,
 ): AnthropicRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options based on the detected runtime and SDK type
@@ -71,13 +73,14 @@ export function buildRuntimeFetchOptions(
  */
 export function buildRuntimeFetchOptions(
   sdkType: SDKType,
+  proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const runtime = detectRuntime();
 
-  // Always disable bodyTimeout (set to 0) to let SDK's timeout parameter
-  // control the total request time. bodyTimeout only monitors intervals between
-  // data chunks, not the total request time, so we disable it to ensure user-configured
-  // timeout works as expected for both streaming and non-streaming requests.
+  // Always disable undici timeouts (set to 0) to let SDK's timeout parameter
+  // control the total request time. bodyTimeout monitors intervals between data
+  // chunks, headersTimeout waits for response headers, so we disable both to
+  // ensure user-configured timeouts work as expected for long-running requests.
 
   switch (runtime) {
     case 'bun': {
@@ -110,22 +113,17 @@ export function buildRuntimeFetchOptions(
     }
 
     case 'node': {
-      // Node.js: Use EnvHttpProxyAgent to configure proxy and disable bodyTimeout
-      // EnvHttpProxyAgent automatically reads proxy settings from environment variables
-      // (HTTP_PROXY, HTTPS_PROXY, NO_PROXY, etc.) to preserve proxy functionality
-      // bodyTimeout is always 0 (disabled) to let SDK timeout control the request
+      // Node.js: Use ProxyAgent when proxy is configured, otherwise Agent.
+      // undici timeouts are disabled to let SDK timeout control the request.
       try {
-        const agent = new EnvHttpProxyAgent({
-          bodyTimeout: 0, // Disable to let SDK timeout control total request time
-        });
-
+        const dispatcher = createDispatcher(proxyUrl);
         if (sdkType === 'openai') {
           return {
-            dispatcher: agent,
+            dispatcher,
           };
         } else {
           return {
-            httpAgent: agent,
+            httpAgent: dispatcher,
           };
         }
       } catch {
@@ -139,20 +137,16 @@ export function buildRuntimeFetchOptions(
     }
 
     default: {
-      // Unknown runtime: Try to use EnvHttpProxyAgent if available
-      // EnvHttpProxyAgent automatically reads proxy settings from environment variables
+      // Unknown runtime: Use ProxyAgent when proxy is configured, otherwise Agent.
       try {
-        const agent = new EnvHttpProxyAgent({
-          bodyTimeout: 0, // Disable to let SDK timeout control total request time
-        });
-
+        const dispatcher = createDispatcher(proxyUrl);
         if (sdkType === 'openai') {
           return {
-            dispatcher: agent,
+            dispatcher,
           };
         } else {
           return {
-            httpAgent: agent,
+            httpAgent: dispatcher,
           };
         }
       } catch {
@@ -164,4 +158,18 @@ export function buildRuntimeFetchOptions(
       }
     }
   }
+}
+
+function createDispatcher(proxyUrl?: string): Dispatcher {
+  if (proxyUrl) {
+    return new ProxyAgent({
+      uri: proxyUrl,
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
+  }
+  return new Agent({
+    headersTimeout: 0,
+    bodyTimeout: 0,
+  });
 }

@@ -16,7 +16,11 @@ import {
   type ContentBlock,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
-import { SDKTestHelper, createSharedTestOptions } from './test-helper.js';
+import {
+  SDKTestHelper,
+  createSharedTestOptions,
+  createResultWaiter,
+} from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 
@@ -254,6 +258,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
 
   describe('Closed stdin behavior (asyncGenerator prompt)', () => {
     it('should reject control requests after stdin closes', async () => {
+      const resultWaiter = createResultWaiter(1);
+      let promptDoneResolve: () => void = () => {};
+      const promptDonePromise = new Promise<void>((resolve) => {
+        promptDoneResolve = resolve;
+      });
+
       async function* createPrompt(): AsyncIterable<SDKUserMessage> {
         yield {
           type: 'user',
@@ -264,6 +274,9 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           },
           parent_tool_use_id: null,
         };
+
+        await resultWaiter.waitForResult(0);
+        promptDoneResolve();
       }
 
       const q = query({
@@ -281,13 +294,14 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         for await (const message of q) {
           if (isSDKResultMessage(message)) {
             firstResultReceived = true;
+            resultWaiter.notifyResult();
             break;
           }
         }
 
         expect(firstResultReceived).toBe(true);
-
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await promptDonePromise;
+        q.endInput();
 
         await expect(q.setPermissionMode('default')).rejects.toThrow(
           'Input stream closed',

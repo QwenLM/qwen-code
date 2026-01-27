@@ -647,7 +647,7 @@ describe('ProcessTransport', () => {
       );
     });
 
-    it('should not throw when writing to ended stream (soft-fail)', () => {
+    it('should throw when writing to ended stream', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',
         args: [],
@@ -664,8 +664,7 @@ describe('ProcessTransport', () => {
 
       mockStdin.end();
 
-      // Should not throw - soft-fail behavior
-      expect(() => transport.write('test')).not.toThrow();
+      expect(() => transport.write('test')).toThrow('Input stream closed');
     });
 
     it('should throw if writing to terminated process', () => {

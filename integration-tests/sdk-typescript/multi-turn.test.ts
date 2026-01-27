@@ -22,7 +22,11 @@ import {
   type ControlMessage,
   type ToolUseBlock,
 } from '@qwen-code/sdk';
-import { SDKTestHelper, createSharedTestOptions } from './test-helper.js';
+import {
+  SDKTestHelper,
+  createSharedTestOptions,
+  createResultWaiter,
+} from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 
@@ -76,6 +80,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
   describe('AsyncIterable Prompt Support', () => {
     it('should handle multi-turn conversation using AsyncIterable prompt', async () => {
+      const resultWaiter = createResultWaiter(3);
+
       // Create multi-turn conversation generator
       async function* createMultiTurnConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
@@ -90,7 +96,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -102,7 +108,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await resultWaiter.waitForResult(1);
 
         yield {
           type: 'user',
@@ -113,6 +119,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(2);
       }
 
       // Create multi-turn query using AsyncIterable prompt
@@ -133,6 +141,9 @@ describe('Multi-Turn Conversations (E2E)', () => {
         for await (const message of q) {
           messages.push(message);
 
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
           if (isSDKAssistantMessage(message)) {
             assistantMessages.push(message);
             const text = extractText(message.message.content);
@@ -153,6 +164,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
     });
 
     it('should maintain session context across turns', async () => {
+      const resultWaiter = createResultWaiter(2);
+
       async function* createContextualConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
 
@@ -162,12 +175,12 @@ describe('Multi-Turn Conversations (E2E)', () => {
           message: {
             role: 'user',
             content:
-              'Suppose we have 3 rabbits and 4 carrots. How many animals are there?',
+              'Suppose we have 3 rabbits and 4 carrots. Identify: How many **animals** are there?',
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -178,6 +191,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(1);
       }
 
       const q = query({
@@ -193,6 +208,9 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
       try {
         for await (const message of q) {
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
           if (isSDKAssistantMessage(message)) {
             assistantMessages.push(message);
           }
@@ -213,6 +231,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
   describe('Tool Usage in Multi-Turn', () => {
     it('should handle tool usage across multiple turns', async () => {
+      const resultWaiter = createResultWaiter(2);
+
       async function* createToolConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
 
@@ -226,7 +246,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 200));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -237,6 +257,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(1);
       }
 
       const q = query({
@@ -257,6 +279,9 @@ describe('Multi-Turn Conversations (E2E)', () => {
         for await (const message of q) {
           messages.push(message);
 
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
           if (isSDKAssistantMessage(message)) {
             assistantMessages.push(message);
             const hasToolUseBlock = message.message.content.some(
@@ -286,6 +311,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
   describe('Message Flow and Sequencing', () => {
     it('should process messages in correct sequence', async () => {
+      const resultWaiter = createResultWaiter(2);
+
       async function* createSequentialConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
 
@@ -299,7 +326,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -310,6 +337,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(1);
       }
 
       const q = query({
@@ -329,6 +358,9 @@ describe('Multi-Turn Conversations (E2E)', () => {
           const messageType = getMessageType(message);
           messageSequence.push(messageType);
 
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
           if (isSDKAssistantMessage(message)) {
             const text = extractText(message.message.content);
             assistantResponses.push(text);
@@ -351,6 +383,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
     });
 
     it('should handle conversation completion correctly', async () => {
+      const resultWaiter = createResultWaiter(2);
+
       async function* createSimpleConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
 
@@ -364,7 +398,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -375,6 +409,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(1);
       }
 
       const q = query({
@@ -394,6 +430,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           messageCount++;
 
           if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
             completedNaturally = true;
             expect(message.subtype).toBe('success');
           }
@@ -441,6 +478,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
     });
 
     it('should handle conversation with delays', async () => {
+      const resultWaiter = createResultWaiter(2);
+
       async function* createDelayedConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
 
@@ -455,7 +494,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
         } as SDKUserMessage;
 
         // Longer delay to test patience
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -466,6 +505,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(1);
       }
 
       const q = query({
@@ -481,6 +522,9 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
       try {
         for await (const message of q) {
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
           if (isSDKAssistantMessage(message)) {
             assistantMessages.push(message);
           }
@@ -495,6 +539,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
 
   describe('Partial Messages in Multi-Turn', () => {
     it('should receive partial messages when includePartialMessages is enabled', async () => {
+      const resultWaiter = createResultWaiter(2);
+
       async function* createMultiTurnConversation(): AsyncIterable<SDKUserMessage> {
         const sessionId = crypto.randomUUID();
 
@@ -508,7 +554,7 @@ describe('Multi-Turn Conversations (E2E)', () => {
           parent_tool_use_id: null,
         } as SDKUserMessage;
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await resultWaiter.waitForResult(0);
 
         yield {
           type: 'user',
@@ -519,6 +565,8 @@ describe('Multi-Turn Conversations (E2E)', () => {
           },
           parent_tool_use_id: null,
         } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(1);
       }
 
       const q = query({
@@ -539,6 +587,9 @@ describe('Multi-Turn Conversations (E2E)', () => {
         for await (const message of q) {
           messages.push(message);
 
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
           if (isSDKPartialAssistantMessage(message)) {
             partialMessageCount++;
           }

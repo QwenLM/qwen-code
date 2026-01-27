@@ -282,9 +282,9 @@ export class ProcessTransport implements Transport {
     if (this.childStdin.writableEnded || this.childStdin.destroyed) {
       this.inputClosed = true;
       logger.warn(
-        `Cannot write to ${this.childStdin.writableEnded ? 'ended' : 'destroyed'} stdin stream, ignoring write`,
+        `Cannot write to ${this.childStdin.writableEnded ? 'ended' : 'destroyed'} stdin stream`,
       );
-      return;
+      throw new Error('Input stream closed');
     }
 
     if (this.childProcess?.killed || this.childProcess?.exitCode !== null) {
@@ -319,10 +319,9 @@ export class ProcessTransport implements Transport {
         errorMsg.includes('write after end');
 
       if (isStreamClosedError) {
-        // Soft-fail: log and return without throwing or changing ready state
         this.inputClosed = true;
         logger.warn(`Stream closed, cannot write: ${errorMsg}`);
-        return;
+        throw new Error('Input stream closed');
       }
 
       // For other errors, maintain original behavior
