@@ -17,7 +17,11 @@ export function isAtWordBoundary(text: string, index: number): boolean {
   if (index === 0) return true;
   const prevChar = text[index - 1];
   // @ is at word boundary if preceded by space, punctuation, or command chars
-  return /[\s\-_/:\\]/.test(prevChar);
+  if (/[\s\-_/:\\]/.test(prevChar)) return true;
+  // Also treat @ as at word boundary if text before @ contains a / (command context)
+  // This handles cases like /run@file.js where @ follows a command without space
+  if (text.slice(0, index).includes('/')) return true;
+  return false;
 }
 
 export function parseInputForHighlighting(

@@ -585,7 +585,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // 2. Second Enter: submits the command
         const isSlashCommandContext = buffer.text.startsWith('/');
         const isAtFileCompletion =
-          isSlashCommandContext && completion.showSuggestions;
+          (isSlashCommandContext || buffer.text.startsWith('@')) &&
+          completion.showSuggestions;
         const isReturnKey = key.name === 'return';
         const isTabKey = key.name === 'tab';
         const isAcceptSuggestionKey =
