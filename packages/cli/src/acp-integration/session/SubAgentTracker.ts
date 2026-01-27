@@ -77,9 +77,21 @@ export class SubAgentTracker {
   constructor(
     private readonly ctx: SessionContext,
     private readonly client: acp.Client,
+    private readonly parentToolCallId: string,
+    private readonly subagentType: string,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
+  }
+
+  /**
+   * Gets the subagent metadata to attach to all events.
+   */
+  private getSubagentMeta() {
+    return {
+      parentToolCallId: this.parentToolCallId,
+      subagentType: this.subagentType,
+    };
   }
 
   /**
@@ -151,6 +163,7 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
+        subagentMeta: this.getSubagentMeta(),
       });
     };
   }
@@ -175,6 +188,7 @@ export class SubAgentTracker {
         message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
+        subagentMeta: this.getSubagentMeta(),
       });
 
       // Clean up state
@@ -269,7 +283,12 @@ export class SubAgentTracker {
       const event = args[0] as SubAgentUsageEvent;
       if (abortSignal.aborted) return;
 
-      this.messageEmitter.emitUsageMetadata(event.usage, '', event.durationMs);
+      this.messageEmitter.emitUsageMetadata(
+        event.usage,
+        '',
+        event.durationMs,
+        this.getSubagentMeta(),
+      );
     };
   }
 

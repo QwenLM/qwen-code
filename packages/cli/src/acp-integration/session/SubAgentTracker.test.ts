@@ -132,7 +132,12 @@ describe('SubAgentTracker', () => {
       requestPermission: requestPermissionSpy,
     } as unknown as acp.Client;
 
-    tracker = new SubAgentTracker(mockContext, mockClient);
+    tracker = new SubAgentTracker(
+      mockContext,
+      mockClient,
+      'parent-call-123',
+      'test-subagent',
+    );
     eventEmitter = new EventEmitter() as unknown as SubAgentEventEmitter;
     abortController = new AbortController();
   });
@@ -214,6 +219,11 @@ describe('SubAgentTracker', () => {
           locations: [],
           kind: 'other',
           rawInput: { path: '/test.ts' },
+          _meta: expect.objectContaining({
+            toolName: 'read_file',
+            parentToolCallId: 'parent-call-123',
+            subagentType: 'test-subagent',
+          }),
         }),
       );
     });
@@ -283,6 +293,11 @@ describe('SubAgentTracker', () => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'call-123',
             status: 'completed',
+            _meta: expect.objectContaining({
+              toolName: 'read_file',
+              parentToolCallId: 'parent-call-123',
+              subagentType: 'test-subagent',
+            }),
           }),
         );
       });
@@ -305,6 +320,11 @@ describe('SubAgentTracker', () => {
           expect.objectContaining({
             sessionUpdate: 'tool_call_update',
             status: 'failed',
+            _meta: expect.objectContaining({
+              toolName: 'read_file',
+              parentToolCallId: 'parent-call-123',
+              subagentType: 'test-subagent',
+            }),
           }),
         );
       });
