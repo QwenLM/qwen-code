@@ -9,6 +9,7 @@ import { loadSettings } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
+  requestChoicePluginNonInteractive,
 } from './consent.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import * as os from 'node:os';
@@ -22,6 +23,7 @@ export async function getExtensionManager(): Promise<ExtensionManager> {
       null,
       requestConsentNonInteractive,
     ),
+    requestChoicePlugin: requestChoicePluginNonInteractive,
     isWorkspaceTrusted: !!isWorkspaceTrusted(loadSettings(workspaceDir).merged),
   });
   await extensionManager.refreshCache();

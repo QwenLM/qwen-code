@@ -647,7 +647,11 @@ export class Session implements SessionContext {
       const error = e instanceof Error ? e : new Error(String(e));
 
       // Use ToolCallEmitter for error handling
-      await this.toolCallEmitter.emitError(callId, error);
+      await this.toolCallEmitter.emitError(
+        callId,
+        fc.name ?? 'unknown_tool',
+        error,
+      );
 
       // Record tool error for session management
       const errorParts = [
@@ -979,7 +983,7 @@ export class Session implements SessionContext {
     if (pathSpecsToRead.length > 0) {
       const readResult = await readManyFilesTool.buildAndExecute(
         {
-          paths_with_line_ranges: pathSpecsToRead,
+          paths: pathSpecsToRead,
         },
         abortSignal,
       );

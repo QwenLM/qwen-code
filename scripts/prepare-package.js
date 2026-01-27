@@ -161,7 +161,6 @@ const distPackageJson = {
     '@lydell/node-pty-linux-x64': '1.1.0',
     '@lydell/node-pty-win32-arm64': '1.1.0',
     '@lydell/node-pty-win32-x64': '1.1.0',
-    'node-pty': '^1.0.0',
   },
   engines: rootPackageJson.engines,
 };

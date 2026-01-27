@@ -1,4 +1,5 @@
 import type {
+  ClaudeMarketplaceConfig,
   ExtensionConfig,
   ExtensionRequestOptions,
   SkillConfig,
@@ -6,6 +7,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { ConfirmationRequest } from '../../ui/types.js';
 import chalk from 'chalk';
+import prompts from 'prompts';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -25,6 +27,49 @@ export async function requestConsentNonInteractive(
     t('Do you want to continue? [Y/n]: '),
   );
   return result;
+}
+
+/**
+ * Requests plugin selection from the user in non-interactive mode.
+ * Displays an interactive list with arrow key navigation.
+ *
+ * This should not be called from interactive mode as it will break the CLI.
+ *
+ * @param marketplace The marketplace config containing available plugins.
+ * @returns The name of the selected plugin.
+ */
+export async function requestChoicePluginNonInteractive(
+  marketplace: ClaudeMarketplaceConfig,
+): Promise<string> {
+  const plugins = marketplace.plugins;
+
+  if (plugins.length === 0) {
+    throw new Error(t('No plugins available in this marketplace.'));
+  }
+
+  // Build choices for prompts select
+
+  const choices = plugins.map((plugin) => ({
+    title: chalk.green(chalk.bold(`[${plugin.name}]`)),
+    value: plugin.name,
+  }));
+
+  const response = await prompts({
+    type: 'select',
+    name: 'plugin',
+    message: t('Select a plugin to install from marketplace "{{name}}":', {
+      name: marketplace.name,
+    }),
+    choices,
+    initial: 0,
+  });
+
+  // Handle cancellation (Ctrl+C)
+  if (response.plugin === undefined) {
+    throw new Error(t('Plugin selection cancelled.'));
+  }
+
+  return response.plugin;
 }
 
 /**

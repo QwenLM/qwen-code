@@ -315,7 +315,9 @@ export default {
   'How is Qwen doing this session? (optional)':
     'How is Qwen doing this session? (optional)',
   Bad: 'Bad',
+  Fine: 'Fine',
   Good: 'Good',
+  Dismiss: 'Dismiss',
   'Not Sure Yet': 'Not Sure Yet',
   'Any other key': 'Any other key',
   'Disable Loading Phrases': 'Disable Loading Phrases',
@@ -515,6 +517,19 @@ export default {
   'Manage extension settings.': 'Manage extension settings.',
   'You need to specify a command (set or list).':
     'You need to specify a command (set or list).',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.':
+    'No plugins available in this marketplace.',
+  'Select a plugin to install from marketplace "{{name}}":':
+    'Select a plugin to install from marketplace "{{name}}":',
+  'Plugin selection cancelled.': 'Plugin selection cancelled.',
+  'Select a plugin from "{{name}}"': 'Select a plugin from "{{name}}"',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel',
+  '{{count}} more above': '{{count}} more above',
+  '{{count}} more below': '{{count}} more below',
   'manage IDE integration': 'manage IDE integration',
   'check status of IDE integration': 'check status of IDE integration',
   'install required IDE companion for {{ideName}}':

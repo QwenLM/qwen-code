@@ -20,7 +20,6 @@ import {
   validateName,
   getExtensionId,
   hashValue,
-  parseInstallSource,
   type ExtensionConfig,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
@@ -778,47 +777,6 @@ describe('extension tests', () => {
         };
         const id = getExtensionId(config, metadata);
         expect(id).toBe(hashValue('https://github.com/owner/repo'));
-      });
-    });
-
-    describe('parseInstallSource', () => {
-      it('should parse HTTPS URL as git type', async () => {
-        const result = await parseInstallSource(
-          'https://github.com/owner/repo',
-        );
-        expect(result.type).toBe('git');
-        expect(result.source).toBe('https://github.com/owner/repo');
-      });
-
-      it('should parse HTTP URL as git type', async () => {
-        const result = await parseInstallSource('http://example.com/repo');
-        expect(result.type).toBe('git');
-      });
-
-      it('should parse git@ URL as git type', async () => {
-        const result = await parseInstallSource(
-          'git@github.com:owner/repo.git',
-        );
-        expect(result.type).toBe('git');
-      });
-
-      it('should parse sso:// URL as git type', async () => {
-        const result = await parseInstallSource('sso://some/path');
-        expect(result.type).toBe('git');
-      });
-
-      it('should parse marketplace URL correctly', async () => {
-        const result = await parseInstallSource(
-          'https://example.com/marketplace:plugin-name',
-        );
-        expect(result.type).toBe('marketplace');
-        expect(result.marketplace?.pluginName).toBe('plugin-name');
-      });
-
-      it('should throw for non-existent local path', async () => {
-        await expect(
-          parseInstallSource('/nonexistent/path/to/extension'),
-        ).rejects.toThrow('Install source not found');
       });
     });
   });

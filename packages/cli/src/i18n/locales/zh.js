@@ -305,7 +305,9 @@ export default {
   'Enable User Feedback': '启用用户反馈',
   'How is Qwen doing this session? (optional)': 'Qwen 这次表现如何？（可选）',
   Bad: '不满意',
+  Fine: '还行',
   Good: '满意',
+  Dismiss: '忽略',
   'Not Sure Yet': '暂不评价',
   'Any other key': '任意其他键',
   'Disable Loading Phrases': '禁用加载短语',
@@ -490,6 +492,18 @@ export default {
   'Manage extension settings.': '管理扩展设置。',
   'You need to specify a command (set or list).':
     '您需要指定命令（set 或 list）。',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.': '此市场中没有可用的插件。',
+  'Select a plugin to install from marketplace "{{name}}":':
+    '从市场 "{{name}}" 中选择要安装的插件：',
+  'Plugin selection cancelled.': '插件选择已取消。',
+  'Select a plugin from "{{name}}"': '从 "{{name}}" 中选择插件',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    '使用 ↑↓ 或 j/k 导航，回车选择，Esc 取消',
+  '{{count}} more above': '上方还有 {{count}} 项',
+  '{{count}} more below': '下方还有 {{count}} 项',
   'manage IDE integration': '管理 IDE 集成',
   'check status of IDE integration': '检查 IDE 集成状态',
   'install required IDE companion for {{ideName}}':

@@ -35,6 +35,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 vi.mock('./consent.js', () => ({
   requestConsentNonInteractive: mockRequestConsentNonInteractive,
   requestConsentOrFail: mockRequestConsentOrFail,
+  requestChoicePluginNonInteractive: vi.fn(),
 }));
 
 vi.mock('../../config/trustedFolders.js', () => ({

@@ -124,6 +124,11 @@ export abstract class BaseController {
     timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
     signal?: AbortSignal,
   ): Promise<ControlResponse> {
+    // Check if stream is closed
+    if (this.context.inputClosed) {
+      throw new Error('Input closed');
+    }
+
     // Check if already aborted
     if (signal?.aborted) {
       throw new Error('Request aborted');

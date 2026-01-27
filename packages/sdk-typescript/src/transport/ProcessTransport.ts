@@ -18,6 +18,7 @@ export class ProcessTransport implements Transport {
   private ready = false;
   private _exitError: Error | null = null;
   private closed = false;
+  private inputClosed = false;
   private abortController: AbortController;
   private processExitHandler: (() => void) | null = null;
   private abortHandler: (() => void) | null = null;
@@ -210,6 +211,7 @@ export class ProcessTransport implements Transport {
 
     this.ready = false;
     this.closed = true;
+    this.inputClosed = true;
   }
 
   async waitForExit(): Promise<void> {
@@ -273,8 +275,16 @@ export class ProcessTransport implements Transport {
       throw new Error('Cannot write to closed transport');
     }
 
-    if (this.childStdin.writableEnded) {
-      throw new Error('Cannot write to ended stream');
+    if (this.inputClosed) {
+      throw new Error('Input stream closed');
+    }
+
+    if (this.childStdin.writableEnded || this.childStdin.destroyed) {
+      this.inputClosed = true;
+      logger.warn(
+        `Cannot write to ${this.childStdin.writableEnded ? 'ended' : 'destroyed'} stdin stream, ignoring write`,
+      );
+      return;
     }
 
     if (this.childProcess?.killed || this.childProcess?.exitCode !== null) {
@@ -301,10 +311,25 @@ export class ProcessTransport implements Transport {
         logger.debug(`Write successful (${message.length} bytes)`);
       }
     } catch (error) {
+      // Check if this is a stream-closed error (EPIPE, ERR_STREAM_WRITE_AFTER_END, etc.)
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const isStreamClosedError =
+        errorMsg.includes('EPIPE') ||
+        errorMsg.includes('ERR_STREAM_WRITE_AFTER_END') ||
+        errorMsg.includes('write after end');
+
+      if (isStreamClosedError) {
+        // Soft-fail: log and return without throwing or changing ready state
+        this.inputClosed = true;
+        logger.warn(`Stream closed, cannot write: ${errorMsg}`);
+        return;
+      }
+
+      // For other errors, maintain original behavior
       this.ready = false;
-      const errorMsg = `Failed to write to stdin: ${error instanceof Error ? error.message : String(error)}`;
-      logger.error(errorMsg);
-      throw new Error(errorMsg);
+      const fullErrorMsg = `Failed to write to stdin: ${errorMsg}`;
+      logger.error(fullErrorMsg);
+      throw new Error(fullErrorMsg);
     }
   }
 
@@ -344,6 +369,7 @@ export class ProcessTransport implements Transport {
   endInput(): void {
     if (this.childStdin) {
       this.childStdin.end();
+      this.inputClosed = true;
     }
   }
 

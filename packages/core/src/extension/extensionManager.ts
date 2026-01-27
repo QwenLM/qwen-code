@@ -9,6 +9,7 @@ import type {
   ExtensionInstallMetadata,
   SkillConfig,
   SubagentConfig,
+  ClaudeMarketplaceConfig,
 } from '../index.js';
 import {
   Storage,
@@ -21,6 +22,7 @@ import {
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+
 import { getErrorMessage } from '../utils/errors.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
@@ -36,11 +38,11 @@ import {
 } from './github.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
-import { parseMarketplaceSource } from './marketplace.js';
 import {
   isGeminiExtensionConfig,
   convertGeminiExtensionPackage,
 } from './gemini-converter.js';
+import { convertClaudePluginPackage } from './claude-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
@@ -62,9 +64,7 @@ import {
   ExtensionUninstallEvent,
   ExtensionUpdateEvent,
 } from '../telemetry/types.js';
-import { stat } from 'node:fs/promises';
 import { loadSkillsFromDir } from '../skills/skill-load.js';
-import { convertClaudePluginPackage } from './claude-converter.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 
 // ============================================================================
@@ -151,6 +151,9 @@ export interface ExtensionManagerOptions {
   config?: Config;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
   requestSetting?: (setting: ExtensionSetting) => Promise<string>;
+  requestChoicePlugin?: (
+    marketplace: ClaudeMarketplaceConfig,
+  ) => Promise<string>;
 }
 
 // ============================================================================
@@ -274,6 +277,9 @@ export class ExtensionManager {
   private isWorkspaceTrusted: boolean;
   private requestConsent: (options?: ExtensionRequestOptions) => Promise<void>;
   private requestSetting?: (setting: ExtensionSetting) => Promise<string>;
+  private requestChoicePlugin: (
+    marketplace: ClaudeMarketplaceConfig,
+  ) => Promise<string>;
 
   constructor(options: ExtensionManagerOptions) {
     this.workspaceDir = options.workspaceDir ?? process.cwd();
@@ -286,6 +292,8 @@ export class ExtensionManager {
       'extension-enablement.json',
     );
     this.requestSetting = options.requestSetting;
+    this.requestChoicePlugin =
+      options.requestChoicePlugin || (() => Promise.resolve(''));
     this.requestConsent = options.requestConsent || (() => Promise.resolve());
     this.config = options.config;
     this.telemetrySettings = options.telemetrySettings;
@@ -306,6 +314,14 @@ export class ExtensionManager {
     requestSetting?: (setting: ExtensionSetting) => Promise<string>,
   ): void {
     this.requestSetting = requestSetting;
+  }
+
+  setRequestChoicePlugin(
+    requestChoicePlugin: (
+      marketplace: ClaudeMarketplaceConfig,
+    ) => Promise<string>,
+  ): void {
+    this.requestChoicePlugin = requestChoicePlugin;
   }
 
   // ==========================================================================
@@ -672,9 +688,9 @@ export class ExtensionManager {
         pathSeparator: path.sep,
       }) as unknown as ExtensionConfig;
 
-      if (!config.name || !config.version) {
+      if (!config.name) {
         throw new Error(
-          `Invalid configuration in ${configFilePath}: missing ${!config.name ? '"name"' : '"version"'}`,
+          `Invalid configuration in ${configFilePath}: missing "name"`,
         );
       }
       validateName(config.name);
@@ -734,35 +750,20 @@ export class ExtensionManager {
       }
 
       let tempDir: string | undefined;
-      let claudePluginName: string | undefined;
 
-      // Handle marketplace installation
-      if (installMetadata.type === 'marketplace') {
-        const marketplaceParsed = parseMarketplaceSource(
-          installMetadata.source,
+      if (
+        installMetadata.type === 'marketplace' &&
+        installMetadata.marketplaceConfig &&
+        !installMetadata.pluginName
+      ) {
+        const pluginName = await this.requestChoicePlugin(
+          installMetadata.marketplaceConfig,
         );
-        if (!marketplaceParsed) {
-          throw new Error(
-            `Invalid marketplace source format: ${installMetadata.source}. Expected format: marketplace-url:plugin-name`,
-          );
-        }
+        installMetadata.pluginName = pluginName;
+      }
 
-        tempDir = await ExtensionStorage.createTmpDir();
-        try {
-          await downloadFromGitHubRelease(
-            {
-              source: marketplaceParsed.marketplaceSource,
-              type: 'git',
-            },
-            tempDir,
-          );
-        } catch (_error) {
-          await cloneFromGit(installMetadata, tempDir);
-          installMetadata.type = 'git';
-        }
-        localSourcePath = tempDir;
-        claudePluginName = marketplaceParsed.pluginName;
-      } else if (
+      if (
+        installMetadata.type === 'marketplace' ||
         installMetadata.type === 'git' ||
         installMetadata.type === 'github-release'
       ) {
@@ -772,11 +773,21 @@ export class ExtensionManager {
             installMetadata,
             tempDir,
           );
-          installMetadata.type = result.type;
-          installMetadata.releaseTag = result.tagName;
+          if (
+            installMetadata.type === 'git' ||
+            installMetadata.type === 'github-release'
+          ) {
+            installMetadata.type = result.type;
+            installMetadata.releaseTag = result.tagName;
+          }
         } catch (_error) {
           await cloneFromGit(installMetadata, tempDir);
-          installMetadata.type = 'git';
+          if (
+            installMetadata.type === 'git' ||
+            installMetadata.type === 'github-release'
+          ) {
+            installMetadata.type = 'git';
+          }
         }
         localSourcePath = tempDir;
       } else if (
@@ -791,7 +802,7 @@ export class ExtensionManager {
       try {
         localSourcePath = await convertGeminiOrClaudeExtension(
           localSourcePath,
-          claudePluginName,
+          installMetadata.pluginName,
         );
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
@@ -897,12 +908,7 @@ export class ExtensionManager {
           );
         }
 
-        if (
-          installMetadata.type === 'local' ||
-          installMetadata.type === 'git' ||
-          installMetadata.type === 'github-release' ||
-          installMetadata.type === 'marketplace'
-        ) {
+        if (installMetadata.type !== 'link') {
           await copyExtension(localSourcePath, destinationPath);
         }
 
@@ -1249,39 +1255,4 @@ export function validateName(name: string) {
       `Invalid extension name: "${name}". Only letters (a-z, A-Z), numbers (0-9), underscores (_), dots (.), and dashes (-) are allowed.`,
     );
   }
-}
-
-export async function parseInstallSource(
-  source: string,
-): Promise<ExtensionInstallMetadata> {
-  let installMetadata: ExtensionInstallMetadata;
-  const marketplaceParsed = parseMarketplaceSource(source);
-  if (marketplaceParsed) {
-    installMetadata = {
-      source,
-      type: 'marketplace',
-      marketplace: marketplaceParsed,
-    };
-  } else if (
-    source.startsWith('http://') ||
-    source.startsWith('https://') ||
-    source.startsWith('git@') ||
-    source.startsWith('sso://')
-  ) {
-    installMetadata = {
-      source,
-      type: 'git',
-    };
-  } else {
-    try {
-      await stat(source);
-      installMetadata = {
-        source,
-        type: 'local',
-      };
-    } catch {
-      throw new Error('Install source not found.');
-    }
-  }
-  return installMetadata;
 }

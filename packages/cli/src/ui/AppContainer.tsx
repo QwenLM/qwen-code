@@ -93,6 +93,7 @@ import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
   useSettingInputRequests,
+  usePluginChoiceRequests,
 } from './hooks/useExtensionUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { t } from '../i18n/index.js';
@@ -176,10 +177,32 @@ export const AppContainer = (props: AppContainerProps) => {
   const { addSettingInputRequest, settingInputRequests } =
     useSettingInputRequests();
 
+  const { addPluginChoiceRequest, pluginChoiceRequests } =
+    usePluginChoiceRequests();
+
   extensionManager.setRequestConsent(
     requestConsentOrFail.bind(null, (description) =>
       requestConsentInteractive(description, addConfirmUpdateExtensionRequest),
     ),
+  );
+
+  extensionManager.setRequestChoicePlugin(
+    (marketplace) =>
+      new Promise<string>((resolve, reject) => {
+        addPluginChoiceRequest({
+          marketplaceName: marketplace.name,
+          plugins: marketplace.plugins.map((p) => ({
+            name: p.name,
+            description: p.description,
+          })),
+          onSelect: (pluginName) => {
+            resolve(pluginName);
+          },
+          onCancel: () => {
+            reject(new Error('Plugin selection cancelled'));
+          },
+        });
+      }),
   );
 
   extensionManager.setRequestSetting(
@@ -600,7 +623,7 @@ export const AppContainer = (props: AppContainerProps) => {
     try {
       const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
         process.cwd(),
-        settings.merged.context?.loadMemoryFromIncludeDirectories
+        settings.merged.context?.loadFromIncludeDirectories
           ? config.getWorkspaceContext().getDirectories()
           : [],
         config.getDebugMode(),
@@ -1307,6 +1330,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
     settingInputRequests.length > 0 ||
+    pluginChoiceRequests.length > 0 ||
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
@@ -1326,6 +1350,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFeedbackDialogOpen,
     openFeedbackDialog,
     closeFeedbackDialog,
+    temporaryCloseFeedbackDialog,
     submitFeedback,
   } = useFeedbackDialog({
     config,
@@ -1369,6 +1394,7 @@ export const AppContainer = (props: AppContainerProps) => {
       confirmationRequest,
       confirmUpdateExtensionRequests,
       settingInputRequests,
+      pluginChoiceRequests,
       loopDetectionConfirmationRequest,
       geminiMdFileCount,
       streamingState,
@@ -1461,6 +1487,7 @@ export const AppContainer = (props: AppContainerProps) => {
       confirmationRequest,
       confirmUpdateExtensionRequests,
       settingInputRequests,
+      pluginChoiceRequests,
       loopDetectionConfirmationRequest,
       geminiMdFileCount,
       streamingState,
@@ -1571,6 +1598,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
+      temporaryCloseFeedbackDialog,
       submitFeedback,
     }),
     [
@@ -1611,6 +1639,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
+      temporaryCloseFeedbackDialog,
       submitFeedback,
     ],
   );

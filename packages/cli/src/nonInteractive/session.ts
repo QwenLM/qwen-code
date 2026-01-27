@@ -596,7 +596,14 @@ class Session {
         throw streamError;
       }
 
-      // Stream ended - wait for all pending work before shutdown
+      // Stdin closed - mark input as closed in dispatcher
+      // This will reject all current pending outgoing requests AND any future requests
+      // that might be registered by async message handlers still running
+      if (this.dispatcher) {
+        this.dispatcher.markInputClosed();
+      }
+
+      // Wait for all pending work before shutdown
       await this.waitForAllPendingWork();
       await this.shutdown();
     } catch (error) {

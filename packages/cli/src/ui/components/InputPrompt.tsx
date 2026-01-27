@@ -37,6 +37,7 @@ import * as path from 'node:path';
 import { SCREEN_READER_USER_PREFIX } from '../textConstants.js';
 import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 export interface InputPromptProps {
   buffer: TextBuffer;
@@ -109,6 +110,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
+  const uiActions = useUIActions();
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -352,12 +354,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return;
       }
 
-      // Intercept feedback dialog option keys (1, 2) when dialog is open
-      if (
-        uiState.isFeedbackDialogOpen &&
-        (FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)
-      ) {
-        return;
+      // Handle feedback dialog keyboard interactions when dialog is open
+      if (uiState.isFeedbackDialogOpen) {
+        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
+        if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
+          return;
+        } else {
+          // For any other key, close feedback dialog temporarily and continue with normal processing
+          uiActions.temporaryCloseFeedbackDialog();
+          // Continue processing the key for normal input handling
+        }
       }
 
       // Reset ESC count and hide prompt on any non-ESC key
@@ -774,7 +780,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       onToggleShortcuts,
       showShortcuts,
       uiState,
-      justAcceptedSuggestion,
+      uiActions,
     ],
   );
 
@@ -973,8 +979,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             userInput={buffer.text}
             mode={
               buffer.text.startsWith('/') &&
-              !reverseSearchActive &&
-              !commandSearchActive
+                !reverseSearchActive &&
+                !commandSearchActive
                 ? 'slash'
                 : 'reverse'
             }

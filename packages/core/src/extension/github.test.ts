@@ -118,32 +118,6 @@ describe('git extension helpers', () => {
       );
     });
 
-    it('should use marketplace source for marketplace type extensions', async () => {
-      const installMetadata = {
-        source: 'marketplace:my-plugin',
-        type: 'marketplace' as const,
-        marketplace: {
-          pluginName: 'my-plugin',
-          marketplaceSource: 'https://github.com/marketplace/my-plugin',
-        },
-      };
-      const destination = '/dest';
-      mockGit.getRemotes.mockResolvedValue([
-        {
-          name: 'origin',
-          refs: { fetch: 'https://github.com/marketplace/my-plugin' },
-        },
-      ]);
-
-      await cloneFromGit(installMetadata, destination);
-
-      expect(mockGit.clone).toHaveBeenCalledWith(
-        'https://github.com/marketplace/my-plugin',
-        './',
-        ['--depth', '1'],
-      );
-    });
-
     it('should use source for marketplace type without marketplace metadata', async () => {
       const installMetadata = {
         source: 'http://fallback-repo.com',

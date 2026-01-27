@@ -36,6 +36,11 @@ vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false })),
 }));
+vi.mock('../contexts/UIActionsContext.js', () => ({
+  useUIActions: vi.fn(() => ({
+    temporaryCloseFeedbackDialog: vi.fn(),
+  })),
+}));
 
 const mockSlashCommands: SlashCommand[] = [
   {

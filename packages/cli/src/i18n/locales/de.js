@@ -298,7 +298,9 @@ export default {
   'How is Qwen doing this session? (optional)':
     'Wie macht sich Qwen in dieser Sitzung? (optional)',
   Bad: 'Schlecht',
+  Fine: 'In Ordnung',
   Good: 'Gut',
+  Dismiss: 'Ignorieren',
   'Not Sure Yet': 'Noch nicht sicher',
   'Any other key': 'Beliebige andere Taste',
   'Disable Loading Phrases': 'Ladesprüche deaktivieren',
@@ -507,6 +509,19 @@ export default {
   'Manage extension settings.': 'Erweiterungseinstellungen verwalten.',
   'You need to specify a command (set or list).':
     'Sie müssen einen Befehl angeben (set oder list).',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.':
+    'In diesem Marktplatz sind keine Plugins verfügbar.',
+  'Select a plugin to install from marketplace "{{name}}":':
+    'Wählen Sie ein Plugin zur Installation aus Marktplatz "{{name}}":',
+  'Plugin selection cancelled.': 'Plugin-Auswahl abgebrochen.',
+  'Select a plugin from "{{name}}"': 'Plugin aus "{{name}}" auswählen',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    'Verwenden Sie ↑↓ oder j/k zum Navigieren, Enter zum Auswählen, Escape zum Abbrechen',
+  '{{count}} more above': '{{count}} weitere oben',
+  '{{count}} more below': '{{count}} weitere unten',
   'manage IDE integration': 'IDE-Integration verwalten',
   'check status of IDE integration': 'Status der IDE-Integration prüfen',
   'install required IDE companion for {{ideName}}':

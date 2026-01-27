@@ -17,6 +17,7 @@ import {
   MessageType,
   type ConfirmationRequest,
   type SettingInputRequest,
+  type PluginChoiceRequest,
 } from '../types.js';
 import { checkExhaustive } from '../../utils/checks.js';
 
@@ -141,6 +142,71 @@ export const useSettingInputRequests = () => {
     addSettingInputRequest,
     settingInputRequests,
     dispatchSettingInputRequests,
+  };
+};
+
+type PluginChoiceRequestWrapper = {
+  marketplaceName: string;
+  plugins: Array<{ name: string; description?: string }>;
+  onSelect: (pluginName: string) => void;
+  onCancel: () => void;
+};
+
+type PluginChoiceRequestAction =
+  | { type: 'add'; request: PluginChoiceRequestWrapper }
+  | { type: 'remove'; request: PluginChoiceRequestWrapper };
+
+function pluginChoiceRequestsReducer(
+  state: PluginChoiceRequestWrapper[],
+  action: PluginChoiceRequestAction,
+): PluginChoiceRequestWrapper[] {
+  switch (action.type) {
+    case 'add':
+      return [...state, action.request];
+    case 'remove':
+      return state.filter((r) => r !== action.request);
+    default:
+      checkExhaustive(action);
+      return state;
+  }
+}
+
+export const usePluginChoiceRequests = () => {
+  const [pluginChoiceRequests, dispatchPluginChoiceRequests] = useReducer(
+    pluginChoiceRequestsReducer,
+    [],
+  );
+  const addPluginChoiceRequest = useCallback(
+    (original: PluginChoiceRequest) => {
+      const wrappedRequest: PluginChoiceRequestWrapper = {
+        marketplaceName: original.marketplaceName,
+        plugins: original.plugins,
+        onSelect: (pluginName: string) => {
+          dispatchPluginChoiceRequests({
+            type: 'remove',
+            request: wrappedRequest,
+          });
+          original.onSelect(pluginName);
+        },
+        onCancel: () => {
+          dispatchPluginChoiceRequests({
+            type: 'remove',
+            request: wrappedRequest,
+          });
+          original.onCancel();
+        },
+      };
+      dispatchPluginChoiceRequests({
+        type: 'add',
+        request: wrappedRequest,
+      });
+    },
+    [dispatchPluginChoiceRequests],
+  );
+  return {
+    addPluginChoiceRequest,
+    pluginChoiceRequests,
+    dispatchPluginChoiceRequests,
   };
 };
 

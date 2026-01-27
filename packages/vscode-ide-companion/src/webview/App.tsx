@@ -431,6 +431,7 @@ export const App: React.FC = () => {
         type: 'permissionResponse',
         data: { optionId },
       });
+
       setPermissionRequest(null);
     },
     [vscode],

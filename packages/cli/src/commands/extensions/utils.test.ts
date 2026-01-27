@@ -32,6 +32,7 @@ vi.mock('../../config/trustedFolders.js', () => ({
 vi.mock('./consent.js', () => ({
   requestConsentOrFail: vi.fn(),
   requestConsentNonInteractive: vi.fn(),
+  requestChoicePluginNonInteractive: vi.fn(),
 }));
 
 describe('getExtensionManager', () => {
