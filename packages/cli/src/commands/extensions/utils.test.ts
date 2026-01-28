@@ -5,7 +5,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getExtensionManager } from './utils.js';
+import { getExtensionManager, extensionToOutputString } from './utils.js';
+import type { Extension, ExtensionManager } from '@qwen-code/qwen-code-core';
 
 const mockRefreshCache = vi.fn();
 const mockExtensionManagerInstance = {
@@ -31,6 +32,7 @@ vi.mock('../../config/trustedFolders.js', () => ({
 vi.mock('./consent.js', () => ({
   requestConsentOrFail: vi.fn(),
   requestConsentNonInteractive: vi.fn(),
+  requestChoicePluginNonInteractive: vi.fn(),
 }));
 
 describe('getExtensionManager', () => {
@@ -62,5 +64,72 @@ describe('getExtensionManager', () => {
         workspaceDir: process.cwd(),
       }),
     );
+  });
+});
+
+describe('extensionToOutputString', () => {
+  const mockIsEnabled = vi.fn();
+  const mockExtensionManager = {
+    isEnabled: mockIsEnabled,
+  } as unknown as ExtensionManager;
+
+  const createMockExtension = (overrides = {}): Extension => ({
+    id: 'test-ext-id',
+    name: 'test-extension',
+    version: '1.0.0',
+    isActive: true,
+    path: '/path/to/extension',
+    contextFiles: [],
+    config: { name: 'test-extension', version: '1.0.0' },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsEnabled.mockReturnValue(true);
+  });
+
+  it('should include status icon when inline is false', () => {
+    const extension = createMockExtension();
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+      false,
+    );
+
+    // Should contain either ✓ or ✗ (with ANSI color codes)
+    expect(result).toMatch(/test-extension/);
+    expect(result).toContain('(1.0.0)');
+  });
+
+  it('should exclude status icon when inline is true', () => {
+    const extension = createMockExtension();
+    const result = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+      true,
+    );
+
+    // Should start with extension name (after stripping potential whitespace)
+    expect(result.trim()).toMatch(/^test-extension/);
+  });
+
+  it('should default inline to false', () => {
+    const extension = createMockExtension();
+    const resultWithoutInline = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+    const resultWithInlineFalse = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+      false,
+    );
+
+    expect(resultWithoutInline).toEqual(resultWithInlineFalse);
   });
 });

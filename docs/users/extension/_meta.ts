@@ -1,6 +1,6 @@
 export default {
   introduction: 'Introduction',
-  'getting-start-extensions': {
+  'getting-started-extensions': {
     display: 'hidden',
   },
   'extension-releasing': {

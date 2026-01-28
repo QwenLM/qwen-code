@@ -1,0 +1,339 @@
+name: 'Release VSCode IDE Companion'
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'The version to release (e.g., v0.1.11). Required for manual patch releases.'
+        required: false
+        type: 'string'
+      ref:
+        description: 'The branch or ref (full git sha) to release from.'
+        required: true
+        type: 'string'
+        default: 'main'
+      dry_run:
+        description: 'Run a dry-run of the release process; no branches, vsix packages or GitHub releases will be created.'
+        required: true
+        type: 'boolean'
+        default: true
+      create_preview_release:
+        description: 'Auto apply the preview release tag, input version is ignored.'
+        required: false
+        type: 'boolean'
+        default: false
+      force_skip_tests:
+        description: 'Select to skip the "Run Tests" step in testing. Prod releases should run tests'
+        required: false
+        type: 'boolean'
+        default: false
+
+concurrency:
+  group: '${{ github.workflow }}'
+  cancel-in-progress: false
+
+jobs:
+  # First job: Determine version and run tests once
+  prepare:
+    runs-on: 'ubuntu-latest'
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    permissions:
+      contents: 'read'
+    outputs:
+      release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
+      release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
+      vscode_tag: '${{ steps.version.outputs.VSCODE_TAG }}'
+      is_preview: '${{ steps.vars.outputs.is_preview }}'
+      is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Set booleans for simplified logic'
+        env:
+          CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
+          DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
+        id: 'vars'
+        run: |-
+          is_preview="false"
+          if [[ "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
+            is_preview="true"
+          fi
+          echo "is_preview=${is_preview}" >> "${GITHUB_OUTPUT}"
+
+          is_dry_run="false"
+          if [[ "${DRY_RUN_INPUT}" == "true" ]]; then
+            is_dry_run="true"
+          fi
+          echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci
+
+      - name: 'Get the version'
+        id: 'version'
+        working-directory: 'packages/vscode-ide-companion'
+        run: |
+          # Get the base version from package.json regardless of scenario
+          BASE_VERSION=$(node -p "require('./package.json').version")
+
+          if [[ "${IS_PREVIEW}" == "true" ]]; then
+            # Generate preview version with timestamp based on actual package version
+            TIMESTAMP=$(date +%Y%m%d%H%M%S)
+            PREVIEW_VERSION="${BASE_VERSION}-preview.${TIMESTAMP}"
+            RELEASE_TAG="preview.${TIMESTAMP}"
+
+            echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_VERSION=${PREVIEW_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "VSCODE_TAG=preview" >> "$GITHUB_OUTPUT"
+          else
+            # Use specified version or get from package.json
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              RELEASE_VERSION="${MANUAL_VERSION#v}" # Remove 'v' prefix if present
+              RELEASE_TAG="${MANUAL_VERSION#v}" # Remove 'v' prefix if present
+            else
+              RELEASE_VERSION="${BASE_VERSION}"
+              RELEASE_TAG="${BASE_VERSION}"
+            fi
+
+            echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+            echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
+            echo "VSCODE_TAG=latest" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          MANUAL_VERSION: '${{ inputs.version }}'
+
+      - name: 'Run Tests'
+        if: |-
+          ${{ github.event.inputs.force_skip_tests != 'true' }}
+        working-directory: 'packages/vscode-ide-companion'
+        run: |
+          npm run test:ci
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+  # Second job: Build platform-specific VSIXes in parallel
+  build:
+    needs: 'prepare'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Platform-specific builds (with node-pty native binaries)
+          - os: 'ubuntu-latest'
+            target: 'linux-x64'
+            universal: false
+          # macOS 15 (x64): use macos-15-intel
+          # Endpoint Badge: macos-latest-large, macos-15-large, or macos-15-intel
+          - os: 'macos-15-intel'
+            target: 'darwin-x64'
+            universal: false
+          # macOS 15 Arm64: use macos-latest
+          # Endpoint Badge: macos-latest, macos-15, or macos-15-xlarge
+          - os: 'macos-latest'
+            target: 'darwin-arm64'
+            universal: false
+          - os: 'windows-latest'
+            target: 'win32-x64'
+            universal: false
+          # Universal fallback (without node-pty, uses child_process)
+          - os: 'ubuntu-latest'
+            target: ''
+            universal: true
+
+    runs-on: '${{ matrix.os }}'
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci
+
+      - name: 'Install VSCE'
+        run: |-
+          npm install -g @vscode/vsce
+
+      - name: 'Update package version'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        shell: 'bash'
+        run: |-
+          npm run release:version -- "${RELEASE_VERSION}"
+
+      - name: 'Prepare VSCode Extension'
+        env:
+          UNIVERSAL_BUILD: '${{ matrix.universal }}'
+          VSCODE_TARGET: '${{ matrix.target }}'
+        run: |
+          # Build and stage the extension + bundled CLI
+          npm --workspace=qwen-code-vscode-ide-companion run prepackage
+
+      - name: 'Package VSIX (platform-specific)'
+        if: '${{ matrix.target != '''' }}'
+        working-directory: 'packages/vscode-ide-companion'
+        run: |-
+          if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
+            vsce package --no-dependencies --pre-release --target ${{ matrix.target }} \
+              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-${{ matrix.target }}.vsix
+          else
+            vsce package --no-dependencies --target ${{ matrix.target }} \
+              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-${{ matrix.target }}.vsix
+          fi
+        shell: 'bash'
+
+      - name: 'Package VSIX (universal)'
+        if: '${{ matrix.target == '''' }}'
+        working-directory: 'packages/vscode-ide-companion'
+        run: |-
+          if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
+            vsce package --no-dependencies --pre-release \
+              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-universal.vsix
+          else
+            vsce package --no-dependencies \
+              --out ../../qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-universal.vsix
+          fi
+        shell: 'bash'
+
+      - name: 'Upload VSIX Artifact'
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'vsix-${{ matrix.target || ''universal'' }}'
+          path: 'qwen-code-vscode-companion-${{ needs.prepare.outputs.release_version }}-*.vsix'
+          if-no-files-found: 'error'
+
+  # Third job: Publish all VSIXes to marketplaces
+  publish:
+    needs:
+      - 'prepare'
+      - 'build'
+    runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
+      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/vscode-companion-${{ needs.prepare.outputs.release_tag }}'
+    permissions:
+      contents: 'read'
+      issues: 'write'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+
+      - name: 'Download all VSIX artifacts'
+        uses: 'actions/download-artifact@v4'
+        with:
+          pattern: 'vsix-*'
+          path: 'vsix-artifacts'
+          merge-multiple: true
+
+      - name: 'List downloaded artifacts'
+        run: |-
+          echo "Downloaded VSIX files:"
+          ls -la vsix-artifacts/
+
+      - name: 'Install VSCE and OVSX'
+        run: |-
+          npm install -g @vscode/vsce
+          npm install -g ovsx
+
+      - name: 'Publish to Microsoft Marketplace'
+        if: '${{ needs.prepare.outputs.is_dry_run == ''false'' && needs.prepare.outputs.is_preview != ''true'' }}'
+        env:
+          VSCE_PAT: '${{ secrets.VSCE_PAT }}'
+        run: |-
+          echo "Publishing to Microsoft Marketplace..."
+          for vsix in vsix-artifacts/*.vsix; do
+            echo "Publishing: ${vsix}"
+            vsce publish --packagePath "${vsix}" --pat "${VSCE_PAT}"
+          done
+
+      - name: 'Publish to OpenVSX'
+        if: '${{ needs.prepare.outputs.is_dry_run == ''false'' }}'
+        env:
+          OVSX_TOKEN: '${{ secrets.OVSX_TOKEN }}'
+        run: |-
+          echo "Publishing to OpenVSX..."
+          for vsix in vsix-artifacts/*.vsix; do
+            echo "Publishing: ${vsix}"
+            if [[ "${{ needs.prepare.outputs.is_preview }}" == "true" ]]; then
+              ovsx publish "${vsix}" --pat "${OVSX_TOKEN}" --pre-release
+            else
+              ovsx publish "${vsix}" --pat "${OVSX_TOKEN}"
+            fi
+          done
+
+      - name: 'Upload all VSIXes as release artifacts (dry run)'
+        if: '${{ needs.prepare.outputs.is_dry_run == ''true'' }}'
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'all-vsix-packages-${{ needs.prepare.outputs.release_version }}'
+          path: 'vsix-artifacts/*.vsix'
+          if-no-files-found: 'error'
+
+  report-failure:
+    name: 'Create Issue on Failure'
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        (
+          needs.build.result == 'failure' ||
+          needs.build.result == 'cancelled' ||
+          needs.publish.result == 'failure' ||
+          needs.publish.result == 'cancelled'
+        )
+      }}
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Create failure issue'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          GH_REPO: '${{ github.repository }}'
+        run: |-
+          gh issue create \
+            --repo "${GH_REPO}" \
+            --title "VSCode IDE Companion Release Failed for ${RELEASE_VERSION} on $(date +'%Y-%m-%d')" \
+            --body "The VSCode IDE Companion release workflow failed. See the full run for details: ${DETAILS_URL}"

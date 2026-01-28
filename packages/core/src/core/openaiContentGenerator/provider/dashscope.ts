@@ -16,6 +16,7 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
+import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
 export class DashScopeOpenAICompatibleProvider
   implements OpenAICompatibleProvider
@@ -68,12 +69,19 @@ export class DashScopeOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
+    // Configure fetch options to ensure user-configured timeout works as expected
+    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    const fetchOptions = buildRuntimeFetchOptions(
+      'openai',
+      this.cliConfig.getProxy(),
+    );
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
       timeout,
       maxRetries,
       defaultHeaders,
+      ...(fetchOptions ? { fetchOptions } : {}),
     });
   }
 

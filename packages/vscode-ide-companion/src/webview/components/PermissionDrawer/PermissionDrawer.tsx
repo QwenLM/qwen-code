@@ -24,10 +24,7 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
   onClose,
 }) => {
   const [focusedIndex, setFocusedIndex] = useState(0);
-  const [customMessage, setCustomMessage] = useState('');
   const containerRef = useRef<HTMLDivElement>(null);
-  // Correct the ref type for custom input to HTMLInputElement to avoid subsequent forced casting
-  const customInputRef = useRef<HTMLInputElement>(null);
 
   console.log('PermissionDrawer rendered with isOpen:', isOpen, toolCall);
   // Prefer file name from locations, fall back to content[].path if present
@@ -94,10 +91,7 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
 
       // Number keys 1-9 for quick select
       const numMatch = e.key.match(/^[1-9]$/);
-      if (
-        numMatch &&
-        !customInputRef.current?.contains(document.activeElement)
-      ) {
+      if (numMatch) {
         const index = parseInt(e.key, 10) - 1;
         if (index < options.length) {
           e.preventDefault();
@@ -109,7 +103,10 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
       // Arrow keys for navigation
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        const totalItems = options.length + 1; // +1 for custom input
+        if (options.length === 0) {
+          return;
+        }
+        const totalItems = options.length;
         if (e.key === 'ArrowDown') {
           setFocusedIndex((prev) => (prev + 1) % totalItems);
         } else {
@@ -118,10 +115,7 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
       }
 
       // Enter to select
-      if (
-        e.key === 'Enter' &&
-        !customInputRef.current?.contains(document.activeElement)
-      ) {
+      if (e.key === 'Enter') {
         e.preventDefault();
         if (focusedIndex < options.length) {
           onResponse(options[focusedIndex].optionId);
@@ -234,28 +228,6 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
               </button>
             );
           })}
-
-          {/* Custom message input (extracted component) */}
-          {(() => {
-            const isFocused = focusedIndex === options.length;
-            const rejectOptionId = options.find((o) =>
-              o.kind.includes('reject'),
-            )?.optionId;
-            return (
-              <CustomMessageInputRow
-                isFocused={isFocused}
-                customMessage={customMessage}
-                setCustomMessage={setCustomMessage}
-                onFocusRow={() => setFocusedIndex(options.length)}
-                onSubmitReject={() => {
-                  if (rejectOptionId) {
-                    onResponse(rejectOptionId);
-                  }
-                }}
-                inputRef={customInputRef}
-              />
-            );
-          })()}
         </div>
       </div>
 
@@ -263,50 +235,3 @@ export const PermissionDrawer: React.FC<PermissionDrawerProps> = ({
     </div>
   );
 };
-
-/**
- * CustomMessageInputRow: Reusable custom input row component (without hooks)
- */
-interface CustomMessageInputRowProps {
-  isFocused: boolean;
-  customMessage: string;
-  setCustomMessage: (val: string) => void;
-  onFocusRow: () => void; // Set focus when mouse enters or input box is focused
-  onSubmitReject: () => void; // Triggered when Enter is pressed (selecting reject option)
-  inputRef: React.RefObject<HTMLInputElement | null>;
-}
-
-const CustomMessageInputRow: React.FC<CustomMessageInputRowProps> = ({
-  isFocused,
-  customMessage,
-  setCustomMessage,
-  onFocusRow,
-  onSubmitReject,
-  inputRef,
-}) => (
-  <div
-    className={`flex items-center gap-2 px-2 py-1.5 text-left w-full box-border rounded-[4px] border-0 shadow-[inset_0_0_0_1px_var(--app-transparent-inner-border)] cursor-text text-[var(--app-primary-foreground)] ${
-      isFocused ? 'text-[var(--app-list-active-foreground)]' : ''
-    }`}
-    onMouseEnter={onFocusRow}
-    onClick={() => inputRef.current?.focus()}
-  >
-    <input
-      ref={inputRef as React.LegacyRef<HTMLInputElement> | undefined}
-      type="text"
-      placeholder="Tell Qwen what to do instead"
-      spellCheck={false}
-      className="flex-1 bg-transparent border-0 outline-none text-sm placeholder:opacity-70"
-      style={{ color: 'var(--app-input-foreground)' }}
-      value={customMessage}
-      onChange={(e) => setCustomMessage(e.target.value)}
-      onFocus={onFocusRow}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && !e.shiftKey && customMessage.trim()) {
-          e.preventDefault();
-          onSubmitReject();
-        }
-      }}
-    />
-  </div>
-);

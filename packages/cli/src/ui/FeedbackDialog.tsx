@@ -5,19 +5,21 @@ import { useUIActions } from './contexts/UIActionsContext.js';
 import { useUIState } from './contexts/UIStateContext.js';
 import { useKeypress } from './hooks/useKeypress.js';
 
-const FEEDBACK_OPTIONS = {
+export const FEEDBACK_OPTIONS = {
   GOOD: 1,
   BAD: 2,
-  NOT_SURE: 3,
+  FINE: 3,
+  DISMISS: 0,
 } as const;
 
 const FEEDBACK_OPTION_KEYS = {
   [FEEDBACK_OPTIONS.GOOD]: '1',
   [FEEDBACK_OPTIONS.BAD]: '2',
-  [FEEDBACK_OPTIONS.NOT_SURE]: 'any',
+  [FEEDBACK_OPTIONS.FINE]: '3',
+  [FEEDBACK_OPTIONS.DISMISS]: '0',
 } as const;
 
-export const FEEDBACK_DIALOG_KEYS = ['1', '2'] as const;
+export const FEEDBACK_DIALOG_KEYS = ['1', '2', '3', '0'] as const;
 
 export const FeedbackDialog: React.FC = () => {
   const uiState = useUIState();
@@ -25,15 +27,19 @@ export const FeedbackDialog: React.FC = () => {
 
   useKeypress(
     (key) => {
-      if (key.name === FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.GOOD]) {
-        uiActions.submitFeedback(FEEDBACK_OPTIONS.GOOD);
-      } else if (key.name === FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.BAD]) {
+      // Handle keys 0-3: permanent close with feedback/dismiss
+      if (key.name === FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.BAD]) {
         uiActions.submitFeedback(FEEDBACK_OPTIONS.BAD);
+      } else if (key.name === FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.FINE]) {
+        uiActions.submitFeedback(FEEDBACK_OPTIONS.FINE);
+      } else if (key.name === FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.GOOD]) {
+        uiActions.submitFeedback(FEEDBACK_OPTIONS.GOOD);
+      } else if (key.name === FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.DISMISS]) {
+        uiActions.submitFeedback(FEEDBACK_OPTIONS.DISMISS);
       } else {
-        uiActions.submitFeedback(FEEDBACK_OPTIONS.NOT_SURE);
+        // Handle other keys: temporary close
+        uiActions.temporaryCloseFeedbackDialog();
       }
-
-      uiActions.closeFeedbackDialog();
     },
     { isActive: uiState.isFeedbackDialogOpen },
   );
@@ -53,8 +59,16 @@ export const FeedbackDialog: React.FC = () => {
         <Text color="cyan">{FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.BAD]}: </Text>
         <Text>{t('Bad')}</Text>
         <Text> </Text>
-        <Text color="cyan">{t('Any other key')}: </Text>
-        <Text>{t('Not Sure Yet')}</Text>
+        <Text color="cyan">
+          {FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.FINE]}:{' '}
+        </Text>
+        <Text>{t('Fine')}</Text>
+        <Text> </Text>
+        <Text color="cyan">
+          {FEEDBACK_OPTION_KEYS[FEEDBACK_OPTIONS.DISMISS]}:{' '}
+        </Text>
+        <Text>{t('Dismiss')}</Text>
+        <Text> </Text>
       </Box>
     </Box>
   );

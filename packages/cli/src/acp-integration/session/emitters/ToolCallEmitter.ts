@@ -65,6 +65,7 @@ export class ToolCallEmitter extends BaseEmitter {
       locations,
       kind,
       rawInput: params.args ?? {},
+      _meta: { toolName: params.toolName },
     });
 
     return true;
@@ -120,6 +121,7 @@ export class ToolCallEmitter extends BaseEmitter {
       toolCallId: params.callId,
       status: params.success ? 'completed' : 'failed',
       content: contentArray,
+      _meta: { toolName: params.toolName },
     };
 
     // Add rawOutput from resultDisplay
@@ -137,7 +139,11 @@ export class ToolCallEmitter extends BaseEmitter {
    * @param callId - The tool call ID
    * @param error - The error that occurred
    */
-  async emitError(callId: string, error: Error): Promise<void> {
+  async emitError(
+    callId: string,
+    toolName: string,
+    error: Error,
+  ): Promise<void> {
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
@@ -145,6 +151,7 @@ export class ToolCallEmitter extends BaseEmitter {
       content: [
         { type: 'content', content: { type: 'text', text: error.message } },
       ],
+      _meta: { toolName },
     });
   }
 

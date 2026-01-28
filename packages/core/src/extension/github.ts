@@ -236,12 +236,8 @@ export async function downloadFromGitHubRelease(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
 ): Promise<GitHubDownloadResult> {
-  const { source, ref, marketplace, type } = installMetadata;
-  const { owner, repo } = parseGitHubRepoForReleases(
-    type === 'marketplace' && marketplace
-      ? marketplace.marketplaceSource
-      : source,
-  );
+  const { source, ref } = installMetadata;
+  const { owner, repo } = parseGitHubRepoForReleases(source);
 
   try {
     const releaseData = await fetchReleaseFromGithub(owner, repo, ref);

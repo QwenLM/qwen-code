@@ -18,6 +18,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
+import { getLanguageSettingsOptions } from '../i18n/languages.js';
 
 export type SettingsType =
   | 'boolean'
@@ -211,13 +212,7 @@ const SETTINGS_SCHEMA = {
           'You can also use custom language codes (e.g., "es", "fr") by placing JS language files ' +
           'in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js).',
         showInDialog: true,
-        options: [
-          { value: 'auto', label: 'Auto (detect from system)' },
-          { value: 'en', label: 'English' },
-          { value: 'zh', label: '中文 (Chinese)' },
-          { value: 'ru', label: 'Русский (Russian)' },
-          { value: 'de', label: 'Deutsch (German)' },
-        ],
+        options: [] as readonly SettingEnumOption[],
       },
       outputLanguage: {
         type: 'string',
@@ -227,7 +222,7 @@ const SETTINGS_SCHEMA = {
         default: 'auto',
         description:
           'The language for LLM output. Use "auto" to detect from system settings, ' +
-          'or set a specific language (e.g., "English", "中文", "日本語").',
+          'or set a specific language.',
         showInDialog: true,
       },
       terminalBell: {
@@ -687,7 +682,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
-      loadMemoryFromIncludeDirectories: {
+      loadFromIncludeDirectories: {
         type: 'boolean',
         label: 'Load Memory From Include Directories',
         category: 'Context',
@@ -1189,6 +1184,15 @@ const SETTINGS_SCHEMA = {
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
 
 export function getSettingsSchema(): SettingsSchemaType {
+  // Inject dynamic language options
+  const schema = SETTINGS_SCHEMA as unknown as SettingsSchema;
+  if (schema['general']?.properties?.['language']) {
+    (
+      schema['general'].properties['language'] as {
+        options?: SettingEnumOption[];
+      }
+    ).options = getLanguageSettingsOptions();
+  }
   return SETTINGS_SCHEMA;
 }
 

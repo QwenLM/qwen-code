@@ -12,6 +12,7 @@ import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
+import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
@@ -142,6 +143,19 @@ export const DialogManager = ({
         settingDescription={request.settingDescription}
         sensitive={request.sensitive}
         onSubmit={request.onSubmit}
+        onCancel={request.onCancel}
+        terminalWidth={terminalWidth}
+      />
+    );
+  }
+  if (uiState.pluginChoiceRequests.length > 0) {
+    const request = uiState.pluginChoiceRequests[0];
+    return (
+      <PluginChoicePrompt
+        key={request.marketplaceName}
+        marketplaceName={request.marketplaceName}
+        plugins={request.plugins}
+        onSelect={request.onSelect}
         onCancel={request.onCancel}
         terminalWidth={terminalWidth}
       />

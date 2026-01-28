@@ -20,6 +20,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import open from 'open';
+import { extensionToOutputString } from '../../commands/extensions/utils.js';
 
 const EXTENSION_EXPLORE_URL = {
   Gemini: 'https://geminicli.com/extensions/',
@@ -475,6 +476,53 @@ async function enableAction(context: CommandContext, args: string) {
   }
 }
 
+async function detailAction(context: CommandContext, args: string) {
+  const extensionManager = context.services.config?.getExtensionManager();
+  if (!(extensionManager instanceof ExtensionManager)) {
+    console.error(
+      `Cannot ${context.invocation?.name} extensions in this environment`,
+    );
+    return;
+  }
+
+  const name = args.trim();
+  if (!name) {
+    context.ui.addItem(
+      {
+        type: MessageType.ERROR,
+        text: t('Usage: /extensions detail <extension-name>'),
+      },
+      Date.now(),
+    );
+    return;
+  }
+
+  const extensions = context.services.config!.getExtensions();
+  const extension = extensions.find((extension) => extension.name === name);
+  if (!extension) {
+    context.ui.addItem(
+      {
+        type: MessageType.ERROR,
+        text: t('Extension "{{name}}" not found.', { name }),
+      },
+      Date.now(),
+    );
+    return;
+  }
+  context.ui.addItem(
+    {
+      type: MessageType.INFO,
+      text: extensionToOutputString(
+        extension,
+        extensionManager,
+        process.cwd(),
+        true,
+      ),
+    },
+    Date.now(),
+  );
+}
+
 export async function completeExtensions(
   context: CommandContext,
   partialArg: string,
@@ -495,7 +543,10 @@ export async function completeExtensions(
     name.startsWith(partialArg),
   );
 
-  if (context.invocation?.name !== 'uninstall') {
+  if (
+    context.invocation?.name !== 'uninstall' &&
+    context.invocation?.name !== 'detail'
+  ) {
     if ('--all'.startsWith(partialArg) || 'all'.startsWith(partialArg)) {
       suggestions.unshift('--all');
     }
@@ -594,6 +645,16 @@ const uninstallCommand: SlashCommand = {
   completion: completeExtensions,
 };
 
+const detailCommand: SlashCommand = {
+  name: 'detail',
+  get description() {
+    return t('Get detail of an extension');
+  },
+  kind: CommandKind.BUILT_IN,
+  action: detailAction,
+  completion: completeExtensions,
+};
+
 export const extensionsCommand: SlashCommand = {
   name: 'extensions',
   get description() {
@@ -608,6 +669,7 @@ export const extensionsCommand: SlashCommand = {
     installCommand,
     uninstallCommand,
     exploreExtensionsCommand,
+    detailCommand,
   ],
   action: (context, args) =>
     // Default to list if no subcommand is provided

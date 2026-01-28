@@ -260,6 +260,7 @@ def fibonacci(n):
                     availableTerminalHeight={diffHeight}
                     contentWidth={colorizeCodeWidth}
                     theme={previewTheme}
+                    settings={settings}
                   />
                 </Box>
               );

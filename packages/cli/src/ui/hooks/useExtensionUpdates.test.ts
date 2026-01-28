@@ -13,6 +13,7 @@ import {
   useExtensionUpdates,
   useSettingInputRequests,
   useConfirmUpdateRequests,
+  usePluginChoiceRequests,
 } from './useExtensionUpdates.js';
 import {
   QWEN_DIR,
@@ -488,5 +489,120 @@ describe('useExtensionUpdates', () => {
         expect.any(Number),
       );
     });
+  });
+});
+
+describe('usePluginChoiceRequests', () => {
+  it('should add a plugin choice request', () => {
+    const { result } = renderHook(() => usePluginChoiceRequests());
+
+    const onSelect = vi.fn();
+    const onCancel = vi.fn();
+    act(() => {
+      result.current.addPluginChoiceRequest({
+        marketplaceName: 'test-marketplace',
+        plugins: [
+          { name: 'plugin1', description: 'First plugin' },
+          { name: 'plugin2', description: 'Second plugin' },
+        ],
+        onSelect,
+        onCancel,
+      });
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(1);
+    expect(result.current.pluginChoiceRequests[0].marketplaceName).toBe(
+      'test-marketplace',
+    );
+    expect(result.current.pluginChoiceRequests[0].plugins).toHaveLength(2);
+  });
+
+  it('should remove a plugin choice request when a plugin is selected', () => {
+    const { result } = renderHook(() => usePluginChoiceRequests());
+
+    const onSelect = vi.fn();
+    const onCancel = vi.fn();
+    act(() => {
+      result.current.addPluginChoiceRequest({
+        marketplaceName: 'test-marketplace',
+        plugins: [{ name: 'plugin1' }],
+        onSelect,
+        onCancel,
+      });
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(1);
+
+    // Select a plugin
+    act(() => {
+      result.current.pluginChoiceRequests[0].onSelect('plugin1');
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(0);
+    expect(onSelect).toHaveBeenCalledWith('plugin1');
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('should remove a plugin choice request when cancelled', () => {
+    const { result } = renderHook(() => usePluginChoiceRequests());
+
+    const onSelect = vi.fn();
+    const onCancel = vi.fn();
+    act(() => {
+      result.current.addPluginChoiceRequest({
+        marketplaceName: 'test-marketplace',
+        plugins: [{ name: 'plugin1' }],
+        onSelect,
+        onCancel,
+      });
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(1);
+
+    // Cancel the request
+    act(() => {
+      result.current.pluginChoiceRequests[0].onCancel();
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(0);
+    expect(onCancel).toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('should handle multiple plugin choice requests', () => {
+    const { result } = renderHook(() => usePluginChoiceRequests());
+
+    const onSelect1 = vi.fn();
+    const onCancel1 = vi.fn();
+    const onSelect2 = vi.fn();
+    const onCancel2 = vi.fn();
+
+    act(() => {
+      result.current.addPluginChoiceRequest({
+        marketplaceName: 'marketplace-1',
+        plugins: [{ name: 'plugin1' }],
+        onSelect: onSelect1,
+        onCancel: onCancel1,
+      });
+      result.current.addPluginChoiceRequest({
+        marketplaceName: 'marketplace-2',
+        plugins: [{ name: 'plugin2' }],
+        onSelect: onSelect2,
+        onCancel: onCancel2,
+      });
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(2);
+
+    // Select from first request
+    act(() => {
+      result.current.pluginChoiceRequests[0].onSelect('plugin1');
+    });
+
+    expect(result.current.pluginChoiceRequests).toHaveLength(1);
+    expect(result.current.pluginChoiceRequests[0].marketplaceName).toBe(
+      'marketplace-2',
+    );
+    expect(onSelect1).toHaveBeenCalledWith('plugin1');
   });
 });

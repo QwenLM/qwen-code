@@ -226,6 +226,7 @@ export const ToolConfirmationMessage: React.FC<
         filename={confirmationDetails.fileName}
         availableTerminalHeight={availableBodyContentHeight()}
         contentWidth={contentWidth}
+        settings={settings}
       />
     );
   } else if (confirmationDetails.type === 'exec') {

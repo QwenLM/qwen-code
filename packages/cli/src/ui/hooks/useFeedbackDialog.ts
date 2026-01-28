@@ -15,6 +15,7 @@ import {
   USER_SETTINGS_PATH,
 } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import { FEEDBACK_OPTIONS } from '../FeedbackDialog.js';
 import stripJsonComments from 'strip-json-comments';
 
 const FEEDBACK_SHOW_PROBABILITY = 0.25; // 25% probability of showing feedback dialog
@@ -96,37 +97,48 @@ export const useFeedbackDialog = ({
 }: UseFeedbackDialogProps) => {
   // Feedback dialog state
   const [isFeedbackDialogOpen, setIsFeedbackDialogOpen] = useState(false);
+  const [isFeedbackDismissedTemporarily, setIsFeedbackDismissedTemporarily] =
+    useState(false);
 
   const openFeedbackDialog = useCallback(() => {
     setIsFeedbackDialogOpen(true);
-
-    // Record the timestamp when feedback dialog is shown (fire and forget)
-    settings.setValue(
-      SettingScope.User,
-      'ui.feedbackLastShownTimestamp',
-      Date.now(),
-    );
-  }, [settings]);
+  }, []);
 
   const closeFeedbackDialog = useCallback(
     () => setIsFeedbackDialogOpen(false),
     [],
   );
 
+  const temporaryCloseFeedbackDialog = useCallback(() => {
+    setIsFeedbackDialogOpen(false);
+    setIsFeedbackDismissedTemporarily(true);
+  }, []);
+
   const submitFeedback = useCallback(
     (rating: number) => {
-      // Create and log the feedback event
-      const feedbackEvent = new UserFeedbackEvent(
-        sessionStats.sessionId,
-        rating as UserFeedbackRating,
-        config.getModel(),
-        config.getApprovalMode(),
+      // Only create and log feedback event for ratings 1-3 (GOOD, BAD, FINE)
+      // Rating 0 (DISMISS) should not trigger any telemetry
+      if (rating >= FEEDBACK_OPTIONS.GOOD && rating <= FEEDBACK_OPTIONS.FINE) {
+        const feedbackEvent = new UserFeedbackEvent(
+          sessionStats.sessionId,
+          rating as UserFeedbackRating,
+          config.getModel(),
+          config.getApprovalMode(),
+        );
+
+        logUserFeedback(config, feedbackEvent);
+      }
+
+      // Record the timestamp when feedback dialog is submitted
+      settings.setValue(
+        SettingScope.User,
+        'ui.feedbackLastShownTimestamp',
+        Date.now(),
       );
 
-      logUserFeedback(config, feedbackEvent);
       closeFeedbackDialog();
     },
-    [config, sessionStats, closeFeedbackDialog],
+    [closeFeedbackDialog, sessionStats.sessionId, config, settings],
   );
 
   useEffect(() => {
@@ -140,13 +152,15 @@ export const useFeedbackDialog = ({
         // 5. Random chance (25% probability)
         // 6. Meets minimum requirements (tool calls > 10 OR user messages > 5)
         // 7. Fatigue mechanism allows showing (not shown recently across sessions)
+        // 8. Not temporarily dismissed
         if (
           config.getAuthType() !== AuthType.QWEN_OAUTH ||
           !config.getUsageStatisticsEnabled() ||
           settings.merged.ui?.enableUserFeedback === false ||
           !lastMessageIsAIResponse(history) ||
           Math.random() > FEEDBACK_SHOW_PROBABILITY ||
-          !meetsMinimumSessionRequirements(sessionStats)
+          !meetsMinimumSessionRequirements(sessionStats) ||
+          isFeedbackDismissedTemporarily
         ) {
           return;
         }
@@ -164,15 +178,27 @@ export const useFeedbackDialog = ({
     history,
     sessionStats,
     isFeedbackDialogOpen,
+    isFeedbackDismissedTemporarily,
     openFeedbackDialog,
     settings.merged.ui?.enableUserFeedback,
     config,
   ]);
 
+  // Reset temporary dismissal when a new AI response starts streaming
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Responding &&
+      isFeedbackDismissedTemporarily
+    ) {
+      setIsFeedbackDismissedTemporarily(false);
+    }
+  }, [streamingState, isFeedbackDismissedTemporarily]);
+
   return {
     isFeedbackDialogOpen,
     openFeedbackDialog,
     closeFeedbackDialog,
+    temporaryCloseFeedbackDialog,
     submitFeedback,
   };
 };

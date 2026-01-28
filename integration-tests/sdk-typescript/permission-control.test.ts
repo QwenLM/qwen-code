@@ -31,6 +31,7 @@ import {
   hasErrorToolResults,
   findSystemMessage,
   findToolCalls,
+  createResultWaiter,
 } from './test-helper.js';
 
 const TEST_TIMEOUT = 30000;
@@ -44,6 +45,7 @@ const SHARED_TEST_OPTIONS = createSharedTestOptions();
 function createStreamingInputWithControlPoint(
   firstMessage: string,
   secondMessage: string,
+  resultWaiter: { waitForResult: (index: number) => Promise<void> },
 ): {
   generator: AsyncIterable<SDKUserMessage>;
   resume: () => void;
@@ -66,7 +68,7 @@ function createStreamingInputWithControlPoint(
       parent_tool_use_id: null,
     } as SDKUserMessage;
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await resultWaiter.waitForResult(0);
 
     await resumePromise;
 
@@ -81,6 +83,8 @@ function createStreamingInputWithControlPoint(
       },
       parent_tool_use_id: null,
     } as SDKUserMessage;
+
+    await resultWaiter.waitForResult(1);
   })();
 
   const resume = () => {
@@ -320,9 +324,11 @@ describe('Permission Control (E2E)', () => {
 
   describe('setPermissionMode API', () => {
     it('should change permission mode from default to yolo', async () => {
+      const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 1 + 1?',
         'What is 2 + 2?',
+        resultWaiter,
       );
 
       const q = query({
@@ -361,6 +367,9 @@ describe('Permission Control (E2E)', () => {
                 resolvers.second?.();
               }
             }
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
           }
         })();
 
@@ -397,9 +406,11 @@ describe('Permission Control (E2E)', () => {
     });
 
     it('should change permission mode from yolo to plan', async () => {
+      const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 3 + 3?',
         'What is 4 + 4?',
+        resultWaiter,
       );
 
       const q = query({
@@ -437,6 +448,9 @@ describe('Permission Control (E2E)', () => {
                 resolvers.second?.();
               }
             }
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
           }
         })();
 
@@ -473,9 +487,11 @@ describe('Permission Control (E2E)', () => {
     });
 
     it('should change permission mode to auto-edit', async () => {
+      const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'What is 5 + 5?',
         'What is 6 + 6?',
+        resultWaiter,
       );
 
       const q = query({
@@ -512,6 +528,9 @@ describe('Permission Control (E2E)', () => {
                 secondResponseReceived = true;
                 resolvers.second?.();
               }
+            }
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
             }
           }
         })();
@@ -584,9 +603,11 @@ describe('Permission Control (E2E)', () => {
         input: Record<string, unknown>;
       }> = [];
 
+      const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
         'Create a file named first.txt',
         'Create a file named second.txt',
+        resultWaiter,
       );
 
       const q = query({
@@ -630,6 +651,7 @@ describe('Permission Control (E2E)', () => {
                 secondResponseReceived = true;
                 resolvers.second?.();
               }
+              resultWaiter.notifyResult();
             }
           }
         })();

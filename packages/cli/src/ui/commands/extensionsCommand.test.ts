@@ -777,4 +777,87 @@ describe('extensionsCommand', () => {
       );
     });
   });
+
+  describe('detail', () => {
+    const detailAction = extensionsCommand.subCommands?.find(
+      (cmd) => cmd.name === 'detail',
+    )?.action;
+
+    if (!detailAction) {
+      throw new Error('Detail action not found');
+    }
+
+    let realMockExtensionManager: ExtensionManager;
+
+    beforeEach(() => {
+      vi.resetAllMocks();
+      realMockExtensionManager = Object.create(ExtensionManager.prototype);
+      realMockExtensionManager.getLoadedExtensions = mockGetLoadedExtensions;
+
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/extensions detail',
+          name: 'detail',
+          args: '',
+        },
+        services: {
+          config: {
+            getExtensions: mockGetExtensions,
+            getWorkingDir: () => '/test/dir',
+            getExtensionManager: () => realMockExtensionManager,
+          },
+        },
+        ui: {
+          dispatchExtensionStateUpdate: vi.fn(),
+        },
+      });
+    });
+
+    it('should show usage if no name is provided', async () => {
+      await detailAction(mockContext, '');
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Usage: /extensions detail <extension-name>',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('should show error if extension not found', async () => {
+      mockGetExtensions.mockReturnValue([]);
+      await detailAction(mockContext, 'nonexistent-extension');
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'Extension "nonexistent-extension" not found.',
+        },
+        expect.any(Number),
+      );
+    });
+
+    it('should show extension details when found', async () => {
+      const extension: Extension = {
+        id: 'test-ext',
+        name: 'test-ext',
+        version: '1.0.0',
+        isActive: true,
+        path: '/test/dir/test-ext',
+        contextFiles: [],
+        config: { name: 'test-ext', version: '1.0.0' },
+      };
+      mockGetExtensions.mockReturnValue([extension]);
+      realMockExtensionManager.isEnabled = vi.fn().mockReturnValue(true);
+
+      await detailAction(mockContext, 'test-ext');
+
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text: expect.stringContaining('test-ext'),
+        },
+        expect.any(Number),
+      );
+    });
+  });
 });
