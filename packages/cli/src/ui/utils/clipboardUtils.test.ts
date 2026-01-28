@@ -392,34 +392,46 @@ describe('clipboardUtils', () => {
   describe('error handling with DEBUG mode', () => {
     const originalEnv = process.env;
 
-    beforeEach(() => {
-      vi.stubGlobal('process', {
-        ...process,
-        platform: 'darwin',
-        env: { ...originalEnv, DEBUG: '1' },
+    describe('clipboardHasImage', () => {
+      beforeEach(() => {
+        vi.stubGlobal('process', {
+          ...process,
+          platform: 'darwin',
+          env: { ...originalEnv, DEBUG: '1' },
+        });
+      });
+
+      it('should log errors in DEBUG mode', async () => {
+        const consoleErrorSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        mockExecCommand.mockRejectedValue(new Error('Test error'));
+
+        await clipboardHasImage();
+        expect(consoleErrorSpy).toHaveBeenCalled();
+        consoleErrorSpy.mockRestore();
       });
     });
 
-    it('should log errors in DEBUG mode for clipboardHasImage', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-      mockExecCommand.mockRejectedValue(new Error('Test error'));
+    describe('saveClipboardImage on Windows', () => {
+      beforeEach(() => {
+        vi.stubGlobal('process', {
+          ...process,
+          platform: 'win32',
+          env: { ...originalEnv, DEBUG: '1' },
+        });
+      });
 
-      await clipboardHasImage();
-      expect(consoleErrorSpy).toHaveBeenCalled();
-      consoleErrorSpy.mockRestore();
-    });
+      it('should log errors in DEBUG mode', async () => {
+        const consoleErrorSpy = vi
+          .spyOn(console, 'error')
+          .mockImplementation(() => {});
+        mockExecCommand.mockRejectedValue(new Error('Test error'));
 
-    it('should log errors in DEBUG mode for saveClipboardImage', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-      mockExecCommand.mockRejectedValue(new Error('Test error'));
-
-      await saveClipboardImage('/invalid/path');
-      expect(consoleErrorSpy).toHaveBeenCalled();
-      consoleErrorSpy.mockRestore();
+        await saveClipboardImage('/invalid/path');
+        expect(consoleErrorSpy).toHaveBeenCalled();
+        consoleErrorSpy.mockRestore();
+      });
     });
   });
 });
