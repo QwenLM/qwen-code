@@ -111,7 +111,8 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "simple-git": "^3.28.0"
+    "simple-git": "^3.28.0",
+    "zvec": "file:zvec-0.0.1.tgz"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.1.0",
