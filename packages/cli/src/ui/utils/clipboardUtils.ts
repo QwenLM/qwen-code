@@ -278,8 +278,12 @@ async function saveWindowsClipboardImage(
     } catch {
       // Ignore cleanup errors
     }
-  } catch {
-    // PowerShell failed
+  } catch (error) {
+    // PowerShell failed, log in DEBUG mode and re-throw
+    if (process.env['DEBUG']) {
+      console.error('Error in saveWindowsClipboardImage:', error);
+    }
+    throw error;
   }
 
   return null;
