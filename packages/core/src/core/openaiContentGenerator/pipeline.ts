@@ -259,6 +259,18 @@ export class ContentGenerationPipeline {
       );
     }
 
+    // @ts-expect-error chat_template_kwargs is DeepSeek-specific
+     
+    if (request.config?.chat_template_kwargs) {
+      // @ts-expect-error extra_body is provider-specific
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (baseRequest as any).extra_body = {
+        // @ts-expect-error extra_body may not exist
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...(baseRequest as any).extra_body,
+        chat_template_kwargs: request.config.chat_template_kwargs,
+      };
+    }
     // Let provider enhance the request (e.g., add metadata, cache control)
     return this.config.provider.buildRequest(baseRequest, userPromptId);
   }
