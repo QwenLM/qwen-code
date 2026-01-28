@@ -11,12 +11,12 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import type { ChatRecord } from '@qwen-code/qwen-code-core';
 import type { Part, Content } from '@google/genai';
 import {
-  transformToMarkdown,
-  loadHtmlTemplate,
-  prepareExportData,
-  injectDataIntoHtmlTemplate,
+  collectSessionData,
+  normalizeSessionData,
+  toMarkdown,
+  toHtml,
   generateExportFilename,
-} from '../utils/exportUtils.js';
+} from '../utils/export/index.js';
 
 const mockSessionServiceMocks = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
@@ -35,11 +35,11 @@ vi.mock('@qwen-code/qwen-code-core', () => {
   };
 });
 
-vi.mock('../utils/exportUtils.js', () => ({
-  transformToMarkdown: vi.fn(),
-  loadHtmlTemplate: vi.fn(),
-  prepareExportData: vi.fn(),
-  injectDataIntoHtmlTemplate: vi.fn(),
+vi.mock('../utils/export/index.js', () => ({
+  collectSessionData: vi.fn(),
+  normalizeSessionData: vi.fn(),
+  toMarkdown: vi.fn(),
+  toHtml: vi.fn(),
   generateExportFilename: vi.fn(),
 }));
 
@@ -79,16 +79,14 @@ describe('exportCommand', () => {
       },
     });
 
-    vi.mocked(transformToMarkdown).mockReturnValue('# Test Markdown');
-    vi.mocked(loadHtmlTemplate).mockResolvedValue(
-      '<html><script id="chat-data" type="application/json">// DATA_PLACEHOLDER</script></html>',
-    );
-    vi.mocked(prepareExportData).mockReturnValue({
+    vi.mocked(collectSessionData).mockResolvedValue({
       sessionId: 'test-session-id',
       startTime: '2025-01-01T00:00:00Z',
-      messages: mockSessionData.conversation.messages,
+      messages: [],
     });
-    vi.mocked(injectDataIntoHtmlTemplate).mockReturnValue(
+    vi.mocked(normalizeSessionData).mockImplementation((data) => data);
+    vi.mocked(toMarkdown).mockReturnValue('# Test Markdown');
+    vi.mocked(toHtml).mockReturnValue(
       '<html><script id="chat-data" type="application/json">{"data": "test"}</script></html>',
     );
     vi.mocked(generateExportFilename).mockImplementation(
@@ -108,11 +106,13 @@ describe('exportCommand', () => {
       );
     });
 
-    it('should have md and html subcommands', () => {
-      expect(exportCommand.subCommands).toHaveLength(2);
+    it('should have md, html, json, and jsonl subcommands', () => {
+      expect(exportCommand.subCommands).toHaveLength(4);
       expect(exportCommand.subCommands?.map((c) => c.name)).toEqual([
         'md',
         'html',
+        'json',
+        'jsonl',
       ]);
     });
   });
@@ -133,11 +133,12 @@ describe('exportCommand', () => {
       });
 
       expect(mockSessionServiceMocks.loadLastSession).toHaveBeenCalled();
-      expect(transformToMarkdown).toHaveBeenCalledWith(
-        mockSessionData.conversation.messages,
-        'test-session-id',
-        '2025-01-01T00:00:00Z',
+      expect(collectSessionData).toHaveBeenCalledWith(
+        mockSessionData.conversation,
+        expect.anything(),
       );
+      expect(normalizeSessionData).toHaveBeenCalled();
+      expect(toMarkdown).toHaveBeenCalled();
       expect(generateExportFilename).toHaveBeenCalledWith('md');
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.md'),
@@ -260,11 +261,12 @@ describe('exportCommand', () => {
       });
 
       expect(mockSessionServiceMocks.loadLastSession).toHaveBeenCalled();
-      expect(loadHtmlTemplate).toHaveBeenCalled();
-      expect(prepareExportData).toHaveBeenCalledWith(
+      expect(collectSessionData).toHaveBeenCalledWith(
         mockSessionData.conversation,
+        expect.anything(),
       );
-      expect(injectDataIntoHtmlTemplate).toHaveBeenCalled();
+      expect(normalizeSessionData).toHaveBeenCalled();
+      expect(toHtml).toHaveBeenCalled();
       expect(generateExportFilename).toHaveBeenCalledWith('html');
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.html'),
@@ -338,9 +340,11 @@ describe('exportCommand', () => {
       });
     });
 
-    it('should handle errors during HTML template loading', async () => {
-      const error = new Error('Failed to fetch template');
-      vi.mocked(loadHtmlTemplate).mockRejectedValue(error);
+    it('should handle errors during HTML generation', async () => {
+      const error = new Error('Failed to generate HTML');
+      vi.mocked(toHtml).mockImplementation(() => {
+        throw error;
+      });
 
       const htmlCommand = exportCommand.subCommands?.find(
         (c) => c.name === 'html',
@@ -353,7 +357,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: Failed to fetch template',
+        content: 'Failed to export session: Failed to generate HTML',
       });
     });
 
