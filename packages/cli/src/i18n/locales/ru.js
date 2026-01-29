@@ -11,6 +11,12 @@ export default {
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
+  // Attachment hints
+  '↑ to manage attachments': '↑ управление вложениями',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → выбрать, Delete удалить, ↓ выйти',
+  'Attachments: ': 'Вложения: ',
+
   'Basics:': 'Основы:',
   'Add context': 'Добавить контекст',
   'Use {{symbol}} to specify files for context (e.g., {{example}}) to target specific files or folders.':

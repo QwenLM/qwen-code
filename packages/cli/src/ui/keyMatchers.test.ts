@@ -49,7 +49,8 @@ describe('keyMatchers', () => {
       key.name === 'return' && (key.ctrl || key.meta || key.paste),
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
-    [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) => key.ctrl && key.name === 'v',
+    [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) =>
+      (key.ctrl || key.meta) && key.name === 'v',
     [Command.SHOW_ERROR_DETAILS]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
@@ -217,7 +218,10 @@ describe('keyMatchers', () => {
     },
     {
       command: Command.PASTE_CLIPBOARD_IMAGE,
-      positive: [createKey('v', { ctrl: true })],
+      positive: [
+        createKey('v', { ctrl: true }),
+        createKey('v', { meta: true }),
+      ],
       negative: [createKey('v'), createKey('c', { ctrl: true })],
     },
 
