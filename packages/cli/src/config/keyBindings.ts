@@ -153,7 +153,13 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'x', ctrl: true },
     { sequence: '\x18', ctrl: true },
   ],
-  [Command.PASTE_CLIPBOARD_IMAGE]: [{ key: 'v', ctrl: true }],
+  [Command.PASTE_CLIPBOARD_IMAGE]: [
+    { key: 'v', ctrl: true, command: true },
+    // Windows terminal often reports Ctrl+Alt+V as just Meta+V (ctrl: false, meta: true)
+    { key: 'v', command: true, ctrl: false },
+    // Fallback: use sequence 'v' with meta if name is missing
+    { sequence: 'v', command: true, ctrl: false },
+  ],
 
   // App level bindings
   [Command.SHOW_ERROR_DETAILS]: [{ key: 'o', ctrl: true }],

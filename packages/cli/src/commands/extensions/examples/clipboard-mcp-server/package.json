@@ -1,0 +1,27 @@
+{
+  "name": "@qwen-code/clipboard-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server for clipboard image access",
+  "main": "clipboard-server.ts",
+  "type": "module",
+  "scripts": {
+    "start": "tsx clipboard-server.ts",
+    "dev": "tsx --watch clipboard-server.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "clipboard",
+    "image",
+    "qwen"
+  ],
+  "author": "Qwen Code",
+  "license": "Apache-2.0"
+}

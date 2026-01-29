@@ -326,6 +326,18 @@ export const AppContainer = (props: AppContainerProps) => {
     });
     consolePatcher.patch();
     registerCleanup(consolePatcher.cleanup);
+
+    // Register clipboard cleanup on exit
+    registerCleanup(async () => {
+      try {
+        const { cleanupOldClipboardImages } = await import(
+          './utils/clipboardUtils.js'
+        );
+        await cleanupOldClipboardImages(config.getTargetDir());
+      } catch {
+        // ignore cleanup error
+      }
+    });
   }, [handleNewMessage, config]);
 
   // Derive widths for InputPrompt using shared helper
@@ -579,6 +591,7 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+    buffer.setText,
   );
 
   // Vision switch handlers

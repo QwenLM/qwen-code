@@ -93,6 +93,7 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
+  updateInput?: (text: string) => void,
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -520,6 +521,12 @@ export const useSlashCommandProcessor = (
                     true,
                   );
                 }
+                case 'update_input': {
+                  if (updateInput) {
+                    updateInput(result.content);
+                  }
+                  return { type: 'handled' };
+                }
                 case 'stream_messages': {
                   // stream_messages is only used in ACP/Zed integration mode
                   // and should not be returned in interactive UI mode
@@ -630,6 +637,7 @@ export const useSlashCommandProcessor = (
       setSessionShellAllowlist,
       setIsProcessing,
       setConfirmationRequest,
+      updateInput,
     ],
   );
 
