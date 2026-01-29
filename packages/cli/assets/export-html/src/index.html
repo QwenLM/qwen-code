@@ -8,6 +8,33 @@
       type="image/svg+xml"
       href="data:image/svg+xml,__FAVICON_DATA__"
     />
+    <script
+      crossorigin
+      src="https://unpkg.com/react@__REACT_UMD_VERSION__/umd/react.production.min.js"
+    ></script>
+    <script
+      crossorigin
+      src="https://unpkg.com/react-dom@__REACT_DOM_UMD_VERSION__/umd/react-dom.production.min.js"
+    ></script>
+    <script>
+      const withKey = (props, key) =>
+        key == null ? props : Object.assign({}, props, { key });
+      const jsx = (type, props, key) => React.createElement(type, withKey(props, key));
+      const jsxRuntime = {
+        Fragment: React.Fragment,
+        jsx,
+        jsxs: jsx,
+        jsxDEV: jsx,
+      };
+      window.ReactJSXRuntime = jsxRuntime;
+      window['react/jsx-runtime'] = jsxRuntime;
+      window['react/jsx-dev-runtime'] = jsxRuntime;
+    </script>
+    <script src="https://unpkg.com/@qwen-code/webui@__WEBUI_VERSION__/dist/index.umd.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/@qwen-code/webui@__WEBUI_VERSION__/dist/styles.css"
+    />
     <title>Qwen Code Chat Export</title>
     <style>
       @font-face {
@@ -23,9 +50,7 @@
   <body>
     <div id="app"></div>
 
-    <script id="chat-data" type="application/json">
-      // DATA_PLACEHOLDER: Chat export data will be injected here
-    </script>
+    <script id="chat-data" type="application/json"></script>
     <script>
       __INLINE_SCRIPT__;
     </script>

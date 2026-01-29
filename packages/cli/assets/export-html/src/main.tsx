@@ -1,8 +1,28 @@
-import { createRoot } from 'react-dom/client';
-import { ChatViewer, PlatformProvider } from '@qwen-code/webui';
-import '@qwen-code/webui/styles.css';
 import './styles.css';
 import logoSvg from './favicon.svg';
+
+declare global {
+  interface Window {
+    React: typeof import('react');
+    ReactDOM: typeof import('react-dom/client');
+  }
+}
+
+const ReactDOM = window.ReactDOM;
+
+declare const QwenCodeWebUI: {
+  ChatViewer: (props: {
+    messages: unknown[];
+    autoScroll: boolean;
+    theme: string;
+  }) => React.ReactNode;
+  PlatformProvider: (props: {
+    value: unknown;
+    children: React.ReactNode;
+  }) => React.ReactNode;
+};
+
+const { ChatViewer, PlatformProvider } = QwenCodeWebUI;
 
 type ChatData = {
   messages?: unknown[];
@@ -10,8 +30,18 @@ type ChatData = {
   startTime?: string;
 };
 
-type PlatformContextValue = Parameters<typeof PlatformProvider>[0]['value'];
-type ChatViewerMessage = Parameters<typeof ChatViewer>[0]['messages'][number];
+type PlatformContextValue = {
+  platform: 'web';
+  postMessage: (message: unknown) => void;
+  onMessage: (handler: (event: MessageEvent) => void) => () => void;
+  openFile: (path: string) => void;
+  getResourceUrl: () => string | undefined;
+  features: {
+    canOpenFile: boolean;
+    canCopy: boolean;
+  };
+};
+type ChatViewerMessage = { type?: string } & Record<string, unknown>;
 
 const logoSvgWithGradient = (() => {
   if (!logoSvg) {
@@ -133,5 +163,5 @@ const rootElement = document.getElementById('app');
 if (!rootElement) {
   console.error('App container not found.');
 } else {
-  createRoot(rootElement).render(<App />);
+  ReactDOM.createRoot(rootElement).render(<App />);
 }

@@ -14,7 +14,15 @@ export const buildConfig = {
   platform: 'browser',
   format: 'iife',
   target: ['es2018'],
-  jsx: 'automatic',
+  jsx: 'transform',
+  jsxFactory: 'React.createElement',
+  jsxFragment: 'React.Fragment',
+  tsconfigRaw: {
+    compilerOptions: {
+      jsx: 'react',
+    },
+  },
+  external: ['react', 'react-dom', 'react-dom/client'],
   legalComments: 'none',
   loader: {
     '.ts': 'ts',

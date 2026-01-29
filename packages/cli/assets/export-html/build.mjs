@@ -26,9 +26,23 @@ const templateModulePath = join(
   'formatters',
   'htmlTemplate.ts',
 );
+const packageJsonPath = join(assetsDir, 'package.json');
 
 await mkdir(assetsDistDir, { recursive: true });
 await mkdir(packageDistDir, { recursive: true });
+
+const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8'));
+const dependencyVersions = packageJson?.dependencies ?? {};
+const getDependencyVersion = (name) => {
+  const version = dependencyVersions[name];
+  if (!version) {
+    throw new Error(`Missing ${name} dependency version in package.json.`);
+  }
+  return version.replace(/^[^0-9]*/, '');
+};
+const webuiVersion = getDependencyVersion('@qwen-code/webui');
+const reactUmdVersion = '18.2.0';
+const reactDomUmdVersion = '18.2.0';
 
 const buildResult = await build(buildConfig);
 
@@ -52,6 +66,9 @@ const faviconData = encodeURIComponent(faviconSvg.trim());
 const htmlOutput = htmlTemplate
   .replace('__INLINE_CSS__', css.trim())
   .replace('__INLINE_SCRIPT__', jsBundle.text.trim())
+  .replaceAll('__REACT_UMD_VERSION__', reactUmdVersion)
+  .replaceAll('__REACT_DOM_UMD_VERSION__', reactDomUmdVersion)
+  .replaceAll('__WEBUI_VERSION__', webuiVersion)
   .replace('__FAVICON_SVG__', faviconSvg.trim())
   .replace('__FAVICON_DATA__', faviconData);
 

@@ -12,9 +12,12 @@ import { HTML_TEMPLATE } from './htmlTemplate.js';
  */
 function escapeJsonForHtml(json: string): string {
   return json
+    .replace(/<\/script/gi, '<\\/script')
     .replace(/&/g, '\\u0026')
     .replace(/</g, '\\u003c')
-    .replace(/>/g, '\\u003e');
+    .replace(/>/g, '\\u003e')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
 }
 
 /**
@@ -37,11 +40,38 @@ export function injectDataIntoHtmlTemplate(
 ): string {
   const jsonData = JSON.stringify(data, null, 2);
   const escapedJsonData = escapeJsonForHtml(jsonData);
-  const html = template.replace(
-    /<script id="chat-data" type="application\/json">\s*\/\/ DATA_PLACEHOLDER:.*?\s*<\/script>/s,
-    `<script id="chat-data" type="application/json">\n${escapedJsonData}\n    </script>`,
-  );
-  return html;
+  const idAttribute = 'id="chat-data"';
+  const idIndex = template.indexOf(idAttribute);
+  if (idIndex === -1) {
+    return template;
+  }
+
+  const openTagStart = template.lastIndexOf('<script', idIndex);
+  if (openTagStart === -1) {
+    return template;
+  }
+
+  const openTagEnd = template.indexOf('>', idIndex);
+  if (openTagEnd === -1) {
+    return template;
+  }
+
+  const closeTagStart = template.indexOf('</script>', openTagEnd);
+  if (closeTagStart === -1) {
+    return template;
+  }
+
+  const lineStart = template.lastIndexOf('\n', openTagStart);
+  const lineIndent =
+    lineStart === -1 ? '' : template.slice(lineStart + 1, openTagStart);
+  const indentedJson = escapedJsonData
+    .split('\n')
+    .map((line) => `${lineIndent}${line}`)
+    .join('\n');
+
+  const before = template.slice(0, openTagEnd + 1);
+  const after = template.slice(closeTagStart);
+  return `${before}\n${indentedJson}\n${after}`;
 }
 
 /**
