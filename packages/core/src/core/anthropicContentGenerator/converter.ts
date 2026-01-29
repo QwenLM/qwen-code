@@ -39,19 +39,23 @@ export class AnthropicContentConverter {
   }
 
   convertGeminiRequestToAnthropic(request: GenerateContentParameters): {
-    system?: string;
+    system?: Anthropic.TextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
     const messages: AnthropicMessageParam[] = [];
 
-    const system = this.extractTextFromContentUnion(
+    const systemText = this.extractTextFromContentUnion(
       request.config?.systemInstruction,
     );
 
     this.processContents(request.contents, messages);
 
+    // Add cache_control to enable prompt caching
+    const system = this.buildSystemWithCacheControl(systemText);
+    this.addCacheControlToMessages(messages);
+
     return {
-      system: system || undefined,
+      system,
       messages,
     };
   }
@@ -496,5 +500,60 @@ export class AnthropicContentConverter {
       'parts' in content &&
       Array.isArray((content as Record<string, unknown>)['parts'])
     );
+  }
+
+  /**
+   * Build system content blocks with cache_control.
+   * Anthropic prompt caching requires cache_control on system content.
+   */
+  private buildSystemWithCacheControl(
+    systemText: string,
+  ): Anthropic.TextBlockParam[] | string {
+    if (!systemText) {
+      return systemText;
+    }
+
+    return [
+      {
+        type: 'text',
+        text: systemText,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
+  }
+
+  /**
+   * Add cache_control to the last user message's content.
+   * This enables prompt caching for the conversation context.
+   */
+  private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
+    // Find the last user message to add cache_control
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === 'user') {
+        const content = Array.isArray(msg.content)
+          ? msg.content
+          : [{ type: 'text' as const, text: msg.content }];
+
+        if (content.length > 0) {
+          const lastContent = content[content.length - 1];
+          // Only add cache_control if the last block is a non-empty text block
+          if (
+            typeof lastContent === 'object' &&
+            'type' in lastContent &&
+            lastContent.type === 'text' &&
+            'text' in lastContent &&
+            lastContent.text
+          ) {
+            lastContent.cache_control = {
+              type: 'ephemeral',
+            };
+          }
+          // If last block is not text or is empty, don't add cache_control
+          msg.content = content;
+        }
+        break;
+      }
+    }
   }
 }
