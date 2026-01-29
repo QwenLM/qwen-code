@@ -38,10 +38,7 @@ import {
 } from './github.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
-import {
-  isGeminiExtensionConfig,
-  convertGeminiExtensionPackage,
-} from './gemini-converter.js';
+import { convertGeminiExtensionPackage } from './gemini-converter.js';
 import { convertClaudePluginPackage } from './claude-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
@@ -245,18 +242,36 @@ async function convertGeminiOrClaudeExtension(
   pluginName?: string,
 ) {
   let newExtensionDir = extensionDir;
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
+  const qwenConfigPath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+  const geminiConfigPath = path.join(extensionDir, 'gemini-extension.json');
+
+  if (fs.existsSync(qwenConfigPath)) {
+    // Already a Qwen extension — no conversion needed
     newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
+  } else if (fs.existsSync(geminiConfigPath)) {
+    // Found gemini-extension.json — attempt conversion regardless of content validation
+    // This enables compatibility with ALL Gemini CLI extensions
+    try {
+      console.warn(
+        `⚠️  Found gemini-extension.json but not ${EXTENSIONS_CONFIG_FILENAME}. ` +
+          `Attempting automatic conversion for Qwen Code compatibility...`,
+      );
+      newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
+        .convertedDir;
+      console.warn(`✅ Successfully converted to Qwen Code format`);
+    } catch (error) {
+      // Provide helpful error instead of silent failure
+      throw new Error(
+        `Failed to convert Gemini extension: ${getErrorMessage(error)}\n` +
+          `Ensure gemini-extension.json exists and is valid JSON.`,
+      );
+    }
   } else if (pluginName) {
+    // Claude plugin conversion (unchanged)
     newExtensionDir = (
       await convertClaudePluginPackage(extensionDir, pluginName)
     ).convertedDir;
   }
-  // Claude plugin conversion not yet implemented
   return newExtensionDir;
 }
 
