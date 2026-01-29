@@ -508,95 +508,97 @@ export function KeypressProvider({
         return;
       }
 
-      if (kittyProtocolEnabled) {
-        if (
-          kittySequenceBuffer ||
-          (key.sequence.startsWith(`${ESC}[`) &&
-            !key.sequence.startsWith(PASTE_MODE_PREFIX) &&
-            !key.sequence.startsWith(PASTE_MODE_SUFFIX) &&
-            !key.sequence.startsWith(FOCUS_IN) &&
-            !key.sequence.startsWith(FOCUS_OUT))
-        ) {
-          kittySequenceBuffer += key.sequence;
+      // Parse CSI sequences for both Kitty protocol and legacy terminals
+      // This ensures Shift+Tab and other special keys work correctly even when
+      // Kitty protocol is not available (e.g., Windows PowerShell)
+      if (
+        kittySequenceBuffer ||
+        (key.sequence &&
+          key.sequence.startsWith(`${ESC}[`) &&
+          !key.sequence.startsWith(PASTE_MODE_PREFIX) &&
+          !key.sequence.startsWith(PASTE_MODE_SUFFIX) &&
+          !key.sequence.startsWith(FOCUS_IN) &&
+          !key.sequence.startsWith(FOCUS_OUT))
+      ) {
+        kittySequenceBuffer += key.sequence;
 
+        if (debugKeystrokeLogging) {
+          console.log('[DEBUG] CSI buffer accumulating:', kittySequenceBuffer);
+        }
+
+        // Try to peel off as many complete sequences as are available at the
+        // start of the buffer. This handles batched inputs cleanly. If the
+        // prefix is incomplete or invalid, skip to the next CSI introducer
+        // (ESC[) so that a following valid sequence can still be parsed.
+        let parsedAny = false;
+        while (kittySequenceBuffer) {
+          const parsed = parseKittyPrefix(kittySequenceBuffer);
+          if (!parsed) {
+            // Look for the next potential CSI start beyond index 0
+            const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
+            if (nextStart > 0) {
+              if (debugKeystrokeLogging) {
+                console.log(
+                  '[DEBUG] Skipping incomplete/invalid CSI prefix:',
+                  kittySequenceBuffer.slice(0, nextStart),
+                );
+              }
+              kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
+              continue;
+            }
+            break;
+          }
+          if (debugKeystrokeLogging) {
+            const parsedSequence = kittySequenceBuffer.slice(0, parsed.length);
+            if (kittySequenceBuffer.length > parsed.length) {
+              console.log(
+                '[DEBUG] CSI sequence parsed successfully (prefix):',
+                parsedSequence,
+              );
+            } else {
+              console.log(
+                '[DEBUG] CSI sequence parsed successfully:',
+                parsedSequence,
+              );
+            }
+          }
+          // Consume the parsed prefix and broadcast it.
+          kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
+          broadcast(parsed.key);
+          parsedAny = true;
+        }
+        if (parsedAny) return;
+
+        if (config?.getDebugMode() || debugKeystrokeLogging) {
+          const codes = Array.from(kittySequenceBuffer).map((ch) =>
+            ch.charCodeAt(0),
+          );
+          console.warn('CSI sequence buffer has char codes:', codes);
+        }
+
+        if (
+          kittyProtocolEnabled &&
+          kittySequenceBuffer.length > MAX_KITTY_SEQUENCE_LENGTH
+        ) {
           if (debugKeystrokeLogging) {
             console.log(
-              '[DEBUG] Kitty buffer accumulating:',
+              '[DEBUG] CSI buffer overflow, clearing:',
               kittySequenceBuffer,
             );
           }
-
-          // Try to peel off as many complete sequences as are available at the
-          // start of the buffer. This handles batched inputs cleanly. If the
-          // prefix is incomplete or invalid, skip to the next CSI introducer
-          // (ESC[) so that a following valid sequence can still be parsed.
-          let parsedAny = false;
-          while (kittySequenceBuffer) {
-            const parsed = parseKittyPrefix(kittySequenceBuffer);
-            if (!parsed) {
-              // Look for the next potential CSI start beyond index 0
-              const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
-              if (nextStart > 0) {
-                if (debugKeystrokeLogging) {
-                  console.log(
-                    '[DEBUG] Skipping incomplete/invalid CSI prefix:',
-                    kittySequenceBuffer.slice(0, nextStart),
-                  );
-                }
-                kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
-                continue;
-              }
-              break;
-            }
-            if (debugKeystrokeLogging) {
-              const parsedSequence = kittySequenceBuffer.slice(
-                0,
-                parsed.length,
-              );
-              if (kittySequenceBuffer.length > parsed.length) {
-                console.log(
-                  '[DEBUG] Kitty sequence parsed successfully (prefix):',
-                  parsedSequence,
-                );
-              } else {
-                console.log(
-                  '[DEBUG] Kitty sequence parsed successfully:',
-                  parsedSequence,
-                );
-              }
-            }
-            // Consume the parsed prefix and broadcast it.
-            kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
-            broadcast(parsed.key);
-            parsedAny = true;
-          }
-          if (parsedAny) return;
-
-          if (config?.getDebugMode() || debugKeystrokeLogging) {
-            const codes = Array.from(kittySequenceBuffer).map((ch) =>
-              ch.charCodeAt(0),
+          if (config) {
+            const event = new KittySequenceOverflowEvent(
+              kittySequenceBuffer.length,
+              kittySequenceBuffer,
             );
-            console.warn('Kitty sequence buffer has char codes:', codes);
+            logKittySequenceOverflow(config, event);
           }
-
-          if (kittySequenceBuffer.length > MAX_KITTY_SEQUENCE_LENGTH) {
-            if (debugKeystrokeLogging) {
-              console.log(
-                '[DEBUG] Kitty buffer overflow, clearing:',
-                kittySequenceBuffer,
-              );
-            }
-            if (config) {
-              const event = new KittySequenceOverflowEvent(
-                kittySequenceBuffer.length,
-                kittySequenceBuffer,
-              );
-              logKittySequenceOverflow(config, event);
-            }
-            kittySequenceBuffer = '';
-          } else {
-            return;
-          }
+          kittySequenceBuffer = '';
+        } else if (!kittyProtocolEnabled) {
+          // For non-Kitty terminals, clear the buffer to avoid accumulation
+          kittySequenceBuffer = '';
+        } else {
+          return;
         }
       }
 

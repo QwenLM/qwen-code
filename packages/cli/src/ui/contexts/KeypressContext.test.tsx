@@ -1256,13 +1256,13 @@ describe('KeypressContext - Kitty Protocol', () => {
       });
 
       expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[DEBUG] Kitty buffer accumulating:',
+        '[DEBUG] CSI buffer accumulating:',
         expect.stringContaining('\x1b[27u'),
       );
       const parsedCall = consoleLogSpy.mock.calls.find(
         (args) =>
           typeof args[0] === 'string' &&
-          args[0].includes('[DEBUG] Kitty sequence parsed successfully'),
+          args[0].includes('[DEBUG] CSI sequence parsed successfully'),
       );
       expect(parsedCall).toBeTruthy();
       expect(parsedCall?.[1]).toEqual(expect.stringContaining('\x1b[27u'));
@@ -1293,7 +1293,7 @@ describe('KeypressContext - Kitty Protocol', () => {
       });
 
       expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[DEBUG] Kitty buffer overflow, clearing:',
+        '[DEBUG] CSI buffer overflow, clearing:',
         expect.any(String),
       );
     });
@@ -1384,13 +1384,13 @@ describe('KeypressContext - Kitty Protocol', () => {
 
       // Verify debug logging for accumulation
       expect(consoleLogSpy).toHaveBeenCalledWith(
-        '[DEBUG] Kitty buffer accumulating:',
+        '[DEBUG] CSI buffer accumulating:',
         sequence,
       );
 
       // Verify warning for char codes
       expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Kitty sequence buffer has char codes:',
+        'CSI sequence buffer has char codes:',
         [27, 91, 49, 50],
       );
     });
@@ -1468,6 +1468,29 @@ describe('KeypressContext - Kitty Protocol', () => {
         );
       },
     );
+
+    it('should recognize Shift+Tab in non-Kitty protocol mode (Windows PowerShell)', () => {
+      const keyHandler = vi.fn();
+
+      // Create a wrapper with Kitty protocol disabled to simulate Windows PowerShell
+      const nonKittyWrapper = ({ children }: { children: React.ReactNode }) => (
+        <KeypressProvider kittyProtocolEnabled={false}>
+          {children}
+        </KeypressProvider>
+      );
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: nonKittyWrapper,
+      });
+      act(() => result.current.subscribe(keyHandler));
+
+      // Send legacy reverse Tab sequence (ESC [ Z)
+      act(() => stdin.sendKittySequence(`\x1b[Z`));
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'tab', shift: true }),
+      );
+    });
   });
 
   describe('Double-tap and batching', () => {
