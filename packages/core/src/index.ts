@@ -78,6 +78,7 @@ export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/jsonl-utils.js';
 
 // Config resolution utilities
 export * from './utils/configResolver.js';
