@@ -1072,6 +1072,34 @@ describe('ContentGenerationPipeline', () => {
         }),
       );
     });
+
+    it('should pass chat_template_kwargs to extra_body for DeepSeekV3.1', async () => {
+      // @ts-expect-error chat_template_kwargs is DeepSeek-specific, not in standard GenerateContentConfig
+      const request = {
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+        config: {
+          chat_template_kwargs: { thinking: true },
+        },
+      } as GenerateContentParameters;
+
+      const userPromptId = 'test-prompt-id';
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'test' },
+      ]);
+
+      const openaiRequest = await pipeline['buildRequest'](
+        request,
+        userPromptId,
+        false,
+        'deepseek-v3.1',
+      );
+
+      // @ts-expect-error extra_body is provider-specific, not in standard OpenAI types
+      expect(openaiRequest.extra_body).toEqual({
+        chat_template_kwargs: { thinking: true },
+      });
+    });
   });
 
   describe('createRequestContext', () => {
