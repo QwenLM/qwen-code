@@ -7,6 +7,8 @@
 import { Buffer } from 'buffer';
 import * as https from 'https';
 import * as os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 import type {
@@ -225,12 +227,15 @@ export class QwenLogger {
     const version = this.config?.getCliVersion() || 'unknown';
     const osMetadata = this.getOsMetadata();
 
+    // Read source information from source.json if it exists
+    const source = this.readSourceInfo();
     return {
       app: {
         id: RUN_APP_ID,
         env: process.env['DEBUG'] ? 'dev' : 'prod',
         version: version || 'unknown',
         type: 'cli',
+        channel: source || undefined,
       },
       user: {
         id: this.userId,
@@ -270,6 +275,27 @@ export class QwenLogger {
         console.debug('Error flushing to RUM:', error);
       }
     });
+  }
+
+  readSourceInfo(): string {
+    try {
+      const sourceJsonPath = path.join(os.homedir(), '.qwen', 'source.json');
+      if (fs.existsSync(sourceJsonPath)) {
+        const sourceJsonContent = fs.readFileSync(sourceJsonPath, 'utf8');
+        const sourceData = JSON.parse(sourceJsonContent);
+        if (
+          sourceData &&
+          typeof sourceData === 'object' &&
+          sourceData.source &&
+          sourceData.source !== 'unknown'
+        ) {
+          return sourceData.source;
+        }
+      }
+    } catch (_error) {
+      // Ignore errors when reading source.json - continue without source info
+    }
+    return '';
   }
 
   async flushToRum(): Promise<LogResponse> {
