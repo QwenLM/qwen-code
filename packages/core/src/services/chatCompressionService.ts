@@ -9,7 +9,7 @@ import type { Config } from '../config/config.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { tokenLimit } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { logChatCompression } from '../telemetry/loggers.js';
@@ -109,7 +109,10 @@ export class ChatCompressionService {
 
     // Don't compress if not forced and we are under the limit.
     if (!force) {
-      if (originalTokenCount < threshold * tokenLimit(model)) {
+      const contextLimit =
+        config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT;
+      if (originalTokenCount < threshold * contextLimit) {
         return {
           newHistory: null,
           info: {

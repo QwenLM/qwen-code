@@ -91,6 +91,9 @@ export type ContentGeneratorConfig = {
   userAgent?: string;
   // Schema compliance mode for tool definitions
   schemaCompliance?: 'auto' | 'openapi_30';
+  // Context window size override. If set to a positive number, it will override
+  // the automatic detection. Leave undefined to use automatic detection.
+  contextWindowSize?: number;
   // Custom HTTP headers to be sent with requests
   customHeaders?: Record<string, string>;
 };

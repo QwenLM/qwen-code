@@ -179,8 +179,13 @@ export const App: React.FC = () => {
           ? modelInfo.name
           : undefined;
 
+    // Note: In the webview context, the contextWindowSize is already reflected in
+    // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
+    // We only use tokenLimit as a fallback if metaLimit is not available.
     const derivedLimit =
-      modelName && modelName.length > 0 ? tokenLimit(modelName) : undefined;
+      modelName && modelName.length > 0
+        ? tokenLimit(modelName, 'input')
+        : undefined;
 
     const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
     const metaLimit =

@@ -15,10 +15,10 @@ import {
   qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
+  tokenLimit,
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
-  tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
@@ -379,6 +379,8 @@ class GeminiAgent {
       name: model.label,
       description: model.description ?? null,
       _meta: {
+        // Each model should have its own context window size based on its capabilities
+        // Use tokenLimit to get the model-specific context window size
         contextLimit: tokenLimit(model.id),
       },
     }));
@@ -392,6 +394,7 @@ class GeminiAgent {
         name: currentModelId,
         description: null,
         _meta: {
+          // Get context window size specific to the current model
           contextLimit: tokenLimit(currentModelId),
         },
       });

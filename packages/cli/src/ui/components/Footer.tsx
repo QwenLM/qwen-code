@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ConsoleSummaryDisplay } from './ConsoleSummaryDisplay.js';
@@ -26,13 +27,11 @@ export const Footer: React.FC = () => {
   const { vimEnabled, vimMode } = useVimMode();
 
   const {
-    model,
     errorCount,
     showErrorDetails,
     promptTokenCount,
     showAutoAcceptIndicator,
   } = {
-    model: config.getModel(),
     errorCount: uiState.errorCount,
     showErrorDetails: uiState.showErrorDetails,
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -56,6 +55,12 @@ export const Footer: React.FC = () => {
 
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
+
+  // Memoize contextWindowSize to avoid recalculating on every render
+  const contextWindowSize = useMemo(
+    () => config.getContentGeneratorConfig()?.contextWindowSize,
+    [config],
+  );
 
   // Left section should show exactly ONE thing at any time, in priority order.
   const leftContent = uiState.ctrlCPressedOnce ? (
@@ -95,8 +100,8 @@ export const Footer: React.FC = () => {
         <Text color={theme.text.accent}>
           <ContextUsageDisplay
             promptTokenCount={promptTokenCount}
-            model={model}
             terminalWidth={terminalWidth}
+            contextWindowSize={contextWindowSize}
           />
         </Text>
       ),

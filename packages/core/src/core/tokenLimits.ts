@@ -224,6 +224,10 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
  * or output generation based on the model and token type. It uses the same
  * normalization logic for consistency across both input and output limits.
  *
+ * This function is primarily used during config initialization to auto-detect
+ * token limits. After initialization, code should use contentGeneratorConfig.contextWindowSize
+ * or contentGeneratorConfig.maxOutputTokens directly.
+ *
  * @param model - The model name to get the token limit for
  * @param type - The type of token limit ('input' for context window, 'output' for generation)
  * @returns The maximum number of tokens allowed for this model and type

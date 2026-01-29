@@ -10,6 +10,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -576,6 +577,19 @@ export class ModelsConfig {
       modelId: model.id,
       detail: 'generationConfig.reasoning',
     };
+
+    // Apply contextWindowSize with fallback logic
+    // Priority: user config > model auto-detection
+    // Note: User-set contextWindowSize is already in _generationConfig and its source
+    // is already tracked in resolveContentGeneratorConfigWithSources
+    if (this._generationConfig.contextWindowSize === undefined) {
+      // Auto-detect from model if not explicitly set by user
+      this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
+      this.generationConfigSources['contextWindowSize'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
   }
 
   /**

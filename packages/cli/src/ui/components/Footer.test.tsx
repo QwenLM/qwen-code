@@ -23,6 +23,7 @@ const defaultProps = {
 const createMockConfig = (overrides = {}) => ({
   getModel: vi.fn(() => defaultProps.model),
   getDebugMode: vi.fn(() => false),
+  getContentGeneratorConfig: vi.fn(() => ({})),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   ...overrides,

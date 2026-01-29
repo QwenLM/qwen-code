@@ -35,7 +35,6 @@ import { getCoreSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { setSimulate429 } from '../utils/testUtils.js';
-import { tokenLimit } from './tokenLimits.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
@@ -418,10 +417,6 @@ describe('Gemini Client (client.ts)', () => {
     const mockGetHistory = vi.fn();
 
     beforeEach(() => {
-      vi.mock('./tokenLimits', () => ({
-        tokenLimit: vi.fn(),
-      }));
-
       client['chat'] = {
         getHistory: mockGetHistory,
         addHistory: vi.fn(),
@@ -571,6 +566,17 @@ describe('Gemini Client (client.ts)', () => {
         });
         expect(estimatedNewTokenCount).toBeGreaterThan(100); // Ensure setup is correct
 
+        // Mock contextWindowSize to ensure compression is triggered
+        vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue(
+          {
+            model: 'test-model',
+            apiKey: 'test-key',
+            vertexai: false,
+            authType: AuthType.USE_GEMINI,
+            contextWindowSize: 100, // Set to same as originalTokenCount to ensure threshold is exceeded
+          },
+        );
+
         const result = await client.tryCompressChat('prompt-id-4', false);
 
         expect(result.compressionStatus).toBe(
@@ -613,6 +619,17 @@ describe('Gemini Client (client.ts)', () => {
         });
         expect(estimatedNewTokenCount).toBeGreaterThan(100); // Ensure setup is correct
 
+        // Mock contextWindowSize to ensure compression is triggered
+        vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue(
+          {
+            model: 'test-model',
+            apiKey: 'test-key',
+            vertexai: false,
+            authType: AuthType.USE_GEMINI,
+            contextWindowSize: 100, // Set to same as originalTokenCount to ensure threshold is exceeded
+          },
+        );
+
         await client.tryCompressChat('prompt-id-4', false); // This fails and sets hasFailedCompressionAttempt = true
 
         // This call should now be a NOOP
@@ -630,7 +647,13 @@ describe('Gemini Client (client.ts)', () => {
 
     it('should not trigger summarization if token count is below threshold', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       mockGetHistory.mockReturnValue([
         { role: 'user', parts: [{ text: '...history...' }] },
       ]);
@@ -643,7 +666,6 @@ describe('Gemini Client (client.ts)', () => {
       const result = await client.tryCompressChat('prompt-id-2', false);
       const newChat = client.getChat();
 
-      expect(tokenLimit).toHaveBeenCalled();
       expect(result).toEqual({
         compressionStatus: CompressionStatus.NOOP,
         newTokenCount: originalTokenCount,
@@ -658,7 +680,13 @@ describe('Gemini Client (client.ts)', () => {
 
       const MOCKED_TOKEN_LIMIT = 1000;
       const MOCKED_CONTEXT_PERCENTAGE_THRESHOLD = 0.5;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       vi.spyOn(client['config'], 'getChatCompression').mockReturnValue({
         contextPercentageThreshold: MOCKED_CONTEXT_PERCENTAGE_THRESHOLD,
       });
@@ -732,7 +760,13 @@ describe('Gemini Client (client.ts)', () => {
     it('should trigger summarization if token count is above threshold with contextPercentageThreshold setting', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
       const MOCKED_CONTEXT_PERCENTAGE_THRESHOLD = 0.5;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       vi.spyOn(client['config'], 'getChatCompression').mockReturnValue({
         contextPercentageThreshold: MOCKED_CONTEXT_PERCENTAGE_THRESHOLD,
       });
@@ -796,7 +830,6 @@ describe('Gemini Client (client.ts)', () => {
       const result = await client.tryCompressChat('prompt-id-3', false);
       const newChat = client.getChat();
 
-      expect(tokenLimit).toHaveBeenCalled();
       expect(mockGenerateContentFn).toHaveBeenCalled();
 
       // Assert that summarization happened
@@ -811,7 +844,13 @@ describe('Gemini Client (client.ts)', () => {
 
     it('should not compress across a function call response', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       const history: Content[] = [
         { role: 'user', parts: [{ text: '...history 1...' }] },
         { role: 'model', parts: [{ text: '...history 2...' }] },
@@ -885,7 +924,6 @@ describe('Gemini Client (client.ts)', () => {
       const result = await client.tryCompressChat('prompt-id-3', false);
       const newChat = client.getChat();
 
-      expect(tokenLimit).toHaveBeenCalled();
       expect(mockGenerateContentFn).toHaveBeenCalled();
 
       // Assert that summarization happened

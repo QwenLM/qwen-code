@@ -736,16 +736,16 @@ describe('DashScopeOpenAICompatibleProvider', () => {
   });
 
   describe('output token limits', () => {
-    it('should limit max_tokens when it exceeds model limit for qwen3-coder-plus', () => {
+    it('should limit max_tokens when it exceeds model limit', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-coder-plus',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 100000, // Exceeds the 65536 limit
+        max_tokens: 100000, // Exceeds the model's output limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(65536); // Should be limited to model's output limit
+      expect(result.max_tokens).toBe(65536); // Should be limited to model's output limit (64K)
     });
 
     it('should limit max_tokens when it exceeds model limit for qwen-vl-max-latest', () => {
@@ -764,7 +764,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-coder-plus',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 1000, // Within the 65536 limit
+        max_tokens: 1000, // Within the model's output limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
@@ -800,12 +800,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'unknown-model',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 10000, // Exceeds the default 4096 limit
+        max_tokens: 10000, // Exceeds the default limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(4096); // Should be limited to default output limit
+      expect(result.max_tokens).toBe(4096); // Should be limited to default output limit (4K)
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {
@@ -824,7 +824,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result = provider.buildRequest(request, 'test-prompt-id');
 
       // max_tokens should be limited
-      expect(result.max_tokens).toBe(65536);
+      expect(result.max_tokens).toBe(65536); // Limited to model's output limit (64K)
 
       // Other parameters should be preserved
       expect(result.temperature).toBe(0.8);
@@ -850,12 +850,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
             ],
           },
         ],
-        max_tokens: 20000, // Exceeds the 8192 limit
+        max_tokens: 20000, // Exceeds the model's output limit
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(8192); // Should be limited
+      expect(result.max_tokens).toBe(8192); // Should be limited to model's output limit (8K)
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,
@@ -882,7 +882,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(32768);
+      expect(result.max_tokens).toBe(32768); // Limited to model's output limit (32K)
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,
@@ -909,7 +909,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(8192);
+      expect(result.max_tokens).toBe(8192); // Limited to model's output limit (8K)
       expect(
         (result as { vl_high_resolution_images?: boolean })
           .vl_high_resolution_images,
@@ -920,13 +920,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'qwen3-coder-plus',
         messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 100000, // Exceeds the 65536 limit
+        max_tokens: 100000, // Exceeds the model's output limit
         stream: true,
       };
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(65536); // Should be limited
+      expect(result.max_tokens).toBe(65536); // Should be limited to model's output limit (64K)
       expect(result.stream).toBe(true); // Streaming should be preserved
     });
   });
