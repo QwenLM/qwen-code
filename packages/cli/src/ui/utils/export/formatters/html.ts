@@ -18,9 +18,7 @@ function escapeJsonForHtml(json: string): string {
 }
 
 /**
- * Loads the HTML template.
- * Currently we use an embedded html string.
- * Consider using online html template in the future.
+ * Loads the HTML template built from assets.
  */
 export function loadHtmlTemplate(): string {
   return HTML_TEMPLATE;

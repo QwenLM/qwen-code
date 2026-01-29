@@ -320,16 +320,16 @@ export const exportCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   subCommands: [
     {
-      name: 'md',
-      description: 'Export session to markdown format',
-      kind: CommandKind.BUILT_IN,
-      action: exportMarkdownAction,
-    },
-    {
       name: 'html',
       description: 'Export session to HTML format',
       kind: CommandKind.BUILT_IN,
       action: exportHtmlAction,
+    },
+    {
+      name: 'md',
+      description: 'Export session to markdown format',
+      kind: CommandKind.BUILT_IN,
+      action: exportMarkdownAction,
     },
     {
       name: 'json',
