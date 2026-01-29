@@ -1,0 +1,67 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Shared timeline styles - base classes only
+ * Individual component styles are in their respective CSS files:
+ * - LayoutComponents.css (tool calls)
+ * - AssistantMessage.css (assistant messages)
+ * 
+ * Timeline connectors are inferred from DOM order; data-first/data-last can override
+ */
+
+/* Base message item styles */
+.message-item {
+  padding: 8px 0;
+  width: 100%;
+  align-items: flex-start;
+  padding-left: 30px;
+  user-select: text;
+  position: relative;
+}
+
+/* User message container spacing */
+.user-message-container {
+  margin-top: 16px;
+}
+
+.user-message-container:first-child {
+  margin-top: 0;
+}
+
+/*
+ * Timeline fallback for environments without data-first/data-last.
+ * Uses sibling selectors and :has() to detect AI sequence boundaries.
+ */
+.qwen-message.message-item:not(.user-message-container):first-child::after,
+.user-message-container
+  + .qwen-message.message-item:not(.user-message-container)::after,
+.chat-messages
+  > :not(.qwen-message.message-item)
+  + .qwen-message.message-item:not(.user-message-container)::after,
+.chat-viewer-messages
+  > :not(.qwen-message.message-item)
+  + .qwen-message.message-item:not(.user-message-container)::after {
+  top: var(--timeline-center-offset, 13px);
+}
+
+.qwen-message.message-item:not(.user-message-container):has(+ .user-message-container)::after,
+.qwen-message.message-item:not(.user-message-container):has(
+    + :not(.qwen-message.message-item)
+  )::after,
+.qwen-message.message-item:not(.user-message-container):last-child::after {
+  bottom: calc(100% - var(--timeline-center-offset, 13px));
+}
+
+.qwen-message.message-item[data-first='true']::after {
+  top: var(--timeline-center-offset, 13px);
+}
+
+.qwen-message.message-item[data-last='true']::after {
+  bottom: calc(100% - var(--timeline-center-offset, 13px));
+}
+
+.qwen-message.message-item[data-first='true'][data-last='true']::after {
+  display: none;
+}

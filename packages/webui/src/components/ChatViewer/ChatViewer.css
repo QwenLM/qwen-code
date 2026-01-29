@@ -1,0 +1,175 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * ChatViewer component styles - matching vscode-ide-companion visual appearance
+ * Note: Timeline styles are inherited from shared styles/timeline.css
+ */
+
+/* ===========================
+   Main Chat Viewer Container
+   =========================== */
+.chat-viewer-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background-color: var(--app-background, var(--app-primary-background, #1e1e1e));
+  color: var(--app-primary-foreground, #cccccc);
+  font-family: var(--vscode-chat-font-family, var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif));
+  font-size: var(--vscode-chat-font-size, 13px);
+  overflow: hidden;
+}
+
+/* ===========================
+   Messages Container (scrollable)
+   =========================== */
+.chat-viewer-messages {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-width: 0;
+  /* Enable smooth scrolling for auto-scroll */
+  scroll-behavior: smooth;
+}
+
+/* Dark theme scrollbar styling */
+.chat-viewer-messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.chat-viewer-messages::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-viewer-messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.chat-viewer-messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Light theme scrollbar styling */
+@media (prefers-color-scheme: light) {
+  .chat-viewer-container.auto-theme .chat-viewer-messages::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.2);
+  }
+  
+  .chat-viewer-container.auto-theme .chat-viewer-messages::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* Force light theme scrollbar */
+.chat-viewer-container.light-theme .chat-viewer-messages::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.chat-viewer-container.light-theme .chat-viewer-messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+/* Message item base styles */
+.chat-viewer-messages > * {
+  display: flex;
+  gap: 0;
+  align-items: flex-start;
+  text-align: left;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  flex-direction: column;
+  position: relative;
+  animation: chatViewerFadeIn 0.2s ease-in;
+}
+
+.chat-viewer-messages > .chat-viewer-scroll-anchor {
+  padding: 0;
+  display: block;
+}
+
+/* Disable overflow anchoring on individual items for manual scroll control */
+.chat-viewer-messages > * {
+  overflow-anchor: none;
+}
+
+/* User message container spacing */
+.chat-viewer-messages .user-message-container:first-child {
+  margin-top: 0;
+}
+
+/* ===========================
+   Animations
+   =========================== */
+@keyframes chatViewerFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ===========================
+   Empty State
+   =========================== */
+.chat-viewer-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 200px;
+  color: var(--app-secondary-foreground, rgba(255, 255, 255, 0.6));
+  font-size: 14px;
+  text-align: center;
+  padding: 20px;
+}
+
+.chat-viewer-empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.chat-viewer-empty-text {
+  max-width: 300px;
+  line-height: 1.5;
+}
+
+/* ===========================
+   Scroll Anchor (for auto-scroll)
+   =========================== */
+.chat-viewer-scroll-anchor {
+  height: 1px;
+  overflow-anchor: auto;
+}
+
+/* ===========================
+   ChatViewer-specific Styles
+   =========================== */
+
+/* Better spacing between message groups */
+.chat-viewer-messages .user-message-container {
+  margin-top: 16px;
+}
+
+/* Ensure proper stacking context */
+.chat-viewer-messages > * {
+  isolation: isolate;
+}
+
+/* Responsive adjustments for ChatViewer */
+@media (max-width: 600px) {
+  .chat-viewer-messages {
+    padding: 12px;
+  }
+}

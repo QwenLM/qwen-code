@@ -1,7 +1,13 @@
 This file contains third-party software notices and license terms.
 
 ============================================================
-semver@7.7.2
+@qwen-code/webui@undefined
+(No repository found)
+
+License text not found.
+
+============================================================
+semver@7.7.3
 (git+https://github.com/npm/node-semver.git)
 
 The ISC License
@@ -365,7 +371,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 ============================================================
-debug@4.4.1
+debug@4.4.3
 (git://github.com/debug-js/debug.git)
 
 (The MIT License)

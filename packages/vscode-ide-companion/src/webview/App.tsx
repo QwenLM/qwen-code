@@ -19,30 +19,29 @@ import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
 import { useMessageSubmit } from './hooks/useMessageSubmit.js';
-import type {
-  PermissionOption,
-  ToolCall as PermissionToolCall,
-} from './components/PermissionDrawer/PermissionRequest.js';
+import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
-import { PermissionDrawer } from './components/PermissionDrawer/PermissionDrawer.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
 import { hasToolCallOutput } from './utils/utils.js';
-import { EmptyState } from './components/layout/EmptyState.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
 import { useCompletionTrigger } from './hooks/useCompletionTrigger.js';
-import { ChatHeader } from './components/layout/ChatHeader.js';
 import {
-  UserMessage,
   AssistantMessage,
+  UserMessage,
   ThinkingMessage,
   WaitingMessage,
   InterruptedMessage,
-} from './components/messages/index.js';
+  FileIcon,
+  UserIcon,
+  PermissionDrawer,
+  // Layout components imported directly from webui
+  EmptyState,
+  ChatHeader,
+  SessionSelector,
+} from '@qwen-code/webui';
 import { InputForm } from './components/layout/InputForm.js';
-import { SessionSelector } from './components/layout/SessionSelector.js';
-import { FileIcon, UserIcon } from './components/icons/index.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
@@ -691,24 +690,10 @@ export const App: React.FC = () => {
 
           case 'in-progress-tool-call':
           case 'completed-tool-call': {
-            const prev = allMessages[index - 1];
-            const next = allMessages[index + 1];
-            const isToolCallType = (
-              x: unknown,
-            ): x is { type: 'in-progress-tool-call' | 'completed-tool-call' } =>
-              !!x &&
-              typeof x === 'object' &&
-              'type' in (x as Record<string, unknown>) &&
-              ((x as { type: string }).type === 'in-progress-tool-call' ||
-                (x as { type: string }).type === 'completed-tool-call');
-            const isFirst = !isToolCallType(prev);
-            const isLast = !isToolCallType(next);
             return (
               <ToolCall
                 key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
                 toolCall={item.data as ToolCallData}
-                isFirst={isFirst}
-                isLast={isLast}
               />
             );
           }
@@ -748,7 +733,7 @@ export const App: React.FC = () => {
         currentSessionId={sessionManagement.currentSessionId}
         searchQuery={sessionManagement.sessionSearchQuery}
         onSearchChange={sessionManagement.setSessionSearchQuery}
-        onSelectSession={(sessionId) => {
+        onSelectSession={(sessionId: string) => {
           sessionManagement.handleSwitchSession(sessionId);
           sessionManagement.setSessionSearchQuery('');
         }}

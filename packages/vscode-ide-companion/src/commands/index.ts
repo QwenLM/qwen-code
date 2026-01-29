@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import * as vscode from 'vscode';
 import type { DiffManager } from '../diff-manager.js';
 import type { WebViewProvider } from '../webview/WebViewProvider.js';
