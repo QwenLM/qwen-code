@@ -140,6 +140,9 @@ export class NativeMessagingHost {
         case NativeMessageType.STOP:
           await this.stopServer();
           break;
+        
+        // --- Added for React UI Compatibility ---
+        
         // Support legacy start_qwen message from React Extension
         case 'start_qwen':
           await this.startServer(message.payload?.port || 12306);
@@ -156,32 +159,66 @@ export class NativeMessagingHost {
             });
           }
           break;
+          
         // Support CONNECT message from React Extension
         case 'CONNECT': {
           // Ensure the HTTP server is running so MCP stdio can reach /mcp.
-          // if (this.associatedServer && !this.associatedServer.isRunning) {
-          //   await this.startServer(message.payload?.port || 12306);
-          // }
+           if (this.associatedServer && !this.associatedServer.isRunning) {
+             // Auto-start server on connect if likely needed
+             await this.startServer(message.payload?.port || 12306);
+           }
+          
+          const payload = {
+              success: true,
+              connected: true,
+              serverRunning: this.associatedServer?.isRunning ?? false,
+          };
+          
           if (message.requestId) {
             this.sendMessage({
               responseToRequestId: message.requestId,
-              payload: {
-                success: true,
-                connected: true,
-                serverRunning: this.associatedServer?.isRunning ?? false,
-              },
+              payload: payload,
             });
           } else {
             this.sendMessage({
               type: 'connected',
-              payload: {
-                success: true,
-                serverRunning: this.associatedServer?.isRunning ?? false,
-              },
+              payload: payload,
             });
           }
           break;
         }
+        
+        // Support qwen_prompt (Chat) - return migration message
+        case 'qwen_prompt': {
+            const response = {
+                success: true,
+                data: {
+                    content: "⚠️ **Migration Notice**\n\nThe Qwen Code architecture has been upgraded to MCP (Model Context Protocol). \n\nPlease use the **Qwen CLI** to interact with the agent:\n\n`$ qwen`\n\nThis SidePanel now serves as a status and tool visualization dashboard.",
+                    stopReason: "stop"
+                }
+            };
+            if (message.requestId) {
+                this.sendMessage({
+                    responseToRequestId: message.requestId,
+                    payload: response
+                });
+            }
+            break;
+        }
+        
+        // Support getQwenSessions - return empty list
+        case 'getQwenSessions': {
+             if (message.requestId) {
+                this.sendMessage({
+                    responseToRequestId: message.requestId,
+                    payload: { success: true, data: { sessions: [], total: 0 } }
+                });
+            }
+            break;
+        }
+        
+        // ----------------------------------------
+
         // Keep ping/pong for simple liveness detection, but this differs from request-response pattern
         case 'ping_from_extension':
           this.sendMessage({ type: 'pong_to_extension' });
