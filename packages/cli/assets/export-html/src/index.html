@@ -19,7 +19,8 @@
     <script>
       const withKey = (props, key) =>
         key == null ? props : Object.assign({}, props, { key });
-      const jsx = (type, props, key) => React.createElement(type, withKey(props, key));
+      const jsx = (type, props, key) =>
+        React.createElement(type, withKey(props, key));
       const jsxRuntime = {
         Fragment: React.Fragment,
         jsx,

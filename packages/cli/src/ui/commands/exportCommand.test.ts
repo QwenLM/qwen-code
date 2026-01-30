@@ -106,11 +106,11 @@ describe('exportCommand', () => {
       );
     });
 
-    it('should have md, html, json, and jsonl subcommands', () => {
+    it('should have html, md, json, and jsonl subcommands', () => {
       expect(exportCommand.subCommands).toHaveLength(4);
       expect(exportCommand.subCommands?.map((c) => c.name)).toEqual([
-        'md',
         'html',
+        'md',
         'json',
         'jsonl',
       ]);
