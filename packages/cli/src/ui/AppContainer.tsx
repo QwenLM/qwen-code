@@ -419,7 +419,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleAuthSelect,
     openAuthDialog,
     cancelAuthentication,
-  } = useAuthCommand(settings, config, historyManager.addItem);
+  } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
 
   useInitializationAuthError(initializationResult.authError, onAuthError);
 
