@@ -39,13 +39,32 @@ export async function loadSkillsFromDir(
   }
 }
 
+/**
+ * Normalizes skill file content for consistent parsing across platforms.
+ * - Strips UTF-8 BOM to ensure frontmatter starts at the first character.
+ * - Normalizes line endings so skills authored on Windows (CRLF) parse correctly.
+ */
+function normalizeSkillFileContent(content: string): string {
+  // Strip UTF-8 BOM to ensure frontmatter starts at the first character.
+  let normalized = content.replace(/^\uFEFF/, '');
+
+  // Normalize line endings so skills authored on Windows (CRLF) parse correctly.
+  normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+  return normalized;
+}
+
 export function parseSkillContent(
   content: string,
   filePath: string,
 ): SkillConfig {
+  // Normalize content to handle BOM and CRLF line endings
+  const normalizedContent = normalizeSkillFileContent(content);
+
   // Split frontmatter and content
-  const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-  const match = content.match(frontmatterRegex);
+  // Use (?:\n|$) to allow frontmatter ending with or without trailing newline
+  const frontmatterRegex = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/;
+  const match = normalizedContent.match(frontmatterRegex);
 
   if (!match) {
     throw new Error('Invalid format: missing YAML frontmatter');
