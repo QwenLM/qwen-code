@@ -32,7 +32,7 @@ export const MainContent = () => {
   return (
     <>
       <Static
-        key={uiState.historyRemountKey}
+        key={`${uiState.historyRemountKey}-${uiState.currentModel}`}
         items={[
           <AppHeader key="app-header" version={version} />,
           ...uiState.history.map((h) => (
