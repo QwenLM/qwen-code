@@ -37,6 +37,7 @@
   },
   "dependencies": {
     "@google/genai": "1.30.0",
+    "@qwen-code/web-app": "file:../web-app",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@qwen-code/qwen-code-core": "file:../core",
