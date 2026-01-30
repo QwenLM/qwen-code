@@ -26,6 +26,16 @@ export interface SessionContext extends SessionUpdateSender {
 }
 
 /**
+ * Subagent metadata for tracking parent tool call context.
+ */
+export interface SubagentMeta {
+  /** ID of the parent TaskTool call that created this subagent */
+  parentToolCallId?: string;
+  /** Type of subagent (from TaskParams.subagent_type) */
+  subagentType?: string;
+}
+
+/**
  * Parameters for emitting a tool call start event.
  */
 export interface ToolCallStartParams {
@@ -37,6 +47,8 @@ export interface ToolCallStartParams {
   args?: Record<string, unknown>;
   /** Status of the tool call */
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
+  /** Optional subagent metadata */
+  subagentMeta?: SubagentMeta;
 }
 
 /**
@@ -57,6 +69,8 @@ export interface ToolCallResultParams {
   error?: Error;
   /** Original args (fallback for TodoWriteTool todos extraction) */
   args?: Record<string, unknown>;
+  /** Optional subagent metadata */
+  subagentMeta?: SubagentMeta;
 }
 
 /**

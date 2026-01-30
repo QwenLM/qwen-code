@@ -663,7 +663,21 @@ export class Query implements AsyncIterable<SDKMessage> {
       },
     );
 
-    this.transport.write(serializeJsonLine(request));
+    try {
+      this.transport.write(serializeJsonLine(request));
+    } catch (error) {
+      const pending = this.pendingControlRequests.get(requestId);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.pendingControlRequests.delete(requestId);
+      }
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.error(`Failed to send control request: ${errorMsg}`);
+      return Promise.reject(
+        new Error(`Failed to send control request: ${errorMsg}`),
+      );
+    }
+
     return responsePromise;
   }
 
@@ -687,7 +701,15 @@ export class Query implements AsyncIterable<SDKMessage> {
           },
     };
 
-    this.transport.write(serializeJsonLine(response));
+    try {
+      this.transport.write(serializeJsonLine(response));
+    } catch (error) {
+      // Write failed - log and ignore since response cannot be delivered
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      logger.warn(
+        `Failed to send control response for request ${requestId}: ${errorMsg}`,
+      );
+    }
   }
 
   async close(): Promise<void> {
@@ -790,11 +812,7 @@ export class Query implements AsyncIterable<SDKMessage> {
        * The timeout ensures we don't hang indefinitely - either the turn proceeds
        * normally, or it fails with a timeout, but Promise.race will always resolve.
        */
-      if (
-        !this.isSingleTurn &&
-        this.sdkMcpTransports.size > 0 &&
-        this.firstResultReceivedPromise
-      ) {
+      if (this.firstResultReceivedPromise) {
         const streamCloseTimeout =
           this.options.timeout?.streamClose ?? DEFAULT_STREAM_CLOSE_TIMEOUT;
         let timeoutId: NodeJS.Timeout | undefined;

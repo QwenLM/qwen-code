@@ -56,6 +56,8 @@ export interface SubAgentStreamTextEvent {
   subagentId: string;
   round: number;
   text: string;
+  /** Whether this text is reasoning/thinking content (as opposed to regular output) */
+  thought?: boolean;
   timestamp: number;
 }
 

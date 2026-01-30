@@ -18,6 +18,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
+import { getLanguageSettingsOptions } from '../i18n/languages.js';
 
 export type SettingsType =
   | 'boolean'
@@ -69,7 +70,6 @@ export interface SettingDefinition {
   default: SettingsValue;
   description?: string;
   parentKey?: string;
-  childKey?: string;
   key?: string;
   properties?: SettingsSchema;
   showInDialog?: boolean;
@@ -211,13 +211,7 @@ const SETTINGS_SCHEMA = {
           'You can also use custom language codes (e.g., "es", "fr") by placing JS language files ' +
           'in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js).',
         showInDialog: true,
-        options: [
-          { value: 'auto', label: 'Auto (detect from system)' },
-          { value: 'en', label: 'English' },
-          { value: 'zh', label: '中文 (Chinese)' },
-          { value: 'ru', label: 'Русский (Russian)' },
-          { value: 'de', label: 'Deutsch (German)' },
-        ],
+        options: [] as readonly SettingEnumOption[],
       },
       outputLanguage: {
         type: 'string',
@@ -227,7 +221,7 @@ const SETTINGS_SCHEMA = {
         default: 'auto',
         description:
           'The language for LLM output. Use "auto" to detect from system settings, ' +
-          'or set a specific language (e.g., "English", "中文", "日本語").',
+          'or set a specific language.',
         showInDialog: true,
       },
       terminalBell: {
@@ -603,7 +597,6 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description: 'Request timeout in milliseconds.',
             parentKey: 'generationConfig',
-            childKey: 'timeout',
             showInDialog: false,
           },
           maxRetries: {
@@ -614,7 +607,6 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description: 'Maximum number of retries for failed requests.',
             parentKey: 'generationConfig',
-            childKey: 'maxRetries',
             showInDialog: false,
           },
           disableCacheControl: {
@@ -625,7 +617,6 @@ const SETTINGS_SCHEMA = {
             default: false,
             description: 'Disable cache control for DashScope providers.',
             parentKey: 'generationConfig',
-            childKey: 'disableCacheControl',
             showInDialog: false,
           },
           schemaCompliance: {
@@ -637,12 +628,22 @@ const SETTINGS_SCHEMA = {
             description:
               'The compliance mode for tool schemas sent to the model. Use "openapi_30" for strict OpenAPI 3.0 compatibility (e.g., for Gemini).',
             parentKey: 'generationConfig',
-            childKey: 'schemaCompliance',
             showInDialog: false,
             options: [
               { value: 'auto', label: 'Auto (Default)' },
               { value: 'openapi_30', label: 'OpenAPI 3.0 Strict' },
             ],
+          },
+          contextWindowSize: {
+            type: 'number',
+            label: 'Context Window Size',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined,
+            description:
+              "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
           },
         },
       },
@@ -687,7 +688,7 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
-      loadMemoryFromIncludeDirectories: {
+      loadFromIncludeDirectories: {
         type: 'boolean',
         label: 'Load Memory From Include Directories',
         category: 'Context',
@@ -1189,6 +1190,15 @@ const SETTINGS_SCHEMA = {
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
 
 export function getSettingsSchema(): SettingsSchemaType {
+  // Inject dynamic language options
+  const schema = SETTINGS_SCHEMA as unknown as SettingsSchema;
+  if (schema['general']?.properties?.['language']) {
+    (
+      schema['general'].properties['language'] as {
+        options?: SettingEnumOption[];
+      }
+    ).options = getLanguageSettingsOptions();
+  }
   return SETTINGS_SCHEMA;
 }
 

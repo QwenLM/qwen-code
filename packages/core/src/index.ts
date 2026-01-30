@@ -139,6 +139,18 @@ export * from './tools/skill.js';
 export * from './tools/todoWrite.js';
 export * from './tools/exitPlanMode.js';
 
+// Export LSP types and tools
+export * from './lsp/types.js';
+export * from './lsp/constants.js';
+export * from './lsp/LspConfigLoader.js';
+export * from './lsp/LspConnectionFactory.js';
+export * from './lsp/LspLanguageDetector.js';
+export * from './lsp/LspResponseNormalizer.js';
+export * from './lsp/LspServerManager.js';
+export * from './lsp/NativeLspClient.js';
+export * from './lsp/NativeLspService.js';
+export * from './tools/lsp.js';
+
 // MCP OAuth
 export { MCPOAuthProvider } from './mcp/oauth-provider.js';
 export type {

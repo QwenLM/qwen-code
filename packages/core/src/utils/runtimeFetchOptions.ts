@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { EnvHttpProxyAgent } from 'undici';
+import { Agent, ProxyAgent, type Dispatcher } from 'undici';
 
 /**
  * JavaScript runtime type
@@ -29,8 +29,10 @@ export function detectRuntime(): Runtime {
  */
 export type OpenAIRuntimeFetchOptions =
   | {
-      dispatcher?: EnvHttpProxyAgent;
-      timeout?: false;
+      fetchOptions?: {
+        dispatcher?: Dispatcher;
+        timeout?: false;
+      };
     }
   | undefined;
 
@@ -38,8 +40,9 @@ export type OpenAIRuntimeFetchOptions =
  * Runtime fetch options for Anthropic SDK
  */
 export type AnthropicRuntimeFetchOptions = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  httpAgent?: any;
+  fetchOptions?: {
+    dispatcher?: Dispatcher;
+  };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fetch?: any;
 };
@@ -54,12 +57,14 @@ export type SDKType = 'openai' | 'anthropic';
  */
 export function buildRuntimeFetchOptions(
   sdkType: 'openai',
+  proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options for Anthropic SDK
  */
 export function buildRuntimeFetchOptions(
   sdkType: 'anthropic',
+  proxyUrl?: string,
 ): AnthropicRuntimeFetchOptions;
 /**
  * Build runtime-specific fetch options based on the detected runtime and SDK type
@@ -71,13 +76,14 @@ export function buildRuntimeFetchOptions(
  */
 export function buildRuntimeFetchOptions(
   sdkType: SDKType,
+  proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const runtime = detectRuntime();
 
-  // Always disable bodyTimeout (set to 0) to let SDK's timeout parameter
-  // control the total request time. bodyTimeout only monitors intervals between
-  // data chunks, not the total request time, so we disable it to ensure user-configured
-  // timeout works as expected for both streaming and non-streaming requests.
+  // Always disable undici timeouts (set to 0) to let SDK's timeout parameter
+  // control the total request time. bodyTimeout monitors intervals between data
+  // chunks, headersTimeout waits for response headers, so we disable both to
+  // ensure user-configured timeouts work as expected for long-running requests.
 
   switch (runtime) {
     case 'bun': {
@@ -85,7 +91,9 @@ export function buildRuntimeFetchOptions(
         // Bun: Disable built-in 300s timeout to let OpenAI SDK timeout control
         // This ensures user-configured timeout works as expected without interference
         return {
-          timeout: false,
+          fetchOptions: {
+            timeout: false,
+          },
         };
       } else {
         // Bun: Use custom fetch to disable built-in 300s timeout
@@ -110,58 +118,36 @@ export function buildRuntimeFetchOptions(
     }
 
     case 'node': {
-      // Node.js: Use EnvHttpProxyAgent to configure proxy and disable bodyTimeout
-      // EnvHttpProxyAgent automatically reads proxy settings from environment variables
-      // (HTTP_PROXY, HTTPS_PROXY, NO_PROXY, etc.) to preserve proxy functionality
-      // bodyTimeout is always 0 (disabled) to let SDK timeout control the request
-      try {
-        const agent = new EnvHttpProxyAgent({
-          bodyTimeout: 0, // Disable to let SDK timeout control total request time
-        });
-
-        if (sdkType === 'openai') {
-          return {
-            dispatcher: agent,
-          };
-        } else {
-          return {
-            httpAgent: agent,
-          };
-        }
-      } catch {
-        // If undici is not available, return appropriate default
-        if (sdkType === 'openai') {
-          return undefined;
-        } else {
-          return {};
-        }
-      }
+      // Node.js: Use undici dispatcher for both SDKs.
+      // This enables proxy support and disables undici timeouts so SDK timeout
+      // controls the total request time.
+      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
     }
 
     default: {
-      // Unknown runtime: Try to use EnvHttpProxyAgent if available
-      // EnvHttpProxyAgent automatically reads proxy settings from environment variables
-      try {
-        const agent = new EnvHttpProxyAgent({
-          bodyTimeout: 0, // Disable to let SDK timeout control total request time
-        });
-
-        if (sdkType === 'openai') {
-          return {
-            dispatcher: agent,
-          };
-        } else {
-          return {
-            httpAgent: agent,
-          };
-        }
-      } catch {
-        if (sdkType === 'openai') {
-          return undefined;
-        } else {
-          return {};
-        }
-      }
+      // Unknown runtime: treat as Node.js-like environment.
+      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
     }
+  }
+}
+
+function buildFetchOptionsWithDispatcher(
+  sdkType: SDKType,
+  proxyUrl?: string,
+): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+  try {
+    const dispatcher = proxyUrl
+      ? new ProxyAgent({
+          uri: proxyUrl,
+          headersTimeout: 0,
+          bodyTimeout: 0,
+        })
+      : new Agent({
+          headersTimeout: 0,
+          bodyTimeout: 0,
+        });
+    return { fetchOptions: { dispatcher } };
+  } catch {
+    return sdkType === 'openai' ? undefined : {};
   }
 }

@@ -53,10 +53,7 @@ export async function cloneFromGit(
 ): Promise<void> {
   try {
     const git = simpleGit(destination);
-    let sourceUrl =
-      installMetadata.type === 'marketplace' && installMetadata.marketplace
-        ? installMetadata.marketplace.marketplaceSource
-        : installMetadata.source;
+    let sourceUrl = installMetadata.source;
     const token = getGitHubToken();
     if (token) {
       try {
@@ -239,12 +236,8 @@ export async function downloadFromGitHubRelease(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
 ): Promise<GitHubDownloadResult> {
-  const { source, ref, marketplace, type } = installMetadata;
-  const { owner, repo } = parseGitHubRepoForReleases(
-    type === 'marketplace' && marketplace
-      ? marketplace.marketplaceSource
-      : source,
-  );
+  const { source, ref } = installMetadata;
+  const { owner, repo } = parseGitHubRepoForReleases(source);
 
   try {
     const releaseData = await fetchReleaseFromGithub(owner, repo, ref);

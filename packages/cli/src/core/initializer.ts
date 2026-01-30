@@ -14,8 +14,7 @@ import {
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { performInitialAuth } from './auth.js';
 import { validateTheme } from './theme.js';
-import { initializeI18n } from '../i18n/index.js';
-import { initializeLlmOutputLanguage } from '../utils/languageUtils.js';
+import { initializeI18n, type SupportedLanguage } from '../i18n/index.js';
 
 export interface InitializationResult {
   authError: string | null;
@@ -38,16 +37,13 @@ export async function initializeApp(
   // Initialize i18n system
   const languageSetting =
     process.env['QWEN_CODE_LANG'] ||
-    settings.merged.general?.language ||
+    (settings.merged.general?.language as string) ||
     'auto';
-  await initializeI18n(languageSetting);
-
-  // Auto-detect and set LLM output language on first use
-  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  await initializeI18n(languageSetting as SupportedLanguage | 'auto');
 
   // Use authType from modelsConfig which respects CLI --auth-type argument
   // over settings.security.auth.selectedType
-  const authType = config.modelsConfig.getCurrentAuthType();
+  const authType = config.getModelsConfig().getCurrentAuthType();
   const authError = await performInitialAuth(config, authType);
 
   // Fallback to user select when initial authentication fails
@@ -61,7 +57,7 @@ export async function initializeApp(
   const themeError = validateTheme(settings);
 
   const shouldOpenAuthDialog =
-    !config.modelsConfig.wasAuthTypeExplicitlyProvided() || !!authError;
+    !config.getModelsConfig().wasAuthTypeExplicitlyProvided() || !!authError;
 
   if (config.getIdeMode()) {
     const ideClient = await IdeClient.getInstance();

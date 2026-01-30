@@ -10,6 +10,7 @@ import type {
   SubAgentToolResultEvent,
   SubAgentApprovalRequestEvent,
   SubAgentUsageEvent,
+  SubAgentStreamTextEvent,
   ToolCallConfirmationDetails,
   AnyDeclarativeTool,
   AnyToolInvocation,
@@ -77,9 +78,21 @@ export class SubAgentTracker {
   constructor(
     private readonly ctx: SessionContext,
     private readonly client: acp.Client,
+    private readonly parentToolCallId: string,
+    private readonly subagentType: string,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
+  }
+
+  /**
+   * Gets the subagent metadata to attach to all events.
+   */
+  private getSubagentMeta() {
+    return {
+      parentToolCallId: this.parentToolCallId,
+      subagentType: this.subagentType,
+    };
   }
 
   /**
@@ -97,11 +110,13 @@ export class SubAgentTracker {
     const onToolResult = this.createToolResultHandler(abortSignal);
     const onApproval = this.createApprovalHandler(abortSignal);
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
+    const onStreamText = this.createStreamTextHandler(abortSignal);
 
     eventEmitter.on(SubAgentEventType.TOOL_CALL, onToolCall);
     eventEmitter.on(SubAgentEventType.TOOL_RESULT, onToolResult);
     eventEmitter.on(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
     eventEmitter.on(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
+    eventEmitter.on(SubAgentEventType.STREAM_TEXT, onStreamText);
 
     return [
       () => {
@@ -109,6 +124,7 @@ export class SubAgentTracker {
         eventEmitter.off(SubAgentEventType.TOOL_RESULT, onToolResult);
         eventEmitter.off(SubAgentEventType.TOOL_WAITING_APPROVAL, onApproval);
         eventEmitter.off(SubAgentEventType.USAGE_METADATA, onUsageMetadata);
+        eventEmitter.off(SubAgentEventType.STREAM_TEXT, onStreamText);
         // Clean up any remaining states
         this.toolStates.clear();
       },
@@ -151,6 +167,7 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
+        subagentMeta: this.getSubagentMeta(),
       });
     };
   }
@@ -175,6 +192,7 @@ export class SubAgentTracker {
         message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
+        subagentMeta: this.getSubagentMeta(),
       });
 
       // Clean up state
@@ -269,7 +287,32 @@ export class SubAgentTracker {
       const event = args[0] as SubAgentUsageEvent;
       if (abortSignal.aborted) return;
 
-      this.messageEmitter.emitUsageMetadata(event.usage, '', event.durationMs);
+      this.messageEmitter.emitUsageMetadata(
+        event.usage,
+        '',
+        event.durationMs,
+        this.getSubagentMeta(),
+      );
+    };
+  }
+
+  /**
+   * Creates a handler for stream text events.
+   * Emits agent message or thought chunks for text content from subagent model responses.
+   */
+  private createStreamTextHandler(
+    abortSignal: AbortSignal,
+  ): (...args: unknown[]) => void {
+    return (...args: unknown[]) => {
+      const event = args[0] as SubAgentStreamTextEvent;
+      if (abortSignal.aborted) return;
+
+      // Emit streamed text as agent message or thought based on the flag
+      void this.messageEmitter.emitMessage(
+        event.text,
+        'assistant',
+        event.thought ?? false,
+      );
     };
   }
 

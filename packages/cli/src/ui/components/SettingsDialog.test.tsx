@@ -1368,7 +1368,7 @@ describe('SettingsDialog', () => {
           enabled: true,
         },
         context: {
-          loadMemoryFromIncludeDirectories: true,
+          loadFromIncludeDirectories: true,
           fileFiltering: {
             respectGitIgnore: true,
             respectQwenIgnore: true,
@@ -1540,7 +1540,7 @@ describe('SettingsDialog', () => {
             enableRecursiveFileSearch: false,
             disableFuzzySearch: true,
           },
-          loadMemoryFromIncludeDirectories: true,
+          loadFromIncludeDirectories: true,
         },
       });
       const onSelect = vi.fn();
@@ -1605,7 +1605,7 @@ describe('SettingsDialog', () => {
           enabled: false,
         },
         context: {
-          loadMemoryFromIncludeDirectories: false,
+          loadFromIncludeDirectories: false,
           fileFiltering: {
             respectGitIgnore: false,
             respectQwenIgnore: false,

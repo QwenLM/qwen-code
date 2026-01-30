@@ -197,6 +197,31 @@ export interface CurrentModeUpdate extends BaseSessionUpdate {
   };
 }
 
+// Current model update (sent by agent when model changes)
+export interface CurrentModelUpdate extends BaseSessionUpdate {
+  update: {
+    sessionUpdate: 'current_model_update';
+    model: ModelInfo;
+  };
+}
+
+// Available command definition
+export interface AvailableCommand {
+  name: string;
+  description: string;
+  input?: {
+    hint?: string;
+  } | null;
+}
+
+// Available commands update (sent by agent after session creation)
+export interface AvailableCommandsUpdate extends BaseSessionUpdate {
+  update: {
+    sessionUpdate: 'available_commands_update';
+    availableCommands: AvailableCommand[];
+  };
+}
+
 // Authenticate update (sent by agent during authentication process)
 export interface AuthenticateUpdateNotification {
   _meta: {
@@ -211,7 +236,9 @@ export type AcpSessionUpdate =
   | ToolCallUpdate
   | ToolCallStatusUpdate
   | PlanUpdate
-  | CurrentModeUpdate;
+  | CurrentModeUpdate
+  | CurrentModelUpdate
+  | AvailableCommandsUpdate;
 
 // Permission request (simplified version, use schema.RequestPermissionRequest for validation)
 export interface AcpPermissionRequest {

@@ -15,6 +15,7 @@ import type {
   HistoryItemWithoutId,
   StreamingState,
   SettingInputRequest,
+  PluginChoiceRequest,
 } from '../types.js';
 import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
@@ -61,6 +62,7 @@ export interface UIState {
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
   settingInputRequests: SettingInputRequest[];
+  pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
   geminiMdFileCount: number;
   streamingState: StreamingState;

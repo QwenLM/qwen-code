@@ -71,6 +71,7 @@ export interface UIActions {
   // Feedback dialog
   openFeedbackDialog: () => void;
   closeFeedbackDialog: () => void;
+  temporaryCloseFeedbackDialog: () => void;
   submitFeedback: (rating: number) => void;
 }
 

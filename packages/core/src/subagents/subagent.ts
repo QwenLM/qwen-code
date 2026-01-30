@@ -39,7 +39,6 @@ import type {
   SubAgentStartEvent,
   SubAgentToolCallEvent,
   SubAgentToolResultEvent,
-  SubAgentStreamTextEvent,
   SubAgentErrorEvent,
   SubAgentUsageEvent,
 } from './subagent-events.js';
@@ -412,15 +411,17 @@ export class SubAgentScope {
             const content = resp.candidates?.[0]?.content;
             const parts = content?.parts || [];
             for (const p of parts) {
-              const txt = (p as Part & { text?: string }).text;
-              if (txt) roundText += txt;
+              const txt = p.text;
+              const isThought = p.thought ?? false;
+              if (txt && !isThought) roundText += txt;
               if (txt)
                 this.eventEmitter?.emit(SubAgentEventType.STREAM_TEXT, {
                   subagentId: this.subagentId,
                   round: turnCounter,
                   text: txt,
+                  thought: isThought,
                   timestamp: Date.now(),
-                } as SubAgentStreamTextEvent);
+                });
             }
             if (resp.usageMetadata) lastUsage = resp.usageMetadata;
           }

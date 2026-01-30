@@ -6,6 +6,7 @@
 
 import type { QwenAgentManager } from '../services/qwenAgentManager.js';
 import type { ConversationStore } from '../services/conversationStore.js';
+import type { PermissionResponseMessage } from '../types/webviewMessageTypes.js';
 import { MessageRouter } from './handlers/MessageRouter.js';
 
 /**
@@ -55,7 +56,7 @@ export class MessageHandler {
    * Set permission handler
    */
   setPermissionHandler(
-    handler: (message: { type: string; data: { optionId: string } }) => void,
+    handler: (message: PermissionResponseMessage) => void,
   ): void {
     this.router.setPermissionHandler(handler);
   }

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -33,7 +33,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.8.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.9.0"
   },
   "dependencies": {
     "@google/genai": "1.30.0",
@@ -55,6 +55,7 @@
     "ink-spinner": "^5.0.0",
     "lowlight": "^3.3.0",
     "open": "^10.1.2",
+    "prompts": "^2.4.2",
     "qrcode-terminal": "^0.12.0",
     "react": "^19.1.0",
     "read-package-up": "^11.0.0",
@@ -84,6 +85,7 @@
     "@types/semver": "^7.7.0",
     "@types/shell-quote": "^1.7.5",
     "@types/yargs": "^17.0.32",
+    "@types/prompts": "^2.4.9",
     "archiver": "^7.0.1",
     "ink-testing-library": "^4.0.0",
     "jsdom": "^26.1.0",

@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -115,8 +115,8 @@
   "scripts": {
     "prepackage": "node ./scripts/prepackage.js",
     "build": "npm run build:dev",
-    "build:dev": "npm run check-types && npm run lint && tsc && node esbuild.js",
-    "build:prod": "tsc && node esbuild.js --production",
+    "build:dev": "npm --workspace @qwen-code/webui run build && npm run check-types && npm run lint && node esbuild.js",
+    "build:prod": "npm --workspace @qwen-code/webui run build && node esbuild.js --production",
     "generate:notices": "node ./scripts/generate-notices.js",
     "prepare": "npm run generate:notices",
     "check-types": "tsc --noEmit",
@@ -134,8 +134,8 @@
     "@types/express": "^5.0.3",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "20.x",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
+    "@types/react": "^19.2.10",
+    "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
@@ -152,13 +152,14 @@
     "vitest": "^3.2.4"
   },
   "dependencies": {
-    "semver": "^7.7.2",
+    "@qwen-code/webui": "*",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "markdown-it": "^14.1.0",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "semver": "^7.7.2",
     "zod": "^3.25.76"
   }
 }

@@ -366,6 +366,9 @@ export type Usage = z.infer<typeof usageSchema>;
 export const sessionUpdateMetaSchema = z.object({
   usage: usageSchema.optional().nullable(),
   durationMs: z.number().optional().nullable(),
+  toolName: z.string().optional().nullable(),
+  parentToolCallId: z.string().optional().nullable(),
+  subagentType: z.string().optional().nullable(),
 });
 
 export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
@@ -575,6 +578,7 @@ export const sessionUpdateSchema = z.union([
     kind: toolKindSchema,
     locations: z.array(toolCallLocationSchema).optional(),
     rawInput: z.unknown().optional(),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
     sessionUpdate: z.literal('tool_call'),
     status: toolCallStatusSchema,
     title: z.string(),
@@ -586,6 +590,7 @@ export const sessionUpdateSchema = z.union([
     locations: z.array(toolCallLocationSchema).optional().nullable(),
     rawInput: z.unknown().optional(),
     rawOutput: z.unknown().optional(),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
     sessionUpdate: z.literal('tool_call_update'),
     status: toolCallStatusSchema.optional().nullable(),
     title: z.string().optional().nullable(),

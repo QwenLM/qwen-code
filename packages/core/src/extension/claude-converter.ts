@@ -39,7 +39,7 @@ export interface ClaudePluginConfig {
   hooks?: string;
   mcpServers?: string | Record<string, MCPServerConfig>;
   outputStyles?: string | string[];
-  lspServers?: string;
+  lspServers?: string | Record<string, unknown>;
 }
 
 /**
@@ -290,8 +290,8 @@ export function convertClaudeToQwenConfig(
   claudeConfig: ClaudePluginConfig,
 ): ExtensionConfig {
   // Validate required fields
-  if (!claudeConfig.name || !claudeConfig.version) {
-    throw new Error('Claude plugin config must have name and version fields');
+  if (!claudeConfig.name) {
+    throw new Error('Claude plugin config must have name field');
   }
 
   // Parse MCP servers
@@ -318,17 +318,12 @@ export function convertClaudeToQwenConfig(
       `[Claude Converter] Output styles are not yet supported in ${claudeConfig.name}`,
     );
   }
-  if (claudeConfig.lspServers) {
-    console.warn(
-      `[Claude Converter] LSP servers are not yet supported in ${claudeConfig.name}`,
-    );
-  }
-
   // Direct field mapping - commands, skills, agents will be collected as folders
   return {
     name: claudeConfig.name,
     version: claudeConfig.version,
     mcpServers,
+    lspServers: claudeConfig.lspServers,
   };
 }
 
@@ -386,7 +381,7 @@ export async function convertClaudePluginPackage(
   }
 
   // Step 3: Load and merge plugin.json if exists (based on strict mode)
-  const strict = marketplacePlugin.strict ?? true;
+  const strict = marketplacePlugin.strict ?? false;
   let mergedConfig: ClaudePluginConfig;
 
   if (strict) {
@@ -433,28 +428,36 @@ export async function convertClaudePluginPackage(
     // Step 6: Copy plugin files to temporary directory
     await copyDirectory(pluginSource, tmpDir);
 
-    // Step 7: Collect commands to commands folder
-    if (mergedConfig.commands) {
-      const commandsDestDir = path.join(tmpDir, 'commands');
-      await collectResources(
-        mergedConfig.commands,
-        pluginSource,
-        commandsDestDir,
-      );
+    // Step 6.1: Handle commands/skills/agents folders based on configuration
+    // If configuration specifies resources, only collect those
+    // If configuration doesn't specify, keep the existing folder (if exists)
+    const resourceConfigs = [
+      { name: 'commands', config: mergedConfig.commands },
+      { name: 'skills', config: mergedConfig.skills },
+      { name: 'agents', config: mergedConfig.agents },
+    ];
+
+    for (const { name, config } of resourceConfigs) {
+      const folderPath = path.join(tmpDir, name);
+      const sourceFolderPath = path.join(pluginSource, name);
+
+      // If config explicitly specifies resources, remove existing folder and collect only specified ones
+      if (config) {
+        if (fs.existsSync(folderPath)) {
+          fs.rmSync(folderPath, { recursive: true, force: true });
+        }
+        await collectResources(config, pluginSource, folderPath);
+      }
+      // If config doesn't specify and source folder doesn't exist in pluginSource,
+      // remove it from tmpDir (it was copied but not needed)
+      else if (!fs.existsSync(sourceFolderPath) && fs.existsSync(folderPath)) {
+        fs.rmSync(folderPath, { recursive: true, force: true });
+      }
+      // Otherwise, keep the existing folder from pluginSource (default behavior)
     }
 
-    // Step 8: Collect skills to skills folder
-    if (mergedConfig.skills) {
-      const skillsDestDir = path.join(tmpDir, 'skills');
-      await collectResources(mergedConfig.skills, pluginSource, skillsDestDir);
-    }
-
-    // Step 9: Collect agents to agents folder
-    const agentsDestDir = path.join(tmpDir, 'agents');
-    if (mergedConfig.agents) {
-      await collectResources(mergedConfig.agents, pluginSource, agentsDestDir);
-    }
     // Step 9.1: Convert collected agent files from Claude format to Qwen format
+    const agentsDestDir = path.join(tmpDir, 'agents');
     await convertAgentFiles(agentsDestDir);
 
     // Step 10: Convert to Qwen format config
@@ -531,6 +534,10 @@ async function collectResources(
         continue;
       }
 
+      // Determine destination: preserve the directory name
+      // e.g., ./skills/xlsx -> tmpDir/skills/xlsx/
+      const finalDestDir = path.join(destDir, dirName);
+
       // Copy all files from the directory
       const files = await glob('**/*', {
         cwd: resolvedPath,
@@ -540,7 +547,7 @@ async function collectResources(
 
       for (const file of files) {
         const srcFile = path.join(resolvedPath, file);
-        const destFile = path.join(destDir, file);
+        const destFile = path.join(finalDestDir, file);
 
         // Ensure parent directory exists
         const destFileDir = path.dirname(destFile);
@@ -583,7 +590,7 @@ export function mergeClaudeConfigs(
   marketplacePlugin: ClaudeMarketplacePluginConfig,
   pluginConfig?: ClaudePluginConfig,
 ): ClaudePluginConfig {
-  if (!pluginConfig && marketplacePlugin.strict !== false) {
+  if (!pluginConfig && marketplacePlugin.strict === true) {
     throw new Error(
       `Plugin ${marketplacePlugin.name} requires plugin.json (strict mode)`,
     );
@@ -707,6 +714,12 @@ async function resolvePluginSource(
 
     if (!fs.existsSync(sourcePath)) {
       throw new Error(`Plugin source not found at ${sourcePath}`);
+    }
+
+    // If source path equals marketplace dir (source is '.' or ''),
+    // return marketplaceDir directly to avoid copying to subdirectory of self
+    if (path.resolve(sourcePath) === path.resolve(marketplaceDir)) {
+      return marketplaceDir;
     }
 
     // Copy to plugin directory

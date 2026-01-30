@@ -11,11 +11,13 @@ import { ToolMessage } from './ToolMessage.js';
 import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { SettingsContext } from '../../contexts/SettingsContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
   Config,
 } from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../../config/settings.js';
 
 vi.mock('../TerminalOutput.js', () => ({
   TerminalOutput: function MockTerminalOutput({
@@ -58,10 +60,17 @@ vi.mock('../GeminiRespondingSpinner.js', () => ({
 vi.mock('./DiffRenderer.js', () => ({
   DiffRenderer: function MockDiffRenderer({
     diffContent,
+    settings,
   }: {
     diffContent: string;
+    settings?: unknown;
   }) {
-    return <Text>MockDiff:{diffContent}</Text>;
+    return (
+      <Text>
+        MockDiff:{diffContent}
+        {settings ? ':withSettings' : ''}
+      </Text>
+    );
   },
 }));
 vi.mock('../../utils/MarkdownDisplay.js', () => ({
@@ -83,6 +92,15 @@ vi.mock('../subagents/index.js', () => ({
   },
 }));
 
+// Mock settings
+const mockSettings: LoadedSettings = {
+  merged: {
+    ui: {
+      showLineNumbers: true,
+    },
+  },
+} as LoadedSettings;
+
 // Helper to render with context
 const renderWithContext = (
   ui: React.ReactElement,
@@ -90,9 +108,11 @@ const renderWithContext = (
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <StreamingContext.Provider value={contextValue}>
-      {ui}
-    </StreamingContext.Provider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <StreamingContext.Provider value={contextValue}>
+        {ui}
+      </StreamingContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 

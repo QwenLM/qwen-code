@@ -205,4 +205,167 @@ describe('GeminiContentGenerator', () => {
       }),
     );
   });
+
+  it('should strip displayName from inlineData and fileData before sending to API', async () => {
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              inlineData: {
+                mimeType: 'image/png',
+                data: 'base64data',
+                displayName: 'image.png',
+              },
+            },
+            {
+              inlineData: {
+                mimeType: 'application/pdf',
+                data: 'base64pdfdata',
+                displayName: 'document.pdf',
+              },
+            },
+            {
+              fileData: {
+                mimeType: 'application/pdf',
+                fileUri: 'gs://bucket/file.pdf',
+                displayName: 'document.pdf',
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await generator.generateContent(request, 'prompt-id');
+
+    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+
+    // Verify displayName is stripped from inlineData
+    expect(calledWith.contents[0].parts[0].inlineData).toEqual({
+      mimeType: 'image/png',
+      data: 'base64data',
+    });
+    expect(
+      calledWith.contents[0].parts[0].inlineData.displayName,
+    ).toBeUndefined();
+
+    expect(calledWith.contents[0].parts[1].inlineData).toEqual({
+      mimeType: 'application/pdf',
+      data: 'base64pdfdata',
+    });
+    expect(
+      calledWith.contents[0].parts[1].inlineData.displayName,
+    ).toBeUndefined();
+
+    // Verify displayName is stripped from fileData
+    expect(calledWith.contents[0].parts[2].fileData).toEqual({
+      mimeType: 'application/pdf',
+      fileUri: 'gs://bucket/file.pdf',
+    });
+    expect(
+      calledWith.contents[0].parts[2].fileData.displayName,
+    ).toBeUndefined();
+  });
+
+  it('should strip displayName from functionResponse parts', async () => {
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'Read',
+                response: { output: 'content' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'base64data',
+                      displayName: 'screenshot.png',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await generator.generateContent(request, 'prompt-id');
+
+    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+    const functionResponseParts =
+      calledWith.contents[0].parts[0].functionResponse.parts;
+
+    // Verify displayName is stripped from nested inlineData
+    expect(functionResponseParts[0].inlineData).toEqual({
+      mimeType: 'image/png',
+      data: 'base64data',
+    });
+    expect(functionResponseParts[0].inlineData.displayName).toBeUndefined();
+  });
+
+  it('should convert audio and video to text in functionResponse parts', async () => {
+    const request = {
+      model: 'gemini-1.5-flash',
+      contents: [
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'Read',
+                response: { output: 'content' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'imagedata',
+                    },
+                  },
+                  {
+                    inlineData: {
+                      mimeType: 'audio/wav',
+                      data: 'audiodata',
+                      displayName: 'recording.wav',
+                    },
+                  },
+                  {
+                    inlineData: {
+                      mimeType: 'video/mp4',
+                      data: 'videodata',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    await generator.generateContent(request, 'prompt-id');
+
+    const calledWith = mockGoogleGenAI.models.generateContent.mock.calls[0][0];
+    const functionResponseParts =
+      calledWith.contents[0].parts[0].functionResponse.parts;
+
+    // All parts should remain, but audio/video converted to text
+    expect(functionResponseParts).toHaveLength(3);
+    expect(functionResponseParts[0].inlineData.mimeType).toBe('image/png');
+    expect(functionResponseParts[1].text).toBe(
+      'Unsupported media type for Gemini: audio/wav (recording.wav).',
+    );
+    expect(functionResponseParts[2].text).toBe(
+      'Unsupported media type for Gemini: video/mp4.',
+    );
+  });
 });

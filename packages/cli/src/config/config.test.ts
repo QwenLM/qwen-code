@@ -13,17 +13,47 @@ import {
   WriteFileTool,
   DEFAULT_QWEN_MODEL,
   OutputFormat,
+  NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 
+const createNativeLspServiceInstance = () => ({
+  discoverAndPrepare: vi.fn(),
+  start: vi.fn(),
+  definitions: vi.fn().mockResolvedValue([]),
+  references: vi.fn().mockResolvedValue([]),
+  workspaceSymbols: vi.fn().mockResolvedValue([]),
+  hover: vi.fn().mockResolvedValue(null),
+  documentSymbols: vi.fn().mockResolvedValue([]),
+  implementations: vi.fn().mockResolvedValue([]),
+  prepareCallHierarchy: vi.fn().mockResolvedValue([]),
+  incomingCalls: vi.fn().mockResolvedValue([]),
+  outgoingCalls: vi.fn().mockResolvedValue([]),
+  diagnostics: vi.fn().mockResolvedValue([]),
+  workspaceDiagnostics: vi.fn().mockResolvedValue([]),
+  codeActions: vi.fn().mockResolvedValue([]),
+  applyWorkspaceEdit: vi.fn().mockResolvedValue(false),
+});
+
 vi.mock('./trustedFolders.js', () => ({
   isWorkspaceTrusted: vi
     .fn()
     .mockReturnValue({ isTrusted: true, source: 'file' }), // Default to trusted
 }));
+
+const nativeLspServiceMock = vi.mocked(NativeLspService);
+const getLastLspInstance = () => {
+  const results = nativeLspServiceMock.mock.results;
+  if (results.length === 0) {
+    return undefined;
+  }
+  return results[results.length - 1]?.value as ReturnType<
+    typeof createNativeLspServiceInstance
+  >;
+};
 
 vi.mock('fs', async (importOriginal) => {
   const actualFs = await importOriginal<typeof import('fs')>();
@@ -79,6 +109,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualServer = await importOriginal<typeof ServerConfig>();
   return {
     ...actualServer,
+    NativeLspService: vi
+      .fn()
+      .mockImplementation(() => createNativeLspServiceInstance()),
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
         getConnectionStatus: vi.fn(),
@@ -514,6 +547,10 @@ describe('loadCliConfig', () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
+    nativeLspServiceMock.mockReset();
+    nativeLspServiceMock.mockImplementation(
+      () => createNativeLspServiceInstance() as unknown as NativeLspService,
+    );
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
   });
@@ -541,6 +578,22 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should initialize native LSP service when enabled', async () => {
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments({} as Settings);
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv);
+
+    // LSP is enabled via --experimental-lsp flag
+    expect(config.isLspEnabled()).toBe(true);
+    expect(nativeLspServiceMock).toHaveBeenCalledTimes(1);
+    const lspInstance = getLastLspInstance();
+    expect(lspInstance).toBeDefined();
+    expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
+    expect(lspInstance?.start).toHaveBeenCalledTimes(1);
   });
 
   describe('Proxy configuration', () => {

@@ -11,6 +11,7 @@ import type {
   ToolCallStartParams,
   ToolCallResultParams,
   ResolvedToolMetadata,
+  SubagentMeta,
 } from '../types.js';
 import type * as acp from '../../acp.js';
 import type { Part } from '@google/genai';
@@ -65,6 +66,10 @@ export class ToolCallEmitter extends BaseEmitter {
       locations,
       kind,
       rawInput: params.args ?? {},
+      _meta: {
+        toolName: params.toolName,
+        ...params.subagentMeta,
+      },
     });
 
     return true;
@@ -120,6 +125,10 @@ export class ToolCallEmitter extends BaseEmitter {
       toolCallId: params.callId,
       status: params.success ? 'completed' : 'failed',
       content: contentArray,
+      _meta: {
+        toolName: params.toolName,
+        ...params.subagentMeta,
+      },
     };
 
     // Add rawOutput from resultDisplay
@@ -135,9 +144,16 @@ export class ToolCallEmitter extends BaseEmitter {
    * Use this for explicit error handling when not using emitResult.
    *
    * @param callId - The tool call ID
+   * @param toolName - The tool name
    * @param error - The error that occurred
+   * @param subagentMeta - Optional subagent metadata
    */
-  async emitError(callId: string, error: Error): Promise<void> {
+  async emitError(
+    callId: string,
+    toolName: string,
+    error: Error,
+    subagentMeta?: SubagentMeta,
+  ): Promise<void> {
     await this.sendUpdate({
       sessionUpdate: 'tool_call_update',
       toolCallId: callId,
@@ -145,6 +161,10 @@ export class ToolCallEmitter extends BaseEmitter {
       content: [
         { type: 'content', content: { type: 'text', text: error.message } },
       ],
+      _meta: {
+        toolName,
+        ...subagentMeta,
+      },
     });
   }
 

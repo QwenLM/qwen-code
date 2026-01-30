@@ -422,3 +422,15 @@ export interface SettingInputRequest {
   onSubmit: (value: string) => void;
   onCancel: () => void;
 }
+
+export interface PluginChoice {
+  name: string;
+  description?: string;
+}
+
+export interface PluginChoiceRequest {
+  marketplaceName: string;
+  plugins: PluginChoice[];
+  onSelect: (pluginName: string) => void;
+  onCancel: () => void;
+}

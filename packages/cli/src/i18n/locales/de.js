@@ -298,7 +298,9 @@ export default {
   'How is Qwen doing this session? (optional)':
     'Wie macht sich Qwen in dieser Sitzung? (optional)',
   Bad: 'Schlecht',
+  Fine: 'In Ordnung',
   Good: 'Gut',
+  Dismiss: 'Ignorieren',
   'Not Sure Yet': 'Noch nicht sicher',
   'Any other key': 'Beliebige andere Taste',
   'Disable Loading Phrases': 'Ladesprüche deaktivieren',
@@ -478,6 +480,17 @@ export default {
   'Either an extension name or --all must be provided':
     'Entweder ein Erweiterungsname oder --all muss angegeben werden',
   'Lists installed extensions.': 'Listet installierte Erweiterungen auf.',
+  'Path:': 'Pfad:',
+  'Source:': 'Quelle:',
+  'Type:': 'Typ:',
+  'Ref:': 'Ref:',
+  'Release tag:': 'Release-Tag:',
+  'Enabled (User):': 'Aktiviert (Benutzer):',
+  'Enabled (Workspace):': 'Aktiviert (Arbeitsbereich):',
+  'Context files:': 'Kontextdateien:',
+  'Skills:': 'Skills:',
+  'Agents:': 'Agents:',
+  'MCP servers:': 'MCP-Server:',
   'Link extension failed to install.':
     'Verknüpfte Erweiterung konnte nicht installiert werden.',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -507,6 +520,19 @@ export default {
   'Manage extension settings.': 'Erweiterungseinstellungen verwalten.',
   'You need to specify a command (set or list).':
     'Sie müssen einen Befehl angeben (set oder list).',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.':
+    'In diesem Marktplatz sind keine Plugins verfügbar.',
+  'Select a plugin to install from marketplace "{{name}}":':
+    'Wählen Sie ein Plugin zur Installation aus Marktplatz "{{name}}":',
+  'Plugin selection cancelled.': 'Plugin-Auswahl abgebrochen.',
+  'Select a plugin from "{{name}}"': 'Plugin aus "{{name}}" auswählen',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    'Verwenden Sie ↑↓ oder j/k zum Navigieren, Enter zum Auswählen, Escape zum Abbrechen',
+  '{{count}} more above': '{{count}} weitere oben',
+  '{{count}} more below': '{{count}} weitere unten',
   'manage IDE integration': 'IDE-Integration verwalten',
   'check status of IDE integration': 'Status der IDE-Integration prüfen',
   'install required IDE companion for {{ideName}}':
@@ -554,8 +580,8 @@ export default {
   // ============================================================================
   // Commands - Language
   // ============================================================================
-  'Invalid language. Available: en-US, zh-CN':
-    'Ungültige Sprache. Verfügbar: en-US, zh-CN',
+  'Invalid language. Available: {{options}}':
+    'Ungültige Sprache. Verfügbar: {{options}}',
   'Language subcommands do not accept additional arguments.':
     'Sprach-Unterbefehle akzeptieren keine zusätzlichen Argumente.',
   'Current UI language: {{lang}}': 'Aktuelle UI-Sprache: {{lang}}',
@@ -564,12 +590,14 @@ export default {
   'LLM output language not set': 'LLM-Ausgabesprache nicht festgelegt',
   'Set UI language': 'UI-Sprache festlegen',
   'Set LLM output language': 'LLM-Ausgabesprache festlegen',
-  'Usage: /language ui [zh-CN|en-US]': 'Verwendung: /language ui [zh-CN|en-US]',
+  'Usage: /language ui [{{options}}]': 'Verwendung: /language ui [{{options}}]',
   'Usage: /language output <language>':
     'Verwendung: /language output <Sprache>',
   'Example: /language output 中文': 'Beispiel: /language output Deutsch',
-  'Example: /language output English': 'Beispiel: /language output English',
+  'Example: /language output English': 'Beispiel: /language output Englisch',
   'Example: /language output 日本語': 'Beispiel: /language output Japanisch',
+  'Example: /language output Português':
+    'Beispiel: /language output Portugiesisch',
   'UI language changed to {{lang}}': 'UI-Sprache geändert zu {{lang}}',
   'LLM output language set to {{lang}}':
     'LLM-Ausgabesprache auf {{lang}} gesetzt',
@@ -585,12 +613,7 @@ export default {
   'To request additional UI language packs, please open an issue on GitHub.':
     'Um zusätzliche UI-Sprachpakete anzufordern, öffnen Sie bitte ein Issue auf GitHub.',
   'Available options:': 'Verfügbare Optionen:',
-  '  - zh-CN: Simplified Chinese': '  - zh-CN: Vereinfachtes Chinesisch',
-  '  - en-US: English': '  - en-US: Englisch',
-  'Set UI language to Simplified Chinese (zh-CN)':
-    'UI-Sprache auf Vereinfachtes Chinesisch (zh-CN) setzen',
-  'Set UI language to English (en-US)':
-    'UI-Sprache auf Englisch (en-US) setzen',
+  'Set UI language to {{name}}': 'UI-Sprache auf {{name}} setzen',
 
   // ============================================================================
   // Commands - Approval Mode

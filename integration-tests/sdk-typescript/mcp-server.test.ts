@@ -19,6 +19,7 @@ import {
   type SDKMessage,
   type ToolUseBlock,
   type SDKSystemMessage,
+  type SDKUserMessage,
 } from '@qwen-code/sdk';
 import {
   SDKTestHelper,
@@ -26,6 +27,7 @@ import {
   extractText,
   findToolUseBlocks,
   createSharedTestOptions,
+  createResultWaiter,
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = {
@@ -290,6 +292,176 @@ describe('MCP Server Integration (E2E)', () => {
         expect(assistantText).toMatch(/7/);
 
         // Validate successful completion
+        const lastMessage = messages[messages.length - 1];
+        expect(isSDKResultMessage(lastMessage)).toBe(true);
+      } finally {
+        await q.close();
+      }
+    });
+
+    it('should support multi-turn asyncGenerator prompt with MCP tools', async () => {
+      const resultWaiter = createResultWaiter(2);
+
+      async function* createMultiTurnPrompt(): AsyncIterable<SDKUserMessage> {
+        const sessionId = crypto.randomUUID();
+
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            content: 'Use the add tool to calculate 2 + 3. Give me the result.',
+          },
+          parent_tool_use_id: null,
+        };
+
+        await resultWaiter.waitForResult(0);
+
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            content:
+              'Now use the multiply tool to calculate 5 * 4. Give me the result.',
+          },
+          parent_tool_use_id: null,
+        };
+
+        await resultWaiter.waitForResult(1);
+      }
+
+      const q = query({
+        prompt: createMultiTurnPrompt(),
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          debug: false,
+          mcpServers: {
+            'test-math-server': {
+              command: 'node',
+              args: [serverScriptPath],
+            },
+          },
+        },
+      });
+
+      const messages: SDKMessage[] = [];
+      let assistantText = '';
+      const toolCalls: string[] = [];
+
+      try {
+        for await (const message of q) {
+          messages.push(message);
+
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
+          if (isSDKAssistantMessage(message)) {
+            const toolUseBlocks = findToolUseBlocks(message);
+            toolUseBlocks.forEach((block) => {
+              toolCalls.push(block.name);
+            });
+            assistantText += extractText(message.message.content);
+          }
+        }
+
+        expect(toolCalls).toContain('add');
+        expect(toolCalls).toContain('multiply');
+        expect(assistantText).toMatch(/5/);
+        expect(assistantText).toMatch(/20/);
+
+        const lastMessage = messages[messages.length - 1];
+        expect(isSDKResultMessage(lastMessage)).toBe(true);
+      } finally {
+        await q.close();
+      }
+    });
+
+    it('should support multi-turn MCP tools with canUseTool', async () => {
+      const canUseToolCalls: Array<{ toolName: string }> = [];
+      const resultWaiter = createResultWaiter(2);
+
+      async function* createMultiTurnPrompt(): AsyncIterable<SDKUserMessage> {
+        const sessionId = crypto.randomUUID();
+
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            content: 'Use the add tool to calculate 9 + 1. Give me the result.',
+          },
+          parent_tool_use_id: null,
+        };
+
+        await resultWaiter.waitForResult(0);
+
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: {
+            role: 'user',
+            content:
+              'Now use the multiply tool to calculate 4 * 3. Give me the result.',
+          },
+          parent_tool_use_id: null,
+        };
+
+        await resultWaiter.waitForResult(1);
+      }
+
+      const q = query({
+        prompt: createMultiTurnPrompt(),
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          permissionMode: 'default',
+          canUseTool: async (toolName) => {
+            canUseToolCalls.push({ toolName });
+            return {
+              behavior: 'allow',
+              updatedInput: {},
+            };
+          },
+          debug: false,
+          mcpServers: {
+            'test-math-server': {
+              command: 'node',
+              args: [serverScriptPath],
+            },
+          },
+        },
+      });
+
+      const messages: SDKMessage[] = [];
+      let assistantText = '';
+      const toolCalls: string[] = [];
+
+      try {
+        for await (const message of q) {
+          messages.push(message);
+
+          if (isSDKResultMessage(message)) {
+            resultWaiter.notifyResult();
+          }
+          if (isSDKAssistantMessage(message)) {
+            const toolUseBlocks = findToolUseBlocks(message);
+            toolUseBlocks.forEach((block) => {
+              toolCalls.push(block.name);
+            });
+            assistantText += extractText(message.message.content);
+          }
+        }
+
+        expect(toolCalls).toContain('add');
+        expect(toolCalls).toContain('multiply');
+        expect(canUseToolCalls.map((call) => call.toolName)).toEqual(
+          expect.arrayContaining(['add', 'multiply']),
+        );
+        expect(assistantText).toMatch(/10/);
+        expect(assistantText).toMatch(/12/);
+
         const lastMessage = messages[messages.length - 1];
         expect(isSDKResultMessage(lastMessage)).toBe(true);
       } finally {

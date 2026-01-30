@@ -4,75 +4,208 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
-import { parseMarketplaceSource } from './marketplace.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { parseInstallSource } from './marketplace.js';
+import * as fs from 'node:fs/promises';
+import * as https from 'node:https';
 
-describe('Marketplace Installation', () => {
-  describe('parseMarketplaceSource', () => {
-    it('should parse valid marketplace source with http URL', () => {
-      const result = parseMarketplaceSource(
-        'http://example.com/marketplace:my-plugin',
+// Mock dependencies
+vi.mock('node:fs/promises', () => ({
+  stat: vi.fn(),
+}));
+
+vi.mock('node:fs', () => ({
+  promises: {
+    readFile: vi.fn(),
+  },
+}));
+
+vi.mock('node:https', () => ({
+  get: vi.fn(),
+}));
+
+vi.mock('./github.js', () => ({
+  parseGitHubRepoForReleases: vi.fn((url: string) => {
+    const match = url.match(/github\.com\/([^/]+)\/([^/]+)/);
+    if (match) {
+      return { owner: match[1], repo: match[2] };
+    }
+    throw new Error('Not a GitHub URL');
+  }),
+}));
+
+describe('parseInstallSource', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Default: HTTPS requests fail (no marketplace config)
+    vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+      const mockRes = {
+        statusCode: 404,
+        on: vi.fn(),
+      };
+      if (typeof callback === 'function') {
+        callback(mockRes as never);
+      }
+      return { on: vi.fn() } as never;
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe('owner/repo format parsing', () => {
+    it('should parse owner/repo format without plugin name', async () => {
+      const result = await parseInstallSource('owner/repo');
+
+      expect(result.source).toBe('https://github.com/owner/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse owner/repo format with plugin name', async () => {
+      const result = await parseInstallSource('owner/repo:my-plugin');
+
+      expect(result.source).toBe('https://github.com/owner/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBe('my-plugin');
+    });
+
+    it('should handle owner/repo with dashes and underscores', async () => {
+      const result = await parseInstallSource('my-org/my_repo:plugin-name');
+
+      expect(result.source).toBe('https://github.com/my-org/my_repo');
+      expect(result.pluginName).toBe('plugin-name');
+    });
+  });
+
+  describe('HTTPS URL parsing', () => {
+    it('should parse HTTPS GitHub URL without plugin name', async () => {
+      const result = await parseInstallSource('https://github.com/owner/repo');
+
+      expect(result.source).toBe('https://github.com/owner/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse HTTPS GitHub URL with plugin name', async () => {
+      const result = await parseInstallSource(
+        'https://github.com/owner/repo:my-plugin',
       );
-      expect(result).toEqual({
-        marketplaceSource: 'http://example.com/marketplace',
-        pluginName: 'my-plugin',
-      });
+
+      expect(result.source).toBe('https://github.com/owner/repo');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBe('my-plugin');
     });
 
-    it('should parse valid marketplace source with https URL', () => {
-      const result = parseMarketplaceSource(
-        'https://github.com/example/marketplace:awesome-plugin',
+    it('should not treat port number as plugin name', async () => {
+      const result = await parseInstallSource('https://example.com:8080/repo');
+
+      expect(result.source).toBe('https://example.com:8080/repo');
+      expect(result.pluginName).toBeUndefined();
+    });
+  });
+
+  describe('git@ URL parsing', () => {
+    it('should parse git@ URL without plugin name', async () => {
+      const result = await parseInstallSource('git@github.com:owner/repo.git');
+
+      expect(result.source).toBe('git@github.com:owner/repo.git');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse git@ URL with plugin name', async () => {
+      const result = await parseInstallSource(
+        'git@github.com:owner/repo.git:my-plugin',
       );
-      expect(result).toEqual({
-        marketplaceSource: 'https://github.com/example/marketplace',
-        pluginName: 'awesome-plugin',
-      });
+
+      expect(result.source).toBe('git@github.com:owner/repo.git');
+      expect(result.type).toBe('git');
+      expect(result.pluginName).toBe('my-plugin');
+    });
+  });
+
+  describe('local path parsing', () => {
+    it('should parse local path without plugin name', async () => {
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+
+      const result = await parseInstallSource('/path/to/extension');
+
+      expect(result.source).toBe('/path/to/extension');
+      expect(result.type).toBe('local');
+      expect(result.pluginName).toBeUndefined();
     });
 
-    it('should handle plugin names with hyphens', () => {
-      const result = parseMarketplaceSource(
-        'https://example.com:my-super-plugin',
+    it('should parse local path with plugin name', async () => {
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+
+      const result = await parseInstallSource('/path/to/extension:my-plugin');
+
+      expect(result.source).toBe('/path/to/extension');
+      expect(result.type).toBe('local');
+      expect(result.pluginName).toBe('my-plugin');
+    });
+
+    it('should throw error for non-existent local path', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(parseInstallSource('/nonexistent/path')).rejects.toThrow(
+        'Install source not found: /nonexistent/path',
       );
-      expect(result).toEqual({
-        marketplaceSource: 'https://example.com',
-        pluginName: 'my-super-plugin',
+    });
+
+    it('should handle Windows drive letter correctly', async () => {
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+
+      const result = await parseInstallSource('C:\\path\\to\\extension');
+
+      expect(result.source).toBe('C:\\path\\to\\extension');
+      expect(result.type).toBe('local');
+      // The colon after C should not be treated as plugin separator
+      expect(result.pluginName).toBeUndefined();
+    });
+  });
+
+  describe('marketplace config detection', () => {
+    it('should detect marketplace type when config exists', async () => {
+      const mockMarketplaceConfig = {
+        name: 'test-marketplace',
+        owner: { name: 'Test Owner' },
+        plugins: [{ name: 'plugin1' }],
+      };
+
+      // Mock successful API response
+      vi.mocked(https.get).mockImplementation((_url, _options, callback) => {
+        const mockRes = {
+          statusCode: 200,
+          on: vi.fn((event, handler) => {
+            if (event === 'data') {
+              handler(Buffer.from(JSON.stringify(mockMarketplaceConfig)));
+            }
+            if (event === 'end') {
+              handler();
+            }
+          }),
+        };
+        if (typeof callback === 'function') {
+          callback(mockRes as never);
+        }
+        return { on: vi.fn() } as never;
       });
+
+      const result = await parseInstallSource('owner/repo');
+
+      expect(result.type).toBe('marketplace');
+      expect(result.marketplaceConfig).toEqual(mockMarketplaceConfig);
     });
 
-    it('should handle URLs with ports', () => {
-      const result = parseMarketplaceSource(
-        'https://example.com:8080/marketplace:plugin',
-      );
-      expect(result).toEqual({
-        marketplaceSource: 'https://example.com:8080/marketplace',
-        pluginName: 'plugin',
-      });
-    });
+    it('should remain git type when marketplace config not found', async () => {
+      // HTTPS returns 404 (default mock behavior)
+      const result = await parseInstallSource('owner/repo');
 
-    it('should return null for source without colon separator', () => {
-      const result = parseMarketplaceSource('https://example.com/plugin');
-      expect(result).toBeNull();
-    });
-
-    it('should return null for source without URL', () => {
-      const result = parseMarketplaceSource('not-a-url:plugin');
-      expect(result).toBeNull();
-    });
-
-    it('should return null for source with empty plugin name', () => {
-      const result = parseMarketplaceSource('https://example.com:');
-      expect(result).toBeNull();
-    });
-
-    it('should use last colon as separator', () => {
-      // URLs with ports have colons, should use the last one
-      const result = parseMarketplaceSource(
-        'https://example.com:8080:my-plugin',
-      );
-      expect(result).toEqual({
-        marketplaceSource: 'https://example.com:8080',
-        pluginName: 'my-plugin',
-      });
+      expect(result.type).toBe('git');
+      expect(result.marketplaceConfig).toBeUndefined();
     });
   });
 });

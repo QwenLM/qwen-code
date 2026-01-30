@@ -18,7 +18,10 @@ import {
   type SupportedLanguage,
   t,
 } from '../../i18n/index.js';
-import { SUPPORTED_LANGUAGES } from '../../i18n/languages.js';
+import {
+  SUPPORTED_LANGUAGES,
+  getSupportedLanguageIds,
+} from '../../i18n/languages.js';
 import {
   OUTPUT_LANGUAGE_AUTO,
   isAutoLanguage,
@@ -62,11 +65,14 @@ function parseUiLanguageArg(input: string): SupportedLanguage | null {
 }
 
 /**
- * Formats a UI language code for display (e.g., "zh" -> "Chinese（zh-CN）").
+ * Formats a UI language code for display (e.g., "zh" -> "中文 (Chinese) [zh-CN]").
  */
 function formatUiLanguageDisplay(lang: SupportedLanguage): string {
   const option = SUPPORTED_LANGUAGES.find((o) => o.code === lang);
-  return option ? `${option.fullName}（${option.id}）` : lang;
+  if (!option) return lang;
+  return option.nativeName && option.nativeName !== option.fullName
+    ? `${option.nativeName} (${option.fullName}) [${option.id}]`
+    : `${option.fullName} [${option.id}]`;
 }
 
 /**
@@ -219,7 +225,7 @@ export const languageCommand: SlashCommand = {
         messageType: 'error',
         content: [
           t('Invalid command. Available subcommands:'),
-          `  - /language ui [${SUPPORTED_LANGUAGES.map((o) => o.id).join('|')}] - ${t('Set UI language')}`,
+          `  - /language ui [${getSupportedLanguageIds()}] - ${t('Set UI language')}`,
           `  - /language output <language> - ${t('Set LLM output language')}`,
         ].join('\n'),
       };
@@ -245,7 +251,7 @@ export const languageCommand: SlashCommand = {
         t('Current LLM output language: {{lang}}', { lang: outputLangDisplay }),
         '',
         t('Available subcommands:'),
-        `  /language ui [${SUPPORTED_LANGUAGES.map((o) => o.id).join('|')}] - ${t('Set UI language')}`,
+        `  /language ui [${getSupportedLanguageIds()}] - ${t('Set UI language')}`,
         `  /language output <language> - ${t('Set LLM output language')}`,
       ].join('\n'),
     };
@@ -274,12 +280,12 @@ export const languageCommand: SlashCommand = {
               t('Set UI language'),
               '',
               t('Usage: /language ui [{{options}}]', {
-                options: SUPPORTED_LANGUAGES.map((o) => o.id).join('|'),
+                options: getSupportedLanguageIds(),
               }),
               '',
               t('Available options:'),
               ...SUPPORTED_LANGUAGES.map(
-                (o) => `  - ${o.id}: ${t(o.fullName)}`,
+                (o) => `  - ${o.id}: ${o.nativeName || o.fullName}`,
               ),
               '',
               t(
@@ -295,7 +301,7 @@ export const languageCommand: SlashCommand = {
             type: 'message',
             messageType: 'error',
             content: t('Invalid language. Available: {{options}}', {
-              options: SUPPORTED_LANGUAGES.map((o) => o.id).join(','),
+              options: getSupportedLanguageIds(','),
             }),
           };
         }
@@ -308,7 +314,9 @@ export const languageCommand: SlashCommand = {
         (lang): SlashCommand => ({
           name: lang.id,
           get description() {
-            return t('Set UI language to {{name}}', { name: lang.fullName });
+            return t('Set UI language to {{name}}', {
+              name: lang.nativeName || lang.fullName,
+            });
           },
           kind: CommandKind.BUILT_IN,
           action: async (context, args) => {

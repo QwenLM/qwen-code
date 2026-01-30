@@ -12,6 +12,8 @@ import prettierConfig from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
+// For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
+import storybook from 'eslint-plugin-storybook';
 
 export default tseslint.config(
   {
@@ -199,6 +201,20 @@ export default tseslint.config(
     },
   },
   {
+    files: ['**/*.cjs'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        module: 'readonly',
+        require: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+      'no-undef': 'off',
+    },
+  },
+  {
     files: ['packages/vscode-ide-companion/esbuild.js'],
     languageOptions: {
       globals: {
@@ -286,4 +302,5 @@ export default tseslint.config(
       'react/react-in-jsx-scope': 'off',
     },
   },
+  storybook.configs['flat/recommended'],
 );

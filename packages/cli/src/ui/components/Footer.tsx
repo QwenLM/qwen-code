@@ -26,13 +26,11 @@ export const Footer: React.FC = () => {
   const { vimEnabled, vimMode } = useVimMode();
 
   const {
-    model,
     errorCount,
     showErrorDetails,
     promptTokenCount,
     showAutoAcceptIndicator,
   } = {
-    model: config.getModel(),
     errorCount: uiState.errorCount,
     showErrorDetails: uiState.showErrorDetails,
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -56,6 +54,9 @@ export const Footer: React.FC = () => {
 
   // Check if debug mode is enabled
   const debugMode = config.getDebugMode();
+
+  const contextWindowSize =
+    config.getContentGeneratorConfig()?.contextWindowSize;
 
   // Left section should show exactly ONE thing at any time, in priority order.
   const leftContent = uiState.ctrlCPressedOnce ? (
@@ -88,15 +89,15 @@ export const Footer: React.FC = () => {
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
     });
   }
-  if (promptTokenCount > 0) {
+  if (promptTokenCount > 0 && contextWindowSize) {
     rightItems.push({
       key: 'context',
       node: (
         <Text color={theme.text.accent}>
           <ContextUsageDisplay
             promptTokenCount={promptTokenCount}
-            model={model}
             terminalWidth={terminalWidth}
+            contextWindowSize={contextWindowSize}
           />
         </Text>
       ),
