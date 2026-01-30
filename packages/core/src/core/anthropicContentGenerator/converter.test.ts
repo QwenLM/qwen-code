@@ -33,7 +33,13 @@ describe('AnthropicContentConverter', () => {
         config: { systemInstruction: 'sys' },
       });
 
-      expect(system).toBe('sys');
+      expect(system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
     });
 
     it('extracts systemInstruction text from parts and joins with newlines', () => {
@@ -48,7 +54,13 @@ describe('AnthropicContentConverter', () => {
         },
       });
 
-      expect(system).toBe('a\nb');
+      expect(system).toEqual([
+        {
+          type: 'text',
+          text: 'a\nb',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
     });
 
     it('converts a plain string content into a user message', () => {
@@ -58,7 +70,16 @@ describe('AnthropicContentConverter', () => {
       });
 
       expect(messages).toEqual([
-        { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Hello',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
       ]);
     });
 
@@ -78,7 +99,11 @@ describe('AnthropicContentConverter', () => {
           role: 'user',
           content: [
             { type: 'text', text: 'Hello' },
-            { type: 'text', text: 'World' },
+            {
+              type: 'text',
+              text: 'World',
+              cache_control: { type: 'ephemeral' },
+            },
           ],
         },
       ]);
