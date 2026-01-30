@@ -148,8 +148,16 @@ export function extensionConsentString(
   commands: string[] = [],
   skills: SkillConfig[] = [],
   subagents: SubagentConfig[] = [],
+  isGeminiExtension: boolean = false,
 ): string {
   const output: string[] = [];
+  if (isGeminiExtension) {
+    output.push(
+      t(
+        '⚠️  You are installing a Gemini CLI extension. Some features may not work perfectly with Qwen Code.',
+      ),
+    );
+  }
   const mcpServerEntries = Object.entries(extensionConfig.mcpServers || {});
   output.push(
     t('Installing extension "{{name}}".', { name: extensionConfig.name }),
@@ -234,6 +242,7 @@ export const requestConsentOrFail = async (
     commands,
     skills,
     subagents,
+    options.isGeminiExtension ?? false,
   );
   if (previousExtensionConfig) {
     const previousExtensionConsent = extensionConsentString(

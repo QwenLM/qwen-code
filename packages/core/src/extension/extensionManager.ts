@@ -140,6 +140,7 @@ export type ExtensionRequestOptions = {
   previousCommands?: string[];
   previousSkills?: SkillConfig[];
   previousSubagents?: SubagentConfig[];
+  isGeminiExtension?: boolean;
 };
 
 export interface ExtensionManagerOptions {
@@ -245,18 +246,28 @@ async function convertGeminiOrClaudeExtension(
   pluginName?: string,
 ) {
   let newExtensionDir = extensionDir;
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
+  const qwenConfigPath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
+  const geminiConfigPath = path.join(extensionDir, 'gemini-extension.json');
+
+  if (fs.existsSync(qwenConfigPath)) {
+    // Already a Qwen extension — no conversion needed
     newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
+  } else if (fs.existsSync(geminiConfigPath)) {
+    // VALIDATE FIRST (maintainer requirement)
+    if (!isGeminiExtensionConfig(extensionDir)) {
+      throw new Error(
+        `Invalid gemini-extension.json: missing required fields (name/version)`,
+      );
+    }
+    // THEN convert
     newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
       .convertedDir;
   } else if (pluginName) {
+    // Claude plugin conversion (unchanged)
     newExtensionDir = (
       await convertClaudePluginPackage(extensionDir, pluginName)
     ).convertedDir;
   }
-  // Claude plugin conversion not yet implemented
   return newExtensionDir;
 }
 
@@ -801,10 +812,23 @@ export class ExtensionManager {
       }
 
       try {
+        // Save original path BEFORE conversion to detect Gemini origin
+        const originalSourcePath = localSourcePath;
+
         localSourcePath = await convertGeminiOrClaudeExtension(
           localSourcePath,
           installMetadata.pluginName,
         );
+
+        // Detect if this was a Gemini extension (had gemini-extension.json but not qwen-extension.json)
+        const isGeminiExtension =
+          fs.existsSync(
+            path.join(originalSourcePath, 'gemini-extension.json'),
+          ) &&
+          !fs.existsSync(
+            path.join(originalSourcePath, EXTENSIONS_CONFIG_FILENAME),
+          );
+
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
@@ -866,6 +890,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            isGeminiExtension,
           });
         } else {
           await this.requestConsent({
@@ -877,6 +902,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            isGeminiExtension,
           });
         }
 

@@ -10,6 +10,7 @@ import {
   ExtensionManager,
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
+import type { ExtensionRequestOptions } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { loadSettings } from '../../config/settings.js';
@@ -47,7 +48,8 @@ export async function handleInstall(args: InstallArgs) {
 
     const requestConsent = args.consent
       ? () => Promise.resolve()
-      : requestConsentOrFail.bind(null, requestConsentNonInteractive);
+      : (options?: ExtensionRequestOptions) =>
+          requestConsentOrFail(requestConsentNonInteractive, options);
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
       workspaceDir,
