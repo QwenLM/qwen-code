@@ -21,10 +21,12 @@ import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
  * have appeared during the original session.
  */
 export class HistoryReplayer {
+  private readonly ctx: SessionContext;
   private readonly messageEmitter: MessageEmitter;
   private readonly toolCallEmitter: ToolCallEmitter;
 
   constructor(ctx: SessionContext) {
+    this.ctx = ctx;
     this.messageEmitter = new MessageEmitter(ctx);
     this.toolCallEmitter = new ToolCallEmitter(ctx);
   }
@@ -44,6 +46,7 @@ export class HistoryReplayer {
    * Replays a single chat record.
    */
   private async replayRecord(record: ChatRecord): Promise<void> {
+    this.setActiveRecordId(record.uuid);
     switch (record.type) {
       case 'user':
         if (record.message) {
@@ -68,6 +71,7 @@ export class HistoryReplayer {
         // Skip system records (compression, telemetry, slash commands)
         break;
     }
+    this.setActiveRecordId(null);
   }
 
   /**
@@ -198,5 +202,14 @@ export class HistoryReplayer {
       }
     }
     return '';
+  }
+
+  private setActiveRecordId(recordId: string | null): void {
+    const context = this.ctx as unknown as {
+      setActiveRecordId?: (id: string | null) => void;
+    };
+    if (typeof context.setActiveRecordId === 'function') {
+      context.setActiveRecordId(recordId);
+    }
   }
 }
