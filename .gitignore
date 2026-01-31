@@ -22,7 +22,7 @@ package-lock.json
 # Editors
 .idea
 *.iml
-.cursor
+# .cursor
 .qoder
 
 # OS metadata
