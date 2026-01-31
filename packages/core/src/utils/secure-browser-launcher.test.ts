@@ -205,15 +205,6 @@ describe('secure-browser-launcher', () => {
   });
 
   describe('Error handling', () => {
-    it('should handle browser launch failures gracefully', async () => {
-      setPlatform('darwin');
-      mockExecFile.mockRejectedValueOnce(new Error('Command not found'));
-
-      await expect(openBrowserSecurely('https://example.com')).rejects.toThrow(
-        'Failed to open browser',
-      );
-    });
-
     it('should try fallback browsers on Linux', async () => {
       setPlatform('linux');
 
@@ -238,5 +229,25 @@ describe('secure-browser-launcher', () => {
         expect.any(Object),
       );
     });
+  });
+
+  it('should handle browser launch failures gracefully by logging instead of throwing', async () => {
+    // Simulate a failure (like missing xdg-open)
+    mockExecFile.mockRejectedValueOnce(new Error('Command failed'));
+
+    // Spy on the console to make sure we log the message
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    // THE FIX: We expect this to RESOLVE (succeed), not REJECT (crash)
+    await expect(
+      openBrowserSecurely('https://example.com'),
+    ).resolves.toBeUndefined();
+
+    // Verify we logged the helpful message
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to open browser automatically'),
+    );
+
+    consoleSpy.mockRestore();
   });
 });
