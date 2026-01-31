@@ -122,9 +122,7 @@ export default tseslint.config(
             'yargs/**',
             'msw/node',
             '**/generated/**',
-            './styles/tailwind.css',
-            './styles/App.css',
-            './styles/style.css'
+            '**/styles/*.css'
           ],
         },
       ],

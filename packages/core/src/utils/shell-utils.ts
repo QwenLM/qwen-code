@@ -495,19 +495,25 @@ export function execCommand(
       args,
       { encoding: 'utf8', ...options },
       (error, stdout, stderr) => {
+        const toText = (value: string | Buffer | null | undefined) =>
+          typeof value === 'string'
+            ? value
+            : value
+              ? value.toString('utf8')
+              : '';
         if (error) {
           if (!options.preserveOutputOnError) {
             reject(error);
           } else {
             resolve({
-              stdout: stdout ?? '',
-              stderr: stderr ?? '',
+              stdout: toText(stdout),
+              stderr: toText(stderr),
               code: typeof error.code === 'number' ? error.code : 1,
             });
           }
           return;
         }
-        resolve({ stdout: stdout ?? '', stderr: stderr ?? '', code: 0 });
+        resolve({ stdout: toText(stdout), stderr: toText(stderr), code: 0 });
       },
     );
     child.on('error', reject);

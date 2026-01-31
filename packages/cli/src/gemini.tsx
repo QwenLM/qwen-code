@@ -55,6 +55,197 @@ import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 
+/**
+ * Find an available port starting from the given port
+ */
+async function findAvailablePort(startPort: number): Promise<number> {
+  const net = await import('node:net');
+
+  return new Promise((resolve) => {
+    const tryPort = (port: number) => {
+      const server = net.createServer();
+      server.listen(port, '127.0.0.1', () => {
+        server.close(() => resolve(port));
+      });
+      server.on('error', () => {
+        // Port is in use, try next
+        tryPort(port + 1);
+      });
+    };
+    tryPort(startPort);
+  });
+}
+
+/**
+ * Parse web command arguments
+ */
+function parseWebArgs(args: string[]): {
+  port: number;
+  host: string;
+  open: boolean;
+  dev: boolean;
+} {
+  const result = {
+    port: 5495,
+    host: '127.0.0.1',
+    open: true,
+    dev: false,
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const nextArg = args[i + 1];
+
+    if ((arg === '--port' || arg === '-p') && nextArg) {
+      const port = parseInt(nextArg, 10);
+      if (!isNaN(port) && port > 0 && port < 65536) {
+        result.port = port;
+      }
+      i++;
+    } else if ((arg === '--host' || arg === '-h') && nextArg) {
+      result.host = nextArg;
+      i++;
+    } else if (arg === '--no-open') {
+      result.open = false;
+    } else if (arg === '--dev' || arg === '-d') {
+      result.dev = true;
+    } else if (arg === '--help') {
+      console.log(`
+Usage: qwen web [options]
+
+Start the Qwen Code Web GUI server.
+
+Options:
+  -p, --port <port>   Port to listen on (default: 5495)
+  -h, --host <host>   Host to bind to (default: 127.0.0.1)
+  --no-open           Don't open browser automatically
+  -d, --dev           Run in development mode with hot reload
+  --help              Show this help message
+`);
+      process.exit(0);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Run the web server (qwen web subcommand)
+ */
+async function runWebServer(args: string[]): Promise<void> {
+  const parsed = parseWebArgs(args);
+
+  // Dev mode: use Vite dev server with HMR
+  if (parsed.dev) {
+    console.log('Starting Qwen Code Web GUI in development mode...\n');
+
+    const { spawn } = await import('node:child_process');
+    const path = await import('node:path');
+    const fs = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+
+    // Find web-app package directory - try multiple possible locations
+    const currentDir = path.dirname(fileURLToPath(import.meta.url));
+    const possiblePaths = [
+      path.resolve(currentDir, '../../web-app'), // From src/gemini.tsx
+      path.resolve(currentDir, '../../../web-app'), // From dist/src/gemini.js
+      path.resolve(currentDir, '../../../../packages/web-app'), // From nested dist
+      path.resolve(process.cwd(), 'packages/web-app'), // From project root
+    ];
+
+    let webAppDir: string | null = null;
+    for (const p of possiblePaths) {
+      if (fs.existsSync(path.join(p, 'package.json'))) {
+        webAppDir = p;
+        break;
+      }
+    }
+
+    if (!webAppDir) {
+      console.error('Could not find web-app package directory.');
+      console.error('Tried:', possiblePaths);
+      process.exit(1);
+    }
+
+    console.log(`  Web App directory: ${webAppDir}\n`);
+    console.log('  Starting Vite dev server (frontend) + backend server...\n');
+    console.log('  Frontend: http://localhost:5173 (with HMR)');
+    console.log('  Backend:  http://localhost:5495\n');
+
+    const child = spawn('npm', ['run', 'dev'], {
+      cwd: webAppDir,
+      stdio: 'inherit',
+      shell: true,
+    });
+
+    child.on('error', (err) => {
+      console.error('Failed to start dev server:', err.message);
+      process.exit(1);
+    });
+
+    // Keep process running
+    await new Promise(() => {});
+    return;
+  }
+
+  // Production mode: use built assets
+  console.log('Starting Qwen Code Web GUI server...');
+
+  try {
+    // Find available port
+    const actualPort = await findAvailablePort(parsed.port);
+
+    if (actualPort !== parsed.port) {
+      console.log(
+        `Port ${parsed.port} is in use, using port ${actualPort} instead.`,
+      );
+    }
+
+    // Dynamic import of the web-app package
+    const webAppModule = await import('@qwen-code/web-app');
+    const { startServer } = webAppModule;
+
+    await startServer({
+      port: actualPort,
+      host: parsed.host,
+      config: null,
+    });
+
+    const url = `http://${parsed.host === '0.0.0.0' ? 'localhost' : parsed.host}:${actualPort}`;
+
+    console.log(`\n  Qwen Code Web GUI running at: ${url}\n`);
+
+    if (parsed.host === '0.0.0.0') {
+      console.log(
+        '  Warning: Server is accessible from the network. Use with caution.\n',
+      );
+    }
+
+    if (parsed.open) {
+      try {
+        const open = (await import('open')).default;
+        await open(url);
+        console.log('  Browser opened.\n');
+      } catch {
+        console.log(
+          `  Could not open browser automatically. Please visit ${url}\n`,
+        );
+      }
+    }
+
+    console.log('  Press Ctrl+C to stop the server.\n');
+
+    // Keep the process running
+    await new Promise(() => {});
+  } catch (error) {
+    console.error(
+      'Failed to start Web GUI server:',
+      error instanceof Error ? error.message : String(error),
+    );
+    process.exit(1);
+  }
+}
+
 export function validateDnsResolutionOrder(
   order: string | undefined,
 ): DnsResolutionOrder {
@@ -200,6 +391,14 @@ export async function startInteractiveUI(
 
 export async function main() {
   setupUnhandledRejectionHandler();
+
+  // Check for 'web' subcommand early - before any complex initialization
+  const args = process.argv.slice(2);
+  if (args[0] === 'web') {
+    await runWebServer(args.slice(1));
+    return;
+  }
+
   const settings = loadSettings();
   await cleanupCheckpoints();
 
