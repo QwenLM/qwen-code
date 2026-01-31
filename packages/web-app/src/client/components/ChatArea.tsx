@@ -399,8 +399,19 @@ export function ChatArea({
 
         {/* Messages */}
         <div className="flex-1 overflow-auto" ref={scrollContainerRef}>
-          <div className="min-h-full flex flex-col">
-            <div className="flex-1">
+          <div
+            className={cn(
+              'h-full flex flex-col',
+              chatMessages.length === 0 && 'items-center justify-center',
+            )}
+          >
+            <div
+              className={cn(
+                chatMessages.length === 0
+                  ? 'flex items-center justify-center'
+                  : 'flex-1',
+              )}
+            >
               <ChatViewer
                 ref={chatViewerRef}
                 messages={chatMessages}

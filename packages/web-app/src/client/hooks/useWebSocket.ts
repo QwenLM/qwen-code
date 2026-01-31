@@ -61,12 +61,15 @@ export function useWebSocket(
   // Connect to WebSocket
   useEffect(() => {
     if (!sessionId) {
+      setIsConnected(false);
       return;
     }
 
-    // Reset usage when switching sessions
+    // Reset state when switching sessions
     setUsage(null);
     setSessionInfo(null);
+    setIsConnected(false);
+    setIsStreaming(false);
 
     const connect = () => {
       // Determine WebSocket URL

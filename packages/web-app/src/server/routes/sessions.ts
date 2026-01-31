@@ -39,10 +39,20 @@ export function sessionsRouter() {
 
       res.json(response);
     } catch (error) {
-      console.error('Error listing sessions:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Error listing sessions:', message);
+
+      // If configuration is not available, return empty list instead of error
+      if (
+        message.includes('Configuration not available') ||
+        message.includes('not found')
+      ) {
+        return res.json({ sessions: [], hasMore: false });
+      }
+
       res.status(500).json({
         error: 'Failed to list sessions',
-        message: error instanceof Error ? error.message : 'Unknown error',
+        message,
       });
     }
   });
