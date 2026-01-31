@@ -118,7 +118,6 @@ function resetStreamState(state: StreamState): void {
   state.thinkingMessageId = null;
 }
 
- 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function guessToolKind(name: string): string {
@@ -235,9 +234,10 @@ export class SessionRunner {
   }
 
   static async createNew(cwd: string = process.cwd()): Promise<SessionRunner> {
-    const runner = new SessionRunner(null, cwd);
-    await runner.ensureQuery();
-    await runner.waitForSessionId();
+    // Generate a new session ID upfront - CLI will use this when it starts
+    const sessionId = randomUUID();
+    const runner = new SessionRunner(sessionId, cwd);
+    // Don't start CLI yet - it will be started when the first message is sent
     return runner;
   }
 
@@ -249,7 +249,17 @@ export class SessionRunner {
     if (this.sessionId) {
       return this.sessionId;
     }
-    return this.sessionIdReady;
+    // Add timeout to prevent hanging forever
+    const timeoutMs = 30000; // 30 seconds
+    return Promise.race([
+      this.sessionIdReady,
+      new Promise<string>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('Timeout waiting for session ID')),
+          timeoutMs,
+        ),
+      ),
+    ]);
   }
 
   private resolveSessionId(sessionId: string): void {
