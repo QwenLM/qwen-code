@@ -382,34 +382,28 @@ export const useGeminiStream = (
           return { queryToSend: null, shouldProceed: false };
         }
 
+        localQueryToSendToGemini = trimmedQuery;
+
+        addItem(
+          { type: MessageType.USER, text: trimmedQuery },
+          userMessageTimestamp,
+        );
+
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
           const atCommandResult = await handleAtCommand({
             query: trimmedQuery,
             config,
-            addItem,
             onDebugMessage,
             messageId: userMessageTimestamp,
             signal: abortSignal,
+            addItem,
           });
-
-          // Add user's turn after @ command processing is done.
-          addItem(
-            { type: MessageType.USER, text: trimmedQuery },
-            userMessageTimestamp,
-          );
 
           if (!atCommandResult.shouldProceed) {
             return { queryToSend: null, shouldProceed: false };
           }
           localQueryToSendToGemini = atCommandResult.processedQuery;
-        } else {
-          // Normal query for Gemini
-          addItem(
-            { type: MessageType.USER, text: trimmedQuery },
-            userMessageTimestamp,
-          );
-          localQueryToSendToGemini = trimmedQuery;
         }
       } else {
         // It's a function response (PartListUnion that isn't a string)
@@ -981,6 +975,7 @@ export const useGeminiStream = (
             prompt_id!,
             options,
           );
+
           const processingStatus = await processGeminiStreamEvents(
             stream,
             userMessageTimestamp,

@@ -322,25 +322,7 @@ export async function getFolderStructure(
     formatStructure(structureRoot, '', true, true, structureLines);
 
     // 3. Build the final output string
-    function isTruncated(node: FullFolderInfo): boolean {
-      if (node.hasMoreFiles || node.hasMoreSubfolders || node.isIgnored) {
-        return true;
-      }
-      for (const sub of node.subFolders) {
-        if (isTruncated(sub)) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    let summary = `Showing up to ${mergedOptions.maxItems} items (files + folders).`;
-
-    if (isTruncated(structureRoot)) {
-      summary += ` Folders or files indicated with ${TRUNCATION_INDICATOR} contain more items not shown, were ignored, or the display limit (${mergedOptions.maxItems} items) was reached.`;
-    }
-
-    return `${summary}\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
+    return `Showing up to ${mergedOptions.maxItems} items:\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
   } catch (error: unknown) {
     console.error(`Error getting folder structure for ${resolvedPath}:`, error);
     return `Error processing directory "${resolvedPath}": ${getErrorMessage(error)}`;

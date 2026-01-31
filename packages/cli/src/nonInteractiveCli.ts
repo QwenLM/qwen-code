@@ -224,7 +224,6 @@ export async function runNonInteractive(
           const { processedQuery, shouldProceed } = await handleAtCommand({
             query: input,
             config,
-            addItem: (_item, _timestamp) => 0,
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,

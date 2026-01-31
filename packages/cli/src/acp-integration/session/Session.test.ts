@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import { Session } from './Session.js';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import * as core from '@qwen-code/qwen-code-core';
 import type * as acp from '../acp.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
@@ -203,24 +204,14 @@ describe('Session', () => {
       try {
         await fs.writeFile(filePath, '# Test\n', 'utf8');
 
-        const readManyFilesTool = {
-          buildAndExecute: vi.fn().mockResolvedValue({
-            llmContent: 'file content',
-            returnDisplay: 'ok',
-          }),
-        };
-        const toolRegistry = {
-          getTool: vi.fn((name: string) =>
-            name === 'read_many_files' ? readManyFilesTool : undefined,
-          ),
-        };
-        const fileService = {
-          shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
-        };
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts: 'file content',
+            files: [],
+          });
 
         mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
-        mockConfig.getToolRegistry = vi.fn().mockReturnValue(toolRegistry);
-        mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
         mockChat.sendMessageStream = vi
           .fn()
           .mockResolvedValue((async function* () {})());
@@ -239,10 +230,10 @@ describe('Session', () => {
 
         await session.prompt(promptRequest);
 
-        expect(readManyFilesTool.buildAndExecute).toHaveBeenCalledWith(
-          { paths: [fileName] },
-          expect.any(AbortSignal),
-        );
+        expect(readManyFilesSpy).toHaveBeenCalledWith(mockConfig, {
+          paths: [fileName],
+          signal: expect.any(AbortSignal),
+        });
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }

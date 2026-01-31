@@ -78,6 +78,7 @@ export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/readManyFiles.js';
 
 // Config resolution utilities
 export * from './utils/configResolver.js';
@@ -104,6 +105,7 @@ export * from './services/shellExecutionService.js';
 export * from './tools/tools.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
+export * from './tools/tool-names.js';
 
 // Export subagents (Phase 1)
 export * from './subagents/index.js';
@@ -129,7 +131,6 @@ export * from './tools/web-fetch.js';
 export * from './tools/memoryTool.js';
 export * from './tools/shell.js';
 export * from './tools/web-search/index.js';
-export * from './tools/read-many-files.js';
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';

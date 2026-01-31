@@ -53,9 +53,6 @@ export enum ToolErrorType {
   // Memory-specific Errors
   MEMORY_TOOL_EXECUTION_ERROR = 'memory_tool_execution_error',
 
-  // ReadManyFiles-specific Errors
-  READ_MANY_FILES_SEARCH_ERROR = 'read_many_files_search_error',
-
   // Shell errors
   SHELL_EXECUTE_ERROR = 'shell_execute_error',
 

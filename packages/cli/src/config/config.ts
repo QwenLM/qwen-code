@@ -102,7 +102,6 @@ export interface CliArgs {
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
-  allFiles: boolean | undefined;
   yolo: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
@@ -289,12 +288,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .option('sandbox-image', {
           type: 'string',
           description: 'Sandbox image URI.',
-        })
-        .option('all-files', {
-          alias: ['a'],
-          type: 'boolean',
-          description: 'Include ALL files in context?',
-          default: false,
         })
         .option('yolo', {
           alias: 'y',
@@ -511,10 +504,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .deprecateOption(
           'checkpointing',
           'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'all-files',
-          'Use @ includes in the application instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'prompt',
@@ -950,7 +939,6 @@ export async function loadCliConfig(
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
-    fullContext: argv.allFiles || false,
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools,
