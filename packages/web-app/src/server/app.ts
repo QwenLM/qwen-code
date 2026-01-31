@@ -7,16 +7,14 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import type { Config } from '@qwen-code/qwen-code-core';
 import { sessionsRouter } from './routes/sessions.js';
-import { configRouter } from './routes/config.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Create Express application
  */
-export function createApp(config: Config | null) {
+export function createApp() {
   const app = express();
 
   // JSON body parser
@@ -41,12 +39,8 @@ export function createApp(config: Config | null) {
     next();
   });
 
-  // Store config in app locals for routes to access
-  app.locals.config = config;
-
   // API routes
   app.use('/api/sessions', sessionsRouter());
-  app.use('/api/config', configRouter());
 
   // Health check
   app.get('/healthz', (_req, res) => {

@@ -30,17 +30,50 @@ export type MessageType =
  */
 export interface MessagePart {
   text: string;
+  thought?: boolean;
 }
+
+/**
+ * Tool call content
+ */
+export interface ToolCallContent {
+  type: 'content' | 'diff';
+  content?: {
+    type: string;
+    text?: string;
+    error?: unknown;
+    [key: string]: unknown;
+  };
+  path?: string;
+  oldText?: string | null;
+  newText?: string;
+}
+
+/**
+ * Tool call location
+ */
+export interface ToolCallLocation {
+  path: string;
+  line?: number | null;
+}
+
+/**
+ * Tool call status
+ */
+export type ToolCallStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
 /**
  * Tool call data
  */
 export interface ToolCallData {
-  name: string;
-  args: Record<string, unknown>;
-  status: 'pending' | 'running' | 'success' | 'error';
-  result?: unknown;
-  error?: string;
+  toolCallId: string;
+  kind: string;
+  title: string | object;
+  status: ToolCallStatus;
+  rawInput?: string | object;
+  content?: ToolCallContent[];
+  locations?: ToolCallLocation[];
+  timestamp?: number;
 }
 
 /**
@@ -55,7 +88,7 @@ export interface Message {
   message?: {
     role: string;
     parts?: MessagePart[];
-    content?: string;
+    content?: string | unknown[];
   };
   toolCall?: ToolCallData;
 }
@@ -63,11 +96,19 @@ export interface Message {
 /**
  * Permission request
  */
+export interface PermissionOption {
+  name: string;
+  kind: string;
+  optionId: string;
+}
+
 export interface PermissionRequest {
   id: string;
   operation: string;
   args: Record<string, unknown>;
   description?: string;
+  options?: PermissionOption[];
+  toolCall?: ToolCallData;
 }
 
 /**

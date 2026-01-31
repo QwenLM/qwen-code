@@ -15,10 +15,11 @@
     }
   },
   "scripts": {
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "tsx watch src/server/index.ts",
-    "dev:client": "vite",
-    "build": "npm run build:client && npm run build:server",
+    "dev:client": "wait-on tcp:5495 && vite",
+    "prebuild": "node -e \"const pkg=require('./package.json');require('fs').writeFileSync('src/client/version.ts','export const APP_VERSION = \\\"' + pkg.version + '\\\";\\n');\"",
+    "build": "npm run prebuild && npm run build:client && npm run build:server",
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
@@ -27,9 +28,30 @@
   },
   "dependencies": {
     "@qwen-code/qwen-code-core": "file:../core",
+    "@qwen-code/sdk": "file:../sdk-typescript",
+    "@radix-ui/react-collapsible": "^1.1.12",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-dropdown-menu": "^2.1.16",
+    "@radix-ui/react-hover-card": "^1.1.15",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-switch": "^1.2.6",
+    "@radix-ui/react-toggle": "^1.1.10",
+    "@radix-ui/react-toggle-group": "^1.1.11",
+    "@radix-ui/react-tooltip": "^1.2.8",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "cmdk": "^1.1.1",
     "express": "^4.21.0",
-    "ws": "^8.18.0",
-    "open": "^10.1.2"
+    "lucide-react": "^0.561.0",
+    "nanoid": "^5.1.6",
+    "open": "^10.1.2",
+    "react-resizable-panels": "^2.1.7",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^2.6.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@qwen-code/webui": "file:../webui",
@@ -46,7 +68,8 @@
     "tailwindcss": "^3.4.0",
     "tsx": "^4.19.0",
     "typescript": "^5.0.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "wait-on": "^7.2.0"
   },
   "peerDependencies": {}
 }

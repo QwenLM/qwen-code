@@ -6,36 +6,25 @@
 
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import type { Config } from '@qwen-code/qwen-code-core';
 import type { Session, SessionsListResponse } from '../../shared/types.js';
-
-/**
- * Get config from request app locals
- */
-function getConfig(req: Request): Config | null {
-  return req.app.locals.config as Config | null;
-}
+import { SessionService } from '@qwen-code/qwen-code-core';
+import { createSession, removeSession } from '../sessionManager.js';
 
 /**
  * Sessions API router
  */
 export function sessionsRouter() {
   const router = Router();
+  const cwd = process.cwd();
+  const sessionService = new SessionService(cwd);
 
   /**
    * GET /api/sessions - List all sessions
    */
   router.get('/', async (req: Request, res: Response) => {
-    const config = getConfig(req);
-    if (!config) {
-      return res.status(500).json({ error: 'Configuration not available' });
-    }
-
     try {
-      const limit = parseInt(req.query.limit as string) || 50;
-      const offset = parseInt(req.query.offset as string) || 0;
+      const limit = parseInt(req.query.limit as string, 10) || 50;
 
-      const sessionService = config.getSessionService();
       const result = await sessionService.listSessions({ size: limit });
 
       const response: SessionsListResponse = {
@@ -61,14 +50,10 @@ export function sessionsRouter() {
   /**
    * POST /api/sessions - Create a new session
    */
-  router.post('/', async (req: Request, res: Response) => {
-    const config = getConfig(req);
-    if (!config) {
-      return res.status(500).json({ error: 'Configuration not available' });
-    }
-
+  router.post('/', async (_req: Request, res: Response) => {
     try {
-      const sessionId = config.startNewSession();
+      const runner = await createSession(cwd);
+      const sessionId = runner.getSessionId();
 
       const session: Session = {
         id: sessionId,
@@ -90,13 +75,7 @@ export function sessionsRouter() {
    * GET /api/sessions/:id - Get session details
    */
   router.get('/:id', async (req: Request, res: Response) => {
-    const config = getConfig(req);
-    if (!config) {
-      return res.status(500).json({ error: 'Configuration not available' });
-    }
-
     try {
-      const sessionService = config.getSessionService();
       const session = await sessionService.loadSession(req.params.id);
 
       if (!session) {
@@ -122,18 +101,14 @@ export function sessionsRouter() {
    * DELETE /api/sessions/:id - Delete a session
    */
   router.delete('/:id', async (req: Request, res: Response) => {
-    const config = getConfig(req);
-    if (!config) {
-      return res.status(500).json({ error: 'Configuration not available' });
-    }
-
     try {
-      const sessionService = config.getSessionService();
       const success = await sessionService.removeSession(req.params.id);
 
       if (!success) {
         return res.status(404).json({ error: 'Session not found' });
       }
+
+      removeSession(req.params.id);
 
       res.status(204).send();
     } catch (error) {

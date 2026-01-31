@@ -11,17 +11,34 @@ import type {
   WSMessage,
 } from '../../shared/types.js';
 
+interface SessionInfo {
+  version?: string;
+  model?: string;
+  contextWindow?: number;
+}
+
+interface UsageInfo {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  contextWindow: number;
+}
+
 interface UseWebSocketOptions {
   onMessage: (message: Message) => void;
   onHistory: (messages: Message[]) => void;
+  onSessionInfo?: (info: SessionInfo) => void;
+  onUsageUpdate?: (usage: UsageInfo) => void;
 }
 
 interface UseWebSocketReturn {
   isConnected: boolean;
   isStreaming: boolean;
   permissionRequest: PermissionRequest | null;
+  sessionInfo: SessionInfo | null;
+  usage: UsageInfo | null;
   send: (message: WSMessage) => void;
-  respondToPermission: (allow: boolean, scope: string) => void;
+  respondToPermission: (optionId: string) => void;
 }
 
 export function useWebSocket(
@@ -32,18 +49,24 @@ export function useWebSocket(
   const [isStreaming, setIsStreaming] = useState(false);
   const [permissionRequest, setPermissionRequest] =
     useState<PermissionRequest | null>(null);
+  const [sessionInfo, setSessionInfo] = useState<SessionInfo | null>(null);
+  const [usage, setUsage] = useState<UsageInfo | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
-  const { onMessage, onHistory } = options;
+  const { onMessage, onHistory, onSessionInfo, onUsageUpdate } = options;
 
   // Connect to WebSocket
   useEffect(() => {
     if (!sessionId) {
       return;
     }
+
+    // Reset usage when switching sessions
+    setUsage(null);
+    setSessionInfo(null);
 
     const connect = () => {
       // Determine WebSocket URL
@@ -96,12 +119,37 @@ export function useWebSocket(
               setIsStreaming(false);
               break;
 
+            case 'session_info': {
+              const info: SessionInfo = {
+                version: data.version,
+                model: data.model,
+                contextWindow: data.contextWindow,
+              };
+              setSessionInfo(info);
+              onSessionInfo?.(info);
+              break;
+            }
+
+            case 'usage_update': {
+              const usageData: UsageInfo = {
+                inputTokens: data.inputTokens ?? 0,
+                outputTokens: data.outputTokens ?? 0,
+                totalTokens: data.totalTokens ?? 0,
+                contextWindow: data.contextWindow ?? 200000,
+              };
+              setUsage(usageData);
+              onUsageUpdate?.(usageData);
+              break;
+            }
+
             case 'permission_request':
               setPermissionRequest({
                 id: data.id,
                 operation: data.operation,
                 args: data.args || {},
                 description: data.description,
+                options: Array.isArray(data.options) ? data.options : undefined,
+                toolCall: data.toolCall,
               });
               break;
 
@@ -111,6 +159,12 @@ export function useWebSocket(
 
             case 'error':
               console.error('WebSocket error:', data.message);
+              // Reset streaming state on error
+              setIsStreaming(false);
+              break;
+
+            default:
+              console.warn('Unhandled WebSocket message type:', data.type);
               break;
           }
         } catch (err) {
@@ -121,6 +175,7 @@ export function useWebSocket(
       ws.onclose = (event) => {
         console.log('WebSocket closed:', event.code, event.reason);
         setIsConnected(false);
+        setIsStreaming(false);
         wsRef.current = null;
 
         // Attempt to reconnect after delay
@@ -134,6 +189,7 @@ export function useWebSocket(
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
+        setIsStreaming(false);
       };
     };
 
@@ -148,7 +204,7 @@ export function useWebSocket(
         wsRef.current = null;
       }
     };
-  }, [sessionId, onMessage, onHistory]);
+  }, [sessionId, onMessage, onHistory, onSessionInfo, onUsageUpdate]);
 
   // Send message
   const send = useCallback((message: WSMessage) => {
@@ -161,11 +217,10 @@ export function useWebSocket(
 
   // Respond to permission request
   const respondToPermission = useCallback(
-    (allow: boolean, scope: string) => {
+    (optionId: string) => {
       send({
         type: 'permission_response',
-        allow,
-        scope,
+        optionId,
         requestId: permissionRequest?.id,
       });
       setPermissionRequest(null);
@@ -177,6 +232,8 @@ export function useWebSocket(
     isConnected,
     isStreaming,
     permissionRequest,
+    sessionInfo,
+    usage,
     send,
     respondToPermission,
   };

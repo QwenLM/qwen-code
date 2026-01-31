@@ -5,68 +5,49 @@
  */
 
 import type { WebSocket, WebSocketServer } from 'ws';
-import type { Config } from '@qwen-code/qwen-code-core';
 import type { WSMessage } from '../../shared/types.js';
-import { SessionRunner } from './sessionRunner.js';
+import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  getOrCreateSession,
+  getSession,
+  removeSession,
+} from '../sessionManager.js';
 
 interface ClientState {
   sessionId: string | null;
 }
 
-// Global map of session runners
-const sessionRunners = new Map<string, SessionRunner>();
-
-/**
- * Get or create a session runner for the given session ID
- */
-function getOrCreateRunner(sessionId: string, config: Config | null): SessionRunner {
-  let runner = sessionRunners.get(sessionId);
-  if (!runner) {
-    runner = new SessionRunner(sessionId, config);
-    sessionRunners.set(sessionId, runner);
-  }
-  return runner;
-}
-
-/**
- * Setup WebSocket server
- */
-export function setupWebSocket(wss: WebSocketServer, config: Config | null) {
+export function setupWebSocket(wss: WebSocketServer) {
   const clientStates = new WeakMap<WebSocket, ClientState>();
 
   wss.on('connection', (ws: WebSocket) => {
     console.log('WebSocket client connected');
-
     clientStates.set(ws, { sessionId: null });
 
     ws.on('message', async (data) => {
       try {
         const message: WSMessage = JSON.parse(data.toString());
         const state = clientStates.get(ws);
-
-        if (!state) return;
+        if (!state) {
+          return;
+        }
 
         switch (message.type) {
           case 'join_session':
-            await handleJoinSession(ws, state, message, config);
+            await handleJoinSession(ws, state, message);
             break;
-
           case 'leave_session':
             handleLeaveSession(ws, state);
             break;
-
           case 'user_message':
-            await handleUserMessage(ws, state, message, config);
+            await handleUserMessage(ws, state, message);
             break;
-
           case 'cancel':
             handleCancel(state);
             break;
-
           case 'permission_response':
             handlePermissionResponse(state, message);
             break;
-
           default:
             ws.send(
               JSON.stringify({
@@ -90,12 +71,11 @@ export function setupWebSocket(wss: WebSocketServer, config: Config | null) {
       console.log('WebSocket client disconnected');
       const state = clientStates.get(ws);
       if (state?.sessionId) {
-        const runner = sessionRunners.get(state.sessionId);
+        const runner = getSession(state.sessionId);
         if (runner) {
           runner.removeClient(ws);
-          // Clean up runner if no clients left
           if (runner.clientCount === 0) {
-            sessionRunners.delete(state.sessionId);
+            removeSession(state.sessionId);
           }
         }
       }
@@ -108,14 +88,10 @@ export function setupWebSocket(wss: WebSocketServer, config: Config | null) {
   });
 }
 
-/**
- * Handle join session request
- */
 async function handleJoinSession(
   ws: WebSocket,
   state: ClientState,
   message: WSMessage,
-  config: Config | null,
 ) {
   const sessionId = message.sessionId as string;
   if (!sessionId) {
@@ -123,21 +99,27 @@ async function handleJoinSession(
     return;
   }
 
-  // Leave previous session if any
   if (state.sessionId) {
-    const prevRunner = sessionRunners.get(state.sessionId);
+    const prevRunner = getSession(state.sessionId);
     if (prevRunner) {
       prevRunner.removeClient(ws);
     }
   }
 
   state.sessionId = sessionId;
-
-  // Get or create runner and add client
-  const runner = getOrCreateRunner(sessionId, config);
+  let runner = getSession(sessionId);
+  if (!runner) {
+    const sessionService = new SessionService(process.cwd());
+    const exists = await sessionService.sessionExists(sessionId);
+    if (!exists) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Session not found' }));
+      state.sessionId = null;
+      return;
+    }
+    runner = getOrCreateSession(sessionId);
+  }
   runner.addClient(ws);
 
-  // Load and send history
   try {
     const history = await runner.getHistory();
     ws.send(JSON.stringify({ type: 'history', messages: history }));
@@ -155,30 +137,26 @@ async function handleJoinSession(
   );
 }
 
-/**
- * Handle leave session request
- */
 function handleLeaveSession(ws: WebSocket, state: ClientState) {
-  if (state.sessionId) {
-    const runner = sessionRunners.get(state.sessionId);
-    if (runner) {
-      runner.removeClient(ws);
-      if (runner.clientCount === 0) {
-        sessionRunners.delete(state.sessionId);
-      }
-    }
-    state.sessionId = null;
+  if (!state.sessionId) {
+    return;
   }
+
+  const runner = getSession(state.sessionId);
+  if (runner) {
+    runner.removeClient(ws);
+    if (runner.clientCount === 0) {
+      removeSession(state.sessionId);
+    }
+  }
+
+  state.sessionId = null;
 }
 
-/**
- * Handle user message
- */
 async function handleUserMessage(
   ws: WebSocket,
   state: ClientState,
   message: WSMessage,
-  config: Config | null,
 ) {
   if (!state.sessionId) {
     ws.send(JSON.stringify({ type: 'error', message: 'Not in a session' }));
@@ -193,34 +171,27 @@ async function handleUserMessage(
     return;
   }
 
-  const runner = getOrCreateRunner(state.sessionId, config);
+  const runner = getOrCreateSession(state.sessionId);
   await runner.handleUserMessage(content.trim());
 }
 
-/**
- * Handle cancel request
- */
 function handleCancel(state: ClientState) {
-  if (state.sessionId) {
-    const runner = sessionRunners.get(state.sessionId);
-    if (runner) {
-      runner.cancel();
-    }
+  if (!state.sessionId) {
+    return;
   }
+
+  const runner = getSession(state.sessionId);
+  runner?.cancel();
 }
 
-/**
- * Handle permission response
- */
 function handlePermissionResponse(state: ClientState, message: WSMessage) {
-  if (state.sessionId) {
-    const runner = sessionRunners.get(state.sessionId);
-    if (runner) {
-      runner.handlePermissionResponse({
-        allow: message.allow as boolean,
-        scope: message.scope as string,
-        requestId: message.requestId as string | undefined,
-      });
-    }
+  if (!state.sessionId) {
+    return;
   }
+
+  const runner = getSession(state.sessionId);
+  runner?.handlePermissionResponse({
+    optionId: message.optionId as string,
+    requestId: message.requestId as string | undefined,
+  });
 }

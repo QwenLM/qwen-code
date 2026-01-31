@@ -6,15 +6,17 @@
 
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
-import type { Config } from '@qwen-code/qwen-code-core';
 import { createApp } from './app.js';
 import { setupWebSocket } from './websocket/handler.js';
 import { findAvailablePort } from './utils/port.js';
+import { pathToFileURL } from 'url';
 
 export interface StartServerOptions {
   port?: number;
   host?: string;
-  config: Config | null;
+  cwd?: string;
+  // Deprecated, kept for API compatibility.
+  config?: unknown;
 }
 
 /**
@@ -23,22 +25,16 @@ export interface StartServerOptions {
 export async function startServer(
   options: StartServerOptions,
 ): Promise<number> {
-  const { port = 5494, host = '127.0.0.1', config } = options;
+  const { port = 5494, host = '127.0.0.1' } = options;
 
-  // Find available port
   const actualPort = await findAvailablePort(host, port);
 
-  // Create Express app
-  const app = createApp(config);
-
-  // Create HTTP server
+  const app = createApp();
   const server = createServer(app);
 
-  // Create WebSocket server
   const wss = new WebSocketServer({ server, path: '/ws' });
-  setupWebSocket(wss, config);
+  setupWebSocket(wss);
 
-  // Start server
   return new Promise((resolve, reject) => {
     server.on('error', reject);
     server.listen(actualPort, host, () => {
@@ -49,3 +45,25 @@ export async function startServer(
 }
 
 export { createApp } from './app.js';
+
+async function startFromEnv(): Promise<void> {
+  const env = process.env as Record<string, string | undefined>;
+  const host = env['QWEN_CODE_WEB_HOST'] ?? env['WEB_APP_HOST'] ?? '127.0.0.1';
+  const port = Number(env['QWEN_CODE_WEB_PORT'] ?? env['WEB_APP_PORT']) || 5495;
+
+  await startServer({ host, port });
+}
+
+function isMainModule(): boolean {
+  if (!process.argv[1]) {
+    return false;
+  }
+  return import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isMainModule()) {
+  startFromEnv().catch((error) => {
+    console.error('Failed to start Web GUI server:', error);
+    process.exit(1);
+  });
+}
