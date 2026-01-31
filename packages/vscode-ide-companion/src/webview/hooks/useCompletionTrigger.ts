@@ -57,6 +57,8 @@ export function useCompletionTrigger(
 
   // Timer for loading timeout
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Track request order so slower responses can't overwrite newer completions.
+  const requestIdRef = useRef(0);
 
   const closeCompletion = useCallback(() => {
     // Clear pending timeout
@@ -64,6 +66,7 @@ export function useCompletionTrigger(
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
+    requestIdRef.current += 1;
     setState({
       isOpen: false,
       triggerChar: null,
@@ -79,6 +82,8 @@ export function useCompletionTrigger(
       query: string,
       position: { top: number; left: number },
     ) => {
+      const requestId = requestIdRef.current + 1;
+      requestIdRef.current = requestId;
       // Clear previous timeout if any
       if (timeoutRef.current) {
         clearTimeout(timeoutRef.current);
@@ -96,6 +101,9 @@ export function useCompletionTrigger(
 
       // Schedule a timeout fallback if loading takes too long
       timeoutRef.current = setTimeout(() => {
+        if (requestIdRef.current !== requestId) {
+          return;
+        }
         setState((prev) => {
           // Only show timeout if still open and still for the same request
           if (
@@ -112,6 +120,9 @@ export function useCompletionTrigger(
       }, TIMEOUT_MS);
 
       const items = await getCompletionItems(trigger, query);
+      if (requestIdRef.current !== requestId) {
+        return;
+      }
 
       // Clear timeout on success
       if (timeoutRef.current) {
@@ -171,7 +182,12 @@ export function useCompletionTrigger(
     if (!state.isOpen || !state.triggerChar) {
       return;
     }
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
     const items = await getCompletionItems(state.triggerChar, state.query);
+    if (requestIdRef.current !== requestId) {
+      return;
+    }
 
     // Only update state if items have actually changed
     setState((prev) => {
