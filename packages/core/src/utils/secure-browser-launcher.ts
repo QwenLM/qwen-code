@@ -107,7 +107,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
 
   try {
     await execFileAsync(command, args, options);
-  } catch (error) {
+  } catch (_error) {
     // For Linux, try fallback commands if xdg-open fails
     if (
       (platformName === 'linux' ||
@@ -121,6 +121,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
         'firefox',
         'chromium',
         'google-chrome',
+        'microsoft-edge',
       ];
 
       for (const fallbackCommand of fallbackCommands) {
@@ -134,10 +135,12 @@ export async function openBrowserSecurely(url: string): Promise<void> {
       }
     }
 
-    // Re-throw the error if all attempts failed
-    throw new Error(
-      `Failed to open browser: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    // Log the URL so the user can open it manually instead of crashing.
+    console.error(
+      `Failed to open browser automatically. Please open this URL manually:`,
     );
+    console.error(url);
+    return;
   }
 }
 
