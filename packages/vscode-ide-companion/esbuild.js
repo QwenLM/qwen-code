@@ -23,8 +23,11 @@ const esbuildProblemMatcherPlugin = {
   name: 'esbuild-problem-matcher',
 
   setup(build) {
+    const isWatchMode = build.initialOptions.watch;
     build.onStart(() => {
-      console.log('[watch] build started');
+      if (isWatchMode) {
+        console.log('[watch] build started');
+      }
     });
     build.onEnd((result) => {
       result.errors.forEach(({ text, location }) => {
@@ -33,7 +36,9 @@ const esbuildProblemMatcherPlugin = {
           `    ${location.file}:${location.line}:${location.column}:`,
         );
       });
-      console.log('[watch] build finished');
+      if (isWatchMode) {
+        console.log('[watch] build finished');
+      }
     });
   },
 };
