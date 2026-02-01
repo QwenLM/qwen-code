@@ -6,18 +6,18 @@
 import type React from 'react';
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useVSCode } from './hooks/useVSCode.js';
-import { InputForm } from './components/layout/InputForm.js';
-import { EmptyState } from './components/layout/EmptyState.js';
+import { InputForm } from './platform/InputForm.js';
+import { EmptyState } from './platform/EmptyState.js';
 import {
   UserMessage,
   AssistantMessage,
   WaitingMessage,
-} from './components/messages/index.js';
-import { PermissionDrawer } from './components/PermissionDrawer/PermissionDrawer.js';
+  PermissionDrawer,
+} from '@qwen-code/webui';
 import type {
   PermissionOption,
-  ToolCall,
-} from './components/PermissionDrawer/PermissionRequest.js';
+  PermissionToolCall,
+} from '@qwen-code/webui';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -51,7 +51,7 @@ export const App: React.FC = () => {
     requestId: number;
     sessionId?: string | null;
     options: PermissionOption[];
-    toolCall: ToolCall;
+    toolCall: PermissionToolCall;
   } | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -173,8 +173,8 @@ export const App: React.FC = () => {
               data: {
                 requestId: number;
                 sessionId?: string | null;
-                options: PermissionOption[];
-                toolCall: ToolCall;
+    options: PermissionOption[];
+    toolCall: PermissionToolCall;
               };
             }
           ).data;

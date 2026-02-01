@@ -4,9 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* Import component styles */
-@import './timeline.css';
-@import '../components/messages/MarkdownRenderer/MarkdownRenderer.css';
+/* WebUI base styles (timeline, markdown, components) are loaded via
+ * @qwen-code/webui/styles.css in index.tsx. */
 
 /* ===========================
    CSS Variables (with Chrome fallbacks)

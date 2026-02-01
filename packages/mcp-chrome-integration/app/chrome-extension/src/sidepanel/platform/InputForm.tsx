@@ -15,8 +15,8 @@ import type {
   InputFormProps as BaseInputFormProps,
   EditModeInfo,
 } from '@qwen-code/webui';
-import { getApprovalModeInfoFromString } from '../../types/acpTypes.js';
-import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
+import { getApprovalModeInfoFromString } from '../types/acpTypes.js';
+import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 
 /**
  * Extended props that accept ApprovalModeValue and optional context usage

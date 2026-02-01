@@ -5,7 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
-import type { ToolCallData } from '../components/messages/toolcalls/ToolCall.js';
+import type { ToolCallData } from '@qwen-code/webui';
 import type { ToolCallUpdate } from '../../types/chatTypes.js';
 
 /**
