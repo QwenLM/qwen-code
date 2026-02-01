@@ -392,6 +392,8 @@ export const mcpServerSchema = z.object({
   command: z.string(),
   env: z.array(envVariableSchema),
   name: z.string(),
+  timeout: z.number().optional(),
+  trust: z.boolean().optional(),
 });
 
 export const promptCapabilitiesSchema = z.object({

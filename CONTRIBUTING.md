@@ -62,8 +62,8 @@ This section guides contributors on how to build, modify, and understand the dev
 **Prerequisites:**
 
 1.  **Node.js**:
-    - **Development:** Please use Node.js `~20.19.0`. This specific version is required due to an upstream development dependency issue. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
-    - **Production:** For running the CLI in a production environment, any version of Node.js `>=20` is acceptable.
+    - **Development:** Please use Node.js `~22.0.0`. You can use a tool like [nvm](https://github.com/nvm-sh/nvm) to manage Node.js versions.
+    - **Production:** For running the CLI in a production environment, any version of Node.js `>=22` is acceptable.
 2.  **Git**
 
 ### Build Process
@@ -200,7 +200,7 @@ This section describes how to develop and preview the documentation locally.
 
 ### Prerequisites
 
-1. Ensure you have Node.js (version 18+) installed
+1. Ensure you have Node.js (version 22+) installed
 2. Have npm or yarn available
 
 ### Setup Documentation Site Locally

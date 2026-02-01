@@ -10,7 +10,7 @@
 Prerequisites:
 
 - A [Qwen Code](https://chat.qwen.ai/auth?mode=register) account
-- Requires [Node.js 20+](https://nodejs.org/zh-cn/download), you can use `node -v` to check the version. If it's not installed, use the following command to install it.
+- Requires [Node.js 22+](https://nodejs.org/zh-cn/download), you can use `node -v` to check the version. If it's not installed, use the following command to install it.
 
 ### Install Qwen Code:
 

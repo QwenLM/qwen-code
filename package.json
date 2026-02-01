@@ -2,11 +2,12 @@
   "name": "@qwen-code/qwen-code",
   "version": "0.9.0",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "type": "module",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "packages/mcp-chrome-integration/app/*"
   ],
   "repository": {
     "type": "git",
@@ -73,6 +74,7 @@
     "LICENSE"
   ],
   "devDependencies": {
+    "@types/chrome": "^0.1.32",
     "@types/marked": "^5.0.2",
     "@types/mime-types": "^3.0.1",
     "@types/minimatch": "^5.1.2",

@@ -1,0 +1,142 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Unified timeline styles for tool calls and messages
+ */
+
+/* ==========================================
+   ToolCallContainer timeline styles
+   ========================================== */
+.toolcall-container {
+  position: relative;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* ToolCallContainer timeline connector */
+.toolcall-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+}
+
+/* First item: connector starts from status point position */
+.toolcall-container:first-child::after {
+  top: 24px;
+}
+
+/* Last item: connector shows only upper part */
+.toolcall-container:last-child::after {
+  height: calc(100% - 24px);
+  top: 0;
+  bottom: auto;
+}
+
+/* ==========================================
+   AssistantMessage timeline styles
+   ========================================== */
+.assistant-message-container {
+  position: relative;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+/* AssistantMessage timeline connector */
+.assistant-message-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+}
+
+/* First item: connector starts from status point position */
+.assistant-message-container:first-child::after {
+  top: 24px;
+}
+
+/* Last item: connector shows only upper part */
+.assistant-message-container:last-child::after {
+  height: calc(100% - 24px);
+  top: 0;
+  bottom: auto;
+}
+
+/* ==========================================
+   Custom timeline styles for qwen-message message-item elements
+   ========================================== */
+
+/* Default connector style - creates full-height connectors for all AI message items */
+.qwen-message.message-item:not(.user-message-container)::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color);
+  z-index: 0;
+}
+
+/* Single-item AI sequence (both a start and an end): hide the connector entirely */
+.qwen-message.message-item:not(.user-message-container):is(
+    :first-child,
+    .user-message-container
+      + .qwen-message.message-item:not(.user-message-container),
+    .chat-messages
+      > :not(.qwen-message.message-item)
+      + .qwen-message.message-item:not(.user-message-container)
+  ):is(
+    :has(+ .user-message-container),
+    :has(+ :not(.qwen-message.message-item)),
+    :last-child
+  )::after {
+  display: none;
+}
+
+/* Handle the start of each AI message sequence - includes the first AI message in the entire message list and new AI messages interrupted by user messages */
+.qwen-message.message-item:not(.user-message-container):first-child::after,
+.user-message-container + .qwen-message.message-item:not(.user-message-container)::after,
+/* If the previous sibling is not .qwen-message.message-item (such as waiting prompts, sentinel elements, or card-style tool calls), also treat as a new group start */
+.chat-messages > :not(.qwen-message.message-item)
+  + .qwen-message.message-item:not(.user-message-container)::after {
+  top: 15px;
+}
+
+/* Handle the end of each AI message sequence */
+/* When the next sibling is a user message */
+.qwen-message.message-item:not(.user-message-container):has(+ .user-message-container)::after,
+/* Or when the next sibling is not .qwen-message.message-item (such as waiting prompts, sentinel elements, card-style tool calls, etc.) */
+.qwen-message.message-item:not(.user-message-container):has(+ :not(.qwen-message.message-item))::after,
+/* When it's truly the last child element of the parent container */
+.qwen-message.message-item:not(.user-message-container):last-child::after {
+  /* Note: When setting both top and bottom, the height is (container height - top - bottom).
+   * Here we expect "15px spacing at the bottom", so bottom should be 15px (not calc(100% - 15px)). */
+  top: 0;
+  bottom: calc(100% - 15px);
+}
+
+.user-message-container:first-child {
+  margin-top: 0;
+}
+
+.message-item {
+  padding: 8px 0;
+  width: 100%;
+  align-items: flex-start;
+  padding-left: 30px;
+  user-select: text;
+  position: relative;
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
