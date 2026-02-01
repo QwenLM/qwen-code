@@ -369,6 +369,8 @@ export const sessionUpdateMetaSchema = z.object({
   toolName: z.string().optional().nullable(),
   parentToolCallId: z.string().optional().nullable(),
   subagentType: z.string().optional().nullable(),
+  /** Server-side timestamp (ms since epoch) for correct message ordering */
+  timestamp: z.number().optional().nullable(),
 });
 
 export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
@@ -560,6 +562,7 @@ export const sessionUpdateSchema = z.union([
   z.object({
     content: contentBlockSchema,
     sessionUpdate: z.literal('user_message_chunk'),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
   }),
   z.object({
     content: contentBlockSchema,

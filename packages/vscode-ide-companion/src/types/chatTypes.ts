@@ -30,6 +30,7 @@ export interface ToolCallUpdateData {
   rawInput?: unknown;
   content?: Array<Record<string, unknown>>;
   locations?: Array<{ path: string; line?: number | null }>;
+  timestamp?: number;
 }
 
 export interface UsageStatsPayload {
@@ -92,4 +93,10 @@ export interface ToolCallUpdate {
     line?: number | null;
   }>;
   timestamp?: number; // Add timestamp field for message ordering
+  /** Server-side metadata including timestamp for correct ordering */
+  _meta?: {
+    timestamp?: number;
+    toolName?: string;
+    [key: string]: unknown;
+  };
 }

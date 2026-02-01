@@ -88,10 +88,18 @@ export class QwenAgentManager {
         ) {
           const update = (
             data as unknown as {
-              update: { sessionUpdate: string; content?: { text?: string } };
+              update: {
+                sessionUpdate: string;
+                content?: { text?: string };
+                _meta?: { timestamp?: number };
+              };
             }
           ).update;
           const text = update?.content?.text || '';
+          const timestamp =
+            typeof update?._meta?.timestamp === 'number'
+              ? update._meta.timestamp
+              : Date.now();
           if (update?.sessionUpdate === 'user_message_chunk' && text) {
             console.log(
               '[QwenAgentManager] Rehydration: routing user message chunk',
@@ -99,7 +107,7 @@ export class QwenAgentManager {
             this.callbacks.onMessage?.({
               role: 'user',
               content: text,
-              timestamp: Date.now(),
+              timestamp,
             });
             return;
           }
@@ -110,7 +118,7 @@ export class QwenAgentManager {
             this.callbacks.onMessage?.({
               role: 'assistant',
               content: text,
-              timestamp: Date.now(),
+              timestamp,
             });
             return;
           }

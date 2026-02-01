@@ -69,6 +69,9 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName: params.toolName,
         ...params.subagentMeta,
+        ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
+          timestamp: BaseEmitter.toEpochMs(params.timestamp),
+        }),
       },
     });
 
@@ -128,6 +131,9 @@ export class ToolCallEmitter extends BaseEmitter {
       _meta: {
         toolName: params.toolName,
         ...params.subagentMeta,
+        ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
+          timestamp: BaseEmitter.toEpochMs(params.timestamp),
+        }),
       },
     };
 

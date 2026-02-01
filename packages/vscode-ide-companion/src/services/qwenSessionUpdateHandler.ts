@@ -86,6 +86,9 @@ export class QwenSessionUpdateHandler {
       case 'tool_call': {
         // Handle new tool call
         if (this.callbacks.onToolCall && 'toolCallId' in update) {
+          const meta = update._meta as SessionUpdateMeta | undefined;
+          const timestamp =
+            typeof meta?.timestamp === 'number' ? meta.timestamp : undefined;
           this.callbacks.onToolCall({
             toolCallId: update.toolCallId as string,
             kind: (update.kind as string) || undefined,
@@ -98,6 +101,7 @@ export class QwenSessionUpdateHandler {
             locations: update.locations as
               | Array<{ path: string; line?: number | null }>
               | undefined,
+            ...(timestamp !== undefined && { timestamp }),
           });
         }
         break;
@@ -105,6 +109,9 @@ export class QwenSessionUpdateHandler {
 
       case 'tool_call_update': {
         if (this.callbacks.onToolCall && 'toolCallId' in update) {
+          const meta = update._meta as SessionUpdateMeta | undefined;
+          const timestamp =
+            typeof meta?.timestamp === 'number' ? meta.timestamp : undefined;
           this.callbacks.onToolCall({
             toolCallId: update.toolCallId as string,
             kind: (update.kind as string) || undefined,
@@ -117,6 +124,7 @@ export class QwenSessionUpdateHandler {
             locations: update.locations as
               | Array<{ path: string; line?: number | null }>
               | undefined,
+            ...(timestamp !== undefined && { timestamp }),
           });
         }
         break;
