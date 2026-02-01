@@ -1,4 +1,9 @@
-# Chrome 扩展 Native Host 排查步骤
+# Chrome 扩展 Native Host 排查步骤（已归档）
+
+> 旧版 chrome-extension 已归档到 `archive/chrome-extension`。
+> 当前 MCP Native Server 请参考：
+> `packages/mcp-chrome-integration/app/native-server/README.md` 和
+> `packages/mcp-chrome-integration/docs/INSTALLATION.md`。
 
 适用于遇到“Specified native messaging host not found.”、“Native host has exited.”、“Handshake timeout”等情况。
 
@@ -10,7 +15,7 @@
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "/Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/host.js",
+  "path": "/Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/host.js",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://kbpfhhpfobobomiighfkhojhmefogdgh/"
@@ -24,7 +29,7 @@ cat > "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.
 {
   "name": "com.qwen.cli.bridge",
   "description": "Native messaging host for Qwen CLI Chrome Extension",
-  "path": "/Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/host.js",
+  "path": "/Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/host.js",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://kbpfhhpfobobomiighfkhojhmefogdgh/"
@@ -38,8 +43,8 @@ EOF
 ## 2. 确保可执行与 Node 路径
 Host 入口已设置 shebang `/usr/local/bin/node`。确保脚本可执行：
 ```bash
-chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/host.js
-chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/src/host.js
+chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/host.js
+chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/src/host.js
 ```
 
 ## 3. 日志位置
@@ -50,7 +55,7 @@ chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chro
 
 ## 4. 手动运行自检
 ```bash
-node /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/host.js
+node /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/host.js
 ```
 进程会挂起等待 stdin，无输出属正常；日志文件应记录启动信息。`Ctrl+C` 退出。
 
@@ -72,8 +77,8 @@ cat > "$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.
 EOF
 
 # 确保可执行
-chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/host.js
-chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/packages/chrome-extension/native-host/src/host.js
+chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/host.js
+chmod +x /Users/jinjing/projects/projj/github.com/QwenLM/qwen-code/archive/chrome-extension/native-host/src/host.js
 
 # 查看日志
 cat ~/.qwen/chrome-bridge/qwen-bridge-host.log 2>/dev/null || echo "no log"

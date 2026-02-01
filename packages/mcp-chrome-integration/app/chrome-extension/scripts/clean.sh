@@ -13,10 +13,10 @@ rm -rf "$ROOT_DIR/native-host/dist/"
 rm -f "$ROOT_DIR/native-host/tsconfig.tsbuildinfo"
 rm -f chrome-extension.zip
 
-# Remove log files
-rm -f "$HOME/.qwen/chrome-bridge/qwen-bridge-host.log"
-rm -f /tmp/qwen-bridge-host.log
-rm -f /tmp/qwen-server.log
+# Remove log files (ignore permission issues)
+rm -f "$HOME/.qwen/chrome-bridge/qwen-bridge-host.log" 2>/dev/null || true
+rm -f /tmp/qwen-bridge-host.log 2>/dev/null || true
+rm -f /tmp/qwen-server.log 2>/dev/null || true
 
 # Remove saved extension ID (new unified path + legacy paths)
 rm -f "$ROOT_DIR/.extension-id"

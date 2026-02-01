@@ -4,6 +4,8 @@
 
 ## 📋 概述
 
+> 旧版 `chrome-extension` 已归档到 `archive/chrome-extension`，当前主线为 `mcp-chrome-integration`。
+
 这个项目将 hangwin/mcp-chrome 的 Native Server 与现有的 React 19 Extension 集成，实现：
 
 - **简化架构**: 从 5 层通信降至 3 层 (40% 简化)
@@ -50,7 +52,7 @@ Qwen CLI
 | 浏览历史      | ❌                      | ✅ 支持                       |
 | 性能          | 一般                    | 更快                          |
 
-详细对比见: [docs/implementation-plan.md](docs/implementation-plan.md)
+详细对比见: [docs/status/implementation-plan.md](docs/status/implementation-plan.md)
 
 ## 🚀 快速开始
 
@@ -102,7 +104,7 @@ npm run doctor --workspace=@qwen-code/mcp-chrome-integration
     "chrome": {
       "command": "node",
       "args": [
-        "/path/to/packages/mcp-chrome-integration/app/native-server/dist/index.js"
+        "/path/to/packages/mcp-chrome-integration/app/native-server/dist/mcp/mcp-server-stdio.js"
       ]
     }
   }
@@ -212,7 +214,7 @@ packages/mcp-chrome-integration/
 └── docs/
     ├── implementation-plan.md         # 实施方案
     ├── architecture.md                # 架构文档
-    └── customization-guide.md         # 定制指南
+    └── guides/customization.md         # 定制指南
 ```
 
 ## 🔄 从旧版迁移
@@ -229,13 +231,13 @@ packages/mcp-chrome-integration/
 | `browser_fill_form`          | `chrome_fill_or_select`              | API 类似       |
 | `browser_run_js`             | `chrome_inject_script`               | 注入脚本       |
 
-详细迁移指南见: [docs/implementation-plan.md](docs/implementation-plan.md)
+详细迁移指南见: [docs/status/implementation-plan.md](docs/status/implementation-plan.md)
 
 ## 📚 文档
 
-- [实施方案](docs/implementation-plan.md) - 完整的集成实施方案
-- [架构文档](docs/architecture.md) - 架构设计和技术选型
-- [定制指南](docs/customization-guide.md) - 如何定制和扩展
+- [实施方案](docs/status/implementation-plan.md) - 完整的集成实施方案
+- [架构文档](docs/design/03-architecture.md) - 架构设计和技术选型
+- [定制指南](docs/guides/customization.md) - 如何定制和扩展
 
 ## 🔗 相关资源
 
@@ -264,7 +266,7 @@ npm run doctor --workspace=@qwen-code/mcp-chrome-integration
 
 ```bash
 # macOS
-cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.mcp_chrome_bridge.json
+cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 ```
 
 ### Native Server 无法启动
@@ -323,13 +325,13 @@ macOS/Linux 需要确保文件权限：
 chmod +x app/native-server/dist/cli.js
 
 # 配置清单可读
-chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.mcp_chrome_bridge.json
+chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 ```
 
 ### 系统要求
 
 - **Chrome 版本**: 建议 Chrome 120+
-- **Node.js 版本**: 需要 Node.js 18+
+- **Node.js 版本**: 需要 Node.js 22+
 - **操作系统**: macOS / Linux / Windows
 
 ## 🔧 技术栈
@@ -362,7 +364,7 @@ chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.
 
 如有问题或建议：
 
-1. 查看 [实施方案](docs/implementation-plan.md)
+1. 查看 [实施方案](docs/status/implementation-plan.md)
 2. 查看 [hangwin/mcp-chrome Issues](https://github.com/hangwin/mcp-chrome/issues)
 3. 项目内部讨论
 

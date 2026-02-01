@@ -1,135 +1,67 @@
 # MCP Chrome Integration 文档索引
 
-本目录包含 MCP Chrome Integration 项目的完整文档。
+本目录包含 MCP Chrome Integration 的设计文档、指南、运维、状态与报告。
 
-## 📚 文档导航
+## 📌 快速入口
 
-### 快速开始
-- **[QUICK_START.md](QUICK_START.md)** - 快速开始指南，5分钟上手
-
-### 核心文档
-- **[architecture.md](architecture.md)** - 系统架构设计
-- **[api-reference.md](api-reference.md)** - API 参考文档
-- **[development.md](development.md)** - 开发指南
-
-### 实施与状态
-- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - 项目实施总结（最新版）
-- **[INTEGRATION_STATUS.md](INTEGRATION_STATUS.md)** - 当前集成状态
-- **[implementation-plan.md](implementation-plan.md)** - 完整实施计划
-
-### 调试与故障排查
-- **[DEBUGGING.md](DEBUGGING.md)** - 调试完整指南（整合版）
-
-### 迁移与对比
-- **[migration-guide.md](migration-guide.md)** - 迁移指南
-- **[COMPARISON.md](COMPARISON.md)** - 与其他方案对比（整合版）
-
-### 专题文档
-- **[MCP_USAGE_GUIDE.md](MCP_USAGE_GUIDE.md)** - MCP 使用指南（最新版）
-- **[MCP_NOTES.md](MCP_NOTES.md)** - MCP 笔记
-- **[NATIVE_MESSAGING_ADAPTATION_COMPLETE.md](NATIVE_MESSAGING_ADAPTATION_COMPLETE.md)** - Native Messaging 适配报告
-
-### 技术报告
-- **[hangwin-mcp-chrome-validation-report.md](hangwin-mcp-chrome-validation-report.md)** - Hangwin MCP Chrome 验证报告
-- **[DEPENDENCY_INSTALLATION_REPORT.md](DEPENDENCY_INSTALLATION_REPORT.md)** - 依赖安装报告
+- **设计架构（文档结构）**: [DESIGN_DOCS_ARCHITECTURE.md](DESIGN_DOCS_ARCHITECTURE.md)
+- **快速开始**: [guides/quick-start.md](guides/quick-start.md)
+- **安装指南**: [guides/installation.md](guides/installation.md)
+- **集成状态**: [status/integration-status.md](status/integration-status.md)
 
 ---
 
-## 🗂️ 文档分类
+## 🧭 文档导航（按类型）
 
-### 按受众分类
+### 设计文档（Design）
+- [design/00-overview.md](design/00-overview.md) - 目标/范围/非目标
+- [design/01-requirements.md](design/01-requirements.md) - 需求与约束
+- [design/02-system-context.md](design/02-system-context.md) - 系统上下文
+- [design/03-architecture.md](design/03-architecture.md) - 总体架构
+- [design/04-dataflow.md](design/04-dataflow.md) - 关键数据流
+- [design/05-protocols.md](design/05-protocols.md) - 协议与消息模型
+- [design/06-extension-design.md](design/06-extension-design.md) - 扩展设计
+- [design/07-native-server-design.md](design/07-native-server-design.md) - MCP Server 设计
+- [design/08-tools-catalog.md](design/08-tools-catalog.md) - 工具目录与能力
+- [design/09-security-permissions.md](design/09-security-permissions.md) - 安全与权限
+- [design/10-build-release.md](design/10-build-release.md) - 构建与发布（设计视角）
+- [design/11-migration-compat.md](design/11-migration-compat.md) - 迁移与兼容策略
+- [design/12-observability.md](design/12-observability.md) - 可观测性与诊断
+- [design/13-open-questions.md](design/13-open-questions.md) - 未决问题
+- [design/adr/README.md](design/adr/README.md) - ADR 索引
 
-#### 👥 最终用户
-1. QUICK_START.md - 快速上手
-2. MCP_USAGE_GUIDE.md - 使用指南
-3. DEBUGGING.md - 故障排查
+### 使用与开发指南（Guides）
+- [guides/quick-start.md](guides/quick-start.md) - 快速上手
+- [guides/installation.md](guides/installation.md) - 安装与配置
+- [guides/development.md](guides/development.md) - 开发指南
+- [guides/mcp-usage.md](guides/mcp-usage.md) - MCP 使用指南
+- [guides/customization.md](guides/customization.md) - 定制指南（占位）
 
-#### 👨‍💻 开发者
-1. architecture.md - 了解架构
-2. development.md - 开发指南
-3. api-reference.md - API 文档
-4. DEBUGGING.md - 调试指南
+### 运维与发布（Ops）
+- [ops/deployment.md](ops/deployment.md) - 部署与发布
 
-#### 🏗️ 项目维护者
-1. IMPLEMENTATION_SUMMARY.md - 实施总结
-2. INTEGRATION_STATUS.md - 集成状态
-3. implementation-plan.md - 实施计划
+### 状态与里程碑（Status）
+- [status/integration-status.md](status/integration-status.md) - 当前集成状态（滚动更新）
+- [status/implementation-summary.md](status/implementation-summary.md) - 实施总结（里程碑）
+- [status/implementation-plan.md](status/implementation-plan.md) - 实施计划（历史参考）
+- [status/native-messaging-adaptation.md](status/native-messaging-adaptation.md) - 适配记录（待核验）
 
-#### 🔄 迁移用户
-1. migration-guide.md - 迁移指南
-2. COMPARISON.md - 方案对比
+### 报告（Reports）
+- [reports/dependency-installation.md](reports/dependency-installation.md) - 依赖安装报告
+- [reports/validation-report.md](reports/validation-report.md) - 验证报告
 
-### 按主题分类
-
-#### 🏛️ 架构与设计
-- architecture.md
-- COMPARISON.md
-- implementation-plan.md
-
-#### 🚀 安装与配置
-- QUICK_START.md
-- DEPENDENCY_INSTALLATION_REPORT.md
-
-#### 💻 开发与调试
-- development.md
-- api-reference.md
-- DEBUGGING.md
-
-#### 📖 使用说明
-- MCP_USAGE_GUIDE.md
-- MCP_NOTES.md
-
-#### 📊 项目管理
-- IMPLEMENTATION_SUMMARY.md
-- INTEGRATION_STATUS.md
-- NATIVE_MESSAGING_ADAPTATION_COMPLETE.md
+### 归档（Archive）
+- [archive/](archive/) - 历史/过时文档（仅供参考）
 
 ---
 
-## 🔍 常见问题快速导航
+## 📝 文档维护规则
 
-### 我该从哪里开始？
-→ [QUICK_START.md](QUICK_START.md)
-
-### 如何调试连接问题？
-→ [DEBUGGING.md](DEBUGGING.md) - 第3章：连接问题排查
-
-### 从旧版本迁移？
-→ [migration-guide.md](migration-guide.md)
-
-### 如何使用 MCP 工具？
-→ [MCP_USAGE_GUIDE.md](MCP_USAGE_GUIDE.md)
-
-### 想了解架构设计？
-→ [architecture.md](architecture.md)
-
-### 需要 API 参考？
-→ [api-reference.md](api-reference.md)
+1. 设计文档为单一真相来源（SSOT），状态/报告不得覆盖设计。
+2. 新增文档需放在对应分类目录，并更新本索引。
+3. 过时文档必须移入 `archive/`，并在正文顶部标注“历史”。
 
 ---
 
-## 📝 文档维护说明
-
-### 文档更新原则
-1. 保持文档同步更新
-2. 使用清晰的版本标记
-3. 及时归档过时文档
-
-### 归档文档
-已归档的历史文档位于 `archive/` 目录：
-- ~~IMPLEMENTATION_SUMMARY_1.md~~ → 已合并到 IMPLEMENTATION_SUMMARY.md
-- ~~MCP_USAGE_GUIDE_FINAL.md~~ → 重命名为 MCP_USAGE_GUIDE.md
-- ~~debugging.md, DEBUG_GUIDE.md, DEBUGGING_CONNECTION.md~~ → 已合并到 DEBUGGING.md
-- ~~comparison.md, browser-mcp-comparison.md~~ → 已合并到 COMPARISON.md
-
-### 贡献文档
-如需添加或修改文档：
-1. 确保文档符合现有结构
-2. 更新本索引文件
-3. 添加交叉引用链接
-
----
-
-**文档总数**: 13 个核心文档
-**最后更新**: 2026-01-25
+**最后更新**: 2026-02-01
 **维护者**: Qwen Code Team

@@ -6,7 +6,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/QwenLM/qwen-code.git",
-    "directory": "packages/chrome-extension"
+    "directory": "packages/mcp-chrome-integration/app/chrome-extension"
   },
   "keywords": [
     "chrome-extension",
@@ -29,10 +29,10 @@
     "dev": "EXTENSION_OUT_DIR=dist/extension node scripts/dev-watch.js",
     "debug:mac": "./scripts/debug.sh",
     "sync:extension": "node scripts/sync-extension.js",
-    "build:bg": "node config/esbuild.background.config.js",
-    "build:bg:watch": "node config/esbuild.background.config.js --watch",
-    "build:ui": "node config/esbuild.config.js",
-    "build:ui:watch": "node config/esbuild.config.js --watch",
+    "build:bg": "node scripts/sync-extension.js && node config/esbuild.background.config.js",
+    "build:bg:watch": "node scripts/sync-extension.js && node config/esbuild.background.config.js --watch",
+    "build:ui": "EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js",
+    "build:ui:watch": "EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js --watch",
     "build": "EXTENSION_OUT_DIR=dist/extension npm run clean && EXTENSION_OUT_DIR=dist/extension node scripts/sync-extension.js && EXTENSION_OUT_DIR=dist/extension node config/esbuild.background.config.js --production && EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js --production",
     "install:extension": "./scripts/first-install.sh",
     "install:host": "cd native-host && ./scripts/smart-install.sh",
@@ -44,9 +44,10 @@
     "logs": "tail -f $HOME/.qwen/chrome-bridge/qwen-bridge-host.log"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
+    "@qwen-code/webui": "*",
     "markdown-it": "^14.1.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

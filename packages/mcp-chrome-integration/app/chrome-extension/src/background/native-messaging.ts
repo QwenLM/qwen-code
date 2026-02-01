@@ -1,5 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
 
+import { toCallToolResult, toErrorCallToolResult } from './mcp-tool-result';
+import { createToolRouter } from './tool-router';
+import { normalizeToolName } from './tool-catalog';
+import {
+  DEFAULT_BODY_CHAR_LIMIT,
+  createWebRequestRecorder,
+  mergeCapturedResponses,
+  mergeDebuggerRequests,
+  standardizeNetworkCapture,
+} from './network-capture-utils';
+import type {
+  RawNetworkRequest,
+  WebSocketSession,
+} from './network-capture-utils';
+
 /**
  * Native Messaging Communication Layer
  * Handles communication between Chrome Extension and Native Host via Native Messaging protocol
@@ -25,28 +40,19 @@
     timeoutId?: number;
   };
 
-  type NetworkCaptureEntry = {
-    requestId: string;
-    url: string;
-    method: string;
-    headers?: Record<string, any>;
-    timestamp?: number;
-    type?: string;
-    status?: number;
-    statusText?: string;
-    responseHeaders?: Record<string, any>;
-    mimeType?: string;
-    responseBody?: string;
-    bodyTruncated?: boolean;
-  };
-
   type NetworkCaptureState = {
     capturing: boolean;
     tabId: number | null;
-    requests: NetworkCaptureEntry[];
+    debuggerRequests: Map<string, RawNetworkRequest>;
+    webSocketSessions: Map<string, WebSocketSession>;
     startTime: number | null;
     needResponseBody?: boolean;
+    needDocumentBody?: boolean;
+    captureWebSocket?: boolean;
     includeStatic?: boolean;
+    maxBodyChars?: number;
+    maxWebSocketFrames?: number;
+    maxWebSocketFrameChars?: number;
   };
 
   type NativeMessagingAPI = {
@@ -144,17 +150,18 @@
         }
       });
 
-      // Send initial connection message
-      sendNativeMessage({
-        type: 'CONNECT',
-        payload: { timestamp: Date.now() },
-      });
-
       isConnected = true;
       reconnectAttempts = 0;
 
       // Broadcast connection to UI
       broadcastToUI({ type: 'nativeHostConnected' });
+
+      // Ensure native host starts the HTTP server for MCP bridging
+      try {
+        sendNativeMessage({ type: 'CONNECT', payload: {} });
+      } catch (error) {
+        console.warn(LOG_PREFIX, 'Failed to send CONNECT to native host:', error);
+      }
 
       console.log(LOG_PREFIX, 'Connected successfully');
       return true;
@@ -373,68 +380,15 @@
     try {
       let result;
 
-      // Map MCP tool names to browser operations
-      switch (toolName) {
-        case 'chrome_screenshot':
-        case 'browser_capture_screenshot':
-          result = await executeBrowserScreenshot(args);
-          break;
-
-        case 'chrome_read_page':
-        case 'browser_read_page':
-          result = await executeBrowserReadPage(args);
-          break;
-
-        case 'get_windows_and_tabs':
-        case 'chrome_get_tabs':
-          result = await executeGetWindowsAndTabs(args);
-          break;
-
-        case 'chrome_navigate':
-          result = await executeNavigate(args);
-          break;
-
-        case 'chrome_click_element':
-        case 'browser_click':
-          result = await executeClickElement(args);
-          break;
-
-        case 'chrome_fill_or_select':
-        case 'browser_fill_form':
-        case 'browser_input_text':
-          result = await executeFillOrSelect(args);
-          break;
-
-        case 'chrome_console':
-        case 'browser_get_console_logs':
-          result = await executeGetConsoleLogs(args);
-          break;
-
-        case 'chrome_inject_script':
-        case 'browser_run_js':
-          result = await executeInjectScript(args);
-          break;
-
-        // Network capture tools
-        case 'chrome_network_capture':
-          result = await executeNetworkCapture(args);
-          break;
-
-        case 'chrome_network_debugger_start':
-          result = await executeNetworkDebuggerStart(args);
-          break;
-
-        case 'chrome_network_debugger_stop':
-          result = await executeNetworkDebuggerStop(args);
-          break;
-
-        case 'chrome_network_request':
-          result = await executeNetworkRequest(args);
-          break;
-
-        default:
-          throw new Error(`Unknown tool: ${toolName}`);
+      const normalizedName = normalizeToolName(toolName);
+      const handler = toolRouter.get(normalizedName);
+      if (!handler) {
+        throw new Error(`Unknown tool: ${toolName}`);
       }
+
+      result = await handler(args);
+
+      const callToolResult = toCallToolResult(result);
 
       // Send success response back to Native Host
       // Format must match what register-tools.ts expects:
@@ -443,14 +397,14 @@
         responseToRequestId: requestId,
         payload: {
           status: 'success',
-          data: {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          },
+          data: callToolResult,
         },
       });
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
       console.error(LOG_PREFIX, `Tool ${toolName} failed:`, err);
+
+      const errorResult = toErrorCallToolResult(err);
 
       // Send error response back to Native Host
       sendNativeMessage({
@@ -458,10 +412,7 @@
         payload: {
           status: 'error',
           error: err.message,
-          data: {
-            content: [{ type: 'text', text: `Error: ${err.message}` }],
-            isError: true,
-          },
+          data: errorResult,
         },
       });
     }
@@ -764,9 +715,15 @@
   let networkCaptureState: NetworkCaptureState = {
     capturing: false,
     tabId: null,
-    requests: [],
+    debuggerRequests: new Map(),
+    webSocketSessions: new Map(),
     startTime: null,
   };
+  let networkRecorder = null;
+  let webRequestListener = null;
+  let webRequestHeaderListener = null;
+  let webRequestCompleteListener = null;
+  let webRequestErrorListener = null;
 
   // Network capture implementation
   async function executeNetworkCapture(args: BrowserToolArgs): Promise<any> {
@@ -777,7 +734,35 @@
       maxCaptureTime,
       inactivityTimeout,
       includeStatic,
+      captureWebSocket,
+      needDocumentBody,
+      documentResponseBody,
+      includeDocumentBody,
+      maxBodyChars,
+      maxWebSocketFrames,
+      maxWebSocketFrameChars,
+      maxEntries,
     } = args;
+    const captureWebSocketEnabled = Boolean(
+      captureWebSocket ?? args.includeWebSocket ?? args.needWebSocket,
+    );
+    const documentBodyEnabled = Boolean(
+      needDocumentBody ?? documentResponseBody ?? includeDocumentBody,
+    );
+    const bodyCharLimit =
+      typeof maxBodyChars === 'number'
+        ? maxBodyChars
+        : DEFAULT_BODY_CHAR_LIMIT;
+    const webSocketFrameLimit =
+      typeof maxWebSocketFrames === 'number' ? maxWebSocketFrames : 200;
+    const webSocketFrameCharLimit =
+      typeof maxWebSocketFrameChars === 'number'
+        ? maxWebSocketFrameChars
+        : bodyCharLimit;
+    const entryLimit = typeof maxEntries === 'number' ? maxEntries : 100;
+    const shouldAttachDebugger = Boolean(
+      needResponseBody || captureWebSocketEnabled || documentBodyEnabled,
+    );
 
     if (action === 'start') {
       // Get active tab
@@ -796,25 +781,27 @@
         throw new Error('Active tab has no id');
       }
 
-      // If URL provided, navigate first
-      if (url) {
-        await chrome.tabs.update(tabId, { url });
-        // Wait for navigation
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-
       // Reset state
       networkCaptureState = {
         capturing: true,
         tabId,
-        requests: [],
+        debuggerRequests: new Map(),
+        webSocketSessions: new Map(),
         startTime: Date.now(),
         needResponseBody: needResponseBody || false,
+        needDocumentBody: documentBodyEnabled,
+        captureWebSocket: captureWebSocketEnabled,
         includeStatic: includeStatic || false,
+        maxBodyChars: bodyCharLimit,
+        maxWebSocketFrames: webSocketFrameLimit,
+        maxWebSocketFrameChars: webSocketFrameCharLimit,
       };
 
-      // If needResponseBody, use debugger API
-      if (needResponseBody) {
+      // Use webRequest API for request/response metadata
+      setupWebRequestListeners(tabId);
+
+      // Attach debugger for response bodies or websocket capture
+      if (shouldAttachDebugger) {
         try {
           await chrome.debugger.attach({ tabId }, '1.3');
           await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {});
@@ -823,19 +810,24 @@
           chrome.debugger.onEvent.addListener(handleDebuggerEvent);
         } catch (e) {
           console.error('Failed to attach debugger:', e);
-          // Fall back to webRequest API
-          setupWebRequestListeners(tabId);
         }
-      } else {
-        // Use webRequest API (lighter weight)
-        setupWebRequestListeners(tabId);
+      }
+
+      // If URL provided, navigate after listeners are ready
+      if (url) {
+        await chrome.tabs.update(tabId, { url });
+        // Wait for navigation
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
       return {
         success: true,
         message: 'Network capture started',
         tabId,
-        mode: needResponseBody ? 'debugger' : 'webRequest',
+        mode: shouldAttachDebugger ? 'debugger' : 'webRequest',
+        captureWebSocket: captureWebSocketEnabled,
+        documentResponseBody: documentBodyEnabled,
+        bodyCharLimit,
       };
     } else if (action === 'stop') {
       if (!networkCaptureState.capturing) {
@@ -849,7 +841,12 @@
       const tabId = networkCaptureState.tabId;
 
       // Detach debugger if attached
-      if (networkCaptureState.needResponseBody && tabId !== null) {
+      if (
+        (networkCaptureState.needResponseBody ||
+          networkCaptureState.captureWebSocket ||
+          networkCaptureState.needDocumentBody) &&
+        tabId !== null
+      ) {
         try {
           chrome.debugger.onEvent.removeListener(handleDebuggerEvent);
           await chrome.debugger.detach({ tabId: tabId });
@@ -858,16 +855,58 @@
         }
       }
 
+      // Stop webRequest listeners
+      if (tabId !== null) {
+        teardownWebRequestListeners();
+      }
+
       // Get captured requests
-      const requests = [...networkCaptureState.requests];
+      let requests = networkRecorder ? networkRecorder.getRequests() : [];
+      const debuggerEntries = Array.from(
+        networkCaptureState.debuggerRequests.values(),
+      );
+      if (requests.length === 0 && debuggerEntries.length > 0) {
+        requests = debuggerEntries;
+      } else {
+        requests = mergeDebuggerRequests(requests, debuggerEntries);
+      }
       const startTime = networkCaptureState.startTime ?? Date.now();
-      const duration = Date.now() - startTime;
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+
+      // Merge captured response bodies from content script (fetch/xhr patch)
+      try {
+        if (tabId !== null) {
+          const captured = await getCapturedResponses(tabId);
+          requests = mergeCapturedResponses(requests, captured);
+        }
+      } catch (e) {
+        console.warn(LOG_PREFIX, 'Failed to merge captured responses:', e);
+      }
+
+      const totalRequestCount = requests.length;
+      const limitedRequests = requests.slice(0, entryLimit);
+      const webSockets = Array.from(
+        networkCaptureState.webSocketSessions.values(),
+      );
+
+      const capture = standardizeNetworkCapture({
+        tabId,
+        startedAt: startTime,
+        endedAt: endTime,
+        includeStatic: networkCaptureState.includeStatic,
+        needResponseBody: networkCaptureState.needResponseBody,
+        requests: limitedRequests,
+        websockets: webSockets,
+        bodyCharLimit: networkCaptureState.maxBodyChars,
+      });
 
       // Reset state
       networkCaptureState = {
         capturing: false,
         tabId: null,
-        requests: [],
+        debuggerRequests: new Map(),
+        webSocketSessions: new Map(),
         startTime: null,
       };
 
@@ -875,8 +914,11 @@
         success: true,
         message: 'Network capture stopped',
         duration: duration,
-        requestCount: requests.length,
-        requests: requests.slice(0, 100), // Limit to 100 requests
+        requestCount: totalRequestCount,
+        websocketCount: capture.websockets.length,
+        requests: limitedRequests,
+        websockets: capture.websockets,
+        capture,
       };
     }
 
@@ -884,9 +926,202 @@
   }
 
   function setupWebRequestListeners(tabId: number): void {
-    // This is a simplified implementation
-    // Full implementation would use chrome.webRequest API
-    console.log(LOG_PREFIX, 'Setting up webRequest listeners for tab:', tabId);
+    if (!chrome.webRequest) {
+      console.warn(LOG_PREFIX, 'webRequest API not available');
+      return;
+    }
+
+    networkRecorder = createWebRequestRecorder({
+      includeStatic: !!networkCaptureState.includeStatic,
+    });
+
+    webRequestListener = (details: chrome.webRequest.WebRequestBodyDetails) => {
+      if (!networkRecorder) return;
+      if (details.tabId !== tabId) return;
+      networkRecorder.recordBeforeRequest(details);
+    };
+
+    webRequestHeaderListener = (
+      details: chrome.webRequest.WebRequestHeadersDetails,
+    ) => {
+      if (!networkRecorder) return;
+      if (details.tabId !== tabId) return;
+      networkRecorder.recordBeforeSendHeaders(details);
+    };
+
+    webRequestCompleteListener = (
+      details: chrome.webRequest.WebResponseCacheDetails,
+    ) => {
+      if (!networkRecorder) return;
+      if (details.tabId !== tabId) return;
+      networkRecorder.recordCompleted(details);
+    };
+
+    webRequestErrorListener = (
+      details: chrome.webRequest.WebResponseErrorDetails,
+    ) => {
+      if (!networkRecorder) return;
+      if (details.tabId !== tabId) return;
+      networkRecorder.recordError(details);
+    };
+
+    chrome.webRequest.onBeforeRequest.addListener(
+      webRequestListener,
+      { urls: ['<all_urls>'] },
+      ['requestBody'],
+    );
+
+    chrome.webRequest.onBeforeSendHeaders.addListener(
+      webRequestHeaderListener,
+      { urls: ['<all_urls>'] },
+      ['requestHeaders', 'extraHeaders'],
+    );
+
+    chrome.webRequest.onCompleted.addListener(
+      webRequestCompleteListener,
+      { urls: ['<all_urls>'] },
+      ['responseHeaders', 'extraHeaders'],
+    );
+
+    chrome.webRequest.onErrorOccurred.addListener(
+      webRequestErrorListener,
+      { urls: ['<all_urls>'] },
+    );
+
+    console.log(LOG_PREFIX, 'webRequest listeners attached for tab:', tabId);
+  }
+
+  function teardownWebRequestListeners(): void {
+    if (!chrome.webRequest) return;
+    if (webRequestListener) {
+      chrome.webRequest.onBeforeRequest.removeListener(webRequestListener);
+    }
+    if (webRequestHeaderListener) {
+      chrome.webRequest.onBeforeSendHeaders.removeListener(
+        webRequestHeaderListener,
+      );
+    }
+    if (webRequestCompleteListener) {
+      chrome.webRequest.onCompleted.removeListener(webRequestCompleteListener);
+    }
+    if (webRequestErrorListener) {
+      chrome.webRequest.onErrorOccurred.removeListener(webRequestErrorListener);
+    }
+    webRequestListener = null;
+    webRequestHeaderListener = null;
+    webRequestCompleteListener = null;
+    webRequestErrorListener = null;
+    networkRecorder = null;
+  }
+
+  async function getCapturedResponses(tabId: number) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['content/content-script.js'],
+      });
+    } catch (e) {
+      // Script might already be injected
+    }
+
+    return new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(
+        tabId,
+        { type: 'GET_CAPTURED_RESPONSES' },
+        (response: any) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else if (response && response.success) {
+            resolve(response.data || []);
+          } else {
+            reject(
+              new Error(response?.error || 'Failed to get captured responses'),
+            );
+          }
+        },
+      );
+    });
+  }
+
+  const DEBUGGER_STATIC_TYPES = new Set([
+    'Image',
+    'Stylesheet',
+    'Script',
+    'Font',
+    'Media',
+    'Other',
+  ]);
+
+  function normalizeDebuggerHeaders(
+    headers: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    if (!headers) return undefined;
+    const normalized: Record<string, string> = {};
+    for (const [key, value] of Object.entries(headers)) {
+      normalized[String(key).toLowerCase()] = String(value ?? '');
+    }
+    return normalized;
+  }
+
+  function ensureDebuggerRequest(requestId: string): RawNetworkRequest {
+    let entry = networkCaptureState.debuggerRequests.get(requestId);
+    if (!entry) {
+      entry = {
+        requestId,
+        url: '',
+        method: 'GET',
+        source: { request: 'debugger' },
+      };
+      networkCaptureState.debuggerRequests.set(requestId, entry);
+    }
+    return entry;
+  }
+
+  function ensureWebSocketSession(
+    requestId: string,
+    url?: string,
+  ): WebSocketSession {
+    let session = networkCaptureState.webSocketSessions.get(requestId);
+    if (!session) {
+      session = {
+        requestId,
+        url: url || '',
+        frames: [],
+      };
+      networkCaptureState.webSocketSessions.set(requestId, session);
+    } else if (url && !session.url) {
+      session.url = url;
+    }
+    return session;
+  }
+
+  function recordWebSocketFrame(
+    session: WebSocketSession,
+    direction: 'sent' | 'received',
+    payloadData: string | undefined,
+    opcode: number | undefined,
+    timestamp?: number,
+  ): void {
+    const frameLimit = networkCaptureState.maxWebSocketFrames ?? 200;
+    if (session.frames.length >= frameLimit) return;
+    const maxChars =
+      networkCaptureState.maxWebSocketFrameChars ??
+      networkCaptureState.maxBodyChars ??
+      DEFAULT_BODY_CHAR_LIMIT;
+    let payload = payloadData ? String(payloadData) : '';
+    let truncated = false;
+    if (payload.length > maxChars) {
+      payload = payload.slice(0, maxChars);
+      truncated = true;
+    }
+    session.frames.push({
+      direction,
+      opcode,
+      payload,
+      payloadEncoding: opcode === 2 ? 'base64' : 'text',
+      truncated,
+      timestamp,
+    });
   }
 
   function handleDebuggerEvent(
@@ -906,60 +1141,145 @@
       return;
     }
 
-    if (method === 'Network.requestWillBeSent') {
-      const request = {
-        requestId: params.requestId,
-        url: params.request.url,
-        method: params.request.method,
-        headers: params.request.headers,
-        timestamp: params.timestamp,
-        type: params.type,
-      };
+    if (
+      method.startsWith('Network.webSocket') &&
+      !networkCaptureState.captureWebSocket
+    ) {
+      return;
+    }
 
+    if (method === 'Network.requestWillBeSent') {
       // Filter static resources if needed
-      if (!networkCaptureState.includeStatic) {
-        const staticTypes = ['Image', 'Stylesheet', 'Script', 'Font'];
-        if (staticTypes.includes(params.type)) {
-          return;
-        }
+      if (
+        !networkCaptureState.includeStatic &&
+        params?.type &&
+        DEBUGGER_STATIC_TYPES.has(params.type)
+      ) {
+        return;
       }
 
-      networkCaptureState.requests.push(request);
+      const request = ensureDebuggerRequest(params.requestId);
+      request.url = params.request?.url || request.url;
+      request.method = params.request?.method || request.method;
+      request.headers = normalizeDebuggerHeaders(params.request?.headers);
+      request.timestamp = params.timestamp;
+      request.type = params.type;
+      if (params.request?.postData) {
+        request.requestBody = {
+          raw: String(params.request.postData),
+          rawEncoding: 'utf-8',
+        };
+      }
+      request.source = {
+        ...(request.source || {}),
+        request: 'debugger',
+      };
     }
 
     if (method === 'Network.responseReceived') {
-      const request = networkCaptureState.requests.find(
-        (r) => r.requestId === params.requestId,
+      const request = ensureDebuggerRequest(params.requestId);
+      request.status = params.response?.status;
+      request.statusText = params.response?.statusText;
+      request.type = params.type || request.type;
+      request.responseHeaders = normalizeDebuggerHeaders(
+        params.response?.headers,
       );
-      if (request) {
-        request.status = params.response.status;
-        request.statusText = params.response.statusText;
-        request.responseHeaders = params.response.headers;
-        request.mimeType = params.response.mimeType;
-      }
+      request.mimeType = params.response?.mimeType;
+      request.source = {
+        ...(request.source || {}),
+        response: 'debugger',
+      };
     }
 
-    if (
-      method === 'Network.loadingFinished' &&
-      networkCaptureState.needResponseBody
-    ) {
-      const request = networkCaptureState.requests.find(
-        (r) => r.requestId === params.requestId,
+    if (method === 'Network.loadingFinished') {
+      const request = networkCaptureState.debuggerRequests.get(
+        params.requestId,
       );
-      if (request) {
-        // Get response body
-        chrome.debugger.sendCommand(
-          { tabId: captureTabId },
-          'Network.getResponseBody',
-          { requestId: params.requestId },
-          (result: any) => {
-            if (result && result.body) {
-              request.responseBody = result.body.substring(0, 10000); // Limit size
-              request.bodyTruncated = result.body.length > 10000;
-            }
-          },
-        );
-      }
+      if (!request) return;
+      const shouldCaptureBody =
+        networkCaptureState.needResponseBody ||
+        (networkCaptureState.needDocumentBody && request.type === 'Document');
+      if (!shouldCaptureBody) return;
+
+      const bodyLimit =
+        networkCaptureState.maxBodyChars ?? DEFAULT_BODY_CHAR_LIMIT;
+
+      // Get response body
+      chrome.debugger.sendCommand(
+        { tabId: captureTabId },
+        'Network.getResponseBody',
+        { requestId: params.requestId },
+        (result: any) => {
+          if (chrome.runtime.lastError) {
+            request.error = chrome.runtime.lastError.message;
+            return;
+          }
+          if (result && typeof result.body === 'string') {
+            const truncated = result.body.length > bodyLimit;
+            request.responseBody = truncated
+              ? result.body.slice(0, bodyLimit)
+              : result.body;
+            request.bodyTruncated = truncated;
+            request.responseBodyEncoding = result.base64Encoded
+              ? 'base64'
+              : 'utf-8';
+            request.responseBodySource = 'debugger';
+          }
+        },
+      );
+    }
+
+    if (method === 'Network.webSocketCreated') {
+      const session = ensureWebSocketSession(params.requestId, params.url);
+      session.createdAt = params.timestamp;
+    }
+
+    if (method === 'Network.webSocketWillSendHandshakeRequest') {
+      const session = ensureWebSocketSession(params.requestId, params.url);
+      session.requestHeaders = normalizeDebuggerHeaders(
+        params.request?.headers,
+      );
+    }
+
+    if (method === 'Network.webSocketHandshakeResponseReceived') {
+      const session = ensureWebSocketSession(params.requestId);
+      session.status = params.response?.status;
+      session.statusText = params.response?.statusText;
+      session.responseHeaders = normalizeDebuggerHeaders(
+        params.response?.headers,
+      );
+    }
+
+    if (method === 'Network.webSocketFrameSent') {
+      const session = ensureWebSocketSession(params.requestId);
+      recordWebSocketFrame(
+        session,
+        'sent',
+        params.response?.payloadData,
+        params.response?.opcode,
+        params.timestamp,
+      );
+    }
+
+    if (method === 'Network.webSocketFrameReceived') {
+      const session = ensureWebSocketSession(params.requestId);
+      recordWebSocketFrame(
+        session,
+        'received',
+        params.response?.payloadData,
+        params.response?.opcode,
+        params.timestamp,
+      );
+    }
+
+    if (method === 'Network.webSocketClosed') {
+      const session = ensureWebSocketSession(params.requestId);
+      session.closedAt = params.timestamp;
+    }
+
+    if (method === 'Network.webSocketFrameError') {
+      const session = ensureWebSocketSession(params.requestId);
+      session.error = params.errorMessage || 'websocket frame error';
     }
   }
 
@@ -978,6 +1298,23 @@
       throw new Error('Active tab has no id');
     }
 
+    const captureWebSocketEnabled = Boolean(
+      args.captureWebSocket ?? args.includeWebSocket ?? args.needWebSocket,
+    );
+    const documentBodyEnabled = Boolean(
+      args.needDocumentBody ?? args.documentResponseBody ?? args.includeDocumentBody,
+    );
+    const bodyCharLimit =
+      typeof args.maxBodyChars === 'number'
+        ? args.maxBodyChars
+        : DEFAULT_BODY_CHAR_LIMIT;
+    const webSocketFrameLimit =
+      typeof args.maxWebSocketFrames === 'number' ? args.maxWebSocketFrames : 200;
+    const webSocketFrameCharLimit =
+      typeof args.maxWebSocketFrameChars === 'number'
+        ? args.maxWebSocketFrameChars
+        : bodyCharLimit;
+
     try {
       await chrome.debugger.attach({ tabId }, '1.3');
       await chrome.debugger.sendCommand({ tabId }, 'Network.enable', {});
@@ -985,10 +1322,16 @@
       networkCaptureState = {
         capturing: true,
         tabId,
-        requests: [],
+        debuggerRequests: new Map(),
+        webSocketSessions: new Map(),
         startTime: Date.now(),
         needResponseBody: true,
+        needDocumentBody: documentBodyEnabled,
+        captureWebSocket: captureWebSocketEnabled,
         includeStatic: false,
+        maxBodyChars: bodyCharLimit,
+        maxWebSocketFrames: webSocketFrameLimit,
+        maxWebSocketFrameChars: webSocketFrameCharLimit,
       };
 
       chrome.debugger.onEvent.addListener(handleDebuggerEvent);
@@ -1026,14 +1369,34 @@
       // Might already be detached
     }
 
-    const requests = [...networkCaptureState.requests];
+    const requests = Array.from(
+      networkCaptureState.debuggerRequests.values(),
+    );
     const startTime = networkCaptureState.startTime ?? Date.now();
-    const duration = Date.now() - startTime;
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    const entryLimit = typeof args.maxEntries === 'number' ? args.maxEntries : 100;
+    const limitedRequests = requests.slice(0, entryLimit);
+    const webSockets = Array.from(
+      networkCaptureState.webSocketSessions.values(),
+    );
+
+    const capture = standardizeNetworkCapture({
+      tabId,
+      startedAt: startTime,
+      endedAt: endTime,
+      includeStatic: networkCaptureState.includeStatic,
+      needResponseBody: networkCaptureState.needResponseBody,
+      requests: limitedRequests,
+      websockets: webSockets,
+      bodyCharLimit: networkCaptureState.maxBodyChars,
+    });
 
     networkCaptureState = {
       capturing: false,
       tabId: null,
-      requests: [],
+      debuggerRequests: new Map(),
+      webSocketSessions: new Map(),
       startTime: null,
     };
 
@@ -1042,7 +1405,10 @@
       message: 'Network debugger stopped',
       duration: duration,
       requestCount: requests.length,
-      requests: requests.slice(0, 100),
+      websocketCount: capture.websockets.length,
+      requests: limitedRequests,
+      websockets: capture.websockets,
+      capture,
     };
   }
 
@@ -1086,6 +1452,27 @@
       throw new Error(`Network request failed: ${err.message}`);
     }
   }
+
+  const toolRouter = createToolRouter(
+    {
+      chrome_screenshot: executeBrowserScreenshot,
+      chrome_read_page: executeBrowserReadPage,
+      get_windows_and_tabs: executeGetWindowsAndTabs,
+      chrome_navigate: executeNavigate,
+      chrome_click_element: executeClickElement,
+      chrome_fill_or_select: executeFillOrSelect,
+      chrome_console: executeGetConsoleLogs,
+      chrome_inject_script: executeInjectScript,
+      chrome_network_capture: executeNetworkCapture,
+      chrome_network_debugger_start: executeNetworkDebuggerStart,
+      chrome_network_debugger_stop: executeNetworkDebuggerStop,
+      chrome_network_request: executeNetworkRequest,
+    },
+    (name) => async () => ({
+      content: [{ type: 'text', text: `Unsupported tool in extension: ${name}` }],
+      isError: true,
+    }),
+  );
 
   /**
    * Get connection status

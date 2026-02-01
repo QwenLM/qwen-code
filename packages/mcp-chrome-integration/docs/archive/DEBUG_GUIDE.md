@@ -141,7 +141,7 @@ node --inspect dist/index.js
 
 ### 前置条件
 
-⚠️ **重要**: 由于 Extension 通信层尚未完全适配，以下步骤需要先完成 Extension 的 Native Messaging 适配（参考 `docs/IMPLEMENTATION_SUMMARY.md`）。
+⚠️ **重要**: 由于 Extension 通信层尚未完全适配，以下步骤需要先完成 Extension 的 Native Messaging 适配（参考 `docs/status/implementation-summary.md`）。
 
 ### 步骤 1: 构建 Extension
 

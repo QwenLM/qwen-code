@@ -77,7 +77,7 @@ cd /path/to/mcp-chrome-integration
 5. 验证安装（运行 doctor 命令）
 
 **环境要求**:
-- Node.js 18+
+- Node.js 22+
 - pnpm
 - macOS/Linux（Windows 需要修改路径）
 
@@ -443,9 +443,9 @@ nvm use 18
 ## 🔗 相关文档
 
 - [项目文档索引](../docs/README.md)
-- [调试指南](../docs/DEBUGGING.md)
-- [快速开始](../docs/QUICK_START.md)
-- [开发指南](../docs/development.md)
+- [调试指南（历史）](../docs/archive/DEBUG_GUIDE.md)
+- [快速开始](../docs/guides/quick-start.md)
+- [开发指南](../docs/guides/development.md)
 
 ---
 

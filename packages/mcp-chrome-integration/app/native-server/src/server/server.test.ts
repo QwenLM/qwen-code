@@ -1,5 +1,4 @@
 import { describe, expect, test, afterAll, beforeAll } from '@jest/globals';
-import supertest from 'supertest';
 import Server from './index';
 
 describe('服务器测试', () => {
@@ -14,12 +13,14 @@ describe('服务器测试', () => {
   });
 
   test('GET /ping 应返回正确响应', async () => {
-    const response = await supertest(Server.getInstance().server)
-      .get('/ping')
-      .expect(200)
-      .expect('Content-Type', /json/);
+    const response = await Server.getInstance().inject({
+      method: 'GET',
+      url: '/ping',
+    });
 
-    expect(response.body).toEqual({
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toMatch(/json/);
+    expect(response.json()).toEqual({
       status: 'ok',
       message: 'pong',
     });

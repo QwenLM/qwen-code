@@ -36,8 +36,9 @@ const entryPoints = [
 async function build() {
   const ctx = await esbuild.context({
     entryPoints,
-    bundle: false,
+    bundle: true,
     platform: 'browser',
+    format: 'iife',
     target: ['chrome115'],
     minify: isProduction,
     sourcemap: !isProduction,

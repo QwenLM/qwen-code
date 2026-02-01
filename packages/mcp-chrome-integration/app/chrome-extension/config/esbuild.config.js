@@ -15,7 +15,7 @@ import autoprefixer from 'autoprefixer';
 
 const isWatch = process.argv.includes('--watch');
 const isProduction = process.argv.includes('--production');
-const outDir = process.env.EXTENSION_OUT_DIR || 'extension';
+const outDir = process.env.EXTENSION_OUT_DIR || 'dist/extension';
 
 /**
  * Custom CSS plugin that processes CSS through PostCSS/Tailwind

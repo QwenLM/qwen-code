@@ -26,13 +26,13 @@ fi
 echo "📋 检查环境..."
 if ! command -v node &> /dev/null; then
     echo -e "${RED}❌ Node.js 未安装${NC}"
-    echo "请先安装 Node.js 18+ : https://nodejs.org/"
+    echo "请先安装 Node.js 22+ : https://nodejs.org/"
     exit 1
 fi
 
 NODE_VERSION=$(node -v | cut -d'v' -f2 | cut -d'.' -f1)
 if [ "$NODE_VERSION" -lt 18 ]; then
-    echo -e "${RED}❌ Node.js 版本过低 (当前: v$NODE_VERSION, 需要: v18+)${NC}"
+    echo -e "${RED}❌ Node.js 版本过低 (当前: v$NODE_VERSION, 需要: v22+)${NC}"
     exit 1
 fi
 
@@ -93,7 +93,7 @@ echo "   - 加载后，Extension 卡片上会显示 ID (例如: abcdefghijklmnop
 echo "   - 记下这个 ID，后续更新 Native Messaging 配置时需要"
 echo ""
 echo "3. 更新 Native Messaging 配置（如果 Extension ID 改变）:"
-echo "   macOS: ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.qwen.mcp_chrome_bridge.json"
+echo "   macOS: ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json"
 echo "   更新 allowed_origins 字段为: chrome-extension://YOUR_EXTENSION_ID/"
 echo ""
 echo "4. 配置 Qwen CLI:"
@@ -109,7 +109,6 @@ echo '   }'
 echo ""
 echo "🎯 提示："
 echo "   - 如需重新构建: ./scripts/build-all.sh"
-echo "   - 查看详细文档: docs/implementation-plan.md"
+echo "   - 查看详细文档: docs/status/implementation-plan.md"
 echo ""
 echo -e "${GREEN}✨ 享受更强大的浏览器自动化能力！${NC}"
-

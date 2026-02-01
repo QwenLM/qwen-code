@@ -642,7 +642,7 @@ export const TOOL_SCHEMAS: Tool[] = [
   {
     name: TOOL_NAMES.BROWSER.NETWORK_CAPTURE,
     description:
-      'Unified network capture tool. Use action="start" to begin capturing, action="stop" to end and retrieve results. Set needResponseBody=true to capture response bodies (uses Debugger API, may conflict with DevTools). Default mode uses webRequest API (lightweight, no debugger conflict, but no response body).',
+      'Unified network capture tool. Use action="start" to begin capturing, action="stop" to end and retrieve results. Set needResponseBody=true to capture response bodies (uses Debugger API, may conflict with DevTools). Enable captureWebSocket and/or needDocumentBody to extend coverage. Default mode uses webRequest API (lightweight, no debugger conflict, but no response body).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -656,6 +656,16 @@ export const TOOL_SCHEMAS: Tool[] = [
           type: 'boolean',
           description:
             'When true, captures response body using Debugger API (default: false). Only use when you need to inspect response content.',
+        },
+        needDocumentBody: {
+          type: 'boolean',
+          description:
+            'When true, captures Document response body via Debugger API even if needResponseBody is false (default: false).',
+        },
+        captureWebSocket: {
+          type: 'boolean',
+          description:
+            'When true, captures WebSocket handshake metadata and frames via Debugger API (default: false).',
         },
         url: {
           type: 'string',
@@ -675,6 +685,26 @@ export const TOOL_SCHEMAS: Tool[] = [
           type: 'boolean',
           description:
             'Include static resources like images/scripts/styles (default: false)',
+        },
+        maxBodyChars: {
+          type: 'number',
+          description:
+            'Maximum characters to keep per response body or WebSocket frame payload (default: 10000).',
+        },
+        maxWebSocketFrames: {
+          type: 'number',
+          description:
+            'Maximum WebSocket frames to retain per connection (default: 200).',
+        },
+        maxWebSocketFrameChars: {
+          type: 'number',
+          description:
+            'Maximum characters to keep per WebSocket frame payload (default: same as maxBodyChars).',
+        },
+        maxEntries: {
+          type: 'number',
+          description:
+            'Maximum number of requests to include in the response (default: 100).',
         },
       },
       required: ['action'],

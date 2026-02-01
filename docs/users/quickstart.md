@@ -18,7 +18,7 @@ To install Qwen Code, use one of the following methods:
 
 ### NPM (recommended)
 
-Requires [Node.js 20+](https://nodejs.org/download), you can use `node -v` check the version. If it's not installed, use the following command to install it.
+Requires [Node.js 22+](https://nodejs.org/download), you can use `node -v` check the version. If it's not installed, use the following command to install it.
 
 If you have [Node.js or newer installed](https://nodejs.org/en/download/):
 

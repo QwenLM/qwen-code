@@ -73,3 +73,6 @@ integration-tests/concurrent-runner/task-*
 # storybook
 *storybook.log
 storybook-static
+
+# test
+coverage/

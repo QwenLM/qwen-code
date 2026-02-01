@@ -6,7 +6,7 @@ A documentation website for Qwen Code built with [Next.js](https://nextjs.org/) 
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 22+
 - npm or yarn
 
 ### Installation

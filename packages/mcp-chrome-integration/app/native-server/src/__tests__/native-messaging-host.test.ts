@@ -3,7 +3,7 @@
  * Tests for the Native Messaging protocol implementation between Chrome Extension and Native Server
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 
 // Mock types for testing
 interface MockMessage {
@@ -134,7 +134,7 @@ describe('Native Messaging Protocol', () => {
         resolve: (value) => {
           resolvedValue = value;
         },
-        reject: vi.fn(),
+        reject: jest.fn(),
         timeoutId: setTimeout(() => {}, 30000),
       };
       pendingRequests.set(requestId, pending);
@@ -163,9 +163,9 @@ describe('Native Messaging Protocol', () => {
       const pendingRequests = new Map<string, MockPendingRequest>();
       const requestId = 'req_error';
 
-      let rejectedError: Error | null = null;
+      let rejectedError: unknown = null;
       const pending: MockPendingRequest = {
-        resolve: vi.fn(),
+        resolve: jest.fn(),
         reject: (reason) => {
           rejectedError = reason as Error;
         },
@@ -192,7 +192,10 @@ describe('Native Messaging Protocol', () => {
       }
 
       expect(rejectedError).toBeInstanceOf(Error);
-      expect(rejectedError?.message).toBe('Tool execution failed');
+      const rejectedMessage = (
+        rejectedError as { message?: string } | null
+      )?.message;
+      expect(rejectedMessage).toBe('Tool execution failed');
     });
   });
 
@@ -291,11 +294,11 @@ describe('Connection Health', () => {
 
   describe('Timeout Handling', () => {
     beforeEach(() => {
-      vi.useFakeTimers();
+      jest.useFakeTimers();
     });
 
     afterEach(() => {
-      vi.useRealTimers();
+      jest.useRealTimers();
     });
 
     it('should timeout pending request after specified duration', () => {
@@ -305,7 +308,7 @@ describe('Connection Health', () => {
 
       let timedOut = false;
       const pending: MockPendingRequest = {
-        resolve: vi.fn(),
+        resolve: jest.fn(),
         reject: () => {
           timedOut = true;
         },
@@ -317,7 +320,7 @@ describe('Connection Health', () => {
       pendingRequests.set(requestId, pending);
 
       // Fast-forward time
-      vi.advanceTimersByTime(timeoutMs + 100);
+      jest.advanceTimersByTime(timeoutMs + 100);
 
       expect(timedOut).toBe(true);
       expect(pendingRequests.has(requestId)).toBe(false);

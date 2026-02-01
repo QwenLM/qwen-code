@@ -1,0 +1,66 @@
+{
+  "name": "@qwen-code/chrome-bridge-old",
+  "version": "1.0.0",
+  "description": "Chrome extension bridge for Qwen CLI - enables AI-powered browser interactions",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/chrome-extension"
+  },
+  "keywords": [
+    "chrome-extension",
+    "qwen",
+    "cli",
+    "bridge",
+    "native-messaging",
+    "mcp",
+    "ai"
+  ],
+  "author": "Qwen Team",
+  "license": "Apache-2.0",
+  "type": "module",
+  "files": [
+    "public/",
+    "native-host/",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "EXTENSION_OUT_DIR=dist/extension node scripts/dev-watch.js",
+    "debug:mac": "./scripts/debug.sh",
+    "sync:extension": "node scripts/sync-extension.js",
+    "build:ui": "node config/esbuild.config.js",
+    "build:ui:watch": "node config/esbuild.config.js --watch",
+    "dev:native-host": "npm --prefix native-host run dev",
+    "build:native-host": "npm --prefix native-host run build",
+    "build": "EXTENSION_OUT_DIR=dist/extension npm run clean && npm run build:native-host && EXTENSION_OUT_DIR=dist/extension node scripts/sync-extension.js && EXTENSION_OUT_DIR=dist/extension node config/esbuild.config.js --production",
+    "install:extension": "./scripts/first-install.sh",
+    "install:host": "cd native-host && ./scripts/smart-install.sh",
+    "install:all": "./scripts/first-install.sh",
+    "update:host": "cd native-host && ./scripts/update-host-config.sh",
+    "dev:chrome": "open -a 'Google Chrome' --args --load-extension=$PWD/dist/extension --auto-open-devtools-for-tabs",
+    "package": "npm run build && cd dist && zip -r ../chrome-extension.zip extension/",
+    "clean": "./scripts/clean.sh",
+    "logs": "tail -f $HOME/.qwen/chrome-bridge/qwen-bridge-host.log"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@qwen-code/webui": "*",
+    "markdown-it": "^14.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.32",
+    "@types/markdown-it": "^14.1.2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "autoprefixer": "^10.4.22",
+    "esbuild": "^0.25.3",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.18",
+    "typescript": "^5.8.3"
+  }
+}

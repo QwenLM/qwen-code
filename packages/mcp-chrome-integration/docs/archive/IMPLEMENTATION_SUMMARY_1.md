@@ -165,7 +165,7 @@ packages/mcp-chrome-integration/
    - 受众: 所有用户
    - 内容: 快速开始、工具列表、配置方法、故障排查
 
-2. **packages/mcp-chrome-integration/docs/migration-guide.md**
+2. **packages/mcp-chrome-integration/docs/design/11-migration-compat.md**
    - 受众: 从旧版迁移的用户
    - 内容: 逐工具迁移指南、代码对比、注意事项
 
@@ -184,10 +184,10 @@ packages/mcp-chrome-integration/
 ### 保留文档 (未修改)
 
 - **packages/chrome-extension/** - 完整保留旧实现
-  - `docs/architecture.md` - 旧架构文档
-  - `docs/MCP_NOTES.md` - MCP 能力文档
+  - `docs/design/03-architecture.md` - 旧架构文档
+  - `docs/design/08-tools-catalog.md` - MCP 能力文档
   - `docs/new.md` - 技术调研对话
-  - `docs/hangwin-mcp-chrome-validation-report.md` - 验证报告
+  - `docs/reports/validation-report.md` - 验证报告
 
 ---
 
@@ -356,7 +356,7 @@ cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration
 ### 项目文档
 
 - [README.md](README.md) - 安装和使用指南
-- [migration-guide.md](docs/migration-guide.md) - 迁移指南
+- [migration-guide.md](docs/design/11-migration-compat.md) - 迁移指南
 - [comparison.md](docs/comparison.md) - 详细对比
 
 ### 外部资源
@@ -367,8 +367,8 @@ cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration
 
 ### 旧实现参考
 
-- [chrome-extension/docs/architecture.md](../chrome-extension/docs/architecture.md)
-- [chrome-extension/docs/hangwin-mcp-chrome-validation-report.md](../chrome-extension/docs/hangwin-mcp-chrome-validation-report.md)
+- [chrome-extension/docs/design/03-architecture.md](../chrome-extension/docs/design/03-architecture.md)
+- [chrome-extension/docs/reports/validation-report.md](../chrome-extension/docs/reports/validation-report.md)
 
 ---
 

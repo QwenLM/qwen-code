@@ -2,7 +2,7 @@
   "name": "@qwen-code/qwen-code",
   "version": "0.9.0",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "type": "module",
   "workspaces": [
