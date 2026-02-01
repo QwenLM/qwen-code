@@ -54,17 +54,45 @@ export class AcpFileSystemService implements FileSystemService {
     return response.content;
   }
 
-  async writeTextFile(filePath: string, content: string): Promise<void> {
+  async writeTextFile(
+    filePath: string,
+    content: string,
+    options?: { bom?: boolean },
+  ): Promise<void> {
     if (!this.capabilities.writeTextFile) {
-      return this.fallback.writeTextFile(filePath, content);
+      return this.fallback.writeTextFile(filePath, content, options);
     }
+
+    // Prepend BOM character if requested
+    const finalContent = options?.bom ? '\uFEFF' + content : content;
 
     await this.client.writeTextFile({
       path: filePath,
-      content,
+      content: finalContent,
       sessionId: this.sessionId,
     });
   }
+
+  async detectFileBOM(filePath: string): Promise<boolean> {
+    // Try to detect BOM through ACP client first by reading first line
+    if (this.capabilities.readTextFile) {
+      try {
+        const response = await this.client.readTextFile({
+          path: filePath,
+          sessionId: this.sessionId,
+          line: null,
+          limit: 1,
+        });
+        // Check if content starts with BOM character (U+FEFF)
+        return response.content.charCodeAt(0) === 0xfeff;
+      } catch {
+        // Fall through to fallback if ACP read fails
+      }
+    }
+    // Fall back to local filesystem detection
+    return this.fallback.detectFileBOM(filePath);
+  }
+
   findFiles(fileName: string, searchPaths: readonly string[]): string[] {
     return this.fallback.findFiles(fileName, searchPaths);
   }

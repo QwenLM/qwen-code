@@ -24,6 +24,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
+import { FileEncoding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
@@ -235,9 +236,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         fs.mkdirSync(dirName, { recursive: true });
       }
 
+      // Check if file exists and has BOM to preserve encoding
+      // For new files, use the configured default encoding
+      let useBOM = false;
+      if (!isNewFile) {
+        useBOM = await this.config
+          .getFileSystemService()
+          .detectFileBOM(file_path);
+      } else {
+        useBOM = this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
+      }
+
       await this.config
         .getFileSystemService()
-        .writeTextFile(file_path, fileContent);
+        .writeTextFile(file_path, fileContent, { bom: useBOM });
 
       // Generate diff for display result
       const fileName = path.basename(file_path);
