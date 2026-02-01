@@ -55,7 +55,6 @@ const renderComponent = (
         switchModel: vi.fn().mockResolvedValue(undefined),
         getAuthType: vi.fn(() => 'qwen-oauth'),
 
-        // --- Functions used by ClearcutLogger ---
         getUsageStatisticsEnabled: vi.fn(() => true),
         getSessionId: vi.fn(() => 'mock-session-id'),
         getDebugMode: vi.fn(() => false),
@@ -63,7 +62,6 @@ const renderComponent = (
           authType: AuthType.QWEN_OAUTH,
           model: MAINLINE_CODER,
         })),
-        getUseSmartEdit: vi.fn(() => false),
         getUseModelRouter: vi.fn(() => false),
         getProxy: vi.fn(() => undefined),
 

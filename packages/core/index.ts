@@ -42,6 +42,4 @@ export {
 export { makeFakeConfig } from './src/test-utils/config.js';
 export * from './src/utils/pathReader.js';
 export * from './src/utils/request-tokenizer/supportedImageFormats.js';
-export { ClearcutLogger } from './src/telemetry/clearcut-logger/clearcut-logger.js';
-export { QwenLogger } from './src/telemetry/qwen-logger/qwen-logger.js';
 export { logModelSlashCommand } from './src/telemetry/loggers.js';

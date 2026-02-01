@@ -254,7 +254,6 @@ describe('CoreToolScheduler', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -332,7 +331,6 @@ describe('CoreToolScheduler', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -375,7 +373,6 @@ describe('CoreToolScheduler', () => {
       } as unknown as ToolRegistry;
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null, // No client needed for these tests
         getExcludeTools: () => undefined,
@@ -417,7 +414,6 @@ describe('CoreToolScheduler', () => {
       // Create mocked config with excluded tools
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
@@ -448,7 +444,6 @@ describe('CoreToolScheduler', () => {
       // Create mocked config with excluded tools
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit'],
@@ -490,7 +485,6 @@ describe('CoreToolScheduler', () => {
       // Create mocked config
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => undefined,
@@ -570,7 +564,6 @@ describe('CoreToolScheduler', () => {
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
@@ -657,7 +650,6 @@ describe('CoreToolScheduler', () => {
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
@@ -747,7 +739,6 @@ describe('CoreToolScheduler with payload', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1077,7 +1068,6 @@ describe('CoreToolScheduler edit cancellation', () => {
         getProjectTempDir: () => '/tmp',
       },
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1187,7 +1177,6 @@ describe('CoreToolScheduler YOLO mode', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1429,7 +1418,6 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1562,7 +1550,6 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1665,7 +1652,6 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1738,7 +1724,6 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1933,7 +1918,6 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -2054,7 +2038,6 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,

@@ -52,7 +52,6 @@ import { ReadManyFilesTool } from '../tools/read-many-files.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
-import { SmartEditTool } from '../tools/smart-edit.js';
 import { SkillTool } from '../tools/skill.js';
 import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
@@ -361,7 +360,6 @@ export interface ConfigParameters {
   truncateToolOutputLines?: number;
   enableToolOutputTruncation?: boolean;
   eventEmitter?: EventEmitter;
-  useSmartEdit?: boolean;
   output?: OutputSettings;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
@@ -510,7 +508,6 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
-  private readonly useSmartEdit: boolean;
   private readonly channel: string | undefined;
 
   constructor(params: ConfigParameters) {
@@ -623,7 +620,6 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
-    this.useSmartEdit = params.useSmartEdit ?? false;
     this.channel = params.channel;
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
@@ -1523,10 +1519,6 @@ export class Config {
     return this.truncateToolOutputLines;
   }
 
-  getUseSmartEdit(): boolean {
-    return this.useSmartEdit;
-  }
-
   getOutputFormat(): OutputFormat {
     return this.outputFormat;
   }
@@ -1649,11 +1641,7 @@ export class Config {
     }
 
     registerCoreTool(GlobTool, this);
-    if (this.getUseSmartEdit()) {
-      registerCoreTool(SmartEditTool, this);
-    } else {
-      registerCoreTool(EditTool, this);
-    }
+    registerCoreTool(EditTool, this);
     registerCoreTool(WriteFileTool, this);
     registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
