@@ -10,7 +10,6 @@ import type {
   Content,
   ContentListUnion,
   ContentUnion,
-  FunctionCall,
   FunctionResponse,
   GenerateContentParameters,
   Part,
@@ -29,15 +28,6 @@ import {
 type AnthropicMessageParam = Anthropic.MessageParam;
 type AnthropicToolParam = Anthropic.Tool;
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
-
-type ThoughtPart = { text: string; signature?: string };
-
-interface ParsedParts {
-  thoughtParts: ThoughtPart[];
-  contentParts: string[];
-  functionCalls: FunctionCall[];
-  functionResponses: FunctionResponse[];
-}
 
 export class AnthropicContentConverter {
   private model: string;
@@ -228,125 +218,187 @@ export class AnthropicContentConverter {
     }
 
     if (!this.isContentObject(content)) return;
-
-    const parsed = this.parseParts(content.parts || []);
-
-    if (parsed.functionResponses.length > 0) {
-      for (const response of parsed.functionResponses) {
-        messages.push({
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: response.id || '',
-              content: this.extractFunctionResponseContent(response.response),
-            },
-          ],
-        });
-      }
-      return;
-    }
-
-    if (content.role === 'model' && parsed.functionCalls.length > 0) {
-      const thinkingBlocks: AnthropicContentBlockParam[] =
-        parsed.thoughtParts.map((part) => {
-          const thinkingBlock: unknown = {
-            type: 'thinking',
-            thinking: part.text,
-          };
-          if (part.signature) {
-            (thinkingBlock as { signature?: string }).signature =
-              part.signature;
-          }
-          return thinkingBlock as AnthropicContentBlockParam;
-        });
-      const toolUses: AnthropicContentBlockParam[] = parsed.functionCalls.map(
-        (call, index) => ({
-          type: 'tool_use',
-          id: call.id || `tool_${index}`,
-          name: call.name || '',
-          input: (call.args as Record<string, unknown>) || {},
-        }),
-      );
-
-      const textBlocks: AnthropicContentBlockParam[] = parsed.contentParts.map(
-        (text) => ({
-          type: 'text' as const,
-          text,
-        }),
-      );
-
-      messages.push({
-        role: 'assistant',
-        content: [...thinkingBlocks, ...textBlocks, ...toolUses],
-      });
-      return;
-    }
-
+    const parts = content.parts || [];
     const role = content.role === 'model' ? 'assistant' : 'user';
-    const thinkingBlocks: AnthropicContentBlockParam[] =
-      role === 'assistant'
-        ? parsed.thoughtParts.map((part) => {
-            const thinkingBlock: unknown = {
-              type: 'thinking',
-              thinking: part.text,
-            };
-            if (part.signature) {
-              (thinkingBlock as { signature?: string }).signature =
-                part.signature;
-            }
-            return thinkingBlock as AnthropicContentBlockParam;
-          })
-        : [];
-    const textBlocks: AnthropicContentBlockParam[] = [
-      ...thinkingBlocks,
-      ...parsed.contentParts.map((text) => ({
-        type: 'text' as const,
-        text,
-      })),
-    ];
-    if (textBlocks.length > 0) {
-      messages.push({ role, content: textBlocks });
-    }
-  }
-
-  private parseParts(parts: Part[]): ParsedParts {
-    const thoughtParts: ThoughtPart[] = [];
-    const contentParts: string[] = [];
-    const functionCalls: FunctionCall[] = [];
-    const functionResponses: FunctionResponse[] = [];
+    const contentBlocks: AnthropicContentBlockParam[] = [];
+    let toolCallIndex = 0;
 
     for (const part of parts) {
       if (typeof part === 'string') {
-        contentParts.push(part);
-      } else if (
-        'text' in part &&
-        part.text &&
-        !('thought' in part && part.thought)
-      ) {
-        contentParts.push(part.text);
-      } else if ('text' in part && 'thought' in part && part.thought) {
-        thoughtParts.push({
-          text: part.text || '',
-          signature:
+        contentBlocks.push({ type: 'text', text: part });
+        continue;
+      }
+
+      if ('text' in part && 'thought' in part && part.thought) {
+        if (role === 'assistant') {
+          const thinkingBlock: unknown = {
+            type: 'thinking',
+            thinking: part.text || '',
+          };
+          if (
             'thoughtSignature' in part &&
             typeof part.thoughtSignature === 'string'
-              ? part.thoughtSignature
-              : undefined,
-        });
-      } else if ('functionCall' in part && part.functionCall) {
-        functionCalls.push(part.functionCall);
-      } else if ('functionResponse' in part && part.functionResponse) {
-        functionResponses.push(part.functionResponse);
+          ) {
+            (thinkingBlock as { signature?: string }).signature =
+              part.thoughtSignature;
+          }
+          contentBlocks.push(thinkingBlock as AnthropicContentBlockParam);
+        }
+      }
+
+      if ('text' in part && part.text && !('thought' in part && part.thought)) {
+        contentBlocks.push({ type: 'text', text: part.text });
+      }
+
+      const mediaBlock = this.createMediaBlockFromPart(part);
+      if (mediaBlock) {
+        contentBlocks.push(mediaBlock);
+      }
+
+      if ('functionCall' in part && part.functionCall) {
+        if (role === 'assistant') {
+          contentBlocks.push({
+            type: 'tool_use',
+            id: part.functionCall.id || `tool_${toolCallIndex}`,
+            name: part.functionCall.name || '',
+            input: (part.functionCall.args as Record<string, unknown>) || {},
+          });
+          toolCallIndex += 1;
+        }
+      }
+
+      if (part.functionResponse) {
+        const toolResultBlock = this.createToolResultBlock(
+          part.functionResponse,
+        );
+        if (toolResultBlock && role === 'user') {
+          contentBlocks.push(toolResultBlock);
+        }
       }
     }
 
+    if (contentBlocks.length > 0) {
+      messages.push({ role, content: contentBlocks });
+    }
+  }
+
+  private createToolResultBlock(
+    response: FunctionResponse,
+  ): Anthropic.ToolResultBlockParam | null {
+    const textContent = this.extractFunctionResponseContent(response.response);
+
+    type ToolResultContent = Anthropic.ToolResultBlockParam['content'];
+    const partBlocks: AnthropicContentBlockParam[] = [];
+
+    for (const part of response.parts || []) {
+      const block = this.createMediaBlockFromPart(part);
+      if (block) {
+        partBlocks.push(block);
+      }
+    }
+
+    let content: ToolResultContent;
+    if (partBlocks.length > 0) {
+      const blocks: AnthropicContentBlockParam[] = [];
+      if (textContent) {
+        blocks.push({ type: 'text', text: textContent });
+      }
+      blocks.push(...partBlocks);
+      content = blocks as unknown as ToolResultContent;
+    } else {
+      content = textContent;
+    }
+
     return {
-      thoughtParts,
-      contentParts,
-      functionCalls,
-      functionResponses,
+      type: 'tool_result',
+      tool_use_id: response.id || '',
+      content,
     };
+  }
+
+  private createMediaBlockFromPart(
+    part: Part,
+  ): AnthropicContentBlockParam | null {
+    if (part.inlineData?.mimeType && part.inlineData?.data) {
+      if (this.isSupportedAnthropicImageMimeType(part.inlineData.mimeType)) {
+        return {
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: part.inlineData.mimeType as
+              | 'image/jpeg'
+              | 'image/png'
+              | 'image/gif'
+              | 'image/webp',
+            data: part.inlineData.data,
+          },
+        };
+      }
+
+      if (part.inlineData.mimeType === 'application/pdf') {
+        return {
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: part.inlineData.data,
+          },
+        };
+      }
+
+      const displayName = part.inlineData.displayName
+        ? ` (${part.inlineData.displayName})`
+        : '';
+      return {
+        type: 'text',
+        text: `Unsupported inline media type: ${part.inlineData.mimeType}${displayName}.`,
+      };
+    }
+
+    if (part.fileData?.mimeType && part.fileData?.fileUri) {
+      const displayName = part.fileData.displayName
+        ? ` (${part.fileData.displayName})`
+        : '';
+      const fileUri = part.fileData.fileUri;
+
+      if (this.isSupportedAnthropicImageMimeType(part.fileData.mimeType)) {
+        return {
+          type: 'image',
+          source: {
+            type: 'url',
+            url: fileUri,
+          },
+        } as unknown as AnthropicContentBlockParam;
+      }
+
+      if (part.fileData.mimeType === 'application/pdf') {
+        return {
+          type: 'document',
+          source: {
+            type: 'url',
+            url: fileUri,
+          },
+        } as unknown as AnthropicContentBlockParam;
+      }
+
+      return {
+        type: 'text',
+        text: `Unsupported file media type: ${part.fileData.mimeType}${displayName}.`,
+      };
+    }
+
+    return null;
+  }
+
+  private isSupportedAnthropicImageMimeType(
+    mimeType: string,
+  ): mimeType is 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
+    return (
+      mimeType === 'image/jpeg' ||
+      mimeType === 'image/png' ||
+      mimeType === 'image/gif' ||
+      mimeType === 'image/webp'
+    );
   }
 
   private extractTextFromContentUnion(contentUnion: unknown): string {

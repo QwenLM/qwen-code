@@ -10,6 +10,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { tokenLimit } from '../core/tokenLimits.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -241,6 +242,11 @@ export class ModelsConfig {
         kind: 'programmatic',
         detail: metadata?.reason || 'setModel',
       };
+
+      // Notify Config to update contentGeneratorConfig
+      if (this.onModelChange) {
+        await this.onModelChange(AuthType.QWEN_OAUTH, false);
+      }
       return;
     }
 
@@ -576,6 +582,23 @@ export class ModelsConfig {
       modelId: model.id,
       detail: 'generationConfig.reasoning',
     };
+
+    // Context window size: use provider value if set, otherwise auto-detect from model
+    if (gc.contextWindowSize !== undefined) {
+      this._generationConfig.contextWindowSize = gc.contextWindowSize;
+      this.generationConfigSources['contextWindowSize'] = {
+        kind: 'modelProviders',
+        authType: model.authType,
+        modelId: model.id,
+        detail: 'generationConfig.contextWindowSize',
+      };
+    } else {
+      this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
+      this.generationConfigSources['contextWindowSize'] = {
+        kind: 'computed',
+        detail: 'auto-detected from model',
+      };
+    }
   }
 
   /**

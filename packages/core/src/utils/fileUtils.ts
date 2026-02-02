@@ -351,6 +351,7 @@ export async function processSingleFileContent(
       .relative(rootDirectory, filePath)
       .replace(/\\/g, '/');
 
+    const displayName = path.basename(filePath);
     switch (fileType) {
       case 'binary': {
         return {
@@ -456,9 +457,9 @@ export async function processSingleFileContent(
         };
       }
       case 'image':
-      case 'pdf':
       case 'audio':
-      case 'video': {
+      case 'video':
+      case 'pdf': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         return {
@@ -466,6 +467,7 @@ export async function processSingleFileContent(
             inlineData: {
               data: base64Data,
               mimeType: mime.getType(filePath) || 'application/octet-stream',
+              displayName,
             },
           },
           returnDisplay: `Read ${fileType} file: ${relativePathForDisplay}`,

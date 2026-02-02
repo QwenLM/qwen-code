@@ -9,19 +9,19 @@
  * It re-exports the router and types from the toolcalls module.
  */
 
-import type React from 'react';
+import type { FC } from 'react';
+import type { ToolCallData } from '@qwen-code/webui';
 import { ToolCallRouter } from './index.js';
 
-// Re-export types from the toolcalls module for backward compatibility
+// Re-export types from webui for backward compatibility
 export type {
   ToolCallData,
   BaseToolCallProps as ToolCallProps,
-} from './shared/types.js';
+  ToolCallContent,
+} from '@qwen-code/webui';
 
-// Re-export the content type for external use
-export type { ToolCallContent } from './shared/types.js';
-export const ToolCall: React.FC<{
-  toolCall: import('./shared/types.js').ToolCallData;
+export const ToolCall: FC<{
+  toolCall: ToolCallData;
   isFirst?: boolean;
   isLast?: boolean;
 }> = ({ toolCall, isFirst, isLast }) => (

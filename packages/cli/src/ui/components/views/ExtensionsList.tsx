@@ -9,12 +9,10 @@ import { useUIState } from '../../contexts/UIStateContext.js';
 import { ExtensionUpdateState } from '../../state/extensions.js';
 
 export const ExtensionsList = () => {
-  const { commandContext, extensionsUpdateState } = useUIState();
-  const allExtensions = commandContext.services.config!.getExtensions();
-  const settings = commandContext.services.settings;
-  const disabledExtensions = settings.merged.extensions?.disabled ?? [];
+  const { extensionsUpdateState, commandContext } = useUIState();
+  const extensions = commandContext.services.config?.getExtensions() || [];
 
-  if (allExtensions.length === 0) {
+  if (extensions.length === 0) {
     return <Text>No extensions installed.</Text>;
   }
 
@@ -22,10 +20,11 @@ export const ExtensionsList = () => {
     <Box flexDirection="column" marginTop={1} marginBottom={1}>
       <Text>Installed extensions:</Text>
       <Box flexDirection="column" paddingLeft={2}>
-        {allExtensions.map((ext) => {
+        {extensions.map((ext) => {
           const state = extensionsUpdateState.get(ext.name);
-          const isActive = !disabledExtensions.includes(ext.name);
+          const isActive = ext.isActive;
           const activeString = isActive ? 'active' : 'disabled';
+          const activeColor = isActive ? 'green' : 'grey';
 
           let stateColor = 'gray';
           const stateText = state || 'unknown state';
@@ -44,6 +43,7 @@ export const ExtensionsList = () => {
               break;
             case ExtensionUpdateState.UP_TO_DATE:
             case ExtensionUpdateState.NOT_UPDATABLE:
+            case ExtensionUpdateState.UPDATED:
               stateColor = 'green';
               break;
             default:
@@ -52,12 +52,22 @@ export const ExtensionsList = () => {
           }
 
           return (
-            <Box key={ext.name}>
+            <Box key={ext.name} flexDirection="column" marginBottom={1}>
               <Text>
                 <Text color="cyan">{`${ext.name} (v${ext.version})`}</Text>
-                {` - ${activeString}`}
+                <Text color={activeColor}>{` - ${activeString}`}</Text>
                 {<Text color={stateColor}>{` (${stateText})`}</Text>}
               </Text>
+              {ext.resolvedSettings && ext.resolvedSettings.length > 0 && (
+                <Box flexDirection="column" paddingLeft={2}>
+                  <Text>settings:</Text>
+                  {ext.resolvedSettings.map((setting) => (
+                    <Text key={setting.name}>
+                      - {setting.name}: {setting.value}
+                    </Text>
+                  ))}
+                </Box>
+              )}
             </Box>
           );
         })}

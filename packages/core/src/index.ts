@@ -76,6 +76,8 @@ export * from './utils/subagentGenerator.js';
 export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/thoughtUtils.js';
+export * from './utils/toml-to-markdown-converter.js';
+export * from './utils/yaml-parser.js';
 
 // Config resolution utilities
 export * from './utils/configResolver.js';
@@ -109,6 +111,9 @@ export * from './subagents/index.js';
 // Export skills
 export * from './skills/index.js';
 
+// Export extension
+export * from './extension/index.js';
+
 // Export prompt logic
 export * from './prompts/mcp-prompts.js';
 
@@ -134,6 +139,18 @@ export * from './tools/skill.js';
 export * from './tools/todoWrite.js';
 export * from './tools/exitPlanMode.js';
 
+// Export LSP types and tools
+export * from './lsp/types.js';
+export * from './lsp/constants.js';
+export * from './lsp/LspConfigLoader.js';
+export * from './lsp/LspConnectionFactory.js';
+export * from './lsp/LspLanguageDetector.js';
+export * from './lsp/LspResponseNormalizer.js';
+export * from './lsp/LspServerManager.js';
+export * from './lsp/NativeLspClient.js';
+export * from './lsp/NativeLspService.js';
+export * from './tools/lsp.js';
+
 // MCP OAuth
 export { MCPOAuthProvider } from './mcp/oauth-provider.js';
 export type {
@@ -141,6 +158,7 @@ export type {
   OAuthCredentials,
 } from './mcp/token-storage/types.js';
 export { MCPOAuthTokenStorage } from './mcp/oauth-token-storage.js';
+export { KeychainTokenStorage } from './mcp/token-storage/keychain-token-storage.js';
 export type { MCPOAuthConfig } from './mcp/oauth-provider.js';
 export type {
   OAuthAuthorizationServerMetadata,

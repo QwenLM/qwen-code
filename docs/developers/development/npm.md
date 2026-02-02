@@ -202,7 +202,7 @@ This is the most critical stage where files are moved and transformed into their
       - Copies README.md and LICENSE to dist/
       - Copies locales folder for internationalization
       - Creates a clean package.json for distribution with only necessary dependencies
-      - Includes runtime dependencies like tiktoken
+      - Keeps distribution dependencies minimal (no bundled runtime deps)
       - Maintains optional dependencies for node-pty
 
 2.  The JavaScript Bundle is Created:

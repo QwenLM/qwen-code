@@ -33,6 +33,9 @@ export interface SemanticColors {
     error: string;
     success: string;
     warning: string;
+    // Dim variants for less intense UI elements
+    errorDim: string;
+    warningDim: string;
   };
 }
 
@@ -63,6 +66,8 @@ export const lightSemanticColors: SemanticColors = {
     error: lightTheme.AccentRed,
     success: lightTheme.AccentGreen,
     warning: lightTheme.AccentYellow,
+    errorDim: lightTheme.AccentRedDim,
+    warningDim: lightTheme.AccentYellowDim,
   },
 };
 
@@ -93,6 +98,8 @@ export const darkSemanticColors: SemanticColors = {
     error: darkTheme.AccentRed,
     success: darkTheme.AccentGreen,
     warning: darkTheme.AccentYellow,
+    errorDim: darkTheme.AccentRedDim,
+    warningDim: darkTheme.AccentYellowDim,
   },
 };
 
@@ -123,5 +130,7 @@ export const ansiSemanticColors: SemanticColors = {
     error: ansiTheme.AccentRed,
     success: ansiTheme.AccentGreen,
     warning: ansiTheme.AccentYellow,
+    errorDim: ansiTheme.AccentRedDim,
+    warningDim: ansiTheme.AccentYellowDim,
   },
 };

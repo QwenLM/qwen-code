@@ -70,6 +70,69 @@ const normalizeModelInfo = (value: unknown): ModelInfo | null => {
 };
 
 /**
+ * SessionModelState as returned from ACP session/new.
+ */
+export interface SessionModelState {
+  availableModels: ModelInfo[];
+  currentModelId: string;
+}
+
+/**
+ * Extract complete model state from ACP `session/new` result.
+ *
+ * Returns both the list of available models and the current model ID.
+ */
+export const extractSessionModelState = (
+  result: unknown,
+): SessionModelState | null => {
+  if (!result || typeof result !== 'object') {
+    return null;
+  }
+
+  const obj = result as Record<string, unknown>;
+  const models = obj['models'];
+
+  // ACP draft: NewSessionResponse.models is a SessionModelState object.
+  if (models && typeof models === 'object' && !Array.isArray(models)) {
+    const state = models as Record<string, unknown>;
+    const availableModels = state['availableModels'];
+    const currentModelId = state['currentModelId'];
+
+    if (Array.isArray(availableModels)) {
+      const normalizedModels = availableModels
+        .map(normalizeModelInfo)
+        .filter((m): m is ModelInfo => Boolean(m));
+
+      const modelId =
+        typeof currentModelId === 'string' && currentModelId.length > 0
+          ? currentModelId
+          : normalizedModels[0]?.modelId || '';
+
+      return {
+        availableModels: normalizedModels,
+        currentModelId: modelId,
+      };
+    }
+  }
+
+  // Legacy: some implementations returned `models` as a raw array.
+  if (Array.isArray(models)) {
+    const normalizedModels = models
+      .map(normalizeModelInfo)
+      .filter((m): m is ModelInfo => Boolean(m));
+
+    if (normalizedModels.length > 0) {
+      return {
+        availableModels: normalizedModels,
+        currentModelId: normalizedModels[0].modelId,
+      };
+    }
+  }
+
+  return null;
+};
+
+/**
  * Extract model info from ACP `session/new` result.
  *
  * Per Agent Client Protocol draft schema, NewSessionResponse includes `models`.

@@ -474,8 +474,17 @@ export class Session implements SessionContext {
           }
         ).eventEmitter;
 
+        // Extract subagent metadata from TaskTool call
+        const parentToolCallId = callId;
+        const subagentType = (args['subagent_type'] as string) ?? '';
+
         // Create a SubAgentTracker for this tool execution
-        const subAgentTracker = new SubAgentTracker(this, this.client);
+        const subAgentTracker = new SubAgentTracker(
+          this,
+          this.client,
+          parentToolCallId,
+          subagentType,
+        );
 
         // Set up sub-agent tool tracking
         subAgentCleanupFunctions = subAgentTracker.setup(
@@ -647,7 +656,11 @@ export class Session implements SessionContext {
       const error = e instanceof Error ? e : new Error(String(e));
 
       // Use ToolCallEmitter for error handling
-      await this.toolCallEmitter.emitError(callId, error);
+      await this.toolCallEmitter.emitError(
+        callId,
+        fc.name ?? 'unknown_tool',
+        error,
+      );
 
       // Record tool error for session management
       const errorParts = [
@@ -979,7 +992,7 @@ export class Session implements SessionContext {
     if (pathSpecsToRead.length > 0) {
       const readResult = await readManyFilesTool.buildAndExecute(
         {
-          paths_with_line_ranges: pathSpecsToRead,
+          paths: pathSpecsToRead,
         },
         abortSignal,
       );

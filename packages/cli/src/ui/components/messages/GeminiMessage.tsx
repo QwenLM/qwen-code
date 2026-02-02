@@ -14,14 +14,14 @@ interface GeminiMessageProps {
   text: string;
   isPending: boolean;
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
 }
 
 export const GeminiMessage: React.FC<GeminiMessageProps> = ({
   text,
   isPending,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
 }) => {
   const prefix = '✦ ';
   const prefixWidth = prefix.length;
@@ -38,7 +38,7 @@ export const GeminiMessage: React.FC<GeminiMessageProps> = ({
           text={text}
           isPending={isPending}
           availableTerminalHeight={availableTerminalHeight}
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth - prefixWidth}
         />
       </Box>
     </Box>

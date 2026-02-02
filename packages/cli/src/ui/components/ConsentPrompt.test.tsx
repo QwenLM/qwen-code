@@ -44,7 +44,7 @@ describe('ConsentPrompt', () => {
       {
         isPending: true,
         text: prompt,
-        terminalWidth,
+        contentWidth: terminalWidth,
       },
       undefined,
     );

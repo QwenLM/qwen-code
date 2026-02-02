@@ -208,6 +208,36 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   }
 
   /**
+   * Marks stdin as closed and rejects all pending outgoing requests.
+   * After this is called, new outgoing requests will be rejected immediately.
+   * This should be called when stdin closes to avoid waiting for responses.
+   */
+  markInputClosed(): void {
+    if (this.context.inputClosed) {
+      return; // Already marked as closed
+    }
+
+    this.context.inputClosed = true;
+
+    const requestIds = Array.from(this.pendingOutgoingRequests.keys());
+
+    if (this.context.debugMode) {
+      console.error(
+        `[ControlDispatcher] Input closed, rejecting ${requestIds.length} pending outgoing requests`,
+      );
+    }
+
+    // Reject all currently pending outgoing requests
+    for (const id of requestIds) {
+      const pending = this.pendingOutgoingRequests.get(id);
+      if (pending) {
+        this.deregisterOutgoingRequest(id);
+        pending.reject(new Error('Input closed'));
+      }
+    }
+  }
+
+  /**
    * Stops all pending requests and cleans up all controllers
    */
   shutdown(): void {
@@ -243,7 +273,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   }
 
   /**
-   * Registers an incoming request in the pending registry
+   * Registers an incoming request in the pending registry.
    */
   registerIncomingRequest(
     requestId: string,

@@ -153,6 +153,7 @@ describe('runNonInteractiveStreamJson', () => {
     handleControlResponse: ReturnType<typeof vi.fn>;
     handleCancel: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
+    markInputClosed: ReturnType<typeof vi.fn>;
     getPendingIncomingRequestCount: ReturnType<typeof vi.fn>;
     waitForPendingIncomingRequests: ReturnType<typeof vi.fn>;
     sdkMcpController: {
@@ -192,6 +193,7 @@ describe('runNonInteractiveStreamJson', () => {
       handleControlResponse: vi.fn(),
       handleCancel: vi.fn(),
       shutdown: vi.fn(),
+      markInputClosed: vi.fn(),
       getPendingIncomingRequestCount: vi.fn().mockReturnValue(0),
       waitForPendingIncomingRequests: vi.fn().mockResolvedValue(undefined),
       sdkMcpController: {

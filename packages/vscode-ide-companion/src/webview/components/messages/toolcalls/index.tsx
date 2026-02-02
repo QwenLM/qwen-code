@@ -4,27 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Tool call component factory - routes to specialized components by kind
+ * All UI components are now imported from @qwen-code/webui
  */
 
-import type React from 'react';
-import type { BaseToolCallProps } from './shared/types.js';
-import { shouldShowToolCall } from '../../../utils/utils.js';
-import { GenericToolCall } from './GenericToolCall.js';
-import { ReadToolCall } from './Read/ReadToolCall.js';
-import { WriteToolCall } from './Write/WriteToolCall.js';
-import { EditToolCall } from './Edit/EditToolCall.js';
-import { ExecuteToolCall as BashExecuteToolCall } from './Bash/Bash.js';
-import { ExecuteToolCall } from './Execute/Execute.js';
-import { UpdatedPlanToolCall } from './UpdatedPlan/UpdatedPlanToolCall.js';
-import { SearchToolCall } from './Search/SearchToolCall.js';
-import { ThinkToolCall } from './Think/ThinkToolCall.js';
+import type { FC } from 'react';
+import {
+  shouldShowToolCall,
+  // All ToolCall components from webui
+  GenericToolCall,
+  ThinkToolCall,
+  SaveMemoryToolCall,
+  EditToolCall,
+  WriteToolCall,
+  SearchToolCall,
+  UpdatedPlanToolCall,
+  ShellToolCall,
+  ReadToolCall,
+  WebFetchToolCall,
+} from '@qwen-code/webui';
+import type { BaseToolCallProps } from '@qwen-code/webui';
 
 /**
  * Factory function that returns the appropriate tool call component based on kind
  */
-export const getToolCallComponent = (
-  kind: string,
-): React.FC<BaseToolCallProps> => {
+export const getToolCallComponent = (kind: string): FC<BaseToolCallProps> => {
   const normalizedKind = kind.toLowerCase();
 
   // Route to specialized components
@@ -39,11 +42,9 @@ export const getToolCallComponent = (
       return EditToolCall;
 
     case 'execute':
-      return ExecuteToolCall;
-
     case 'bash':
     case 'command':
-      return BashExecuteToolCall;
+      return ShellToolCall;
 
     case 'updated_plan':
     case 'updatedplan':
@@ -62,6 +63,18 @@ export const getToolCallComponent = (
     case 'thinking':
       return ThinkToolCall;
 
+    case 'save_memory':
+    case 'savememory':
+    case 'memory':
+      return SaveMemoryToolCall;
+
+    case 'fetch':
+    case 'web_fetch':
+    case 'webfetch':
+    case 'web_search':
+    case 'websearch':
+      return WebFetchToolCall;
+
     default:
       // Fallback to generic component
       return GenericToolCall;
@@ -71,9 +84,7 @@ export const getToolCallComponent = (
 /**
  * Main tool call component that routes to specialized implementations
  */
-export const ToolCallRouter: React.FC<
-  BaseToolCallProps & { isFirst?: boolean; isLast?: boolean }
-> = ({ toolCall, isFirst, isLast }) => {
+export const ToolCallRouter: React.FC<BaseToolCallProps> = ({ toolCall }) => {
   // Check if we should show this tool call (hide internal ones)
   if (!shouldShowToolCall(toolCall.kind)) {
     return null;
@@ -83,8 +94,8 @@ export const ToolCallRouter: React.FC<
   const Component = getToolCallComponent(toolCall.kind);
 
   // Render the specialized component
-  return <Component toolCall={toolCall} isFirst={isFirst} isLast={isLast} />;
+  return <Component toolCall={toolCall} />;
 };
 
 // Re-export types for convenience
-export type { BaseToolCallProps, ToolCallData } from './shared/types.js';
+export type { BaseToolCallProps, ToolCallData } from '@qwen-code/webui';

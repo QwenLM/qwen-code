@@ -17,6 +17,8 @@ import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
 // Mock OpenAI
 vi.mock('openai', () => ({
@@ -30,6 +32,10 @@ vi.mock('openai', () => ({
   })),
 }));
 
+vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
+  buildRuntimeFetchOptions: vi.fn(),
+}));
+
 describe('DefaultOpenAICompatibleProvider', () => {
   let provider: DefaultOpenAICompatibleProvider;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
@@ -37,6 +43,11 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    const mockedBuildRuntimeFetchOptions =
+      buildRuntimeFetchOptions as unknown as MockedFunction<
+        (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
+      >;
+    mockedBuildRuntimeFetchOptions.mockReturnValue(undefined);
 
     // Mock ContentGeneratorConfig
     mockContentGeneratorConfig = {
@@ -50,6 +61,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
     // Mock Config
     mockCliConfig = {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
+      getProxy: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     provider = new DefaultOpenAICompatibleProvider(
@@ -112,15 +124,17 @@ describe('DefaultOpenAICompatibleProvider', () => {
     it('should create OpenAI client with correct configuration', () => {
       const client = provider.buildClient();
 
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-api-key',
-        baseURL: 'https://api.openai.com/v1',
-        timeout: 60000,
-        maxRetries: 2,
-        defaultHeaders: {
-          'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-        },
-      });
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'test-api-key',
+          baseURL: 'https://api.openai.com/v1',
+          timeout: 60000,
+          maxRetries: 2,
+          defaultHeaders: {
+            'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
+          },
+        }),
+      );
 
       expect(client).toBeDefined();
     });
@@ -131,15 +145,17 @@ describe('DefaultOpenAICompatibleProvider', () => {
 
       provider.buildClient();
 
-      expect(OpenAI).toHaveBeenCalledWith({
-        apiKey: 'test-api-key',
-        baseURL: 'https://api.openai.com/v1',
-        timeout: DEFAULT_TIMEOUT,
-        maxRetries: DEFAULT_MAX_RETRIES,
-        defaultHeaders: {
-          'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
-        },
-      });
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiKey: 'test-api-key',
+          baseURL: 'https://api.openai.com/v1',
+          timeout: DEFAULT_TIMEOUT,
+          maxRetries: DEFAULT_MAX_RETRIES,
+          defaultHeaders: {
+            'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
+          },
+        }),
+      );
     });
 
     it('should include custom headers from buildHeaders', () => {
@@ -244,6 +260,49 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(originalRequest).toEqual(originalRequestCopy);
       // Result should be a different object
       expect(result).not.toBe(originalRequest);
+    });
+
+    it('should merge extra_body into the request', () => {
+      const providerWithExtraBody = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: {
+            custom_param: 'custom_value',
+            nested: { key: 'value' },
+          },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: 0.7,
+      };
+
+      const result = providerWithExtraBody.buildRequest(
+        originalRequest,
+        'prompt-id',
+      );
+
+      expect(result).toEqual({
+        ...originalRequest,
+        custom_param: 'custom_value',
+        nested: { key: 'value' },
+      });
+    });
+
+    it('should not include extra_body when not configured', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: 0.7,
+      };
+
+      const result = provider.buildRequest(originalRequest, 'prompt-id');
+
+      expect(result).toEqual(originalRequest);
+      expect(result).not.toHaveProperty('custom_param');
     });
   });
 });

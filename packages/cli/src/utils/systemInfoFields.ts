@@ -15,104 +15,108 @@ export interface SystemInfoField {
   key: keyof ExtendedSystemInfo;
 }
 
-/**
- * Unified field configuration for system information display.
- * This ensures consistent labeling between /about and /bug commands.
- */
-export function getSystemInfoFields(
-  info: ExtendedSystemInfo,
-): SystemInfoField[] {
-  const allFields: SystemInfoField[] = [
-    {
-      label: t('CLI Version'),
-      key: 'cliVersion',
-    },
-    {
-      label: t('Git Commit'),
-      key: 'gitCommit',
-    },
-    {
-      label: t('Model'),
-      key: 'modelVersion',
-    },
-    {
-      label: t('Sandbox'),
-      key: 'sandboxEnv',
-    },
-    {
-      label: t('OS Platform'),
-      key: 'osPlatform',
-    },
-    {
-      label: t('OS Arch'),
-      key: 'osArch',
-    },
-    {
-      label: t('OS Release'),
-      key: 'osRelease',
-    },
-    {
-      label: t('Node.js Version'),
-      key: 'nodeVersion',
-    },
-    {
-      label: t('NPM Version'),
-      key: 'npmVersion',
-    },
-    {
-      label: t('Session ID'),
-      key: 'sessionId',
-    },
-    {
-      label: t('Auth Method'),
-      key: 'selectedAuthType',
-    },
-    {
-      label: t('Base URL'),
-      key: 'baseUrl',
-    },
-    {
-      label: t('Memory Usage'),
-      key: 'memoryUsage',
-    },
-    {
-      label: t('IDE Client'),
-      key: 'ideClient',
-    },
-  ];
-
-  // Filter out optional fields that are not present
-  return allFields.filter((field) => {
-    const value = info[field.key];
-    // Optional fields: only show if they exist and are non-empty
-    if (
-      field.key === 'baseUrl' ||
-      field.key === 'gitCommit' ||
-      field.key === 'ideClient'
-    ) {
-      return Boolean(value);
-    }
-    return true;
-  });
+export interface SystemInfoDisplayField {
+  label: string;
+  value: string;
 }
 
-/**
- * Get the value for a field from system info
- */
-export function getFieldValue(
-  field: SystemInfoField,
+export function getSystemInfoFields(
   info: ExtendedSystemInfo,
-): string {
-  const value = info[field.key];
+): SystemInfoDisplayField[] {
+  const fields: SystemInfoDisplayField[] = [];
 
-  if (value === undefined || value === null) {
+  addField(fields, t('Qwen Code'), formatCliVersion(info));
+  addField(fields, t('Runtime'), formatRuntime(info));
+  addField(fields, t('IDE Client'), info.ideClient);
+  addField(fields, t('OS'), formatOs(info));
+  addField(fields, t('Auth'), formatAuth(info));
+  addField(fields, t('Model'), info.modelVersion);
+  addField(fields, t('Session ID'), info.sessionId);
+  addField(fields, t('Sandbox'), info.sandboxEnv);
+  addField(fields, t('Proxy'), formatProxy(info.proxy));
+  addField(fields, t('Memory Usage'), info.memoryUsage);
+
+  return fields;
+}
+
+function addField(
+  fields: SystemInfoDisplayField[],
+  label: string,
+  value: string,
+): void {
+  if (value) {
+    fields.push({ label, value });
+  }
+}
+
+function formatCliVersion(info: ExtendedSystemInfo): string {
+  if (!info.cliVersion) {
     return '';
   }
-
-  // Special formatting for selectedAuthType
-  if (field.key === 'selectedAuthType') {
-    return String(value).startsWith('oauth') ? 'OAuth' : String(value);
+  if (!info.gitCommit) {
+    return info.cliVersion;
   }
+  return `${info.cliVersion} (${info.gitCommit})`;
+}
 
-  return String(value);
+function formatRuntime(info: ExtendedSystemInfo): string {
+  if (!info.nodeVersion && !info.npmVersion) {
+    return '';
+  }
+  const node = info.nodeVersion ? `Node.js ${info.nodeVersion}` : '';
+  const npm = info.npmVersion ? `npm ${info.npmVersion}` : '';
+  return joinParts([node, npm], ' / ');
+}
+
+function formatOs(info: ExtendedSystemInfo): string {
+  return joinParts(
+    [info.osPlatform, info.osArch, formatOsRelease(info.osRelease)],
+    ' ',
+  ).trim();
+}
+
+function formatOsRelease(release: string): string {
+  if (!release) {
+    return '';
+  }
+  return `(${release})`;
+}
+
+function formatAuth(info: ExtendedSystemInfo): string {
+  if (!info.selectedAuthType) {
+    return '';
+  }
+  const authType = formatAuthType(info.selectedAuthType);
+  if (!info.baseUrl) {
+    return authType;
+  }
+  return `${authType} (${info.baseUrl})`;
+}
+
+function formatAuthType(authType: string): string {
+  return authType.startsWith('oauth') ? 'OAuth' : authType;
+}
+
+function formatProxy(proxy?: string): string {
+  if (!proxy) {
+    return 'no proxy';
+  }
+  return redactProxy(proxy);
+}
+
+function redactProxy(proxy: string): string {
+  try {
+    const url = new URL(proxy);
+    if (url.username || url.password) {
+      url.username = url.username ? '***' : '';
+      url.password = url.password ? '***' : '';
+    }
+    return url.toString();
+  } catch {
+    return proxy.replace(/\/\/[^/]*@/, '//***@');
+  }
+}
+
+function joinParts(parts: string[], separator: string): string {
+  return parts.filter((part) => part).join(separator);
 }

@@ -17,6 +17,8 @@ const githubLightColors: ColorsTheme = {
   AccentGreen: '#008080',
   AccentYellow: '#990073',
   AccentRed: '#d14',
+  AccentYellowDim: '#8B7000',
+  AccentRedDim: '#993333',
   DiffAdded: '#C6EAD8',
   DiffRemoved: '#FFCCCC',
   Comment: '#998',

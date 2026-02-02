@@ -53,6 +53,7 @@ export class MessageEmitter extends BaseEmitter {
     usageMetadata: GenerateContentResponseUsageMetadata,
     text: string = '',
     durationMs?: number,
+    subagentMeta?: import('../types.js').SubagentMeta,
   ): Promise<void> {
     const usage: Usage = {
       promptTokens: usageMetadata.promptTokenCount,
@@ -63,7 +64,9 @@ export class MessageEmitter extends BaseEmitter {
     };
 
     const meta =
-      typeof durationMs === 'number' ? { usage, durationMs } : { usage };
+      typeof durationMs === 'number'
+        ? { usage, durationMs, ...subagentMeta }
+        : { usage, ...subagentMeta };
 
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',

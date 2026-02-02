@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, MCPServerConfig } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { isSdkMcpServerConfig } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
-import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import {
   McpClient,
   MCPDiscoveryState,
@@ -16,7 +15,6 @@ import {
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { EventEmitter } from 'node:events';
-import type { WorkspaceContext } from '../utils/workspaceContext.js';
 
 /**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
@@ -25,32 +23,21 @@ import type { WorkspaceContext } from '../utils/workspaceContext.js';
  */
 export class McpClientManager {
   private clients: Map<string, McpClient> = new Map();
-  private readonly mcpServers: Record<string, MCPServerConfig>;
-  private readonly mcpServerCommand: string | undefined;
   private readonly toolRegistry: ToolRegistry;
-  private readonly promptRegistry: PromptRegistry;
-  private readonly debugMode: boolean;
-  private readonly workspaceContext: WorkspaceContext;
+  private readonly cliConfig: Config;
   private discoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
   private readonly eventEmitter?: EventEmitter;
   private readonly sendSdkMcpMessage?: SendSdkMcpMessage;
 
   constructor(
-    mcpServers: Record<string, MCPServerConfig>,
-    mcpServerCommand: string | undefined,
+    config: Config,
     toolRegistry: ToolRegistry,
-    promptRegistry: PromptRegistry,
-    debugMode: boolean,
-    workspaceContext: WorkspaceContext,
     eventEmitter?: EventEmitter,
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.mcpServers = mcpServers;
-    this.mcpServerCommand = mcpServerCommand;
+    this.cliConfig = config;
     this.toolRegistry = toolRegistry;
-    this.promptRegistry = promptRegistry;
-    this.debugMode = debugMode;
-    this.workspaceContext = workspaceContext;
+
     this.eventEmitter = eventEmitter;
     this.sendSdkMcpMessage = sendSdkMcpMessage;
   }
@@ -67,8 +54,8 @@ export class McpClientManager {
     await this.stop();
 
     const servers = populateMcpServerCommand(
-      this.mcpServers,
-      this.mcpServerCommand,
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
     );
 
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
@@ -85,9 +72,9 @@ export class McpClientManager {
           name,
           config,
           this.toolRegistry,
-          this.promptRegistry,
-          this.workspaceContext,
-          this.debugMode,
+          this.cliConfig.getPromptRegistry(),
+          this.cliConfig.getWorkspaceContext(),
+          this.cliConfig.getDebugMode(),
           sdkCallback,
         );
         this.clients.set(name, client);

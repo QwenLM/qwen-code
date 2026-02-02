@@ -20,6 +20,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | Shortcut                                           | Description                                                                                                                         |
 | -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | `!`                                                | Toggle shell mode when the input is empty.                                                                                          |
+| `?`                                                | Toggle keyboard shortcuts display when the input is empty.                                                                          |
 | `\` (at end of line) + `Enter`                     | Insert a newline.                                                                                                                   |
 | `Down Arrow`                                       | Navigate down through the input history.                                                                                            |
 | `Enter`                                            | Submit the current prompt.                                                                                                          |
@@ -38,6 +39,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`   | Move the cursor one word to the left.                                                                                               |
 | `Ctrl+N`                                           | Navigate down through the input history.                                                                                            |
 | `Ctrl+P`                                           | Navigate up through the input history.                                                                                              |
+| `Ctrl+R`                                           | Reverse search through input/shell history.                                                                                         |
 | `Ctrl+Right Arrow` / `Meta+Right Arrow` / `Meta+F` | Move the cursor one word to the right.                                                                                              |
 | `Ctrl+U`                                           | Delete from the cursor to the beginning of the line.                                                                                |
 | `Ctrl+V`                                           | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |

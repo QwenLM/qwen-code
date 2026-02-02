@@ -41,6 +41,8 @@ export {
   logExtensionEnable,
   logExtensionInstallEvent,
   logExtensionUninstall,
+  logExtensionDisable,
+  logExtensionUpdateEvent,
   logRipgrepFallback,
   logNextSpeakerCheck,
   logAuth,

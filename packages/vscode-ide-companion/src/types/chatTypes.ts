@@ -3,7 +3,11 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { AcpPermissionRequest, ModelInfo } from './acpTypes.js';
+import type {
+  AcpPermissionRequest,
+  ModelInfo,
+  AvailableCommand,
+} from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -59,6 +63,9 @@ export interface QwenAgentCallbacks {
   onModeChanged?: (modeId: ApprovalModeValue) => void;
   onUsageUpdate?: (stats: UsageStatsPayload) => void;
   onModelInfo?: (info: ModelInfo) => void;
+  onModelChanged?: (model: ModelInfo) => void;
+  onAvailableCommands?: (commands: AvailableCommand[]) => void;
+  onAvailableModels?: (models: ModelInfo[]) => void;
 }
 
 export interface ToolCallUpdate {

@@ -655,6 +655,29 @@ export function hasErrorToolResults(messages: SDKMessage[]): boolean {
 // Streaming Input Utilities
 // ============================================================================
 
+export function createResultWaiter(expectedResults: number): {
+  waitForResult: (index: number) => Promise<void>;
+  notifyResult: () => void;
+} {
+  const resolvers: Array<() => void> = [];
+  const promises = Array.from({ length: expectedResults }, () => {
+    return new Promise<void>((resolve) => {
+      resolvers.push(resolve);
+    });
+  });
+  let resolvedCount = 0;
+
+  return {
+    waitForResult: (index: number) => promises[index],
+    notifyResult: () => {
+      if (resolvedCount < resolvers.length) {
+        resolvers[resolvedCount]?.();
+        resolvedCount += 1;
+      }
+    },
+  };
+}
+
 /**
  * Create a simple streaming input from an array of message contents
  */

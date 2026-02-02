@@ -212,7 +212,6 @@ describe('useGeminiStream', () => {
       geminiMdFileCount: 0,
       alwaysSkipModificationConfirmation: false,
       vertexai: false,
-      showMemoryUsage: false,
       contextFileName: undefined,
       getToolRegistry: vi.fn(
         () => ({ getToolSchemaList: vi.fn(() => []) }) as any,

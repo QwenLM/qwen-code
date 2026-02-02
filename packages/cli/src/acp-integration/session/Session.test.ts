@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Session } from './Session.js';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -38,10 +41,27 @@ describe('Session', () => {
       addHistory: vi.fn(),
     } as unknown as GeminiChat;
 
+    const toolRegistry = { getTool: vi.fn() };
+    const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
+
     mockConfig = {
       setApprovalMode: vi.fn(),
       setModel: setModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
+      getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
+      getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUserMessage: vi.fn(),
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      getFileService: vi.fn().mockReturnValue(fileService),
+      getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
+      getTargetDir: vi.fn().mockReturnValue(process.cwd()),
+      getDebugMode: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     mockClient = {
@@ -169,6 +189,63 @@ describe('Session', () => {
       expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
       expect(consoleErrorSpy).toHaveBeenCalled();
       consoleErrorSpy.mockRestore();
+    });
+  });
+
+  describe('prompt', () => {
+    it('passes resolved paths to read_many_files tool', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-session-'),
+      );
+      const fileName = 'README.md';
+      const filePath = path.join(tempDir, fileName);
+
+      try {
+        await fs.writeFile(filePath, '# Test\n', 'utf8');
+
+        const readManyFilesTool = {
+          buildAndExecute: vi.fn().mockResolvedValue({
+            llmContent: 'file content',
+            returnDisplay: 'ok',
+          }),
+        };
+        const toolRegistry = {
+          getTool: vi.fn((name: string) =>
+            name === 'read_many_files' ? readManyFilesTool : undefined,
+          ),
+        };
+        const fileService = {
+          shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+        };
+
+        mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
+        mockConfig.getToolRegistry = vi.fn().mockReturnValue(toolRegistry);
+        mockConfig.getFileService = vi.fn().mockReturnValue(fileService);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue((async function* () {})());
+
+        const promptRequest: acp.PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'Check this file' },
+            {
+              type: 'resource_link',
+              name: fileName,
+              uri: `file://${fileName}`,
+            },
+          ],
+        };
+
+        await session.prompt(promptRequest);
+
+        expect(readManyFilesTool.buildAndExecute).toHaveBeenCalledWith(
+          { paths: [fileName] },
+          expect.any(AbortSignal),
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
   });
 });

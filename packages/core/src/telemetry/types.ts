@@ -439,17 +439,27 @@ export interface ChatCompressionEvent extends BaseTelemetryEvent {
   'event.timestamp': string;
   tokens_before: number;
   tokens_after: number;
+  compression_input_token_count?: number;
+  compression_output_token_count?: number;
 }
 
 export function makeChatCompressionEvent({
   tokens_before,
   tokens_after,
+  compression_input_token_count,
+  compression_output_token_count,
 }: Omit<ChatCompressionEvent, CommonFields>): ChatCompressionEvent {
   return {
     'event.name': 'chat_compression',
     'event.timestamp': new Date().toISOString(),
     tokens_before,
     tokens_after,
+    ...(compression_input_token_count !== undefined
+      ? { compression_input_token_count }
+      : {}),
+    ...(compression_output_token_count !== undefined
+      ? { compression_output_token_count }
+      : {}),
   };
 }
 
@@ -662,6 +672,35 @@ export class ExtensionUninstallEvent implements BaseTelemetryEvent {
     this['event.name'] = 'extension_uninstall';
     this['event.timestamp'] = new Date().toISOString();
     this.extension_name = extension_name;
+    this.status = status;
+  }
+}
+
+export class ExtensionUpdateEvent implements BaseTelemetryEvent {
+  'event.name': 'extension_update';
+  'event.timestamp': string;
+  extension_name: string;
+  extension_id: string;
+  extension_previous_version: string;
+  extension_version: string;
+  extension_source: string;
+  status: 'success' | 'error';
+
+  constructor(
+    extension_name: string,
+    extension_id: string,
+    extension_version: string,
+    extension_previous_version: string,
+    extension_source: string,
+    status: 'success' | 'error',
+  ) {
+    this['event.name'] = 'extension_update';
+    this['event.timestamp'] = new Date().toISOString();
+    this.extension_name = extension_name;
+    this.extension_id = extension_id;
+    this.extension_version = extension_version;
+    this.extension_previous_version = extension_previous_version;
+    this.extension_source = extension_source;
     this.status = status;
   }
 }

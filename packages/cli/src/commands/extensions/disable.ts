@@ -5,24 +5,29 @@
  */
 
 import { type CommandModule } from 'yargs';
-import { disableExtension } from '../../config/extension.js';
 import { SettingScope } from '../../config/settings.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { getExtensionManager } from './utils.js';
+import { t } from '../../i18n/index.js';
 
 interface DisableArgs {
   name: string;
   scope?: string;
 }
 
-export function handleDisable(args: DisableArgs) {
+export async function handleDisable(args: DisableArgs) {
+  const extensionManager = await getExtensionManager();
   try {
     if (args.scope?.toLowerCase() === 'workspace') {
-      disableExtension(args.name, SettingScope.Workspace);
+      extensionManager.disableExtension(args.name, SettingScope.Workspace);
     } else {
-      disableExtension(args.name, SettingScope.User);
+      extensionManager.disableExtension(args.name, SettingScope.User);
     }
     console.log(
-      `Extension "${args.name}" successfully disabled for scope "${args.scope}".`,
+      t('Extension "{{name}}" successfully disabled for scope "{{scope}}".', {
+        name: args.name,
+        scope: args.scope || SettingScope.User,
+      }),
     );
   } catch (error) {
     console.error(getErrorMessage(error));
@@ -32,15 +37,15 @@ export function handleDisable(args: DisableArgs) {
 
 export const disableCommand: CommandModule = {
   command: 'disable [--scope] <name>',
-  describe: 'Disables an extension.',
+  describe: t('Disables an extension.'),
   builder: (yargs) =>
     yargs
       .positional('name', {
-        describe: 'The name of the extension to disable.',
+        describe: t('The name of the extension to disable.'),
         type: 'string',
       })
       .option('scope', {
-        describe: 'The scope to disable the extenison in.',
+        describe: t('The scope to disable the extenison in.'),
         type: 'string',
         default: SettingScope.User,
       })
@@ -52,17 +57,18 @@ export const disableCommand: CommandModule = {
             .includes((argv.scope as string).toLowerCase())
         ) {
           throw new Error(
-            `Invalid scope: ${argv.scope}. Please use one of ${Object.values(
-              SettingScope,
-            )
-              .map((s) => s.toLowerCase())
-              .join(', ')}.`,
+            t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
+              scope: argv.scope as string,
+              scopes: Object.values(SettingScope)
+                .map((s) => s.toLowerCase())
+                .join(', '),
+            }),
           );
         }
         return true;
       }),
-  handler: (argv) => {
-    handleDisable({
+  handler: async (argv) => {
+    await handleDisable({
       name: argv['name'] as string,
       scope: argv['scope'] as string,
     });

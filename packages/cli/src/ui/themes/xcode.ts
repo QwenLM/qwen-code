@@ -17,6 +17,8 @@ const xcodeColors: ColorsTheme = {
   AccentGreen: '#007400',
   AccentYellow: '#836C28',
   AccentRed: '#c41a16',
+  AccentYellowDim: '#8B7000',
+  AccentRedDim: '#993333',
   DiffAdded: '#C6EAD8',
   DiffRemoved: '#FEDEDE',
   Comment: '#007400',

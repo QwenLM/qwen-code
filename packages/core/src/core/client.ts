@@ -70,9 +70,6 @@ import { retryWithBackoff } from '../utils/retry.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 
-// Fallback handling
-import { handleFallback } from '../fallback/handler.js';
-
 const MAX_TURNS = 100;
 
 export class GeminiClient {
@@ -441,47 +438,19 @@ export class GeminiClient {
       yield { type: GeminiEventType.ChatCompressed, value: compressed };
     }
 
-    // Check session token limit after compression using accurate token counting
+    // Check session token limit after compression.
+    // `lastPromptTokenCount` is treated as authoritative for the (possibly compressed) history;
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
-      // Get all the content that would be sent in an API call
-      const currentHistory = this.getChat().getHistory(true);
-      const userMemory = this.config.getUserMemory();
-      const systemPrompt = getCoreSystemPrompt(
-        userMemory,
-        this.config.getModel(),
-      );
-      const initialHistory = await getInitialChatHistory(this.config);
-
-      // Create a mock request content to count total tokens
-      const mockRequestContent = [
-        {
-          role: 'system' as const,
-          parts: [{ text: systemPrompt }],
-        },
-        ...initialHistory,
-        ...currentHistory,
-      ];
-
-      // Use the improved countTokens method for accurate counting
-      const { totalTokens: totalRequestTokens } = await this.config
-        .getContentGenerator()
-        .countTokens({
-          model: this.config.getModel(),
-          contents: mockRequestContent,
-        });
-
-      if (
-        totalRequestTokens !== undefined &&
-        totalRequestTokens > sessionTokenLimit
-      ) {
+      const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
+      if (lastPromptTokenCount > sessionTokenLimit) {
         yield {
           type: GeminiEventType.SessionTokenLimitExceeded,
           value: {
-            currentTokens: totalRequestTokens,
+            currentTokens: lastPromptTokenCount,
             limit: sessionTokenLimit,
             message:
-              `Session token limit exceeded: ${totalRequestTokens} tokens > ${sessionTokenLimit} limit. ` +
+              `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
               'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           },
         };
@@ -635,15 +604,7 @@ export class GeminiClient {
           this.lastPromptId!,
         );
       };
-      const onPersistent429Callback = async (
-        authType?: string,
-        error?: unknown,
-      ) =>
-        // Pass the captured model to the centralized handler.
-        await handleFallback(this.config, currentAttemptModel, authType, error);
-
       const result = await retryWithBackoff(apiCall, {
-        onPersistent429: onPersistent429Callback,
         authType: this.config.getContentGeneratorConfig()?.authType,
       });
       return result;

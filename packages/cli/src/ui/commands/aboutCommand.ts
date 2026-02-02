@@ -11,7 +11,8 @@ import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
 import { t } from '../../i18n/index.js';
 
 export const aboutCommand: SlashCommand = {
-  name: 'about',
+  name: 'status',
+  altNames: ['about'],
   get description() {
     return t('show version info');
   },

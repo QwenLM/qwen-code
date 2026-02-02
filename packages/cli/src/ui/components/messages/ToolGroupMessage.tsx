@@ -19,7 +19,7 @@ interface ToolGroupMessageProps {
   groupId: number;
   toolCalls: IndividualToolCallDisplay[];
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
   isFocused?: boolean;
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
@@ -30,7 +30,7 @@ interface ToolGroupMessageProps {
 export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   toolCalls,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
@@ -58,9 +58,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         : theme.border.default;
 
   const staticHeight = /* border */ 2 + /* marginBottom */ 1;
-  // This is a bit of a magic number, but it accounts for the border and
-  // marginLeft.
-  const innerWidth = terminalWidth - 4;
+  // account for border (2 chars) and padding (2 chars)
+  const innerWidth = contentWidth - 4;
 
   // only prompt for tool approval on the first 'confirming' tool in the list
   // note, after the CTA, this automatically moves over to the next 'confirming' tool
@@ -96,8 +95,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         Ink to render the border of the box incorrectly and span multiple lines and even
         cause tearing.
       */
-      width="100%"
-      marginLeft={1}
+      width={contentWidth}
       borderDimColor={
         hasPending && (!isShellCommand || !isEmbeddedShellFocused)
       }
@@ -112,7 +110,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
               <ToolMessage
                 {...tool}
                 availableTerminalHeight={availableTerminalHeightPerToolMessage}
-                terminalWidth={innerWidth}
+                contentWidth={innerWidth}
                 emphasis={
                   isConfirming
                     ? 'high'
@@ -135,7 +133,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   availableTerminalHeight={
                     availableTerminalHeightPerToolMessage
                   }
-                  terminalWidth={innerWidth}
+                  contentWidth={innerWidth}
                 />
               )}
             {tool.outputFile && (
