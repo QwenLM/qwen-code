@@ -16,8 +16,8 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { ApiError, createUserContent } from '@google/genai';
-import { retryWithBackoff } from '../utils/retry.js';
+import { createUserContent } from '@google/genai';
+import { getErrorStatus, retryWithBackoff } from '../utils/retry.js';
 import type { Config } from '../config/config.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
@@ -30,7 +30,6 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
-import { handleFallback } from '../fallback/handler.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 export enum StreamEventType {
@@ -357,22 +356,20 @@ export class GeminiChat {
         },
         prompt_id,
       );
-    const onPersistent429Callback = async (
-      authType?: string,
-      error?: unknown,
-    ) => await handleFallback(this.config, model, authType, error);
-
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
-        if (error instanceof ApiError && error.message) {
-          if (error.status === 400) return false;
+        if (error instanceof Error) {
           if (isSchemaDepthError(error.message)) return false;
-          if (error.status === 429) return true;
-          if (error.status >= 500 && error.status < 600) return true;
+          if (isInvalidArgumentError(error.message)) return false;
         }
+
+        const status = getErrorStatus(error);
+        if (status === 400) return false;
+        if (status === 429) return true;
+        if (status && status >= 500 && status < 600) return true;
+
         return false;
       },
-      onPersistent429: onPersistent429Callback,
       authType: this.config.getContentGeneratorConfig()?.authType,
     });
 

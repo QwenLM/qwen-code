@@ -113,6 +113,7 @@ describe('readPathFromWorkspace', () => {
         inlineData: {
           mimeType: 'image/png',
           data: imageData.toString('base64'),
+          displayName: 'image.png',
         },
       },
     ]);
@@ -263,6 +264,7 @@ describe('readPathFromWorkspace', () => {
         inlineData: {
           mimeType: 'image/png',
           data: imageData.toString('base64'),
+          displayName: 'photo.png',
         },
       });
     });

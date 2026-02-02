@@ -70,9 +70,6 @@ import { retryWithBackoff } from '../utils/retry.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 
-// Fallback handling
-import { handleFallback } from '../fallback/handler.js';
-
 const MAX_TURNS = 100;
 
 export class GeminiClient {
@@ -607,15 +604,7 @@ export class GeminiClient {
           this.lastPromptId!,
         );
       };
-      const onPersistent429Callback = async (
-        authType?: string,
-        error?: unknown,
-      ) =>
-        // Pass the captured model to the centralized handler.
-        await handleFallback(this.config, currentAttemptModel, authType, error);
-
       const result = await retryWithBackoff(apiCall, {
-        onPersistent429: onPersistent429Callback,
         authType: this.config.getContentGeneratorConfig()?.authType,
       });
       return result;

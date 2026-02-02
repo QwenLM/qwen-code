@@ -1,0 +1,32 @@
+id = "qwen-code"
+name = "Qwen Code"
+version = "0.1.0"
+schema_version = 1
+authors = ["Qwen Team"]
+description = "Qwen Code Agent Server Extension for Zed"
+repository = "https://github.com/QwenLM/qwen-code"
+
+[agent_servers.qwen-code]
+name = "Qwen Code"
+icon = "qwen-code.svg"
+
+[agent_servers.qwen-code.targets.darwin-aarch64]
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+cmd = "node"
+args = ["./package/cli.js", "--acp", "--experimental-skills"]
+
+[agent_servers.qwen-code.targets.darwin-x86_64]
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+cmd = "node"
+args = ["./package/cli.js", "--acp", "--experimental-skills"]
+
+[agent_servers.qwen-code.targets.linux-x86_64]
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+cmd = "node"
+args = ["./package/cli.js", "--acp", "--experimental-skills"]
+
+[agent_servers.qwen-code.targets.windows-x86_64]
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+cmd = "node"
+args = ["./package/cli.js", "--acp", "--experimental-skills"]
+

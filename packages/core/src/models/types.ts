@@ -32,6 +32,8 @@ export type ModelGenerationConfig = Pick<
   | 'schemaCompliance'
   | 'reasoning'
   | 'customHeaders'
+  | 'extra_body'
+  | 'contextWindowSize'
 >;
 
 /**
@@ -89,6 +91,7 @@ export interface AvailableModel {
   capabilities?: ModelCapabilities;
   authType: AuthType;
   isVision?: boolean;
+  contextWindowSize?: number;
 }
 
 /**

@@ -20,11 +20,15 @@ import {
   OutputFormat,
   isToolEnabled,
   SessionService,
+  ideContextStore,
   type ResumedSessionData,
+  type LspClient,
   type ToolName,
   EditTool,
   ShellTool,
   WriteFileTool,
+  NativeLspClient,
+  NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import type { Settings } from './settings.js';
@@ -113,6 +117,7 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalSkills: boolean | undefined;
+  experimentalLsp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -330,6 +335,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             ).tools?.experimental?.skills;
             return settings.experimental?.skills ?? legacySkills ?? false;
           })(),
+        })
+        .option('experimental-lsp', {
+          type: 'boolean',
+          description:
+            'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
+          default: false,
         })
         .option('channel', {
           type: 'string',
@@ -713,6 +724,9 @@ export async function loadCliConfig(
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
 
+  // LSP configuration: enabled only via --experimental-lsp flag
+  const lspEnabled = argv.experimentalLsp === true;
+  let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
     (argv.inputFormat as InputFormat | undefined) ?? InputFormat.TEXT;
@@ -924,7 +938,7 @@ export async function loadCliConfig(
 
   const modelProvidersConfig = settings.modelProviders;
 
-  return new Config({
+  const config = new Config({
     sessionId,
     sessionData,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -1016,7 +1030,34 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
+    lsp: {
+      enabled: lspEnabled,
+    },
   });
+
+  if (lspEnabled) {
+    try {
+      const lspService = new NativeLspService(
+        config,
+        config.getWorkspaceContext(),
+        appEvents,
+        fileService,
+        ideContextStore,
+        {
+          requireTrustedWorkspace: folderTrust,
+        },
+      );
+
+      await lspService.discoverAndPrepare();
+      await lspService.start();
+      lspClient = new NativeLspClient(lspService);
+      config.setLspClient(lspClient);
+    } catch (err) {
+      logger.warn('Failed to initialize native LSP service:', err);
+    }
+  }
+
+  return config;
 }
 
 function mergeExcludeTools(

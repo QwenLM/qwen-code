@@ -34,6 +34,11 @@ import { executeToolCall } from '../core/nonInteractiveToolExecutor.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../tools/tools.js';
 import { ContextState, SubAgentScope } from './subagent.js';
+import {
+  SubAgentEventEmitter,
+  SubAgentEventType,
+  type SubAgentStreamTextEvent,
+} from './subagent-events.js';
 import type {
   ModelConfig,
   PromptConfig,
@@ -772,6 +777,160 @@ describe('subagent.ts', () => {
           scope.runNonInteractive(new ContextState()),
         ).rejects.toThrow('API Failure');
         expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.ERROR);
+      });
+    });
+
+    describe('runNonInteractive - Streaming and Thought Handling', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      // Helper to create a mock stream that yields specific parts
+      const createMockStreamWithParts = (parts: Part[]) =>
+        vi.fn().mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: { parts },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+      it('should emit STREAM_TEXT events with thought flag', async () => {
+        const { config } = await createMockConfig();
+
+        mockSendMessageStream = createMockStreamWithParts([
+          { text: 'Let me think...' as string, thought: true },
+          { text: 'Here is the answer.' as string },
+        ]);
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const eventEmitter = new SubAgentEventEmitter();
+        const events: SubAgentStreamTextEvent[] = [];
+        eventEmitter.on(SubAgentEventType.STREAM_TEXT, (...args: unknown[]) => {
+          events.push(args[0] as SubAgentStreamTextEvent);
+        });
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          undefined,
+          eventEmitter,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        expect(events).toHaveLength(2);
+        expect(events[0]!.text).toBe('Let me think...');
+        expect(events[0]!.thought).toBe(true);
+        expect(events[1]!.text).toBe('Here is the answer.');
+        expect(events[1]!.thought).toBe(false);
+      });
+
+      it('should exclude thought text from finalText', async () => {
+        const { config } = await createMockConfig();
+
+        mockSendMessageStream = createMockStreamWithParts([
+          { text: 'Internal reasoning here.' as string, thought: true },
+          { text: 'The final answer.' as string },
+        ]);
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('The final answer.');
+      });
+
+      it('should not set finalText from thought-only response', async () => {
+        const { config } = await createMockConfig();
+
+        // First call: only thought text (no regular text → nudge)
+        // Second call: regular text response
+        let callIndex = 0;
+        mockSendMessageStream = vi.fn().mockImplementation(async () => {
+          const idx = callIndex++;
+          return (async function* () {
+            if (idx === 0) {
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: 'Just thinking...' as string,
+                            thought: true,
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              };
+            } else {
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Actual output.' as string }],
+                      },
+                    },
+                  ],
+                },
+              };
+            }
+          })();
+        });
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Actual output.');
+        // Should have been called twice: first with thought-only, then nudged
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
     });
   });

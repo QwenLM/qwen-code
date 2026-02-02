@@ -153,6 +153,15 @@ export function splitCommands(command: string): string[] {
       } else if (char === ';' || char === '&' || char === '|') {
         commands.push(currentCommand.trim());
         currentCommand = '';
+      } else if (char === '\r' && nextChar === '\n') {
+        // Windows-style \r\n newline - treat as command separator
+        commands.push(currentCommand.trim());
+        currentCommand = '';
+        i++; // Skip the \n
+      } else if (char === '\n') {
+        // Unix-style \n newline - treat as command separator
+        commands.push(currentCommand.trim());
+        currentCommand = '';
       } else {
         currentCommand += char;
       }

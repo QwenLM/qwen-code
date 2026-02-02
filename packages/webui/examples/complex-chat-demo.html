@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>@qwen-code/webui Complex Chat Demo</title>
+  <!-- Load React and ReactDOM from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Load the webui library from CDN -->
+  <script src="https://unpkg.com/@qwen-code/webui@0.1.0-beta.2/dist/index.umd.js"></script>
+
+  <!-- Load the CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/@qwen-code/webui@0.1.0-beta.2/dist/styles.css">
+
+  <!-- Load Babel Standalone for JSX processing -->
+  <script src="https://unpkg.com/@babel/standalone@7.23.6/babel.min.js"></script>
+
+  <!-- Manually create the jsxRuntime object to satisfy the dependency -->
+  <script>
+    // Provide a minimal JSX runtime for builds that expect react/jsx-runtime globals.
+    const withKey = (props, key) =>
+      key == null ? props : Object.assign({}, props, { key });
+    const jsx = (type, props, key) => React.createElement(type, withKey(props, key));
+    const jsxRuntime = {
+      Fragment: React.Fragment,
+      jsx,
+      jsxs: jsx,
+      jsxDEV: jsx
+    };
+
+    window.ReactJSXRuntime = jsxRuntime;
+    window['react/jsx-runtime'] = jsxRuntime;
+    window['react/jsx-dev-runtime'] = jsxRuntime;
+  </script>
+
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f5f5f5;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+      overflow: hidden;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      text-align: center;
+      color: #333;
+      margin-bottom: 30px;
+    }
+
+    .chat-container {
+      height: 700px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>@qwen-code/webui Complex Chat Demo</h1>
+    <h2>Real conversation example with tool calls</h2>
+    <div id="complex-chat-root" class="chat-container"></div>
+
+    <h2>Alternative: With Full Tailwind Support</h2>
+    <p>For full Tailwind utility class support (like gap-1.5, button classes, etc.), also include:</p>
+    <pre>&lt;script src="https://cdn.tailwindcss.com"&gt;&lt;/script&gt;</pre>
+  </div>
+
+  <script type="text/babel">
+    // Complex real-world conversation example from Storybook
+    const complexChatMessages = [
+      {
+        uuid: '20fb9426-40ca-4e85-92a1-7add59082167',
+        parentUuid: null,
+        sessionId: 'f05dd1fc-2947-44e0-9f31-cbddce461844',
+        timestamp: '2026-01-09T02:58:32.415Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: `Message received: Object from: Object
+service-worker.js:137 Attempting to connect to Native Host: com.qwen.cli.bridge
+service-worker.js:202 Sending handshake...
+service-worker.js:175 Native host disconnected
+service-worker.js:177 Disconnect error: Object
+service-worker.js:178 Disconnect error message: Native host has exited.
+service-worker.js:207 Handshake timeout - no response from Native Host
+
+Cannot receive host info. Expected output:
+service-worker.js:150 [Native Event] host_info Object
+service-worker.js:552 [Qwen] host_info Object
+service-worker.js:617 [Host] Info Object
+service-worker.js:164 [Native Message] handshake_response Object
+service-worker.js:231 Handshake successful: Object`,
+        },
+      },
+      {
+        uuid: '86f72c75-4626-4292-a26f-13db6f80d4be',
+        parentUuid: '20fb9426-40ca-4e85-92a1-7add59082167',
+        sessionId: 'f05dd1fc-2947-44e0-9f31-cbddce461844',
+        timestamp: '2026-01-09T02:58:45.239Z',
+        type: 'assistant',
+        model: 'claude-opus-4-5-20251101',
+        message: {
+          role: 'assistant',
+          content: `I can see you're experiencing an issue with the Chrome extension's native host connection. The error shows that the native host is disconnecting with "Native host has exited" and there's a handshake timeout. However, the logs also show that sometimes the handshake is successful when the host_info is received properly.
+
+Let me help you troubleshoot this issue. First, I'll explore the codebase to understand how the native host communication works.`,
+        },
+      },
+      {
+        uuid: '6ffff579-8020-4ccb-9b79-7c1da76bbf82',
+        parentUuid: '86f72c75-4626-4292-a26f-13db6f80d4be',
+        sessionId: 'f05dd1fc-2947-44e0-9f31-cbddce461844',
+        timestamp: '2026-01-09T02:58:52.409Z',
+        type: 'assistant',
+        model: 'claude-opus-4-5-20251101',
+        message: {
+          role: 'assistant',
+          content: `Let me create a todo list to track the troubleshooting steps:
+
+1. **Explore the codebase** to understand the native host implementation
+2. **Check the native host configuration** and setup
+3. **Analyze the service worker code** that handles native messaging
+4. **Identify why the native host exits** unexpectedly
+5. **Propose fixes** for the native host connection issue`,
+        },
+      },
+      {
+        uuid: '8fd3dc96-1d34-4dae-845a-4827f435b890',
+        parentUuid: '6ffff579-8020-4ccb-9b79-7c1da76bbf82',
+        sessionId: 'f05dd1fc-2947-44e0-9f31-cbddce461844',
+        timestamp: '2026-01-09T02:58:57.366Z',
+        type: 'assistant',
+        model: 'claude-opus-4-5-20251101',
+        message: {
+          role: 'assistant',
+          content: `Let me start by exploring the codebase to understand the native host implementation.
+
+Looking at the project structure, I found the following relevant files:
+
+\`\`\`
+packages/chrome-extension/
+├── src/
+│   ├── service-worker.ts      # Main service worker
+│   ├── native-messaging/
+│   │   ├── host.ts            # Native host communication
+│   │   └── protocol.ts        # Message protocol
+│   └── manifest.json          # Extension manifest
+└── native-host/
+    ├── index.js               # Native host entry
+    └── com.qwen.cli.bridge.json  # Host manifest
+\`\`\`
+
+The issue appears to be in the handshake timing. The native host is exiting before the handshake completes.`,
+        },
+      },
+      {
+        uuid: 'user-follow-up-1',
+        parentUuid: '8fd3dc96-1d34-4dae-845a-4827f435b890',
+        sessionId: 'f05dd1fc-2947-44e0-9f31-cbddce461844',
+        timestamp: '2026-01-09T03:00:15.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          content: 'How should I fix this issue?',
+        },
+      },
+      {
+        uuid: 'assistant-fix-1',
+        parentUuid: 'user-follow-up-1',
+        sessionId: 'f05dd1fc-2947-44e0-9f31-cbddce461844',
+        timestamp: '2026-01-09T03:00:45.000Z',
+        type: 'assistant',
+        model: 'claude-opus-4-5-20251101',
+        message: {
+          role: 'assistant',
+          content: `Based on my analysis, here's how to fix the native host connection issue:
+
+## Root Cause
+The native host process is exiting prematurely because it's not keeping the stdin stream open for communication.
+
+## Solution
+
+Update the native host's \`index.js\`:
+
+\`\`\`javascript
+// native-host/index.js
+const { stdin, stdout } = process;
+
+// Keep the process alive by not closing stdin
+stdin.resume();
+
+// Handle incoming messages
+stdin.on('data', (data) => {
+  try {
+    const length = data.readUInt32LE(0);
+    const message = JSON.parse(data.slice(4, 4 + length).toString());
+
+    if (message.type === 'handshake') {
+      sendMessage({ type: 'handshake_response', status: 'ok' });
+    }
+    // Handle other messages...
+  } catch (err) {
+    console.error('Error parsing message:', err);
+  }
+});
+
+function sendMessage(msg) {
+  const json = JSON.stringify(msg);
+  const length = Buffer.alloc(4);
+  length.writeUInt32LE(json.length, 0);
+  stdout.write(Buffer.concat([length, Buffer.from(json)]));
+}
+
+// Send host info on startup
+sendMessage({
+  type: 'host_info',
+  pid: process.pid,
+  node: process.execPath
+});
+\`\`\`
+
+## Key Changes
+1. Added \`stdin.resume()\` to prevent the process from exiting
+2. Properly handle the native messaging protocol (4-byte length prefix)
+3. Send \`host_info\` immediately on startup
+
+Would you like me to apply these changes to your codebase?`,
+        },
+      },
+    ];
+
+    // Tool call conversation example
+    const toolCallMessages = [
+      {
+        uuid: 'tc-1',
+        timestamp: '2026-01-15T14:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'Please check the package.json file and add a lodash dependency' },
+          ],
+        },
+      },
+      {
+        uuid: 'tc-2',
+        timestamp: '2026-01-15T14:00:05.000Z',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: 'Sure, let me read the package.json file to check the current dependency configuration.',
+        },
+      },
+      {
+        uuid: 'tc-3',
+        timestamp: '2026-01-15T14:00:06.000Z',
+        type: 'tool_call',
+        toolCall: {
+          toolCallId: 'read-1',
+          kind: 'read',
+          title: 'package.json',
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: {
+                type: 'text',
+                text: `{
+  "name": "my-project",
+  "version": "1.0.0",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0"
+  }
+}`,
+              },
+            },
+          ],
+          locations: [{ path: 'package.json', line: 1 }],
+        },
+      },
+      {
+        uuid: 'tc-4',
+        timestamp: '2026-01-15T14:00:10.000Z',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: 'I see the project uses React 18 and TypeScript. Now let me add the lodash dependency.',
+        },
+      },
+      {
+        uuid: 'tc-5',
+        timestamp: '2026-01-15T14:00:11.000Z',
+        type: 'tool_call',
+        toolCall: {
+          toolCallId: 'edit-1',
+          kind: 'edit',
+          title: 'package.json',
+          status: 'completed',
+          content: [
+            {
+              type: 'diff',
+              path: 'package.json',
+              oldText: `  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },`,
+              newText: `  "dependencies": {
+    "lodash": "^4.17.21",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },`,
+            },
+          ],
+          locations: [{ path: 'package.json', line: 4 }],
+        },
+      },
+      {
+        uuid: 'tc-6',
+        timestamp: '2026-01-15T14:00:15.000Z',
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          content: `Successfully added lodash dependency to package.json.
+
+You need to run the following command to install the new dependency:
+
+\`\`\`bash
+npm install
+\`\`\`
+
+Or if you use pnpm:
+
+\`\`\`bash
+pnpm install
+\`\`\``,
+        },
+      },
+    ];
+
+    // Combine all messages for a comprehensive example
+    const combinedMessages = [
+      ...complexChatMessages,
+      ...toolCallMessages
+    ];
+
+    // Get the ChatViewer and Platform components from the global object
+    const { ChatViewer, PlatformProvider } = QwenCodeWebUI;
+
+    // Define a minimal platform context for web usage
+    const platformContext = {
+      platform: 'web',
+      postMessage: (message) => {
+        // In a web context, you might want to handle messages differently
+        console.log('Posted message:', message);
+      },
+      onMessage: (handler) => {
+        // In a web context, you might listen for custom events
+        window.addEventListener('message', handler);
+        return () => window.removeEventListener('message', handler);
+      },
+      openFile: (path) => {
+        console.log('Opening file:', path);
+      },
+      getResourceUrl: (resource) => {
+        // Return URLs for platform-specific resources
+        return null; // Use default resources
+      },
+      features: {
+        canOpenFile: false,
+        canCopy: true
+      }
+    };
+
+    // Render the ChatViewer component
+    const rootElement = document.getElementById('complex-chat-root');
+
+    // Create the ChatViewer element wrapped with PlatformProvider with complex data
+    const ChatApp = React.createElement(PlatformProvider, { value: platformContext },
+      React.createElement(ChatViewer, {
+        messages: combinedMessages,
+        autoScroll: true,
+        theme: 'light',
+        emptyMessage: 'Loading conversation...'
+      })
+    );
+
+    ReactDOM.render(ChatApp, rootElement);
+  </script>
+</body>
+
+</html>

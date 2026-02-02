@@ -434,7 +434,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Check for enforced auth type mismatch
   useEffect(() => {
     // Check for initialization error first
-    const currentAuthType = config.modelsConfig.getCurrentAuthType();
+    const currentAuthType = config.getModelsConfig().getCurrentAuthType();
 
     if (
       settings.merged.security?.auth?.enforcedType &&

@@ -1,0 +1,197 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Default CSS variables for @qwen-code/webui
+ * These provide fallback values when running outside of VSCode.
+ * In VSCode, these will be overridden by VSCode's design tokens.
+ */
+:root {
+  /* ===========================
+     Primary Colors
+     =========================== */
+  --app-primary: #3b82f6;
+  --app-primary-hover: #2563eb;
+  --app-primary-foreground: #e4e4e7;
+  --app-secondary-foreground: #a1a1aa;
+
+  /* ===========================
+     Background Colors
+     =========================== */
+  --app-background: #1e1e1e;
+  --app-primary-background: #1e1e1e;
+  --app-background-secondary: #252526;
+  --app-secondary-background: #252526;
+  --app-background-tertiary: #2d2d2d;
+
+  /* ===========================
+     Foreground/Text Colors
+     =========================== */
+  --app-foreground: #e4e4e7;
+  --app-foreground-secondary: #a1a1aa;
+  --app-foreground-muted: #71717a;
+
+  /* ===========================
+     Border Colors
+     =========================== */
+  --app-border: #3f3f46;
+  --app-border-focus: #3b82f6;
+  --app-primary-border-color: #3f3f46;
+
+  /* ===========================
+     Status Colors
+     =========================== */
+  --app-success: #10b981;
+  --app-warning: #f59e0b;
+  --app-error: #ef4444;
+  --app-info: #3b82f6;
+
+  /* ===========================
+     Typography
+     =========================== */
+  --app-font-sans: system-ui, -apple-system, sans-serif;
+  --app-font-mono: var(
+    --app-monospace-font-family,
+    ui-monospace,
+    'SF Mono',
+    monospace
+  );
+  --app-monospace-font-size: 13px;
+  --font-size-xs: 11px;
+
+  /* ===========================
+     Link Styles
+     =========================== */
+  --app-link-foreground: #007acc;
+  --app-link-active-foreground: #005a9e;
+
+  /* ===========================
+     Brand Colors
+     =========================== */
+  --app-qwen-ivory: #f5f5dc;
+
+  /* ===========================
+     Border Radius
+     =========================== */
+  --app-radius-sm: 0.25rem;
+  --app-radius-md: 0.375rem;
+  --app-radius-lg: 0.5rem;
+  --qwen-corner-radius-small: 6px;
+  --qwen-corner-radius-medium: 8px;
+  --corner-radius-small: var(--app-radius-sm, 4px);
+  --corner-radius-medium: var(--app-radius-md, 6px);
+  --border-radius-medium: var(--corner-radius-medium, 6px);
+
+  /* ===========================
+     Spacing
+     =========================== */
+  --app-spacing-xs: 0.25rem;
+  --app-spacing-sm: 0.5rem;
+  --app-spacing-md: 1rem;
+  --app-spacing-medium: 8px;
+  --app-spacing-lg: 1.5rem;
+  --app-spacing-xl: 2rem;
+  --spacing-medium: var(--app-spacing-medium, 8px);
+  --spacing-large: 12px;
+
+  /* ===========================
+     Input Styles
+     =========================== */
+  --app-input-background: #3c3c3c;
+  --app-input-secondary-background: #2d2d2d;
+  --app-input-border: #3f3f46;
+  --app-input-foreground: #e4e4e7;
+  --app-input-placeholder-foreground: #71717a;
+
+  /* ===========================
+     Button Styles
+     =========================== */
+  --app-ghost-button-hover-background: rgba(90, 93, 94, 0.31);
+  --app-button-background: #3c3c3c;
+  --app-button-foreground: #ffffff;
+  --app-button-hover-background: var(--app-primary-hover);
+  --app-transparent-inner-border: rgba(255, 255, 255, 0.1);
+
+  /* ===========================
+     Header Styles
+     =========================== */
+  --app-header-background: #252526;
+
+  /* ===========================
+     List Styles
+     =========================== */
+  --app-list-padding: 0px;
+  --app-list-item-padding: 4px 8px;
+  --app-list-border-color: transparent;
+  --app-list-border-radius: 4px;
+  --app-list-hover-background: rgba(90, 93, 94, 0.31);
+  --app-list-active-background: #094771;
+  --app-list-active-foreground: #ffffff;
+  --app-list-gap: 2px;
+
+  /* ===========================
+     Menu Styles
+     =========================== */
+  --app-menu-background: #252526;
+  --app-menu-border: #454545;
+  --app-menu-foreground: #cccccc;
+  --app-menu-selection-background: #094771;
+  --app-menu-selection-foreground: #ffffff;
+
+  /* ===========================
+     Tool Call Styles
+     =========================== */
+  --app-tool-background: #1e1e1e;
+  --app-code-background: #2d2d2d;
+
+  /* ===========================
+     Warning/Error Styles
+     =========================== */
+  --app-warning-background: rgba(255, 204, 0, 0.1);
+  --app-warning-border: #ffcc00;
+  --app-warning-foreground: #ffcc00;
+
+  /* ===========================
+     VSCode Compatibility
+     =========================== */
+  --vscode-chat-font-size: 13px;
+  --vscode-chat-font-family: var(--app-font-sans);
+  --vscode-focusBorder: var(--app-border-focus);
+  --vscode-symbolIcon-fileForeground: var(--app-secondary-foreground);
+}
+
+/* Light theme override (can be toggled via class or media query) */
+@media (prefers-color-scheme: light) {
+  :root.auto-theme {
+    --app-primary-foreground: #1f2937;
+    --app-secondary-foreground: #6b7280;
+    --app-background: #ffffff;
+    --app-primary-background: #ffffff;
+    --app-background-secondary: #f3f4f6;
+    --app-background-tertiary: #e5e7eb;
+    --app-foreground: #1f2937;
+    --app-foreground-secondary: #6b7280;
+    --app-foreground-muted: #9ca3af;
+    --app-border: #e5e7eb;
+    --app-primary-border-color: #e5e7eb;
+    --app-input-background: #ffffff;
+    --app-input-border: #d1d5db;
+    --app-input-placeholder-foreground: #9ca3af;
+    --app-ghost-button-hover-background: rgba(0, 0, 0, 0.05);
+    --app-header-background: #f9fafb;
+    --app-list-hover-background: rgba(0, 0, 0, 0.05);
+    --app-list-active-background: #3b82f6;
+    --app-menu-background: #ffffff;
+    --app-menu-border: #e5e7eb;
+    --app-menu-foreground: #1f2937;
+    --app-tool-background: #ffffff;
+    --app-code-background: #f3f4f6;
+  }
+}

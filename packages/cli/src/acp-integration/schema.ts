@@ -367,6 +367,8 @@ export const sessionUpdateMetaSchema = z.object({
   usage: usageSchema.optional().nullable(),
   durationMs: z.number().optional().nullable(),
   toolName: z.string().optional().nullable(),
+  parentToolCallId: z.string().optional().nullable(),
+  subagentType: z.string().optional().nullable(),
 });
 
 export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
