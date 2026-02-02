@@ -124,7 +124,7 @@ describe('clipboardUtils', () => {
 
       it('should return true when clipboard contains image', async () => {
         mockExecCommand.mockResolvedValue({
-          stdout: 'True',
+          stdout: 'true',
           stderr: '',
           code: 0,
         });
@@ -132,17 +132,17 @@ describe('clipboardUtils', () => {
         const result = await clipboardHasImage();
         expect(result).toBe(true);
         expect(mockExecCommand).toHaveBeenCalledWith(
-          'powershell',
+          'powershell.exe',
           expect.arrayContaining([
             '-command',
-            'Add-Type -Assembly System.Windows.Forms; [System.Windows.Forms.Clipboard]::ContainsImage()',
+            expect.stringContaining('Get-Clipboard'),
           ]),
         );
       });
 
       it('should return false when clipboard does not contain image', async () => {
         mockExecCommand.mockResolvedValue({
-          stdout: 'False',
+          stdout: 'false',
           stderr: '',
           code: 0,
         });
@@ -151,11 +151,15 @@ describe('clipboardUtils', () => {
         expect(result).toBe(false);
       });
 
-      it('should return false when PowerShell fails', async () => {
-        mockExecCommand.mockRejectedValue(new Error('PowerShell not found'));
+      it('should return false when all PowerShell hosts fail', async () => {
+        mockExecCommand
+          .mockRejectedValueOnce(new Error('PowerShell not found'))
+          .mockRejectedValueOnce(new Error('PowerShell not found'))
+          .mockRejectedValueOnce(new Error('PowerShell not found'));
 
         const result = await clipboardHasImage();
         expect(result).toBe(false);
+        expect(mockExecCommand).toHaveBeenCalledTimes(3);
       });
     });
 

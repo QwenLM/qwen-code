@@ -79,6 +79,7 @@ export interface KeyBinding {
   command?: boolean;
   /** Paste operation requirement: true=must be paste, false=must not be paste, undefined=ignore */
   paste?: boolean;
+  meta?: boolean;
 }
 
 /**
@@ -153,10 +154,16 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'x', ctrl: true },
     { sequence: '\x18', ctrl: true },
   ],
-  [Command.PASTE_CLIPBOARD_IMAGE]: [
-    { key: 'v', ctrl: true },
-    { key: 'v', command: true },
-  ],
+  [Command.PASTE_CLIPBOARD_IMAGE]:
+    process.platform === 'win32'
+      ? [
+          { key: 'v', command: true },
+          { key: 'v', meta: true },
+        ]
+      : [
+          { key: 'v', ctrl: true },
+          { key: 'v', command: true },
+        ],
 
   // App level bindings
   [Command.SHOW_ERROR_DETAILS]: [{ key: 'o', ctrl: true }],

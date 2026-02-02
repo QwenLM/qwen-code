@@ -18,7 +18,10 @@ interface Shortcut {
 // Platform-specific key mappings
 const getNewlineKey = () =>
   process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
-const getPasteKey = () => (process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v');
+const getPasteKey = () => {
+  if (process.platform === 'win32') return 'alt+v';
+  return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
+};
 const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
 
