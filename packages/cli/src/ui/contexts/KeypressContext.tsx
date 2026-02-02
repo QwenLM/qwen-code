@@ -735,6 +735,32 @@ export function KeypressProvider({
     };
 
     let rl: readline.Interface;
+    let stdinRl: readline.Interface | null = null;
+
+    // On Windows, when pasting an image (not text), the terminal may not send
+    // any data to stdin, so the 'data' event won't fire. We need to also
+    // listen for keypress events directly on stdin to capture Ctrl+V.
+    // This handler only processes Ctrl+V to avoid duplicate events for other keys.
+    const handleStdinKeypress = async (_: unknown, key: Key) => {
+      // Only handle Ctrl+V (sequence '\x16') that might not come through data event
+      // Other keys will come through the data -> keypressStream -> keypress path
+      if (key && key.sequence === '\x16') {
+        // Check if this is a potential image paste by checking clipboard
+        const hasImage = await clipboardHasImage();
+        if (hasImage) {
+          broadcast({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: true,
+            pasteImage: true,
+            sequence: '',
+          });
+        }
+      }
+    };
+
     if (usePassthrough) {
       rl = readline.createInterface({
         input: keypressStream,
@@ -743,6 +769,14 @@ export function KeypressProvider({
       readline.emitKeypressEvents(keypressStream, rl);
       keypressStream.on('keypress', handleKeypress);
       stdin.on('data', handleRawKeypress);
+
+      // Also listen for keypress on stdin to capture Ctrl+V for image paste
+      stdinRl = readline.createInterface({
+        input: stdin,
+        escapeCodeTimeout: 0,
+      });
+      readline.emitKeypressEvents(stdin, stdinRl);
+      stdin.on('keypress', handleStdinKeypress);
     } else {
       rl = readline.createInterface({ input: stdin, escapeCodeTimeout: 0 });
       readline.emitKeypressEvents(stdin, rl);
@@ -753,6 +787,8 @@ export function KeypressProvider({
       if (usePassthrough) {
         keypressStream.removeListener('keypress', handleKeypress);
         stdin.removeListener('data', handleRawKeypress);
+        stdin.removeListener('keypress', handleStdinKeypress);
+        stdinRl?.close();
       } else {
         stdin.removeListener('keypress', handleKeypress);
       }
