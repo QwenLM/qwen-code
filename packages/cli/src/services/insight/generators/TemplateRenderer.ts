@@ -5,6 +5,7 @@
  */
 
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
 import type { InsightData } from '../types/StaticInsightTypes.js';
@@ -15,7 +16,24 @@ export class TemplateRenderer {
   constructor() {
     const __filename = fileURLToPath(import.meta.url);
     const __dirname = dirname(__filename);
-    this.templateDir = path.join(__dirname, '..', 'templates');
+
+    // In bundled version (dist/cli.js), __dirname is dist/, templates at dist/templates/
+    // In development (dist/src/services/insight/generators/), templates at dist/src/services/insight/templates/
+    const bundledTemplatePath = path.join(__dirname, 'templates');
+    const devTemplatePath = path.join(__dirname, '..', 'templates');
+
+    // Try bundled path first (for production), fall back to dev path
+    try {
+      // Check if bundled templates exist
+      if (existsSync(bundledTemplatePath)) {
+        this.templateDir = bundledTemplatePath;
+      } else {
+        this.templateDir = devTemplatePath;
+      }
+    } catch {
+      // If check fails, use dev path as fallback
+      this.templateDir = devTemplatePath;
+    }
   }
 
   // Load template files
