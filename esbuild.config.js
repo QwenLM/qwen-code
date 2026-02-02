@@ -56,10 +56,6 @@ esbuild
         __dirname,
         'packages/cli/src/patches/is-in-ci.ts',
       ),
-      tiktoken: path.join(
-        path.dirname(require.resolve('tiktoken')),
-        'tiktoken.js',
-      ),
     },
     define: {
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),
