@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
+import { copyRecursiveSync } from './copy_bundle_assets.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,24 +70,6 @@ const localesSourceDir = path.join(
 const localesDestDir = path.join(distDir, 'locales');
 
 if (fs.existsSync(localesSourceDir)) {
-  // Recursive copy function
-  function copyRecursiveSync(src, dest) {
-    const stats = fs.statSync(src);
-    if (stats.isDirectory()) {
-      if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
-      }
-      const entries = fs.readdirSync(src);
-      for (const entry of entries) {
-        const srcPath = path.join(src, entry);
-        const destPath = path.join(dest, entry);
-        copyRecursiveSync(srcPath, destPath);
-      }
-    } else {
-      fs.copyFileSync(src, dest);
-    }
-  }
-
   copyRecursiveSync(localesSourceDir, localesDestDir);
   console.log('Copied locales folder');
 } else {
@@ -107,29 +90,33 @@ const extensionExamplesDir = path.join(
 const extensionExamplesDestDir = path.join(distDir, 'examples');
 
 if (fs.existsSync(extensionExamplesDir)) {
-  // Recursive copy function
-  function copyRecursiveSync(src, dest) {
-    const stats = fs.statSync(src);
-    if (stats.isDirectory()) {
-      if (!fs.existsSync(dest)) {
-        fs.mkdirSync(dest, { recursive: true });
-      }
-      const entries = fs.readdirSync(src);
-      for (const entry of entries) {
-        const srcPath = path.join(src, entry);
-        const destPath = path.join(dest, entry);
-        copyRecursiveSync(srcPath, destPath);
-      }
-    } else {
-      fs.copyFileSync(src, dest);
-    }
-  }
-
   copyRecursiveSync(extensionExamplesDir, extensionExamplesDestDir);
   console.log('Copied extension examples folder');
 } else {
   console.warn(
     `Warning: extension examples folder not found at ${extensionExamplesDir}`,
+  );
+}
+
+// Copy insight templates directory
+console.log('Copying insight templates...');
+const insightTemplatesDir = path.join(
+  rootDir,
+  'packages',
+  'cli',
+  'src',
+  'services',
+  'insight',
+  'templates',
+);
+const destTemplatesDir = path.join(distDir, 'templates');
+
+if (fs.existsSync(insightTemplatesDir)) {
+  copyRecursiveSync(insightTemplatesDir, destTemplatesDir);
+  console.log('Copied insight templates to dist/');
+} else {
+  console.warn(
+    `Warning: Insight templates directory not found at ${insightTemplatesDir}`,
   );
 }
 
@@ -151,7 +138,15 @@ const distPackageJson = {
   bin: {
     qwen: 'cli.js',
   },
-  files: ['cli.js', 'vendor', '*.sb', 'README.md', 'LICENSE', 'locales'],
+  files: [
+    'cli.js',
+    'vendor',
+    '*.sb',
+    'README.md',
+    'LICENSE',
+    'locales',
+    'templates',
+  ],
   config: rootPackageJson.config,
   dependencies: {},
   optionalDependencies: {
