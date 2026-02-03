@@ -358,5 +358,43 @@ describe('ToolConfirmationMessage', () => {
       // At most one call (from Enter via RadioButtonSelect), but not from arrow/tab keys
       expect(onConfirm.mock.calls.length).toBeLessThanOrEqual(1);
     });
+
+    it('should trigger cancel via escape handler when pressing escape on third option', () => {
+      const onConfirm = vi.fn();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Implementation Plan\n- Step one\n- Step two'.replace(
+          /\n/g,
+          EOL,
+        ),
+        onConfirm,
+      };
+
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      // Navigate to third option
+      stdin.write('\x1B[B'); // Down arrow
+      stdin.write('\x1B[B'); // Down arrow
+
+      // Press escape - should trigger cancel via general escape handler (not isPrintableKey path)
+      stdin.write('\x1B'); // Escape
+
+      // Verify onConfirm was called exactly once with Cancel outcome
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
   });
 });
