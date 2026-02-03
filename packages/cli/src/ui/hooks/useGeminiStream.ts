@@ -72,6 +72,12 @@ enum StreamProcessingStatus {
 }
 
 const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
+const RETRY_DISCARD_HISTORY_ITEM_TYPES = new Set<HistoryItemWithoutId['type']>([
+  'gemini',
+  'gemini_content',
+  'gemini_thought',
+  'gemini_thought_content',
+]);
 
 function showCitations(settings: LoadedSettings): boolean {
   const enabled = settings?.merged?.ui?.showCitations;
@@ -113,6 +119,7 @@ export const useGeminiStream = (
     showGuidance?: boolean;
   }>,
   isShellFocused?: boolean,
+  removeHistoryItemsById?: (ids: Iterable<number>) => void,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -122,6 +129,7 @@ export const useGeminiStream = (
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
+  const retryDiscardHistoryItemIdsRef = useRef<Set<number>>(new Set());
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const {
     startNewPrompt,
@@ -454,7 +462,17 @@ export const useGeminiStream = (
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
         if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          const id = addItem(
+            pendingHistoryItemRef.current,
+            userMessageTimestamp,
+          );
+          if (
+            RETRY_DISCARD_HISTORY_ITEM_TYPES.has(
+              pendingHistoryItemRef.current.type,
+            )
+          ) {
+            retryDiscardHistoryItemIdsRef.current.add(id);
+          }
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
         newGeminiMessageBuffer = eventValue;
@@ -479,7 +497,7 @@ export const useGeminiStream = (
         // broken up so that there are more "statically" rendered.
         const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
         const afterText = newGeminiMessageBuffer.substring(splitPoint);
-        addItem(
+        const id = addItem(
           {
             type: pendingHistoryItemRef.current?.type as
               | 'gemini'
@@ -488,6 +506,7 @@ export const useGeminiStream = (
           },
           userMessageTimestamp,
         );
+        retryDiscardHistoryItemIdsRef.current.add(id);
         setPendingHistoryItem({ type: 'gemini_content', text: afterText });
         newGeminiMessageBuffer = afterText;
       }
@@ -537,7 +556,17 @@ export const useGeminiStream = (
       if (!isPendingThought) {
         // If there's a pending non-thought item, finalize it first
         if (pendingHistoryItemRef.current) {
-          addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+          const id = addItem(
+            pendingHistoryItemRef.current,
+            userMessageTimestamp,
+          );
+          if (
+            RETRY_DISCARD_HISTORY_ITEM_TYPES.has(
+              pendingHistoryItemRef.current.type,
+            )
+          ) {
+            retryDiscardHistoryItemIdsRef.current.add(id);
+          }
         }
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
       }
@@ -560,13 +589,14 @@ export const useGeminiStream = (
       } else {
         const beforeText = newThoughtBuffer.substring(0, splitPoint);
         const afterText = newThoughtBuffer.substring(splitPoint);
-        addItem(
+        const id = addItem(
           {
             type: nextPendingType,
             text: beforeText,
           },
           userMessageTimestamp,
         );
+        retryDiscardHistoryItemIdsRef.current.add(id);
         setPendingHistoryItem({
           type: 'gemini_thought_content',
           text: afterText,
@@ -856,7 +886,30 @@ export const useGeminiStream = (
             loopDetectedRef.current = true;
             break;
           case ServerGeminiEventType.Retry:
-            // Will add the missing logic later
+            // The core stream is retrying due to invalid/partial output. Discard
+            // any content already streamed for the failed attempt so we don't
+            // duplicate output in the UI.
+            if (pendingHistoryItemRef.current) {
+              setPendingHistoryItem(null);
+            }
+            setThought(null);
+
+            if (
+              removeHistoryItemsById &&
+              retryDiscardHistoryItemIdsRef.current.size > 0
+            ) {
+              removeHistoryItemsById([
+                ...retryDiscardHistoryItemIdsRef.current,
+              ]);
+              retryDiscardHistoryItemIdsRef.current.clear();
+              onEditorClose();
+            } else {
+              retryDiscardHistoryItemIdsRef.current.clear();
+            }
+
+            geminiMessageBuffer = '';
+            thoughtBuffer = '';
+            toolCallRequests.length = 0;
             break;
           default: {
             // enforces exhaustive switch-case
@@ -882,6 +935,10 @@ export const useGeminiStream = (
       handleSessionTokenLimitExceededEvent,
       handleCitationEvent,
       setThought,
+      onEditorClose,
+      pendingHistoryItemRef,
+      removeHistoryItemsById,
+      setPendingHistoryItem,
     ],
   );
 
@@ -906,6 +963,7 @@ export const useGeminiStream = (
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
+      retryDiscardHistoryItemIdsRef.current.clear();
 
       const userMessageTimestamp = Date.now();
 
@@ -1032,6 +1090,7 @@ export const useGeminiStream = (
         } finally {
           setIsResponding(false);
           isSubmittingQueryRef.current = false;
+          retryDiscardHistoryItemIdsRef.current.clear();
         }
       });
     },

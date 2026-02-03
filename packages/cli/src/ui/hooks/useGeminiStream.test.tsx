@@ -11,6 +11,7 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { useGeminiStream } from './useGeminiStream.js';
 import { useKeypress } from './useKeypress.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
+import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
@@ -2158,6 +2159,82 @@ describe('useGeminiStream', () => {
       expect.any(String), // Argument 3: The prompt_id string
       undefined, // Argument 4: Options (undefined for normal prompts)
     );
+  });
+
+  describe('Retry Handling', () => {
+    it('should discard streamed content on Retry to avoid duplicates', async () => {
+      let idCounter = 0;
+      mockAddItem.mockImplementation(() => {
+        idCounter += 1;
+        return idCounter;
+      });
+
+      const mockOnEditorClose = vi.fn();
+      const mockRemoveHistoryItemsById = vi.fn();
+
+      (findLastSafeSplitPoint as unknown as Mock).mockImplementationOnce(
+        () => 3,
+      );
+
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'abcdef',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          mockOnEditorClose,
+          () => {},
+          false, // visionModelPreviewEnabled
+          () => {},
+          80,
+          24,
+          undefined,
+          undefined,
+          mockRemoveHistoryItemsById,
+        ),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('test query');
+      });
+
+      expect(mockRemoveHistoryItemsById).toHaveBeenCalledWith([2]);
+      expect(mockOnEditorClose).toHaveBeenCalledTimes(1);
+
+      const fullResponses = mockAddItem.mock.calls.filter(
+        (call) => call[0].type === 'gemini' && call[0].text === 'abcdef',
+      );
+      expect(fullResponses).toHaveLength(1);
+    });
   });
 
   describe('Thought Reset', () => {

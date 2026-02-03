@@ -703,6 +703,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     handleVisionSwitchRequired, // onVisionSwitchRequired
     embeddedShellFocused,
+    historyManager.removeItemsById,
   );
 
   // Auto-accept indicator
