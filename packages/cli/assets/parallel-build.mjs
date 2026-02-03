@@ -51,7 +51,11 @@ if (assetBuilds.length === 0) {
 
 const runCommand = ({ command, args, cwd, label }) =>
   new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd, stdio: 'inherit' });
+    const child = spawn(command, args, {
+      cwd,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
 
     child.on('error', reject);
     child.on('exit', (code) => {

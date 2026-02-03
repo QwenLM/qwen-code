@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { build } from 'esbuild';
 import { buildConfig } from './esbuild.config.mjs';
+import prettier from 'prettier';
 
 const assetsDir = dirname(fileURLToPath(import.meta.url));
 const srcDir = join(assetsDir, 'src');
@@ -83,6 +84,15 @@ const templateModule = `/**
 export const HTML_TEMPLATE = ${JSON.stringify(htmlOutput)};
 `;
 
+const formattedTemplateModule = await prettier.format(templateModule, {
+  parser: 'typescript',
+  singleQuote: true,
+  semi: true,
+  trailingComma: 'all',
+  printWidth: 80,
+  tabWidth: 2,
+});
+
 await writeFile(join(assetsDistDir, 'index.html'), htmlOutput);
 await writeFile(join(packageDistDir, 'index.html'), htmlOutput);
-await writeFile(templateModulePath, templateModule);
+await writeFile(templateModulePath, formattedTemplateModule);
