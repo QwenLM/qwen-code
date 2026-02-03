@@ -64,7 +64,7 @@ export const useToolCalls = () => {
 
       const extractText = (
         content?: Array<{
-          type: 'content' | 'diff';
+          type: 'content' | 'diff' | 'entries';
           content?: { text?: string };
         }>,
       ): string => {

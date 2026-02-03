@@ -31,11 +31,13 @@ export const MixedStatus: Story = {
       status: 'completed',
       content: [
         {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: '- [x] Setup project structure\n- [-] Implement authentication\n- [ ] Add unit tests\n- [ ] Deploy to production',
-          },
+          type: 'entries',
+          entries: [
+            { content: 'Setup project structure', status: 'completed' },
+            { content: 'Implement authentication', status: 'in_progress' },
+            { content: 'Add unit tests', status: 'pending' },
+            { content: 'Deploy to production', status: 'pending' },
+          ],
         },
       ],
     },
@@ -51,11 +53,12 @@ export const AllCompleted: Story = {
       status: 'completed',
       content: [
         {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: '- [x] Create component\n- [x] Add styles\n- [x] Write tests',
-          },
+          type: 'entries',
+          entries: [
+            { content: 'Create component', status: 'completed' },
+            { content: 'Add styles', status: 'completed' },
+            { content: 'Write tests', status: 'completed' },
+          ],
         },
       ],
     },
@@ -71,11 +74,12 @@ export const AllPending: Story = {
       status: 'completed',
       content: [
         {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: '- [ ] Research API options\n- [ ] Design database schema\n- [ ] Implement endpoints',
-          },
+          type: 'entries',
+          entries: [
+            { content: 'Research API options', status: 'pending' },
+            { content: 'Design database schema', status: 'pending' },
+            { content: 'Implement endpoints', status: 'pending' },
+          ],
         },
       ],
     },

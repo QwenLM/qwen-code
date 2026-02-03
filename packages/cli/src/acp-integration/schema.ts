@@ -511,6 +511,15 @@ export const toolCallContentSchema = z.union([
     path: z.string(),
     type: z.literal('diff'),
   }),
+  z.object({
+    entries: z.array(
+      z.object({
+        content: z.string(),
+        status: z.enum(['pending', 'in_progress', 'completed']),
+      }),
+    ),
+    type: z.literal('entries'),
+  }),
 ]);
 
 export const toolCallSchema = z.object({

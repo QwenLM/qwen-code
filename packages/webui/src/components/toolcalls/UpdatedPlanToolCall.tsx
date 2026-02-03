@@ -12,6 +12,7 @@ import type {
   BaseToolCallProps,
   ToolCallContainerProps,
   ToolCallStatus,
+  ToolCallContent,
   PlanEntry,
   PlanEntryStatus,
 } from './shared/index.js';
@@ -74,9 +75,37 @@ const mapToolStatusToBullet = (
 };
 
 /**
- * Parse plan entries with - [ ] / - [x] from text
+ * Extract structured plan entries from tool call content
+ * First tries to get entries from structured data, falls back to parsing text
  */
-const parsePlanEntries = (textOutputs: string[]): PlanEntry[] => {
+const extractPlanEntries = (
+  content: ToolCallContent[] | undefined,
+): PlanEntry[] => {
+  if (!content || content.length === 0) return [];
+
+  // Try to get structured entries directly (new format from collect.ts)
+  const entriesItem = content.find(
+    (item) => item.type === 'entries' && Array.isArray(item.entries),
+  );
+  if (entriesItem?.entries) {
+    return entriesItem.entries as PlanEntry[];
+  }
+
+  // Fallback: parse from text outputs (backward compatibility)
+  const textOutputs: string[] = [];
+  for (const item of content) {
+    if (item.type === 'content' && item.content?.text) {
+      textOutputs.push(item.content.text);
+    }
+  }
+
+  return parsePlanEntriesFromText(textOutputs);
+};
+
+/**
+ * Parse plan entries with - [ ] / - [x] from text (fallback method)
+ */
+const parsePlanEntriesFromText = (textOutputs: string[]): PlanEntry[] => {
   const text = textOutputs.join('\n');
   const lines = text.split(/\r?\n/);
   const entries: PlanEntry[] = [];
@@ -124,7 +153,7 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
   isLast,
 }) => {
   const { content, status } = toolCall;
-  const { errors, textOutputs } = groupContent(content);
+  const { errors } = groupContent(content);
 
   // Error-first display
   if (errors.length > 0) {
@@ -140,7 +169,7 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
     );
   }
 
-  const entries = parsePlanEntries(textOutputs);
+  const entries = extractPlanEntries(content);
   const label = safeTitle(toolCall.title) || 'TodoWrite';
 
   return (
