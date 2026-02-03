@@ -115,7 +115,7 @@
     },
     {
       "part_id": "zed-extension",
-      "part_type_id": "extension",
+      "project_type_id": "extension",
       "display_name": "Extension"
     },
     {
