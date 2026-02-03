@@ -46,7 +46,7 @@ export class DefaultOpenAICompatibleProvider
     const defaultHeaders = this.buildHeaders();
     // Configure fetch options to ensure user-configured timeout works as expected
     // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
-    const fetchOptions = buildRuntimeFetchOptions(
+    const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
     );
@@ -56,7 +56,7 @@ export class DefaultOpenAICompatibleProvider
       timeout,
       maxRetries,
       defaultHeaders,
-      ...(fetchOptions ? { fetchOptions } : {}),
+      ...(runtimeOptions || {}),
     });
   }
 
@@ -64,9 +64,11 @@ export class DefaultOpenAICompatibleProvider
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
+    const extraBody = this.contentGeneratorConfig.extra_body;
     // Default provider doesn't need special enhancements, just pass through all parameters
     return {
       ...request, // Preserve all original parameters including sampling params
+      ...(extraBody ? extraBody : {}),
     };
   }
 

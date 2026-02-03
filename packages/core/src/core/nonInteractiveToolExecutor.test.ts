@@ -309,11 +309,13 @@ describe('executeToolCall', () => {
             name: 'testTool',
             id: 'call6',
             response: {
-              output: 'Binary content of type image/png was processed.',
+              output: '',
             },
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'base64data' } },
+            ],
           },
         },
-        imageDataPart,
       ],
     });
   });

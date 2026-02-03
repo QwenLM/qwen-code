@@ -35,10 +35,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     const result = buildRuntimeFetchOptions('openai');
 
     expect(result).toBeDefined();
-    expect(result && 'dispatcher' in result).toBe(true);
+    expect(result && 'fetchOptions' in result).toBe(true);
 
-    const dispatcher = (result as { dispatcher?: { options?: UndiciOptions } })
-      .dispatcher;
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
       headersTimeout: 0,
       bodyTimeout: 0,
@@ -49,10 +50,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
 
     expect(result).toBeDefined();
-    expect(result && 'dispatcher' in result).toBe(true);
+    expect(result && 'fetchOptions' in result).toBe(true);
 
-    const dispatcher = (result as { dispatcher?: { options?: UndiciOptions } })
-      .dispatcher;
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
       uri: 'http://proxy.local',
       headersTimeout: 0,
@@ -60,15 +62,32 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     });
   });
 
-  it('returns httpAgent with disabled timeouts for Anthropic options', () => {
+  it('returns fetchOptions with dispatcher for Anthropic without proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic');
 
     expect(result).toBeDefined();
-    expect(result && 'httpAgent' in result).toBe(true);
+    expect(result && 'fetchOptions' in result).toBe(true);
 
-    const httpAgent = (result as { httpAgent?: { options?: UndiciOptions } })
-      .httpAgent;
-    expect(httpAgent?.options).toMatchObject({
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
+  });
+
+  it('returns fetchOptions with ProxyAgent for Anthropic with proxy', () => {
+    const result = buildRuntimeFetchOptions('anthropic', 'http://proxy.local');
+
+    expect(result).toBeDefined();
+    expect(result && 'fetchOptions' in result).toBe(true);
+
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      uri: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
     });

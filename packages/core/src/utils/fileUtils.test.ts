@@ -731,6 +731,10 @@ describe('fileUtils', () => {
       expect(
         (result.llmContent as { inlineData: { data: string } }).inlineData.data,
       ).toBe(fakePngData.toString('base64'));
+      expect(
+        (result.llmContent as { inlineData: { displayName?: string } })
+          .inlineData.displayName,
+      ).toBe('image.png');
       expect(result.returnDisplay).toContain('Read image file: image.png');
     });
 
@@ -752,6 +756,10 @@ describe('fileUtils', () => {
       expect(
         (result.llmContent as { inlineData: { data: string } }).inlineData.data,
       ).toBe(fakePdfData.toString('base64'));
+      expect(
+        (result.llmContent as { inlineData: { displayName?: string } })
+          .inlineData.displayName,
+      ).toBe('document.pdf');
       expect(result.returnDisplay).toContain('Read pdf file: document.pdf');
     });
 

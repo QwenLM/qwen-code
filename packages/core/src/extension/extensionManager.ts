@@ -100,6 +100,7 @@ export interface ExtensionConfig {
   name: string;
   version: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
   commands?: string | string[];
   skills?: string | string[];

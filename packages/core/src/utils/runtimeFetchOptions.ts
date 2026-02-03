@@ -29,8 +29,10 @@ export function detectRuntime(): Runtime {
  */
 export type OpenAIRuntimeFetchOptions =
   | {
-      dispatcher?: Dispatcher;
-      timeout?: false;
+      fetchOptions?: {
+        dispatcher?: Dispatcher;
+        timeout?: false;
+      };
     }
   | undefined;
 
@@ -38,8 +40,9 @@ export type OpenAIRuntimeFetchOptions =
  * Runtime fetch options for Anthropic SDK
  */
 export type AnthropicRuntimeFetchOptions = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  httpAgent?: any;
+  fetchOptions?: {
+    dispatcher?: Dispatcher;
+  };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fetch?: any;
 };
@@ -88,7 +91,9 @@ export function buildRuntimeFetchOptions(
         // Bun: Disable built-in 300s timeout to let OpenAI SDK timeout control
         // This ensures user-configured timeout works as expected without interference
         return {
-          timeout: false,
+          fetchOptions: {
+            timeout: false,
+          },
         };
       } else {
         // Bun: Use custom fetch to disable built-in 300s timeout
@@ -113,63 +118,36 @@ export function buildRuntimeFetchOptions(
     }
 
     case 'node': {
-      // Node.js: Use ProxyAgent when proxy is configured, otherwise Agent.
-      // undici timeouts are disabled to let SDK timeout control the request.
-      try {
-        const dispatcher = createDispatcher(proxyUrl);
-        if (sdkType === 'openai') {
-          return {
-            dispatcher,
-          };
-        } else {
-          return {
-            httpAgent: dispatcher,
-          };
-        }
-      } catch {
-        // If undici is not available, return appropriate default
-        if (sdkType === 'openai') {
-          return undefined;
-        } else {
-          return {};
-        }
-      }
+      // Node.js: Use undici dispatcher for both SDKs.
+      // This enables proxy support and disables undici timeouts so SDK timeout
+      // controls the total request time.
+      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
     }
 
     default: {
-      // Unknown runtime: Use ProxyAgent when proxy is configured, otherwise Agent.
-      try {
-        const dispatcher = createDispatcher(proxyUrl);
-        if (sdkType === 'openai') {
-          return {
-            dispatcher,
-          };
-        } else {
-          return {
-            httpAgent: dispatcher,
-          };
-        }
-      } catch {
-        if (sdkType === 'openai') {
-          return undefined;
-        } else {
-          return {};
-        }
-      }
+      // Unknown runtime: treat as Node.js-like environment.
+      return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
     }
   }
 }
 
-function createDispatcher(proxyUrl?: string): Dispatcher {
-  if (proxyUrl) {
-    return new ProxyAgent({
-      uri: proxyUrl,
-      headersTimeout: 0,
-      bodyTimeout: 0,
-    });
+function buildFetchOptionsWithDispatcher(
+  sdkType: SDKType,
+  proxyUrl?: string,
+): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+  try {
+    const dispatcher = proxyUrl
+      ? new ProxyAgent({
+          uri: proxyUrl,
+          headersTimeout: 0,
+          bodyTimeout: 0,
+        })
+      : new Agent({
+          headersTimeout: 0,
+          bodyTimeout: 0,
+        });
+    return { fetchOptions: { dispatcher } };
+  } catch {
+    return sdkType === 'openai' ? undefined : {};
   }
-  return new Agent({
-    headersTimeout: 0,
-    bodyTimeout: 0,
-  });
 }

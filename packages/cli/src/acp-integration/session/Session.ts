@@ -474,8 +474,17 @@ export class Session implements SessionContext {
           }
         ).eventEmitter;
 
+        // Extract subagent metadata from TaskTool call
+        const parentToolCallId = callId;
+        const subagentType = (args['subagent_type'] as string) ?? '';
+
         // Create a SubAgentTracker for this tool execution
-        const subAgentTracker = new SubAgentTracker(this, this.client);
+        const subAgentTracker = new SubAgentTracker(
+          this,
+          this.client,
+          parentToolCallId,
+          subagentType,
+        );
 
         // Set up sub-agent tool tracking
         subAgentCleanupFunctions = subAgentTracker.setup(

@@ -1,0 +1,35 @@
+{
+  "concurrency": 3,
+  "yolo": true,
+  "source_repo": ".",
+  "branch": "main",
+  "worktree_base": "~/.qwen/worktrees",
+  "outputs_dir": "./outputs",
+  "results_file": "./results.json",
+  "tasks": [
+    {
+      "id": "code-review",
+      "name": "Security Code Review",
+      "prompts": [
+        "Review the codebase for security vulnerabilities.",
+        "Focus on input validation, authentication, and data handling."
+      ]
+    },
+    {
+      "id": "refactor",
+      "name": "Refactoring Suggestions",
+      "prompts": [
+        "Analyze the code structure and suggest refactoring improvements.",
+        "Prioritize changes that improve maintainability and performance."
+      ]
+    },
+    {
+      "id": "docs",
+      "name": "Documentation Generation",
+      "prompts": [
+        "Generate comprehensive API documentation for the main modules."
+      ]
+    }
+  ],
+  "models": ["claude-3-5-sonnet-20241022", "qwen3-coder-plus"]
+}

@@ -261,5 +261,48 @@ describe('DefaultOpenAICompatibleProvider', () => {
       // Result should be a different object
       expect(result).not.toBe(originalRequest);
     });
+
+    it('should merge extra_body into the request', () => {
+      const providerWithExtraBody = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          extra_body: {
+            custom_param: 'custom_value',
+            nested: { key: 'value' },
+          },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: 0.7,
+      };
+
+      const result = providerWithExtraBody.buildRequest(
+        originalRequest,
+        'prompt-id',
+      );
+
+      expect(result).toEqual({
+        ...originalRequest,
+        custom_param: 'custom_value',
+        nested: { key: 'value' },
+      });
+    });
+
+    it('should not include extra_body when not configured', () => {
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: 0.7,
+      };
+
+      const result = provider.buildRequest(originalRequest, 'prompt-id');
+
+      expect(result).toEqual(originalRequest);
+      expect(result).not.toHaveProperty('custom_param');
+    });
   });
 });

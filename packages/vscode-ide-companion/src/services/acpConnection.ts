@@ -402,6 +402,21 @@ export class AcpConnection {
   }
 
   /**
+   * Set model for current session
+   *
+   * @param modelId - Model ID
+   * @returns Set model response
+   */
+  async setModel(modelId: string): Promise<AcpResponse> {
+    return this.sessionManager.setModel(
+      modelId,
+      this.child,
+      this.pendingRequests,
+      this.nextRequestId,
+    );
+  }
+
+  /**
    * Disconnect
    */
   disconnect(): void {

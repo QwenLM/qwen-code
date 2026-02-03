@@ -19,7 +19,9 @@ export async function validateNonInteractiveAuth(
 ): Promise<Config> {
   try {
     // Get the actual authType from config which has already resolved CLI args, env vars, and settings
-    const authType = nonInteractiveConfig.modelsConfig.getCurrentAuthType();
+    const authType = nonInteractiveConfig
+      .getModelsConfig()
+      .getCurrentAuthType();
     if (!authType) {
       throw new Error(
         'No auth type is selected. Please configure an auth type (e.g. via settings or `--auth-type`) before running in non-interactive mode.',

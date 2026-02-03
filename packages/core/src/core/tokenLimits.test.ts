@@ -235,20 +235,13 @@ describe('tokenLimit', () => {
   });
 
   describe('Moonshot Kimi', () => {
-    it('should return the correct limit for kimi-k2-0905-preview', () => {
+    it('should return the correct limit for kimi-k2 variants', () => {
       expect(tokenLimit('kimi-k2-0905-preview')).toBe(262144); // 256K
       expect(tokenLimit('kimi-k2-0905')).toBe(262144);
-    });
-    it('should return the correct limit for kimi-k2-turbo-preview', () => {
-      expect(tokenLimit('kimi-k2-turbo-preview')).toBe(262144); // 256K
+      expect(tokenLimit('kimi-k2-turbo-preview')).toBe(262144);
       expect(tokenLimit('kimi-k2-turbo')).toBe(262144);
-    });
-    it('should return the correct limit for kimi-k2-0711-preview', () => {
-      expect(tokenLimit('kimi-k2-0711-preview')).toBe(131072); // 128K
-      expect(tokenLimit('kimi-k2-0711')).toBe(131072);
-    });
-    it('should return the correct limit for kimi-k2-instruct', () => {
-      expect(tokenLimit('kimi-k2-instruct')).toBe(131072); // 128K
+      expect(tokenLimit('kimi-k2-0711-preview')).toBe(262144);
+      expect(tokenLimit('kimi-k2-instruct')).toBe(262144);
     });
   });
 

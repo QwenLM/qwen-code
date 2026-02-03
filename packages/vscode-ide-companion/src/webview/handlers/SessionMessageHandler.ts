@@ -34,6 +34,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       'openNewChatTab',
       // Settings-related messages
       'setApprovalMode',
+      'setModel',
     ].includes(messageType);
   }
 
@@ -121,6 +122,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
         await this.handleSetApprovalMode(
           message.data as {
             modeId?: ApprovalModeValue;
+          },
+        );
+        break;
+
+      case 'setModel':
+        await this.handleSetModel(
+          message.data as {
+            modelId?: string;
           },
         );
         break;
@@ -1031,6 +1040,31 @@ export class SessionMessageHandler extends BaseMessageHandler {
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to set mode: ${error}` },
+      });
+    }
+  }
+
+  /**
+   * Set model via agent (ACP session/set_model)
+   * Displays VSCode native notifications on success or failure.
+   */
+  private async handleSetModel(data?: { modelId?: string }): Promise<void> {
+    try {
+      const modelId = data?.modelId;
+      if (!modelId) {
+        throw new Error('Model ID is required');
+      }
+      await this.agentManager.setModelFromUi(modelId);
+      void vscode.window.showInformationMessage(
+        `Model switched to: ${modelId}`,
+      );
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      console.error('[SessionMessageHandler] Failed to set model:', error);
+      vscode.window.showErrorMessage(`Failed to switch model: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: `Failed to set model: ${errorMsg}` },
       });
     }
   }

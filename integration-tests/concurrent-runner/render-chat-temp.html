@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Qwen Code Chat Export</title>
+  <!-- Load React and ReactDOM from CDN -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Manually create the jsxRuntime object to satisfy the dependency -->
+  <script>
+    // Provide a minimal JSX runtime for builds that expect react/jsx-runtime globals.
+    const withKey = (props, key) =>
+      key == null ? props : Object.assign({}, props, { key });
+    const jsx = (type, props, key) => React.createElement(type, withKey(props, key));
+    const jsxRuntime = {
+      Fragment: React.Fragment,
+      jsx,
+      jsxs: jsx,
+      jsxDEV: jsx
+    };
+
+    window.ReactJSXRuntime = jsxRuntime;
+    window['react/jsx-runtime'] = jsxRuntime;
+    window['react/jsx-dev-runtime'] = jsxRuntime;
+  </script>
+
+  <!-- Load the webui library from CDN -->
+  <script src="https://unpkg.com/@qwen-code/webui@0.1.0-beta.3/dist/index.umd.js"></script>
+
+  <!-- Load the CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/@qwen-code/webui@0.1.0-beta.3/dist/styles.css">
+
+  <style>
+    :root {
+      --bg-primary: #18181b;
+      --bg-secondary: #27272a;
+      --text-primary: #f4f4f5;
+      --text-secondary: #a1a1aa;
+      --border-color: #3f3f46;
+      --accent-color: #3b82f6;
+    }
+
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      margin: 0;
+      padding: 0;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .page-wrapper {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .header {
+      width: 100%;
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border-color);
+      background-color: rgba(24, 24, 27, 0.95);
+      backdrop-filter: blur(8px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-sizing: border-box;
+    }
+
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    h1 {
+      font-size: 16px;
+      font-weight: 600;
+      margin: 0;
+      color: var(--text-primary);
+      letter-spacing: -0.02em;
+    }
+
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background-color: var(--bg-secondary);
+      color: var(--text-secondary);
+      border: 1px solid var(--border-color);
+      font-weight: 500;
+    }
+
+    .meta {
+      display: flex;
+      gap: 24px;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .meta-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .meta-label {
+      color: #71717a;
+    }
+
+    .chat-container {
+      width: 100%;
+      max-width: 900px;
+      padding: 40px 20px;
+      box-sizing: border-box;
+      flex: 1;
+    }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar {
+      width: 10px;
+      height: 10px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--bg-primary);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--bg-secondary);
+      border-radius: 5px;
+      border: 2px solid var(--bg-primary);
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: #52525b;
+    }
+
+    /* Responsive adjustments */
+    @media (max-width: 768px) {
+      .chat-container {
+        max-width: 100%;
+        padding: 20px 16px;
+      }
+
+      .header {
+        padding: 12px 16px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+      }
+
+      .header-left {
+        width: 100%;
+        justify-content: space-between;
+      }
+
+      .meta {
+        width: 100%;
+        flex-direction: column;
+        gap: 6px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .chat-container {
+        padding: 16px 12px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="page-wrapper">
+    <div class="header">
+      <div class="header-left">
+        <h1>Qwen Code Export</h1>
+      </div>
+      <div class="meta">
+        <div class="meta-item">
+          <span class="meta-label">Session Id</span>
+          <span id="session-id" class="font-mono">-</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">Export Time</span>
+          <span id="session-date">-</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="chat-root-no-babel" class="chat-container"></div>
+  </div>
+
+  <script id="chat-data" type="application/json">
+
+  </script>
+
+  <script>
+    const chatDataElement = document.getElementById('chat-data');
+    const chatData = chatDataElement?.textContent
+      ? JSON.parse(chatDataElement.textContent)
+      : {};
+    const rawMessages = Array.isArray(chatData.messages) ? chatData.messages : [];
+    const messages = rawMessages.filter((record) => record && record.type !== 'system');
+
+    // Populate metadata
+    const sessionIdElement = document.getElementById('session-id');
+    if (sessionIdElement && chatData.sessionId) {
+      sessionIdElement.textContent = chatData.sessionId;
+    }
+
+    const sessionDateElement = document.getElementById('session-date');
+    if (sessionDateElement && chatData.startTime) {
+      try {
+        const date = new Date(chatData.startTime);
+        sessionDateElement.textContent = date.toLocaleString(undefined, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      } catch (e) {
+        sessionDateElement.textContent = chatData.startTime;
+      }
+    }
+
+    // Get the ChatViewer and Platform components from the global object
+    const { ChatViewer, PlatformProvider } = QwenCodeWebUI;
+
+    // Define a minimal platform context for web usage
+    const platformContext = {
+      platform: 'web',
+      postMessage: (message) => {
+        console.log('Posted message:', message);
+      },
+      onMessage: (handler) => {
+        window.addEventListener('message', handler);
+        return () => window.removeEventListener('message', handler);
+      },
+      openFile: (path) => {
+        console.log('Opening file:', path);
+      },
+      getResourceUrl: (resource) => {
+        return null;
+      },
+      features: {
+        canOpenFile: false,
+        canCopy: true
+      }
+    };
+
+    // Render the ChatViewer component without Babel
+    const rootElementNoBabel = document.getElementById('chat-root-no-babel');
+
+    // Create the ChatViewer element wrapped with PlatformProvider using React.createElement (no JSX)
+    const ChatAppNoBabel = React.createElement(PlatformProvider, { value: platformContext },
+      React.createElement(ChatViewer, {
+        messages,
+        autoScroll: false,
+        theme: 'dark'
+      })
+    );
+
+    ReactDOM.render(ChatAppNoBabel, rootElementNoBabel);
+  </script>
+</body>
+
+</html>

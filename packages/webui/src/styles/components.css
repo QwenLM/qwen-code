@@ -1,0 +1,518 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Common component styles for webui
+ * These styles are shared across all platforms (vscode, web, etc.)
+ */
+
+/* ===========================
+   Global Reset
+   =========================== */
+.webui-root * {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+/* ===========================
+   Animations
+   =========================== */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes typingPulse {
+  0%,
+  60%,
+  100% {
+    transform: scale(0.7);
+    opacity: 0.6;
+  }
+  30% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ===========================
+   Chat Container Styles
+   =========================== */
+.chat-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  background-color: var(--app-primary-background);
+  color: var(--app-primary-foreground);
+  font-family: var(--vscode-chat-font-family, var(--app-font-sans));
+  font-size: var(--vscode-chat-font-size, 13px);
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-width: 0;
+  scroll-behavior: smooth;
+}
+
+/* Disable overflow anchoring on individual items for manual scroll control */
+.chat-messages > * {
+  overflow-anchor: none;
+}
+
+/* ===========================
+   Input Form Styles
+   =========================== */
+.input-form {
+  display: flex;
+  background-color: var(--app-primary-background);
+  border-top: 1px solid var(--app-primary-border-color);
+}
+
+.input-field {
+  flex: 1;
+  padding: 10px 12px;
+  background-color: var(--app-input-background);
+  color: var(--app-input-foreground);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--app-radius-sm, 4px);
+  font-size: var(--vscode-chat-font-size, 13px);
+  font-family: var(--vscode-chat-font-family, var(--app-font-sans));
+  outline: none;
+  line-height: 1.5;
+}
+
+.input-field:focus {
+  border-color: var(--app-primary, #3b82f6);
+}
+
+.input-field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.input-field::placeholder {
+  color: var(--app-input-placeholder-foreground);
+}
+
+.send-button {
+  padding: 10px 20px;
+  background-color: var(--app-primary, #3b82f6);
+  color: var(--app-button-foreground, white);
+  border: none;
+  border-radius: var(--app-radius-sm, 4px);
+  font-size: var(--vscode-chat-font-size, 13px);
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.send-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.send-button:active:not(:disabled) {
+  filter: brightness(0.9);
+}
+
+.send-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ===========================
+   Code Block Styles
+   =========================== */
+.code-block {
+  font-family: var(--app-font-mono);
+  font-size: var(--app-monospace-font-size, 13px);
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--app-radius-sm, 4px);
+  padding: var(--app-spacing-medium, 8px);
+  overflow-x: auto;
+  margin: 4px 0 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* ===========================
+   Diff Display Styles
+   =========================== */
+.diff-display-container {
+  margin: 8px 0;
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--app-radius-md, 6px);
+  overflow: hidden;
+}
+
+.diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--app-input-secondary-background, var(--app-background-secondary));
+  border-bottom: 1px solid var(--app-input-border);
+}
+
+.diff-file-path {
+  font-family: var(--app-font-mono);
+  font-size: 13px;
+  color: var(--app-primary-foreground);
+}
+
+.open-diff-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: 1px solid var(--app-input-border);
+  border-radius: var(--app-radius-sm, 4px);
+  color: var(--app-primary-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  transition: background-color 0.15s;
+}
+
+.open-diff-button:hover {
+  background: var(--app-ghost-button-hover-background);
+}
+
+.open-diff-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.diff-section {
+  margin: 0;
+}
+
+.diff-label {
+  padding: 8px 12px;
+  background: var(--app-primary-background);
+  border-bottom: 1px solid var(--app-input-border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  text-transform: uppercase;
+}
+
+.diff-section .code-block {
+  border: none;
+  border-radius: 0;
+  margin: 0;
+  max-height: none;
+  overflow-y: visible;
+}
+
+.diff-section .code-content {
+  display: block;
+}
+
+/* ===========================
+   Tool Call Card Styles
+   =========================== */
+.toolcall-card {
+  padding-left: 30px;
+}
+
+/* ===========================
+   Button Styles
+   =========================== */
+.btn-ghost {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  outline: none;
+  transition: background-color 0.2s;
+  color: var(--app-primary-foreground);
+  font-size: var(--vscode-chat-font-size, 13px);
+}
+
+.btn-ghost:hover,
+.btn-ghost:focus {
+  background: var(--app-ghost-button-hover-background);
+}
+
+/* Icon-only button, compact square */
+.btn-icon-compact {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--app-radius-sm, 4px);
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+  color: var(--app-secondary-foreground);
+}
+
+.btn-icon-compact:hover {
+  background-color: var(--app-ghost-button-hover-background);
+}
+
+.btn-icon-compact svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* Active/primary state for icon button */
+.btn-icon-compact--active {
+  background-color: var(--app-primary, #3b82f6);
+  color: white;
+}
+
+/* Text button (icon + label) */
+.btn-text-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 2px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  min-width: 0;
+  flex-shrink: 1;
+  font-size: 0.85em;
+  transition: background-color 0.15s;
+  color: var(--app-secondary-foreground);
+}
+
+.btn-text-compact:hover {
+  background-color: var(--app-ghost-button-hover-background);
+}
+
+.btn-text-compact > svg {
+  height: 1em;
+  width: 1em;
+  flex-shrink: 0;
+}
+
+.btn-text-compact > span {
+  display: inline-block;
+  min-width: 0;
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+/* ===========================
+   Context Indicator Styles
+   =========================== */
+.context-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: var(--app-radius-sm, 4px);
+  font-size: 0.8em;
+  user-select: none;
+  color: var(--app-secondary-foreground);
+}
+
+.context-indicator svg {
+  width: 20px;
+  height: 20px;
+}
+
+.context-indicator__track,
+.context-indicator__progress {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.context-indicator__track {
+  stroke: var(--app-secondary-foreground);
+  opacity: 0.35;
+}
+
+.context-indicator__progress {
+  stroke: var(--app-secondary-foreground);
+  stroke-linecap: round;
+}
+
+/* ===========================
+   Composer Styles (Input Form)
+   =========================== */
+.composer-root {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  z-index: 20;
+}
+
+.composer-form {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  max-width: 680px;
+  margin: 0 auto;
+  border-radius: var(--app-radius-lg, 8px);
+  border: 1px solid var(--app-input-border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  transition: border-color 0.2s;
+  z-index: 1;
+  background: var(--app-input-secondary-background, var(--app-background-secondary));
+  color: var(--app-input-foreground);
+}
+
+.composer-form:focus-within {
+  border-color: var(--app-primary, #3b82f6);
+  box-shadow: 0 1px 2px rgba(59, 130, 246, 0.2);
+}
+
+.composer-input {
+  flex: 1;
+  align-self: stretch;
+  padding: 10px 14px;
+  outline: none;
+  overflow-y: auto;
+  position: relative;
+  user-select: text;
+  min-height: 1.5em;
+  max-height: 200px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  overflow-x: hidden;
+  word-break: break-word;
+  white-space: pre-wrap;
+  font-family: inherit;
+  font-size: var(--vscode-chat-font-size, 13px);
+  color: var(--app-input-foreground);
+}
+
+.composer-input:empty::before,
+.composer-input[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: var(--app-input-placeholder-foreground);
+  pointer-events: none;
+  position: absolute;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: calc(100% - 28px);
+}
+
+.composer-input:focus {
+  outline: none;
+}
+
+.composer-input:disabled,
+.composer-input[contenteditable="false"] {
+  color: #999;
+  cursor: not-allowed;
+}
+
+.composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  z-index: 1;
+  padding: 5px;
+  color: var(--app-secondary-foreground);
+  border-top: 0.5px solid var(--app-input-border);
+}
+
+.composer-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--app-radius-lg, 8px);
+  z-index: 0;
+  background: var(--app-input-background);
+}
+
+/* Send button in composer */
+.btn-send-compact {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  border-radius: var(--app-radius-sm, 4px);
+  background-color: var(--app-primary, #3b82f6);
+  color: white;
+  border: none;
+  cursor: pointer;
+}
+
+.btn-send-compact:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.btn-send-compact:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ===========================
+   File Link Styles
+   =========================== */
+.toolcall-content-wrapper .file-link-path {
+  font-size: 0.85em;
+  padding-top: 1px;
+  word-break: break-all;
+  min-width: 0;
+  font-family: var(--app-font-mono);
+  overflow-wrap: anywhere;
+}
+
+/* ===========================
+   Icon SVG Styles
+   =========================== */
+.icon-svg {
+  display: block;
+}
+
+/* ===========================
+   Utility: Line Clamp
+   =========================== */
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}

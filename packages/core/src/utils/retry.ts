@@ -6,10 +6,7 @@
 
 import type { GenerateContentResponse } from '@google/genai';
 import { AuthType } from '../core/contentGenerator.js';
-import {
-  isQwenQuotaExceededError,
-  isQwenThrottlingError,
-} from './quotaErrorDetection.js';
+import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 
 export interface HttpError extends Error {
   status?: number;
@@ -21,16 +18,12 @@ export interface RetryOptions {
   maxDelayMs: number;
   shouldRetryOnError: (error: Error) => boolean;
   shouldRetryOnContent?: (content: GenerateContentResponse) => boolean;
-  onPersistent429?: (
-    authType?: string,
-    error?: unknown,
-  ) => Promise<string | boolean | null>;
   authType?: string;
 }
 
 const DEFAULT_RETRY_OPTIONS: RetryOptions = {
-  maxAttempts: 5,
-  initialDelayMs: 5000,
+  maxAttempts: 7,
+  initialDelayMs: 1500,
   maxDelayMs: 30000, // 30 seconds
   shouldRetryOnError: defaultShouldRetry,
 };
@@ -42,18 +35,10 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
  * @returns True if the error is a transient error, false otherwise.
  */
 function defaultShouldRetry(error: Error | unknown): boolean {
-  // Check for common transient error status codes either in message or a status property
-  if (error && typeof (error as { status?: number }).status === 'number') {
-    const status = (error as { status: number }).status;
-    if (status === 429 || (status >= 500 && status < 600)) {
-      return true;
-    }
-  }
-  if (error instanceof Error && error.message) {
-    if (error.message.includes('429')) return true;
-    if (error.message.match(/5\d{2}/)) return true;
-  }
-  return false;
+  const status = getErrorStatus(error);
+  return (
+    status === 429 || (status !== undefined && status >= 500 && status < 600)
+  );
 }
 
 /**
@@ -98,7 +83,6 @@ export async function retryWithBackoff<T>(
 
   let attempt = 0;
   let currentDelay = initialDelayMs;
-  let consecutive429Count = 0;
 
   while (attempt < maxAttempts) {
     attempt++;
@@ -127,37 +111,21 @@ export async function retryWithBackoff<T>(
         );
       }
 
-      // Track consecutive 429 errors, but handle Qwen throttling differently
-      if (errorStatus === 429) {
-        // For Qwen throttling errors, we still want to track them for exponential backoff
-        // but not for quota fallback logic (since Qwen doesn't have model fallback)
-        if (authType === AuthType.QWEN_OAUTH && isQwenThrottlingError(error)) {
-          // Keep track of 429s but reset the consecutive count to avoid fallback logic
-          consecutive429Count = 0;
-        } else {
-          consecutive429Count++;
-        }
-      } else {
-        consecutive429Count = 0;
-      }
-
-      console.debug('consecutive429Count', consecutive429Count);
-
       // Check if we've exhausted retries or shouldn't retry
       if (attempt >= maxAttempts || !shouldRetryOnError(error as Error)) {
         throw error;
       }
 
-      const { delayDurationMs, errorStatus: delayErrorStatus } =
-        getDelayDurationAndStatus(error);
+      const retryAfterMs =
+        errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
 
-      if (delayDurationMs > 0) {
+      if (retryAfterMs > 0) {
         // Respect Retry-After header if present and parsed
         console.warn(
-          `Attempt ${attempt} failed with status ${delayErrorStatus ?? 'unknown'}. Retrying after explicit delay of ${delayDurationMs}ms...`,
+          `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
           error,
         );
-        await delay(delayDurationMs);
+        await delay(retryAfterMs);
         // Reset currentDelay for next potential non-429 error, or if Retry-After is not present next time
         currentDelay = initialDelayMs;
       } else {
@@ -178,29 +146,34 @@ export async function retryWithBackoff<T>(
 
 /**
  * Extracts the HTTP status code from an error object.
+ *
+ * Checks the following properties in order of priority:
+ * 1. `error.status` - OpenAI, Anthropic, Gemini SDK errors
+ * 2. `error.statusCode` - Some HTTP client libraries
+ * 3. `error.response.status` - Axios-style errors
+ * 4. `error.error.code` - Nested error objects
+ *
  * @param error The error object.
- * @returns The HTTP status code, or undefined if not found.
+ * @returns The HTTP status code (100-599), or undefined if not found.
  */
 export function getErrorStatus(error: unknown): number | undefined {
-  if (typeof error === 'object' && error !== null) {
-    if ('status' in error && typeof error.status === 'number') {
-      return error.status;
-    }
-    // Check for error.response.status (common in axios errors)
-    if (
-      'response' in error &&
-      typeof (error as { response?: unknown }).response === 'object' &&
-      (error as { response?: unknown }).response !== null
-    ) {
-      const response = (
-        error as { response: { status?: unknown; headers?: unknown } }
-      ).response;
-      if ('status' in response && typeof response.status === 'number') {
-        return response.status;
-      }
-    }
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
   }
-  return undefined;
+
+  const err = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown };
+    error?: { code?: unknown };
+  };
+
+  const value =
+    err.status ?? err.statusCode ?? err.response?.status ?? err.error?.code;
+
+  return typeof value === 'number' && value >= 100 && value <= 599
+    ? value
+    : undefined;
 }
 
 /**
@@ -242,24 +215,6 @@ function getRetryAfterDelayMs(error: unknown): number {
 }
 
 /**
- * Determines the delay duration based on the error, prioritizing Retry-After header.
- * @param error The error object.
- * @returns An object containing the delay duration in milliseconds and the error status.
- */
-function getDelayDurationAndStatus(error: unknown): {
-  delayDurationMs: number;
-  errorStatus: number | undefined;
-} {
-  const errorStatus = getErrorStatus(error);
-  let delayDurationMs = 0;
-
-  if (errorStatus === 429) {
-    delayDurationMs = getRetryAfterDelayMs(error);
-  }
-  return { delayDurationMs, errorStatus };
-}
-
-/**
  * Logs a message for a retry attempt when using exponential backoff.
  * @param attempt The current attempt number.
  * @param error The error that caused the retry.
@@ -270,31 +225,15 @@ function logRetryAttempt(
   error: unknown,
   errorStatus?: number,
 ): void {
-  let message = `Attempt ${attempt} failed. Retrying with backoff...`;
-  if (errorStatus) {
-    message = `Attempt ${attempt} failed with status ${errorStatus}. Retrying with backoff...`;
-  }
+  const message = errorStatus
+    ? `Attempt ${attempt} failed with status ${errorStatus}. Retrying with backoff...`
+    : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
     console.warn(message, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
     console.error(message, error);
-  } else if (error instanceof Error) {
-    // Fallback for errors that might not have a status but have a message
-    if (error.message.includes('429')) {
-      console.warn(
-        `Attempt ${attempt} failed with 429 error (no Retry-After header). Retrying with backoff...`,
-        error,
-      );
-    } else if (error.message.match(/5\d{2}/)) {
-      console.error(
-        `Attempt ${attempt} failed with 5xx error. Retrying with backoff...`,
-        error,
-      );
-    } else {
-      console.warn(message, error); // Default to warn for other errors
-    }
   } else {
-    console.warn(message, error); // Default to warn if error type is unknown
+    console.warn(message, error);
   }
 }
