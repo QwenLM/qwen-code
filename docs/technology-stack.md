@@ -105,12 +105,12 @@ Qwen Code is a TypeScript-based monorepo containing 8 packages that implement an
 
 ### 8. Test Utils (`packages/test-utils`)
 
-| Category        | Technology           | Version | Justification         |
-| --------------- | -------------------- | ------- | --------------------- |
-| Runtime         | Node.js              | >= 20   | Inherited from root   |
-| Language        | TypeScript           | Latest  | Used for source files |
-| Testing         | Vitest               | Latest  | Testing utilities     |
-| Testing Library | @testing-library/dom | 10.4.1  | DOM testing           |
+| Category        | Technology           | Version | Justification                               |
+| --------------- | -------------------- | ------- | ------------------------------------------- |
+| Runtime         | Node.js              | >= 20   | Inherited from root                         |
+| Language        | TypeScript           | Latest  | Used for source files                       |
+| Testing         | Vitest               | Latest  | Testing utilities                           |
+| Testing Library | @testing-library/dom | 10.4.1  | Repo-level dependency, not used in package  |
 
 ## Shared Infrastructure
 
