@@ -73,3 +73,7 @@ integration-tests/concurrent-runner/task-*
 # storybook
 *storybook.log
 storybook-static
+
+# BMAD & AGENTS
+_bmad*
+.opencode*

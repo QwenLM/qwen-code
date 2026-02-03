@@ -1,0 +1,146 @@
+{
+  "workflow_version": "1.2.0",
+  "timestamps": {
+    "started": "2026-02-03T00:00:00Z",
+    "last_updated": "2026-02-03T18:45:00Z",
+    "completed": "2026-02-03T18:45:00Z"
+  },
+  "mode": "full_rescan",
+  "scan_level": "exhaustive",
+  "project_root": "/home/davidyusaku/code/qwen-code",
+  "output_folder": "/home/davidyusaku/code/qwen-code/docs",
+  "completed_steps": [
+    {
+      "step": "step_1",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:30:00Z",
+      "summary": "Classified as monorepo with 8 parts"
+    },
+    {
+      "step": "step_2",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:32:00Z",
+      "summary": "Found 10 existing documentation files"
+    },
+    {
+      "step": "step_3",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:35:00Z",
+      "summary": "Tech stack: TypeScript, React, Node.js 20+"
+    },
+    {
+      "step": "step_4",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:38:00Z",
+      "summary": "Conditional analysis: monorepo patterns"
+    },
+    {
+      "step": "step_5",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:40:00Z",
+      "summary": "Source tree documented with 8 packages"
+    },
+    {
+      "step": "step_6",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:42:00Z",
+      "summary": "Development guide written"
+    },
+    {
+      "step": "step_7",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:43:00Z",
+      "summary": "Architecture documentation complete"
+    },
+    {
+      "step": "step_8",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:44:00Z",
+      "summary": "Component inventory generated"
+    },
+    {
+      "step": "step_9",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:45:00Z",
+      "summary": "All supporting docs written"
+    },
+    {
+      "step": "step_10",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:45:00Z",
+      "summary": "Master index generated"
+    },
+    {
+      "step": "step_11",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:45:00Z",
+      "summary": "Validation complete - no incomplete docs"
+    },
+    {
+      "step": "step_12",
+      "status": "completed",
+      "timestamp": "2026-02-03T18:45:00Z",
+      "summary": "Workflow complete"
+    }
+  ],
+  "current_step": "completed",
+  "project_classification": {
+    "repository_type": "monorepo",
+    "parts_count": 8,
+    "primary_technology": "TypeScript/Node.js",
+    "architecture_type": "Layered with CLI/Core separation"
+  },
+  "project_types": [
+    { "part_id": "cli", "project_type_id": "cli", "display_name": "CLI" },
+    {
+      "part_id": "core",
+      "project_type_id": "library",
+      "display_name": "Library"
+    },
+    {
+      "part_id": "sdk-typescript",
+      "project_type_id": "library",
+      "display_name": "Library"
+    },
+    {
+      "part_id": "sdk-java",
+      "project_type_id": "library",
+      "display_name": "Library"
+    },
+    { "part_id": "webui", "project_type_id": "web", "display_name": "Web" },
+    {
+      "part_id": "vscode-ide-companion",
+      "project_type_id": "extension",
+      "display_name": "Extension"
+    },
+    {
+      "part_id": "zed-extension",
+      "part_type_id": "extension",
+      "display_name": "Extension"
+    },
+    {
+      "part_id": "test-utils",
+      "project_type_id": "library",
+      "display_name": "Library"
+    }
+  ],
+  "findings": {
+    "technology_stack": {
+      "primary_language": "TypeScript",
+      "runtime": "Node.js 20+",
+      "frameworks": ["React 19", "Ink", "Express", "Vite"],
+      "ai_providers": ["OpenAI", "Anthropic", "Google GenAI"],
+      "testing": ["Vitest", "Playwright", "msw"]
+    }
+  },
+  "outputs_generated": [
+    "project-scan-report.json",
+    "technology-stack.md",
+    "source-tree-analysis.md",
+    "development-guide.md",
+    "architecture.md",
+    "component-inventory.md",
+    "index.md"
+  ],
+  "resume_instructions": "Workflow complete"
+}
