@@ -98,6 +98,7 @@ export const ToolConfirmationMessage: React.FC<
         highlightedOption === ToolConfirmationOutcome.Cancel
       ) {
         // Filter out navigation and control keys - only trigger on printable characters
+        // Allow shifted characters (uppercase, symbols) to trigger the cancel path
         const navigationKeys = [
           'up',
           'down',
@@ -119,7 +120,6 @@ export const ToolConfirmationMessage: React.FC<
           !navigationKeys.includes(key.name || '') &&
           !key.ctrl &&
           !key.meta &&
-          !key.shift &&
           !key.paste &&
           key.sequence.length > 0;
 

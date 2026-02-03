@@ -11,6 +11,7 @@ import type {
   ToolCallConfirmationDetails,
   Config,
 } from '@qwen-code/qwen-code-core';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
 
@@ -312,7 +313,9 @@ describe('ToolConfirmationMessage', () => {
       // Type a printable character
       stdin.write('a');
 
-      expect(onConfirm).toHaveBeenCalledWith(expect.anything());
+      // Verify onConfirm was called exactly once with Cancel outcome
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
 
     it('should NOT trigger cancel when pressing navigation keys on third option', () => {
@@ -345,16 +348,15 @@ describe('ToolConfirmationMessage', () => {
       stdin.write('\x1B[B'); // Down arrow
       stdin.write('\x1B[B'); // Down arrow
 
-      // Try various navigation keys - none should trigger cancel
+      // Try various navigation keys - none should trigger the "type to revise" cancel
       stdin.write('\x1B[A'); // Up arrow
       stdin.write('\x1B[B'); // Down arrow
       stdin.write('\r'); // Enter
       stdin.write('\t'); // Tab
 
-      // onConfirm should either not be called, or only called when Enter is pressed
-      // (depending on RadioButtonSelect behavior)
-      // The important thing is it shouldn't be called multiple times from navigation keys
-      expect(onConfirm).not.toHaveBeenCalledTimes(4);
+      // Navigation keys should not cause multiple confirms via the "type to revise" path
+      // At most one call (from Enter via RadioButtonSelect), but not from arrow/tab keys
+      expect(onConfirm.mock.calls.length).toBeLessThanOrEqual(1);
     });
   });
 });
