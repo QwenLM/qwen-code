@@ -97,14 +97,32 @@ export const ToolConfirmationMessage: React.FC<
         confirmationDetails.type === 'plan' &&
         highlightedOption === ToolConfirmationOutcome.Cancel
       ) {
-        if (
-          key.name !== 'escape' &&
+        // Filter out navigation and control keys - only trigger on printable characters
+        // Allow shifted characters (uppercase, symbols) to trigger the cancel path
+        const navigationKeys = [
+          'up',
+          'down',
+          'left',
+          'right',
+          'return',
+          'enter',
+          'tab',
+          'delete',
+          'backspace',
+          'home',
+          'end',
+          'pageup',
+          'pagedown',
+          'escape',
+        ];
+        const isPrintableKey =
+          !navigationKeys.includes(key.name || '') &&
           !key.ctrl &&
           !key.meta &&
-          !key.shift &&
           !key.paste &&
-          key.sequence.length > 0
-        ) {
+          key.sequence.length > 0;
+
+        if (isPrintableKey) {
           handleConfirm(ToolConfirmationOutcome.Cancel);
         }
       }
