@@ -247,4 +247,36 @@ describe('ToolConfirmationMessage', () => {
       expect(lastFrame()).not.toContain('Modify with external editor');
     });
   });
+
+  describe('direct text input on option 3', () => {
+    it('should display updated option 3 label', () => {
+      const onConfirm = vi.fn();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Implementation Plan\n- Step one\n- Step two'.replace(
+          /\n/g,
+          EOL,
+        ),
+        onConfirm,
+      };
+
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      expect(lastFrame()).toContain('No, keep planning');
+      expect(lastFrame()).toContain('esc or type to revise');
+    });
+  });
 });

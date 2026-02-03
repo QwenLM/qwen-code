@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
@@ -54,6 +54,8 @@ export const ToolConfirmationMessage: React.FC<
 
   const [ideClient, setIdeClient] = useState<IdeClient | null>(null);
   const [isDiffingEnabled, setIsDiffingEnabled] = useState(false);
+  const [highlightedOption, setHighlightedOption] =
+    useState<ToolConfirmationOutcome | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -91,6 +93,21 @@ export const ToolConfirmationMessage: React.FC<
   useKeypress(
     (key) => {
       if (!isFocused) return;
+      if (
+        confirmationDetails.type === 'plan' &&
+        highlightedOption === ToolConfirmationOutcome.Cancel
+      ) {
+        if (
+          key.name !== 'escape' &&
+          !key.ctrl &&
+          !key.meta &&
+          !key.shift &&
+          !key.paste &&
+          key.sequence.length > 0
+        ) {
+          handleConfirm(ToolConfirmationOutcome.Cancel);
+        }
+      }
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
         handleConfirm(ToolConfirmationOutcome.Cancel);
       }
@@ -99,6 +116,10 @@ export const ToolConfirmationMessage: React.FC<
   );
 
   const handleSelect = (item: ToolConfirmationOutcome) => handleConfirm(item);
+
+  const handleHighlight = useCallback((value: ToolConfirmationOutcome) => {
+    setHighlightedOption(value);
+  }, []);
 
   // Compact mode: return simple 3-option display
   if (compactMode) {
@@ -288,7 +309,7 @@ export const ToolConfirmationMessage: React.FC<
     });
     options.push({
       key: 'cancel',
-      label: t('No, keep planning (esc)'),
+      label: t('No, keep planning (esc or type to revise)'),
       value: ToolConfirmationOutcome.Cancel,
     });
 
@@ -416,6 +437,9 @@ export const ToolConfirmationMessage: React.FC<
         <RadioButtonSelect
           items={options}
           onSelect={handleSelect}
+          onHighlight={
+            confirmationDetails.type === 'plan' ? handleHighlight : undefined
+          }
           isFocused={isFocused}
         />
       </Box>
