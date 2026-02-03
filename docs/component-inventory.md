@@ -312,9 +312,16 @@ const [count, setCount] = useState(0);
 
 ### Shared State
 
+#### Currently Used
+
 | Solution      | Use Case                 |
 | ------------- | ------------------------ |
 | React Context | Theme, config, user auth |
+
+#### Potential Options _(not currently used in this repo)_
+
+| Library       | Typical Use Case         |
+| ------------- | ------------------------ |
 | React Query   | Server state, caching    |
 | Zustand       | Global UI state          |
 | Redux         | Complex session state    |
