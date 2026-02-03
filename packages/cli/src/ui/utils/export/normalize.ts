@@ -5,7 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
-import { ExitPlanModeTool } from '@qwen-code/qwen-code-core';
+import { ExitPlanModeTool, ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Config, Kind } from '@qwen-code/qwen-code-core';
 import type { ExportMessage, ExportSessionData } from './types.js';
 
@@ -103,15 +103,25 @@ function buildToolCallMessageFromResult(
   config: Config,
 ): ExportMessage | null {
   const toolCallResult = record.toolCallResult;
-  const toolCallId = toolCallResult?.callId ?? record.uuid;
   const toolName = extractToolNameFromRecord(record);
+
+  // Skip todo_write tool - it's already handled by plan update in collect.ts
+  // This prevents duplicate todo messages in the export
+  if (toolName === ToolNames.TODO_WRITE) {
+    return null;
+  }
+
+  const toolCallId = toolCallResult?.callId ?? record.uuid;
+  const functionCallArgs = extractFunctionCallArgs(record);
   const { kind, title, locations } = resolveToolMetadata(
     config,
     toolName,
-    (toolCallResult as { args?: Record<string, unknown> } | undefined)?.args,
+    functionCallArgs ??
+      (toolCallResult as { args?: Record<string, unknown> } | undefined)?.args,
   );
   const rawInput = normalizeRawInput(
-    (toolCallResult as { args?: unknown } | undefined)?.args,
+    functionCallArgs ??
+      (toolCallResult as { args?: unknown } | undefined)?.args,
   );
 
   const content =
@@ -155,6 +165,25 @@ function extractToolNameFromRecord(record: ChatRecord): string {
 }
 
 /**
+ * Extracts function call args from a ChatRecord.
+ */
+function extractFunctionCallArgs(
+  record: ChatRecord,
+): Record<string, unknown> | undefined {
+  if (!record.message?.parts) {
+    return undefined;
+  }
+
+  for (const part of record.message.parts) {
+    if ('functionCall' in part && part.functionCall?.args) {
+      return part.functionCall.args as Record<string, unknown>;
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * Resolves tool metadata (kind, title, locations) from tool registry.
  */
 function resolveToolMetadata(
@@ -195,6 +224,10 @@ function resolveToolMetadata(
 function mapToolKind(kind: Kind | undefined, toolName?: string): string {
   if (toolName && toolName === ExitPlanModeTool.Name) {
     return 'switch_mode';
+  }
+
+  if (toolName && toolName === ToolNames.TODO_WRITE) {
+    return 'todowrite';
   }
 
   const allowedKinds = new Set<string>([

@@ -44,6 +44,7 @@ export * from './core/turn.js';
 export * from './core/geminiRequest.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/nonInteractiveToolExecutor.js';
+export * from './tools/tool-names.js';
 
 export * from './qwen/qwenOAuth2.js';
 

@@ -6,7 +6,7 @@
     "build": "node build.mjs"
   },
   "dependencies": {
-    "@qwen-code/webui": "^0.1.0-beta.4"
+    "@qwen-code/webui": "latest"
   },
   "devDependencies": {
     "esbuild": "^0.25.0"

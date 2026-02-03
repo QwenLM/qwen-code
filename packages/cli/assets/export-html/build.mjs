@@ -39,7 +39,14 @@ const getDependencyVersion = (name) => {
   if (!version) {
     throw new Error(`Missing ${name} dependency version in package.json.`);
   }
-  return version.replace(/^[^0-9]*/, '');
+  // Handle various version formats:
+  // - "^0.1.0" -> "0.1.0"
+  // - "~1.2.3" -> "1.2.3"
+  // - "latest" -> "latest"
+  // - "^0.1.0@latest" -> "0.1.0" (remove npm tag suffix)
+  const versionWithoutPrefix = version.replace(/^[^0-9a-zA-Z]+/, '');
+  // Remove npm tag suffix (e.g., "0.1.0@latest" -> "0.1.0")
+  return versionWithoutPrefix.replace(/@.+$/, '');
 };
 const webuiVersion = getDependencyVersion('@qwen-code/webui');
 const reactUmdVersion = '18.2.0';

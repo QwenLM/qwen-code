@@ -26,6 +26,7 @@ class ExportSessionContext implements SessionContext {
     timestamp: number;
   } | null = null;
   private activeRecordId: string | null = null;
+  private activeRecordTimestamp: string | null = null;
   private toolCallMap: Map<string, ExportMessage['toolCall']> = new Map();
 
   constructor(sessionId: string, config: Config) {
@@ -51,14 +52,23 @@ class ExportSessionContext implements SessionContext {
       case 'tool_call_update':
         this.handleToolCallUpdate(update);
         break;
+      case 'plan':
+        this.flushCurrentMessage();
+        this.handlePlanUpdate(update);
+        break;
       default:
         // Ignore other update types
         break;
     }
   }
 
-  setActiveRecordId(recordId: string | null): void {
+  setActiveRecordId(recordId: string | null, timestamp?: string): void {
     this.activeRecordId = recordId;
+    this.activeRecordTimestamp = timestamp ?? null;
+  }
+
+  private getMessageTimestamp(): string {
+    return this.activeRecordTimestamp ?? new Date().toISOString();
   }
 
   private getMessageUuid(): string {
@@ -117,7 +127,7 @@ class ExportSessionContext implements SessionContext {
     this.messages.push({
       uuid,
       sessionId: this.sessionId,
-      timestamp: new Date(toolCall.timestamp || Date.now()).toISOString(),
+      timestamp: this.getMessageTimestamp(),
       type: 'tool_call',
       toolCall,
     });
@@ -140,6 +150,57 @@ class ExportSessionContext implements SessionContext {
     }
   }
 
+  private handlePlanUpdate(update: {
+    entries: Array<{
+      content: string;
+      status: 'pending' | 'in_progress' | 'completed';
+      priority?: string;
+    }>;
+  }): void {
+    // Create a tool_call message for plan updates (TodoWriteTool)
+    // This ensures todos appear at the correct position in the chat
+    const uuid = this.getMessageUuid();
+    const timestamp = this.getMessageTimestamp();
+
+    // Format entries as markdown checklist text for UpdatedPlanToolCall.parsePlanEntries
+    const todoText = update.entries
+      .map((entry) => {
+        const checkbox =
+          entry.status === 'completed'
+            ? '[x]'
+            : entry.status === 'in_progress'
+              ? '[-]'
+              : '[ ]';
+        return `- ${checkbox} ${entry.content}`;
+      })
+      .join('\n');
+
+    const todoContent = [
+      {
+        type: 'content' as const,
+        content: {
+          type: 'text',
+          text: todoText,
+        },
+      },
+    ];
+
+    this.messages.push({
+      uuid,
+      sessionId: this.sessionId,
+      timestamp,
+      type: 'tool_call',
+      toolCall: {
+        toolCallId: uuid, // Use the same uuid as toolCallId for plan updates
+        kind: 'todowrite',
+        title: 'TodoWrite',
+        status: 'completed',
+        content: todoContent,
+        timestamp: Date.parse(timestamp),
+      },
+    });
+  }
+
   private flushCurrentMessage(): void {
     if (!this.currentMessage) return;
 
@@ -147,7 +208,7 @@ class ExportSessionContext implements SessionContext {
     this.messages.push({
       uuid,
       sessionId: this.sessionId,
-      timestamp: new Date(this.currentMessage.timestamp).toISOString(),
+      timestamp: this.getMessageTimestamp(),
       type: this.currentMessage.type,
       message: {
         role: this.currentMessage.role,

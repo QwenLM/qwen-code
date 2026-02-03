@@ -46,7 +46,7 @@ export class HistoryReplayer {
    * Replays a single chat record.
    */
   private async replayRecord(record: ChatRecord): Promise<void> {
-    this.setActiveRecordId(record.uuid);
+    this.setActiveRecordId(record.uuid, record.timestamp);
     switch (record.type) {
       case 'user':
         if (record.message) {
@@ -204,12 +204,12 @@ export class HistoryReplayer {
     return '';
   }
 
-  private setActiveRecordId(recordId: string | null): void {
+  private setActiveRecordId(recordId: string | null, timestamp?: string): void {
     const context = this.ctx as unknown as {
-      setActiveRecordId?: (id: string | null) => void;
+      setActiveRecordId?: (id: string | null, timestamp?: string) => void;
     };
     if (typeof context.setActiveRecordId === 'function') {
-      context.setActiveRecordId(recordId);
+      context.setActiveRecordId(recordId, timestamp);
     }
   }
 }
