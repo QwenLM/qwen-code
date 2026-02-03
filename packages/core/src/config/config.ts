@@ -114,6 +114,8 @@ import {
   type AvailableModel,
 } from '../models/index.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
+import { IndexService } from '../indexing/IndexService.js';
+import { DEFAULT_INDEX_CONFIG } from '../indexing/defaults.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -367,6 +369,17 @@ export interface ConfigParameters {
   channel?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Codebase indexing configuration */
+  indexing?: {
+    enabled?: boolean;
+    autoIndex?: boolean;
+    pollIntervalMs?: number;
+    chunkMaxTokens?: number;
+    chunkOverlapTokens?: number;
+    embeddingBatchSize?: number;
+    streamThreshold?: number;
+    enableGraph?: boolean;
+  };
 }
 
 function normalizeConfigOutputFormat(
@@ -454,6 +467,7 @@ export class Config {
   private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
+  private indexService: IndexService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
@@ -506,6 +520,16 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly useSmartEdit: boolean;
   private readonly channel: string | undefined;
+  private readonly indexingConfig: {
+    enabled: boolean;
+    autoIndex: boolean;
+    pollIntervalMs: number;
+    chunkMaxTokens: number;
+    chunkOverlapTokens: number;
+    embeddingBatchSize: number;
+    streamThreshold: number;
+    enableGraph: boolean;
+  };
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -622,6 +646,19 @@ export class Config {
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+
+    // Initialize indexing configuration
+    this.indexingConfig = {
+      enabled: params.indexing?.enabled ?? true,
+      autoIndex: params.indexing?.autoIndex ?? true,
+      pollIntervalMs: params.indexing?.pollIntervalMs ?? 600000, // 10 minutes
+      chunkMaxTokens: params.indexing?.chunkMaxTokens ?? 512,
+      chunkOverlapTokens: params.indexing?.chunkOverlapTokens ?? 50,
+      embeddingBatchSize: params.indexing?.embeddingBatchSize ?? 10,
+      streamThreshold: params.indexing?.streamThreshold ?? 50000,
+      enableGraph: params.indexing?.enableGraph ?? false,
+    };
+
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -699,6 +736,56 @@ export class Config {
     );
 
     await this.geminiClient.initialize();
+
+    // Initialize codebase indexing if enabled
+    if (this.isIndexingEnabled()) {
+      try {
+        // Get embedding API configuration
+        // The Worker thread needs its own API credentials since it runs in a separate thread
+        const embeddingApiKey =
+          process.env['DASHSCOPE_API_KEY'] ||
+          this.contentGeneratorConfig?.apiKey;
+        const embeddingBaseUrl =
+          process.env['DASHSCOPE_BASE_URL'] ||
+          this.contentGeneratorConfig?.baseUrl;
+
+        // Create IndexService instance
+        this.indexService = new IndexService({
+          projectRoot: this.targetDir,
+          config: {
+            ...DEFAULT_INDEX_CONFIG,
+            chunkMaxTokens: this.indexingConfig.chunkMaxTokens,
+            chunkOverlapTokens: this.indexingConfig.chunkOverlapTokens,
+            embeddingBatchSize: this.indexingConfig.embeddingBatchSize,
+            streamThreshold: this.indexingConfig.streamThreshold,
+            enableGraph: this.indexingConfig.enableGraph,
+            pollIntervalMs: this.indexingConfig.pollIntervalMs,
+          },
+          llmClientConfig: embeddingApiKey
+            ? {
+                apiKey: embeddingApiKey,
+                baseUrl: embeddingBaseUrl,
+                model: this.embeddingModel,
+              }
+            : undefined,
+        });
+
+        // Auto-start build if configured
+        if (this.indexingConfig.autoIndex) {
+          // Start build in background (don't await)
+          this.indexService.startBuild(true).catch((error) => {
+            console.warn(`[Config] Failed to start index build: ${error}`);
+          });
+        }
+
+        // Start polling for changes
+        this.indexService.startPolling();
+      } catch (error) {
+        console.warn(
+          `[Config] Failed to initialize codebase indexing: ${error}`,
+        );
+      }
+    }
 
     logStartSession(this, new StartSessionEvent(this));
   }
@@ -812,6 +899,12 @@ export class Config {
    */
   async shutdown(): Promise<void> {
     this.skillManager?.stopWatching();
+
+    // Terminate index service
+    if (this.indexService) {
+      await this.indexService.terminate();
+      this.indexService = undefined;
+    }
   }
 
   /**
@@ -982,6 +1075,27 @@ export class Config {
 
   getEmbeddingModel(): string {
     return this.embeddingModel;
+  }
+
+  /**
+   * Get indexing configuration.
+   */
+  getIndexingConfig() {
+    return this.indexingConfig;
+  }
+
+  /**
+   * Check if codebase indexing is enabled.
+   */
+  isIndexingEnabled(): boolean {
+    return this.indexingConfig.enabled;
+  }
+
+  /**
+   * Gets the IndexService for codebase indexing.
+   */
+  getIndexService(): IndexService | undefined {
+    return this.indexService;
   }
 
   getSandbox(): SandboxConfig | undefined {
