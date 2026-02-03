@@ -116,7 +116,6 @@ export const ToolConfirmationMessage: React.FC<
           'escape',
         ];
         const isPrintableKey =
-          key.name !== 'escape' &&
           !navigationKeys.includes(key.name || '') &&
           !key.ctrl &&
           !key.meta &&
