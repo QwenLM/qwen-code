@@ -50,6 +50,10 @@ function matchKeyBinding(keyBinding: KeyBinding, key: Key): boolean {
     return false;
   }
 
+  if (keyBinding.meta !== undefined && key.meta !== keyBinding.meta) {
+    return false;
+  }
+
   return true;
 }
 
