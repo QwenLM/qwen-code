@@ -38,7 +38,7 @@ Qwen Code is a TypeScript-based monorepo containing 8 packages that implement an
 | File Watching   | chokidar                  | 4.0.3   | File system watching      |
 | Git Integration | simple-git                | 3.28.0  | Git operations            |
 | File Operations | glob                      | 10.5.0  | File finding              |
-| HTML Processing | markdown-it               | 15.0.12 | Markdown rendering        |
+| HTML Processing | marked                    | 15.0.12 | Markdown rendering        |
 | HTTP Client     | undici                    | 6.22.0  | HTTP requests             |
 | WebSocket       | ws                        | 8.18.0  | WebSocket support         |
 | Testing         | Vitest                    | 3.1.1   | Unit testing framework    |
