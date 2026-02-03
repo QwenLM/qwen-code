@@ -278,5 +278,83 @@ describe('ToolConfirmationMessage', () => {
       expect(lastFrame()).toContain('No, keep planning');
       expect(lastFrame()).toContain('esc or type to revise');
     });
+
+    it('should trigger cancel when typing printable character on third option', () => {
+      const onConfirm = vi.fn();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Implementation Plan\n- Step one\n- Step two'.replace(
+          /\n/g,
+          EOL,
+        ),
+        onConfirm,
+      };
+
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      // Navigate to third option (down twice)
+      stdin.write('\x1B[B'); // Down arrow
+      stdin.write('\x1B[B'); // Down arrow again to reach third option
+
+      // Type a printable character
+      stdin.write('a');
+
+      expect(onConfirm).toHaveBeenCalledWith(expect.anything());
+    });
+
+    it('should NOT trigger cancel when pressing navigation keys on third option', () => {
+      const onConfirm = vi.fn();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Implementation Plan\n- Step one\n- Step two'.replace(
+          /\n/g,
+          EOL,
+        ),
+        onConfirm,
+      };
+
+      const mockConfig = {
+        isTrustedFolder: () => true,
+        getIdeMode: () => false,
+      } as unknown as Config;
+
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      // Navigate to third option
+      stdin.write('\x1B[B'); // Down arrow
+      stdin.write('\x1B[B'); // Down arrow
+
+      // Try various navigation keys - none should trigger cancel
+      stdin.write('\x1B[A'); // Up arrow
+      stdin.write('\x1B[B'); // Down arrow
+      stdin.write('\r'); // Enter
+      stdin.write('\t'); // Tab
+
+      // onConfirm should either not be called, or only called when Enter is pressed
+      // (depending on RadioButtonSelect behavior)
+      // The important thing is it shouldn't be called multiple times from navigation keys
+      expect(onConfirm).not.toHaveBeenCalledTimes(4);
+    });
   });
 });

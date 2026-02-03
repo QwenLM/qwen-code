@@ -97,7 +97,7 @@ export const ToolConfirmationMessage: React.FC<
         confirmationDetails.type === 'plan' &&
         highlightedOption === ToolConfirmationOutcome.Cancel
       ) {
-        // List of non-printable navigation/control keys to ignore
+        // Filter out navigation and control keys - only trigger on printable characters
         const navigationKeys = [
           'up',
           'down',
@@ -106,24 +106,24 @@ export const ToolConfirmationMessage: React.FC<
           'return',
           'enter',
           'tab',
-          'backspace',
           'delete',
+          'backspace',
           'home',
           'end',
           'pageup',
           'pagedown',
           'escape',
         ];
-
-        // Trigger cancel only on printable characters (not navigation keys or modifier combos)
-        if (
-          !navigationKeys.includes(key.name ?? '') &&
+        const isPrintableKey =
+          key.name !== 'escape' &&
+          !navigationKeys.includes(key.name || '') &&
           !key.ctrl &&
           !key.meta &&
           !key.shift &&
           !key.paste &&
-          key.sequence.length > 0
-        ) {
+          key.sequence.length > 0;
+
+        if (isPrintableKey) {
           handleConfirm(ToolConfirmationOutcome.Cancel);
         }
       }
