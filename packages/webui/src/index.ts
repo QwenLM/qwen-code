@@ -144,6 +144,7 @@ export {
   ShellToolCall,
   ReadToolCall,
   WebFetchToolCall,
+  TaskToolCall,
   CheckboxDisplay,
 } from './components/toolcalls';
 export type {
