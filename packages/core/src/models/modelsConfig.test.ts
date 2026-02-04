@@ -472,7 +472,7 @@ describe('ModelsConfig', () => {
     );
 
     const gc = currentGenerationConfig(modelsConfig);
-    expect(gc.model).toBe('coder-model');
+    expect(gc.model).toBe('qwen3-coder-next');
     expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
     expect(gc.apiKeyEnvKey).toBeUndefined();
   });
@@ -493,8 +493,8 @@ describe('ModelsConfig', () => {
     modelsConfig.syncAfterAuthRefresh(AuthType.QWEN_OAUTH, 'gpt-4o');
 
     const gc = currentGenerationConfig(modelsConfig);
-    // Should use default qwen-oauth model (coder-model), not the OPENAI model
-    expect(gc.model).toBe('coder-model');
+    // Should use default qwen-oauth model (qwen3-coder-next), not the OPENAI model
+    expect(gc.model).toBe('qwen3-coder-next');
     expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
     expect(gc.apiKeyEnvKey).toBeUndefined();
   });
@@ -524,7 +524,7 @@ describe('ModelsConfig', () => {
 
     const gc = currentGenerationConfig(modelsConfig);
     // Should use default qwen-oauth model, not preserve manual OpenAI credentials
-    expect(gc.model).toBe('coder-model');
+    expect(gc.model).toBe('qwen3-coder-next');
     expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
     // baseUrl should be set to qwen-oauth default, not preserved from manual OpenAI config
     expect(gc.baseUrl).toBe('DYNAMIC_QWEN_OAUTH_BASE_URL');
@@ -603,7 +603,7 @@ describe('ModelsConfig', () => {
       modelProvidersConfig,
       generationConfig: {},
     });
-    expect(config3.getModel()).toBe('coder-model'); // Falls back to DEFAULT_QWEN_MODEL
+    expect(config3.getModel()).toBe('qwen3-coder-next'); // Falls back to DEFAULT_QWEN_MODEL
     expect(config3.getGenerationConfig().model).toBeUndefined();
   });
 
