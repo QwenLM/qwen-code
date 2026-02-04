@@ -346,10 +346,11 @@ The SDK provides specific exception types for different error scenarios:
 - Memory usage scales with number of concurrent sessions
 
 #### 6. **Limited Documentation**
-- No detailed API reference documentation (JavaDoc)
+- JavaDoc exists but lacks comprehensive coverage for all classes and methods
 - Limited examples for advanced use cases
 - Error handling patterns not comprehensively documented
 - Troubleshooting guide is basic
+- No published API documentation website
 
 #### 7. **Platform Dependencies**
 - Requires Node.js environment for CLI (which is written in TypeScript)
