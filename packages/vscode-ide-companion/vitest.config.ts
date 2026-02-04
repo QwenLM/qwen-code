@@ -67,6 +67,7 @@ export default defineConfig({
     alias: {
       // 保持原有的别名
       vscode: path.resolve(__dirname, 'src/__mocks__/vscode.ts'),
+      '@qwen-code/webui': path.resolve(__dirname, '../webui/src/index.ts'),
       // 强制统一 React 模块解析（与 testing-library 解析来源保持一致）
       react: reactRoot,
       'react-dom': reactDomRoot,
