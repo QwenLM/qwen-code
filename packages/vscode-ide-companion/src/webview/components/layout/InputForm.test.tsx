@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '../../test-utils/render.js';
 import type { ApprovalModeValue } from '../../../types/approvalModeValueTypes.js';
 import type { ModelInfo } from '../../../types/acpTypes.js';
+import type { InputFormProps } from './InputForm.js';
 
 vi.mock('@qwen-code/webui', () => ({
   InputForm: ({
@@ -30,14 +31,32 @@ vi.mock('@qwen-code/webui', () => ({
 
 import { InputForm } from './InputForm.js';
 
-const baseProps = {
+const baseProps: InputFormProps = {
   inputText: '',
-  setInputText: vi.fn(),
-  onSubmit: vi.fn(),
-  onStop: vi.fn(),
-  onToggleThinking: vi.fn(),
-  onToggleEditMode: vi.fn(),
+  inputFieldRef: {
+    current: document.createElement('div'),
+  },
+  isStreaming: false,
+  isWaitingForResponse: false,
+  isComposing: false,
   editMode: 'auto-edit' as ApprovalModeValue,
+  thinkingEnabled: false,
+  activeFileName: null,
+  activeSelection: null,
+  skipAutoActiveContext: false,
+  contextUsage: null,
+  onInputChange: vi.fn(),
+  onCompositionStart: vi.fn(),
+  onCompositionEnd: vi.fn(),
+  onKeyDown: vi.fn(),
+  onSubmit: vi.fn(),
+  onCancel: vi.fn(),
+  onToggleEditMode: vi.fn(),
+  onToggleThinking: vi.fn(),
+  onToggleSkipAutoActiveContext: vi.fn(),
+  onShowCommandMenu: vi.fn(),
+  onAttachContext: vi.fn(),
+  completionIsOpen: false,
 };
 
 const models: ModelInfo[] = [
