@@ -78,3 +78,6 @@ storybook-static
 .vscode-test/
 test-results/
 e2e-vscode/
+
+# git worktrees
+.worktrees/
