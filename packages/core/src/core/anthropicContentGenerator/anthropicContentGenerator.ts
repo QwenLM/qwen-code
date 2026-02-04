@@ -25,9 +25,11 @@ type MessageCreateParamsNonStreaming =
   Anthropic.MessageCreateParamsNonStreaming;
 type MessageCreateParamsStreaming = Anthropic.MessageCreateParamsStreaming;
 type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
-import { getDefaultTokenizer } from '../../utils/request-tokenizer/index.js';
+import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
+import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 
 type StreamingBlockState = {
   type: string;
@@ -54,18 +56,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
   ) {
     const defaultHeaders = this.buildHeaders();
     const baseURL = contentGeneratorConfig.baseUrl;
+    // Configure runtime options to ensure user-configured timeout works as expected
+    // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'anthropic',
+      this.cliConfig.getProxy(),
+    );
 
     this.client = new Anthropic({
       apiKey: contentGeneratorConfig.apiKey,
       baseURL,
-      timeout: contentGeneratorConfig.timeout,
+      timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
+      ...runtimeOptions,
     });
 
     this.converter = new AnthropicContentConverter(
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
+      contentGeneratorConfig.disableCacheControl,
     );
   }
 
@@ -105,10 +115,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
     try {
-      const tokenizer = getDefaultTokenizer();
-      const result = await tokenizer.calculateTokens(request, {
-        textEncoding: 'cl100k_base',
-      });
+      const estimator = new RequestTokenEstimator();
+      const result = await estimator.calculateTokens(request);
 
       return {
         totalTokens: result.totalTokens,

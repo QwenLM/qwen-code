@@ -25,10 +25,12 @@ export const ScreenReaderAppLayout: React.FC = () => {
         <MainContent />
       </Box>
       {uiState.dialogsVisible ? (
-        <DialogManager
-          terminalWidth={uiState.terminalWidth}
-          addItem={uiState.historyManager.addItem}
-        />
+        <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
+          <DialogManager
+            terminalWidth={uiState.terminalWidth}
+            addItem={uiState.historyManager.addItem}
+          />
+        </Box>
       ) : (
         <Composer />
       )}

@@ -12,24 +12,26 @@ import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
 import { useUIState } from '../contexts/UIStateContext.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
-export const DefaultAppLayout: React.FC<{ width?: string }> = ({
-  width = '90%',
-}) => {
+export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
+  const { columns: terminalWidth } = useTerminalSize();
 
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={terminalWidth}>
       <MainContent />
 
       <Box flexDirection="column" ref={uiState.mainControlsRef}>
         <Notifications />
 
         {uiState.dialogsVisible ? (
-          <DialogManager
-            terminalWidth={uiState.terminalWidth}
-            addItem={uiState.historyManager.addItem}
-          />
+          <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
+            <DialogManager
+              terminalWidth={uiState.terminalWidth}
+              addItem={uiState.historyManager.addItem}
+            />
+          </Box>
         ) : (
           <Composer />
         )}

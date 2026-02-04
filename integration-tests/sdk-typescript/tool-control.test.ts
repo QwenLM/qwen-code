@@ -12,7 +12,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { query, isSDKAssistantMessage, type SDKMessage } from '@qwen-code/sdk';
+import {
+  query,
+  isSDKAssistantMessage,
+  isSDKResultMessage,
+  type SDKMessage,
+  type SDKUserMessage,
+} from '@qwen-code/sdk';
 import {
   SDKTestHelper,
   extractText,
@@ -20,6 +26,7 @@ import {
   findToolResults,
   assertSuccessfulCompletion,
   createSharedTestOptions,
+  createResultWaiter,
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
@@ -732,6 +739,241 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Should work normally
           expect(toolNames).toContain('read_file');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+  });
+
+  describe('canUseTool with asyncGenerator prompt', () => {
+    it(
+      'should invoke canUseTool callback when using asyncGenerator as prompt',
+      async () => {
+        await helper.createFile('test.txt', 'original content');
+
+        const resultWaiter = createResultWaiter(1);
+        const canUseToolCalls: Array<{
+          toolName: string;
+          input: Record<string, unknown>;
+        }> = [];
+
+        // Create an async generator that yields a single message
+        async function* createPrompt(): AsyncIterable<SDKUserMessage> {
+          yield {
+            type: 'user',
+            session_id: crypto.randomUUID(),
+            message: {
+              role: 'user',
+              content: 'Read test.txt and then write "updated" to it.',
+            },
+            parent_tool_use_id: null,
+          };
+
+          await resultWaiter.waitForResult(0);
+        }
+
+        const q = query({
+          prompt: createPrompt(),
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['read_file', 'write_file'],
+            allowedTools: [],
+            canUseTool: async (toolName, input) => {
+              canUseToolCalls.push({ toolName, input });
+              return {
+                behavior: 'allow',
+                updatedInput: input,
+              };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // Both tools should have been executed
+          expect(toolNames).toContain('read_file');
+          expect(toolNames).toContain('write_file');
+
+          const toolsCalledInCallback = canUseToolCalls.map(
+            (call) => call.toolName,
+          );
+          expect(toolsCalledInCallback).toContain('write_file');
+
+          const writeFileResults = findToolResults(messages, 'write_file');
+          expect(writeFileResults.length).toBeGreaterThan(0);
+
+          // Verify file was modified
+          const content = await helper.readFile('test.txt');
+          expect(content).toBe('updated');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should deny tool when canUseTool returns deny with asyncGenerator prompt',
+      async () => {
+        await helper.createFile('test.txt', 'original content');
+
+        const resultWaiter = createResultWaiter(1);
+        // Create an async generator that yields a single message
+        async function* createPrompt(): AsyncIterable<SDKUserMessage> {
+          yield {
+            type: 'user',
+            session_id: crypto.randomUUID(),
+            message: {
+              role: 'user',
+              content: 'Write "modified" to test.txt.',
+            },
+            parent_tool_use_id: null,
+          };
+          await resultWaiter.waitForResult(0);
+        }
+
+        const q = query({
+          prompt: createPrompt(),
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['read_file', 'write_file'],
+            canUseTool: async (toolName) => {
+              if (toolName === 'write_file') {
+                return {
+                  behavior: 'deny',
+                  message: 'Write operations are not allowed',
+                };
+              }
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
+          }
+
+          // write_file should have been attempted but stream was closed
+          const writeFileResults = findToolResults(messages, 'write_file');
+          expect(writeFileResults.length).toBeGreaterThan(0);
+          for (const result of writeFileResults) {
+            expect(result.content).toContain(
+              '[Operation Cancelled] Reason: Write operations are not allowed',
+            );
+          }
+
+          // File content should remain unchanged (because write was denied)
+          const content = await helper.readFile('test.txt');
+          expect(content).toBe('original content');
+        } finally {
+          await q.close();
+        }
+      },
+      TEST_TIMEOUT,
+    );
+
+    it(
+      'should support multi-turn conversation with canUseTool using asyncGenerator',
+      async () => {
+        await helper.createFile('data.txt', 'initial data');
+
+        const resultWaiter = createResultWaiter(2);
+        const canUseToolCalls: string[] = [];
+
+        // Create an async generator that yields multiple messages
+        async function* createMultiTurnPrompt(): AsyncIterable<SDKUserMessage> {
+          const sessionId = crypto.randomUUID();
+
+          yield {
+            type: 'user',
+            session_id: sessionId,
+            message: {
+              role: 'user',
+              content: 'Read data.txt and tell me what it contains.',
+            },
+            parent_tool_use_id: null,
+          };
+
+          await resultWaiter.waitForResult(0);
+
+          yield {
+            type: 'user',
+            session_id: sessionId,
+            message: {
+              role: 'user',
+              content: 'Now append " - updated" to the file content.',
+            },
+            parent_tool_use_id: null,
+          };
+
+          await resultWaiter.waitForResult(1);
+        }
+
+        const q = query({
+          prompt: createMultiTurnPrompt(),
+          options: {
+            ...SHARED_TEST_OPTIONS,
+            cwd: testDir,
+            permissionMode: 'default',
+            coreTools: ['read_file', 'write_file'],
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
+              return { behavior: 'allow', updatedInput: {} };
+            },
+            debug: false,
+          },
+        });
+
+        const messages: SDKMessage[] = [];
+
+        try {
+          for await (const message of q) {
+            messages.push(message);
+            if (isSDKResultMessage(message)) {
+              resultWaiter.notifyResult();
+            }
+          }
+
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+
+          // Should have read_file and write_file calls
+          expect(toolNames).toContain('read_file');
+          expect(toolNames).toContain('write_file');
+
+          expect(canUseToolCalls).toContain('write_file');
+
+          const writeFileResults = findToolResults(messages, 'write_file');
+          expect(writeFileResults.length).toBeGreaterThan(0);
+
+          const content = await helper.readFile('data.txt');
+          expect(content).toContain('initial data');
+          expect(content).toContain(' - updated');
         } finally {
           await q.close();
         }

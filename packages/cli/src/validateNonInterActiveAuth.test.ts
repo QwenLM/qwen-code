@@ -14,18 +14,24 @@ import * as JsonOutputAdapterModule from './nonInteractive/io/JsonOutputAdapter.
 import * as StreamJsonOutputAdapterModule from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import * as cleanupModule from './utils/cleanup.js';
 
+type ModelsConfig = ReturnType<Config['getModelsConfig']>;
+
 // Helper to create a mock Config with modelsConfig
 function createMockConfig(overrides?: Partial<Config>): Config {
-  return {
+  const baseModelsConfig = {
+    getModel: vi.fn().mockReturnValue('default-model'),
+    getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+  } as unknown as ModelsConfig;
+  const baseConfig: Partial<Config> = {
     refreshAuth: vi.fn().mockResolvedValue('refreshed'),
     getOutputFormat: vi.fn().mockReturnValue(OutputFormat.TEXT),
     getContentGeneratorConfig: vi.fn().mockReturnValue({ authType: undefined }),
-    modelsConfig: {
-      getModel: vi.fn().mockReturnValue('default-model'),
-      getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
-    },
+    getModelsConfig: vi.fn().mockReturnValue(baseModelsConfig),
+  };
+  return {
+    ...baseConfig,
     ...overrides,
-  } as unknown as Config;
+  } as Config;
 }
 
 describe('validateNonInterActiveAuth', () => {
@@ -128,10 +134,10 @@ describe('validateNonInterActiveAuth', () => {
     );
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
-      modelsConfig: {
+      getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
-      },
+      }),
     });
     try {
       await validateNonInteractiveAuth(
@@ -153,10 +159,10 @@ describe('validateNonInterActiveAuth', () => {
     process.env['OPENAI_API_KEY'] = 'fake-openai-key';
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
-      modelsConfig: {
+      getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-      },
+      }),
     });
     await validateNonInteractiveAuth(
       undefined,
@@ -169,10 +175,10 @@ describe('validateNonInterActiveAuth', () => {
   it('uses configured QWEN_OAUTH if provided', async () => {
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
-      modelsConfig: {
+      getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
-      },
+      }),
     });
     await validateNonInteractiveAuth(
       undefined,
@@ -222,7 +228,7 @@ describe('validateNonInterActiveAuth', () => {
     expect(validateAuthMethodSpy).not.toHaveBeenCalled();
     expect(consoleErrorSpy).not.toHaveBeenCalled();
     expect(processExitSpy).not.toHaveBeenCalled();
-    // refreshAuth is called with the authType from config.modelsConfig.getCurrentAuthType()
+    // refreshAuth is called with the authType from config.getModelsConfig().getCurrentAuthType()
     expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.QWEN_OAUTH);
   });
 
@@ -233,10 +239,10 @@ describe('validateNonInterActiveAuth', () => {
     process.env['OPENAI_API_KEY'] = 'fake-key';
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
-      modelsConfig: {
+      getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-      },
+      }),
     });
     await validateNonInteractiveAuth(
       undefined,
@@ -251,10 +257,10 @@ describe('validateNonInterActiveAuth', () => {
     process.env['OPENAI_API_KEY'] = 'fake-key';
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
-      modelsConfig: {
+      getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-      },
+      }),
     });
     try {
       await validateNonInteractiveAuth(
@@ -297,10 +303,10 @@ describe('validateNonInterActiveAuth', () => {
       const nonInteractiveConfig = createMockConfig({
         refreshAuth: refreshAuthMock,
         getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
-        modelsConfig: {
+        getModelsConfig: vi.fn().mockReturnValue({
           getModel: vi.fn().mockReturnValue('default-model'),
           getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
-        },
+        }),
       });
 
       try {
@@ -334,10 +340,10 @@ describe('validateNonInterActiveAuth', () => {
       const nonInteractiveConfig = createMockConfig({
         refreshAuth: refreshAuthMock,
         getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
-        modelsConfig: {
+        getModelsConfig: vi.fn().mockReturnValue({
           getModel: vi.fn().mockReturnValue('default-model'),
           getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-        },
+        }),
       });
 
       try {
@@ -373,10 +379,10 @@ describe('validateNonInterActiveAuth', () => {
       const nonInteractiveConfig = createMockConfig({
         refreshAuth: refreshAuthMock,
         getOutputFormat: vi.fn().mockReturnValue(OutputFormat.JSON),
-        modelsConfig: {
+        getModelsConfig: vi.fn().mockReturnValue({
           getModel: vi.fn().mockReturnValue('default-model'),
           getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-        },
+        }),
       });
 
       try {
@@ -433,10 +439,10 @@ describe('validateNonInterActiveAuth', () => {
         refreshAuth: refreshAuthMock,
         getOutputFormat: vi.fn().mockReturnValue(OutputFormat.STREAM_JSON),
         getIncludePartialMessages: vi.fn().mockReturnValue(false),
-        modelsConfig: {
+        getModelsConfig: vi.fn().mockReturnValue({
           getModel: vi.fn().mockReturnValue('default-model'),
           getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
-        },
+        }),
       });
 
       try {
@@ -471,10 +477,10 @@ describe('validateNonInterActiveAuth', () => {
         refreshAuth: refreshAuthMock,
         getOutputFormat: vi.fn().mockReturnValue(OutputFormat.STREAM_JSON),
         getIncludePartialMessages: vi.fn().mockReturnValue(false),
-        modelsConfig: {
+        getModelsConfig: vi.fn().mockReturnValue({
           getModel: vi.fn().mockReturnValue('default-model'),
           getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-        },
+        }),
       });
 
       try {
@@ -511,10 +517,10 @@ describe('validateNonInterActiveAuth', () => {
         refreshAuth: refreshAuthMock,
         getOutputFormat: vi.fn().mockReturnValue(OutputFormat.STREAM_JSON),
         getIncludePartialMessages: vi.fn().mockReturnValue(false),
-        modelsConfig: {
+        getModelsConfig: vi.fn().mockReturnValue({
           getModel: vi.fn().mockReturnValue('default-model'),
           getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
-        },
+        }),
       });
 
       try {

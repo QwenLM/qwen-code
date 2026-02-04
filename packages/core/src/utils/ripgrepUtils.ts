@@ -100,38 +100,23 @@ export function getBuiltinRipgrep(): string | null {
     return null;
   }
 
-  // Binary name includes .exe on Windows
   const binaryName = platform === 'win32' ? 'rg.exe' : 'rg';
 
-  // Path resolution:
-  // When running from transpiled code: dist/src/utils/ripgrepUtils.js -> ../../../vendor/ripgrep/
-  // When running from bundle: dist/index.js -> vendor/ripgrep/
+  // Determine levels to traverse up to reach package root where vendor/ lives:
+  // - Bundle (dist/index.js): vendor copied into dist/, 0 levels
+  // - Source (src/utils/*.ts): 2 levels up
+  // - Transpiled (dist/src/utils/*.js): 3 levels up
+  const inSrcUtils = __filename.includes(path.join('src', 'utils'));
+  const levelsUp = !inSrcUtils ? 0 : __filename.endsWith('.ts') ? 2 : 3;
 
-  // Detect if we're running from a bundle (single file)
-  // In bundle, __filename will be something like /path/to/dist/index.js
-  // In transpiled code, __filename will be /path/to/dist/src/utils/ripgrepUtils.js
-  const isBundled = !__filename.includes(path.join('src', 'utils'));
-
-  const vendorPath = isBundled
-    ? path.join(
-        __dirname,
-        'vendor',
-        'ripgrep',
-        `${arch}-${platform}`,
-        binaryName,
-      )
-    : path.join(
-        __dirname,
-        '..',
-        '..',
-        '..',
-        'vendor',
-        'ripgrep',
-        `${arch}-${platform}`,
-        binaryName,
-      );
-
-  return vendorPath;
+  return path.join(
+    __dirname,
+    ...Array<string>(levelsUp).fill('..'),
+    'vendor',
+    'ripgrep',
+    `${arch}-${platform}`,
+    binaryName,
+  );
 }
 
 /**

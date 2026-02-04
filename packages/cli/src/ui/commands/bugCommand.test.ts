@@ -56,27 +56,22 @@ describe('bugCommand', () => {
     if (!bugCommand.action) throw new Error('Action is not defined');
     await bugCommand.action(mockContext, 'A test bug');
 
-    const gitCommitLine =
+    const qwenCodeLine =
       GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
-        ? `* **Git Commit:** ${GIT_COMMIT_INFO}\n`
-        : '';
-    const expectedInfo = `
-* **CLI Version:** 0.1.0
-${gitCommitLine}* **Model:** qwen3-coder-plus
-* **Sandbox:** test
-* **OS Platform:** test-platform
-* **OS Arch:** x64
-* **OS Release:** 22.0.0
-* **Node.js Version:** v20.0.0
-* **NPM Version:** 10.0.0
-* **Session ID:** test-session-id
-* **Auth Method:** 
-* **Memory Usage:** 100 MB
-* **IDE Client:** VSCode
-`;
+        ? `Qwen Code: 0.1.0 (${GIT_COMMIT_INFO})`
+        : 'Qwen Code: 0.1.0';
+    const expectedInfo = `${qwenCodeLine}
+Runtime: Node.js v20.0.0 / npm 10.0.0
+IDE Client: VSCode
+OS: test-platform x64 (22.0.0)
+Model: qwen3-coder-plus
+Session ID: test-session-id
+Sandbox: test
+Proxy: no proxy
+Memory Usage: 100 MB`;
     const expectedUrl =
       'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=' +
-      encodeURIComponent(expectedInfo);
+      encodeURIComponent(`\n${expectedInfo}\n`);
 
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
@@ -95,27 +90,22 @@ ${gitCommitLine}* **Model:** qwen3-coder-plus
     if (!bugCommand.action) throw new Error('Action is not defined');
     await bugCommand.action(mockContext, 'A custom bug');
 
-    const gitCommitLine =
+    const qwenCodeLine =
       GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
-        ? `* **Git Commit:** ${GIT_COMMIT_INFO}\n`
-        : '';
-    const expectedInfo = `
-* **CLI Version:** 0.1.0
-${gitCommitLine}* **Model:** qwen3-coder-plus
-* **Sandbox:** test
-* **OS Platform:** test-platform
-* **OS Arch:** x64
-* **OS Release:** 22.0.0
-* **Node.js Version:** v20.0.0
-* **NPM Version:** 10.0.0
-* **Session ID:** test-session-id
-* **Auth Method:** 
-* **Memory Usage:** 100 MB
-* **IDE Client:** VSCode
-`;
+        ? `Qwen Code: 0.1.0 (${GIT_COMMIT_INFO})`
+        : 'Qwen Code: 0.1.0';
+    const expectedInfo = `${qwenCodeLine}
+Runtime: Node.js v20.0.0 / npm 10.0.0
+IDE Client: VSCode
+OS: test-platform x64 (22.0.0)
+Model: qwen3-coder-plus
+Session ID: test-session-id
+Sandbox: test
+Proxy: no proxy
+Memory Usage: 100 MB`;
     const expectedUrl = customTemplate
       .replace('{title}', encodeURIComponent('A custom bug'))
-      .replace('{info}', encodeURIComponent(expectedInfo));
+      .replace('{info}', encodeURIComponent(`\n${expectedInfo}\n`));
 
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
@@ -152,28 +142,23 @@ ${gitCommitLine}* **Model:** qwen3-coder-plus
     if (!bugCommand.action) throw new Error('Action is not defined');
     await bugCommand.action(mockContext, 'OpenAI bug');
 
-    const gitCommitLine =
+    const qwenCodeLine =
       GIT_COMMIT_INFO && !['N/A'].includes(GIT_COMMIT_INFO)
-        ? `* **Git Commit:** ${GIT_COMMIT_INFO}\n`
-        : '';
-    const expectedInfo = `
-* **CLI Version:** 0.1.0
-${gitCommitLine}* **Model:** qwen3-coder-plus
-* **Sandbox:** test
-* **OS Platform:** test-platform
-* **OS Arch:** x64
-* **OS Release:** 22.0.0
-* **Node.js Version:** v20.0.0
-* **NPM Version:** 10.0.0
-* **Session ID:** test-session-id
-* **Auth Method:** ${AuthType.USE_OPENAI}
-* **Base URL:** https://api.openai.com/v1
-* **Memory Usage:** 100 MB
-* **IDE Client:** VSCode
-`;
+        ? `Qwen Code: 0.1.0 (${GIT_COMMIT_INFO})`
+        : 'Qwen Code: 0.1.0';
+    const expectedInfo = `${qwenCodeLine}
+Runtime: Node.js v20.0.0 / npm 10.0.0
+IDE Client: VSCode
+OS: test-platform x64 (22.0.0)
+Auth: ${AuthType.USE_OPENAI} (https://api.openai.com/v1)
+Model: qwen3-coder-plus
+Session ID: test-session-id
+Sandbox: test
+Proxy: no proxy
+Memory Usage: 100 MB`;
     const expectedUrl =
       'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=' +
-      encodeURIComponent(expectedInfo);
+      encodeURIComponent(`\n${expectedInfo}\n`);
 
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });

@@ -469,21 +469,27 @@ export class PermissionController extends BaseController {
           error,
         );
       }
-      // On error, use default cancel message
+
+      // Extract error message
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      // On error, pass error message as cancel message
       // Only pass payload for exec and mcp types that support it
       const confirmationType = toolCall.confirmationDetails.type;
       if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
         const execOrMcpDetails = toolCall.confirmationDetails as
           | ToolExecuteConfirmationDetails
           | ToolMcpConfirmationDetails;
-        await execOrMcpDetails.onConfirm(
-          ToolConfirmationOutcome.Cancel,
-          undefined,
-        );
+        await execOrMcpDetails.onConfirm(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `Error: ${errorMessage}`,
+        });
       } else {
-        // For other types, don't pass payload (backward compatible)
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: `Error: ${errorMessage}`,
+          },
         );
       }
     } finally {

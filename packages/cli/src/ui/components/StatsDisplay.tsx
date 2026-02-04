@@ -160,11 +160,13 @@ const ModelUsageTable: React.FC<{
 interface StatsDisplayProps {
   duration: string;
   title?: string;
+  width?: number;
 }
 
 export const StatsDisplay: React.FC<StatsDisplayProps> = ({
   duration,
   title,
+  width,
 }) => {
   const { stats } = useSessionStats();
   const { metrics } = stats;
@@ -213,6 +215,7 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
       flexDirection="column"
       paddingY={1}
       paddingX={2}
+      width={width}
     >
       {renderTitle()}
       <Box height={1} />

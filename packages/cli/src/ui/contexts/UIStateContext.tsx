@@ -14,6 +14,8 @@ import type {
   LoopDetectionConfirmationRequest,
   HistoryItemWithoutId,
   StreamingState,
+  SettingInputRequest,
+  PluginChoiceRequest,
 } from '../types.js';
 import type { QwenAuthState } from '../hooks/useQwenAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
@@ -59,6 +61,8 @@ export interface UIState {
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
+  settingInputRequests: SettingInputRequest[];
+  pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
   geminiMdFileCount: number;
   streamingState: StreamingState;
@@ -72,6 +76,8 @@ export interface UIState {
   suggestionsWidth: number;
   isInputActive: boolean;
   shouldShowIdePrompt: boolean;
+  shouldShowCommandMigrationNudge: boolean;
+  commandMigrationTomlFiles: string[];
   isFolderTrustDialogOpen: boolean;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
@@ -87,9 +93,6 @@ export interface UIState {
   historyRemountKey: number;
   messageQueue: string[];
   showAutoAcceptIndicator: ApprovalMode;
-  showWorkspaceMigrationDialog: boolean;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  workspaceExtensions: any[]; // Extension[]
   // Quota-related state
   currentModel: string;
   contextFileNames: string[];
@@ -126,6 +129,8 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Feedback dialog
+  isFeedbackDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

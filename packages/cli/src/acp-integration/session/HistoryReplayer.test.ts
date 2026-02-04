@@ -228,6 +228,7 @@ describe('HistoryReplayer', () => {
           status: 'in_progress',
           title: 'read_file',
           rawInput: { path: '/test.ts' },
+          _meta: { toolName: 'read_file' },
         }),
       );
     });
@@ -280,6 +281,7 @@ describe('HistoryReplayer', () => {
         ],
         // resultDisplay is included as rawOutput
         rawOutput: 'File contents here',
+        _meta: { toolName: 'read_file' },
       });
     });
 

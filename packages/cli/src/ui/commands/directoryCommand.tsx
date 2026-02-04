@@ -119,8 +119,6 @@ export const directoryCommand: SlashCommand = {
                 config.getFolderTrust(),
                 context.services.settings.merged.context?.importFormat ||
                   'tree', // Use setting or default to 'tree'
-                config.getFileFilteringOptions(),
-                context.services.settings.merged.context?.discoveryMaxDirs,
               );
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);

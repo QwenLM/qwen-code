@@ -20,6 +20,7 @@ export default {
   },
   features: 'Features',
   configuration: 'Configuration',
+  extension: 'Extension',
   reference: 'Reference',
   support: 'Support',
   // need refine

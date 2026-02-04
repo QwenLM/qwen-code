@@ -41,10 +41,13 @@ export {
   logExtensionEnable,
   logExtensionInstallEvent,
   logExtensionUninstall,
+  logExtensionDisable,
+  logExtensionUpdateEvent,
   logRipgrepFallback,
   logNextSpeakerCheck,
   logAuth,
   logSkillLaunch,
+  logUserFeedback,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
@@ -65,6 +68,8 @@ export {
   NextSpeakerCheckEvent,
   AuthEvent,
   SkillLaunchEvent,
+  UserFeedbackEvent,
+  UserFeedbackRating,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type { TelemetryEvent } from './types.js';

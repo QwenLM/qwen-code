@@ -4,19 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { DefaultRequestTokenizer } from './requestTokenizer.js';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { RequestTokenizer } from './requestTokenizer.js';
 import type { CountTokensParameters } from '@google/genai';
 
-describe('DefaultRequestTokenizer', () => {
-  let tokenizer: DefaultRequestTokenizer;
+describe('RequestTokenEstimator', () => {
+  let tokenizer: RequestTokenizer;
 
   beforeEach(() => {
-    tokenizer = new DefaultRequestTokenizer();
-  });
-
-  afterEach(async () => {
-    await tokenizer.dispose();
+    tokenizer = new RequestTokenizer();
   });
 
   describe('text token calculation', () => {
@@ -221,25 +217,7 @@ describe('DefaultRequestTokenizer', () => {
     });
   });
 
-  describe('configuration', () => {
-    it('should use custom text encoding', async () => {
-      const request: CountTokensParameters = {
-        model: 'test-model',
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: 'Test text for encoding' }],
-          },
-        ],
-      };
-
-      const result = await tokenizer.calculateTokens(request, {
-        textEncoding: 'cl100k_base',
-      });
-
-      expect(result.totalTokens).toBeGreaterThan(0);
-    });
-
+  describe('images', () => {
     it('should process multiple images serially', async () => {
       const pngBase64 =
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAI9jU77yQAAAABJRU5ErkJggg==';

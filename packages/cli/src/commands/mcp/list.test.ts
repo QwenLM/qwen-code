@@ -7,18 +7,15 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { listMcpServers } from './list.js';
 import { loadSettings } from '../../config/settings.js';
-import { ExtensionStorage, loadExtensions } from '../../config/extension.js';
-import { createTransport } from '@qwen-code/qwen-code-core';
+import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
+import { createTransport, ExtensionManager } from '@qwen-code/qwen-code-core';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 
 vi.mock('../../config/settings.js', () => ({
   loadSettings: vi.fn(),
 }));
-vi.mock('../../config/extension.js', () => ({
-  loadExtensions: vi.fn(),
-  ExtensionStorage: {
-    getUserExtensionsDir: vi.fn(),
-  },
+vi.mock('../../config/trustedFolders.js', () => ({
+  isWorkspaceTrusted: vi.fn(),
 }));
 vi.mock('@qwen-code/qwen-code-core', () => ({
   createTransport: vi.fn(),
@@ -27,20 +24,15 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     CONNECTING: 'CONNECTING',
     DISCONNECTED: 'DISCONNECTED',
   },
-  Storage: vi.fn().mockImplementation((_cwd: string) => ({
-    getGlobalSettingsPath: () => '/tmp/qwen/settings.json',
-    getWorkspaceSettingsPath: () => '/tmp/qwen/workspace-settings.json',
-    getProjectTempDir: () => '/test/home/.qwen/tmp/mocked_hash',
-  })),
-  QWEN_CONFIG_DIR: '.qwen',
+  ExtensionManager: vi.fn(),
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
 }));
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
 
-const mockedExtensionStorage = ExtensionStorage as vi.Mock;
 const mockedLoadSettings = loadSettings as vi.Mock;
-const mockedLoadExtensions = loadExtensions as vi.Mock;
+const mockedIsWorkspaceTrusted = isWorkspaceTrusted as vi.Mock;
 const mockedCreateTransport = createTransport as vi.Mock;
+const MockedExtensionManager = ExtensionManager as vi.Mock;
 const MockedClient = Client as vi.Mock;
 
 interface MockClient {
@@ -57,6 +49,10 @@ describe('mcp list command', () => {
   let consoleSpy: vi.SpyInstance;
   let mockClient: MockClient;
   let mockTransport: MockTransport;
+  let mockExtensionManager: {
+    refreshCache: vi.Mock;
+    getLoadedExtensions: vi.Mock;
+  };
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -70,12 +66,15 @@ describe('mcp list command', () => {
       close: vi.fn(),
     };
 
+    mockExtensionManager = {
+      refreshCache: vi.fn().mockResolvedValue(undefined),
+      getLoadedExtensions: vi.fn().mockReturnValue([]),
+    };
+
     MockedClient.mockImplementation(() => mockClient);
     mockedCreateTransport.mockResolvedValue(mockTransport);
-    mockedLoadExtensions.mockReturnValue([]);
-    mockedExtensionStorage.getUserExtensionsDir.mockReturnValue(
-      '/mocked/extensions/dir',
-    );
+    MockedExtensionManager.mockImplementation(() => mockExtensionManager);
+    mockedIsWorkspaceTrusted.mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -151,8 +150,9 @@ describe('mcp list command', () => {
       },
     });
 
-    mockedLoadExtensions.mockReturnValue([
+    mockExtensionManager.getLoadedExtensions.mockReturnValue([
       {
+        isActive: true,
         config: {
           name: 'test-extension',
           mcpServers: { 'extension-server': { command: '/ext/server' } },

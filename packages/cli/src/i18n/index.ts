@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { homedir } from 'node:os';
 import {
   type SupportedLanguage,
+  SUPPORTED_LANGUAGES,
   getLanguageNameFromLocale,
 } from './languages.js';
 
@@ -55,16 +56,17 @@ const getLocalePath = (
 // Language detection
 export function detectSystemLanguage(): SupportedLanguage {
   const envLang = process.env['QWEN_CODE_LANG'] || process.env['LANG'];
-  if (envLang?.startsWith('zh')) return 'zh';
-  if (envLang?.startsWith('en')) return 'en';
-  if (envLang?.startsWith('ru')) return 'ru';
-  if (envLang?.startsWith('de')) return 'de';
+  if (envLang) {
+    for (const lang of SUPPORTED_LANGUAGES) {
+      if (envLang.startsWith(lang.code)) return lang.code;
+    }
+  }
 
   try {
     const locale = Intl.DateTimeFormat().resolvedOptions().locale;
-    if (locale.startsWith('zh')) return 'zh';
-    if (locale.startsWith('ru')) return 'ru';
-    if (locale.startsWith('de')) return 'de';
+    for (const lang of SUPPORTED_LANGUAGES) {
+      if (locale.startsWith(lang.code)) return lang.code;
+    }
   } catch {
     // Fallback to default
   }

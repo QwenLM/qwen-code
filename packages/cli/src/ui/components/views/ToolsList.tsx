@@ -14,15 +14,15 @@ import { t } from '../../../i18n/index.js';
 interface ToolsListProps {
   tools: readonly ToolDefinition[];
   showDescriptions: boolean;
-  terminalWidth: number;
+  contentWidth: number;
 }
 
 export const ToolsList: React.FC<ToolsListProps> = ({
   tools,
   showDescriptions,
-  terminalWidth,
+  contentWidth,
 }) => (
-  <Box flexDirection="column" marginBottom={1}>
+  <Box flexDirection="column">
     <Text bold color={theme.text.primary}>
       {t('Available Qwen Code CLI tools:')}
     </Text>
@@ -38,7 +38,7 @@ export const ToolsList: React.FC<ToolsListProps> = ({
             </Text>
             {showDescriptions && tool.description && (
               <MarkdownDisplay
-                terminalWidth={terminalWidth}
+                contentWidth={contentWidth}
                 text={tool.description}
                 isPending={false}
               />

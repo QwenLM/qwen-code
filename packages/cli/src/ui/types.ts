@@ -414,3 +414,23 @@ export interface ConfirmationRequest {
 export interface LoopDetectionConfirmationRequest {
   onComplete: (result: { userSelection: 'disable' | 'keep' }) => void;
 }
+
+export interface SettingInputRequest {
+  settingName: string;
+  settingDescription: string;
+  sensitive: boolean;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}
+
+export interface PluginChoice {
+  name: string;
+  description?: string;
+}
+
+export interface PluginChoiceRequest {
+  marketplaceName: string;
+  plugins: PluginChoice[];
+  onSelect: (pluginName: string) => void;
+  onCancel: () => void;
+}

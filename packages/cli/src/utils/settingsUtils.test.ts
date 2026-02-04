@@ -110,6 +110,7 @@ describe('SettingsUtils', () => {
             category: 'UI',
             default: false,
             requiresRestart: true,
+            showInDialog: true,
           },
           accessibility: {
             type: 'object',

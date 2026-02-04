@@ -271,7 +271,6 @@ describe('gemini.tsx main function', () => {
     );
     const { loadSettings } = await import('./config/settings.js');
     const cleanupModule = await import('./utils/cleanup.js');
-    const extensionModule = await import('./config/extension.js');
     const validatorModule = await import('./validateNonInterActiveAuth.js');
     const streamJsonModule = await import('./nonInteractive/session.js');
     const initializerModule = await import('./core/initializer.js');
@@ -284,11 +283,6 @@ describe('gemini.tsx main function', () => {
     vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => {});
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
-    vi.spyOn(extensionModule, 'loadExtensions').mockReturnValue([]);
-    vi.spyOn(
-      extensionModule.ExtensionStorage,
-      'getUserExtensionsDir',
-    ).mockReturnValue('/tmp/extensions');
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
       authError: null,
       themeError: null,
@@ -456,7 +450,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       promptInteractive: undefined,
       query: undefined,
       allFiles: undefined,
-      showMemoryUsage: undefined,
       yolo: undefined,
       approvalMode: undefined,
       telemetry: undefined,
@@ -495,6 +488,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       excludeTools: undefined,
       authType: undefined,
       maxSessionTurns: undefined,
+      experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,
     });

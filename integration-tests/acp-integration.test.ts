@@ -311,9 +311,9 @@ function setupAcpTest(
     }
   });
 
-  it('returns modes on initialize and allows setting approval mode', async () => {
+  it('returns modes on initialize and allows setting mode and model', async () => {
     const rig = new TestRig();
-    rig.setup('acp approval mode');
+    rig.setup('acp mode and model');
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -366,8 +366,14 @@ function setupAcpTest(
       const newSession = (await sendRequest('session/new', {
         cwd: rig.testDir!,
         mcpServers: [],
-      })) as { sessionId: string };
+      })) as {
+        sessionId: string;
+        models: {
+          availableModels: Array<{ modelId: string }>;
+        };
+      };
       expect(newSession.sessionId).toBeTruthy();
+      expect(newSession.models.availableModels.length).toBeGreaterThan(0);
 
       // Test 4: Set approval mode to 'yolo'
       const setModeResult = (await sendRequest('session/set_mode', {
@@ -392,6 +398,15 @@ function setupAcpTest(
       })) as { modeId: string };
       expect(setModeResult3).toBeDefined();
       expect(setModeResult3.modeId).toBe('default');
+
+      // Test 7: Set model using first available model
+      const firstModel = newSession.models.availableModels[0];
+      const setModelResult = (await sendRequest('session/set_model', {
+        sessionId: newSession.sessionId,
+        modelId: firstModel.modelId,
+      })) as { modelId: string };
+      expect(setModelResult).toBeDefined();
+      expect(setModelResult.modelId).toBeTruthy();
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));

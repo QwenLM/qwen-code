@@ -12,10 +12,7 @@ import {
 } from './types.js';
 import { MessageType } from '../types.js';
 import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
-import {
-  getSystemInfoFields,
-  getFieldValue,
-} from '../../utils/systemInfoFields.js';
+import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
 import { t } from '../../i18n/index.js';
 
 export const bugCommand: SlashCommand = {
@@ -30,11 +27,9 @@ export const bugCommand: SlashCommand = {
 
     const fields = getSystemInfoFields(systemInfo);
 
-    // Generate bug report info using the same field configuration
-    let info = '\n';
-    for (const field of fields) {
-      info += `* **${field.label}:** ${getFieldValue(field, systemInfo)}\n`;
-    }
+    const info = fields
+      .map((field) => `${field.label}: ${field.value}`)
+      .join('\n');
 
     let bugReportUrl =
       'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title={title}&info={info}';
@@ -46,7 +41,7 @@ export const bugCommand: SlashCommand = {
 
     bugReportUrl = bugReportUrl
       .replace('{title}', encodeURIComponent(bugDescription))
-      .replace('{info}', encodeURIComponent(info));
+      .replace('{info}', encodeURIComponent(`\n${info}\n`));
 
     context.ui.addItem(
       {

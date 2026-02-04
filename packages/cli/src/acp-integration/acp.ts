@@ -8,6 +8,7 @@
 
 import { z } from 'zod';
 import * as schema from './schema.js';
+import { ACP_ERROR_CODES } from './errorCodes.js';
 export * from './schema.js';
 
 import type { WritableStream, ReadableStream } from 'node:stream/web';
@@ -69,6 +70,13 @@ export class AgentSideConnection implements Client {
           }
           const validatedParams = schema.setModeRequestSchema.parse(params);
           return agent.setMode(validatedParams);
+        }
+        case schema.AGENT_METHODS.session_set_model: {
+          if (!agent.setModel) {
+            throw RequestError.methodNotFound();
+          }
+          const validatedParams = schema.setModelRequestSchema.parse(params);
+          return agent.setModel(validatedParams);
         }
         default:
           throw RequestError.methodNotFound(method);
@@ -342,27 +350,51 @@ export class RequestError extends Error {
   }
 
   static parseError(details?: string): RequestError {
-    return new RequestError(-32700, 'Parse error', details);
+    return new RequestError(
+      ACP_ERROR_CODES.PARSE_ERROR,
+      'Parse error',
+      details,
+    );
   }
 
   static invalidRequest(details?: string): RequestError {
-    return new RequestError(-32600, 'Invalid request', details);
+    return new RequestError(
+      ACP_ERROR_CODES.INVALID_REQUEST,
+      'Invalid request',
+      details,
+    );
   }
 
   static methodNotFound(details?: string): RequestError {
-    return new RequestError(-32601, 'Method not found', details);
+    return new RequestError(
+      ACP_ERROR_CODES.METHOD_NOT_FOUND,
+      'Method not found',
+      details,
+    );
   }
 
   static invalidParams(details?: string): RequestError {
-    return new RequestError(-32602, 'Invalid params', details);
+    return new RequestError(
+      ACP_ERROR_CODES.INVALID_PARAMS,
+      'Invalid params',
+      details,
+    );
   }
 
   static internalError(details?: string): RequestError {
-    return new RequestError(-32603, 'Internal error', details);
+    return new RequestError(
+      ACP_ERROR_CODES.INTERNAL_ERROR,
+      'Internal error',
+      details,
+    );
   }
 
   static authRequired(details?: string): RequestError {
-    return new RequestError(-32000, 'Authentication required', details);
+    return new RequestError(
+      ACP_ERROR_CODES.AUTH_REQUIRED,
+      'Authentication required',
+      details,
+    );
   }
 
   toResult<T>(): Result<T> {
@@ -408,4 +440,5 @@ export interface Agent {
   prompt(params: schema.PromptRequest): Promise<schema.PromptResponse>;
   cancel(params: schema.CancelNotification): Promise<void>;
   setMode?(params: schema.SetModeRequest): Promise<schema.SetModeResponse>;
+  setModel?(params: schema.SetModelRequest): Promise<schema.SetModelResponse>;
 }

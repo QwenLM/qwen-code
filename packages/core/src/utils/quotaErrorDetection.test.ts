@@ -7,7 +7,6 @@
 import { describe, it, expect } from 'vitest';
 import {
   isQwenQuotaExceededError,
-  isQwenThrottlingError,
   isProQuotaExceededError,
   isGenericQuotaExceededError,
   isApiError,
@@ -62,65 +61,6 @@ describe('quotaErrorDetection', () => {
     it('should not detect unrelated errors', () => {
       const error = new Error('Network error');
       expect(isQwenQuotaExceededError(error)).toBe(false);
-    });
-  });
-
-  describe('isQwenThrottlingError', () => {
-    it('should detect throttling error with 429 status', () => {
-      const error = { message: 'throttling', status: 429 };
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should detect requests throttling triggered with 429 status', () => {
-      const error = { message: 'requests throttling triggered', status: 429 };
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should detect rate limit error with 429 status', () => {
-      const error = { message: 'rate limit exceeded', status: 429 };
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should detect too many requests with 429 status', () => {
-      const error = { message: 'too many requests', status: 429 };
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should detect throttling in string error', () => {
-      const error = 'throttling';
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should detect throttling in structured error with 429', () => {
-      const error = { message: 'requests throttling triggered', status: 429 };
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should detect throttling in API error with 429', () => {
-      const error: ApiError = {
-        error: {
-          code: 429,
-          message: 'throttling',
-          status: 'RESOURCE_EXHAUSTED',
-          details: [],
-        },
-      };
-      expect(isQwenThrottlingError(error)).toBe(true);
-    });
-
-    it('should not detect throttling without 429 status in structured error', () => {
-      const error = { message: 'throttling', status: 500 };
-      expect(isQwenThrottlingError(error)).toBe(false);
-    });
-
-    it('should not detect quota exceeded as throttling', () => {
-      const error = { message: 'insufficient_quota', status: 429 };
-      expect(isQwenThrottlingError(error)).toBe(false);
-    });
-
-    it('should not detect unrelated errors as throttling', () => {
-      const error = { message: 'Network error', status: 500 };
-      expect(isQwenThrottlingError(error)).toBe(false);
     });
   });
 

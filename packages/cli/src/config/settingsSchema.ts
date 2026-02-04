@@ -18,6 +18,7 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
+import { getLanguageSettingsOptions } from '../i18n/languages.js';
 
 export type SettingsType =
   | 'boolean'
@@ -69,7 +70,6 @@ export interface SettingDefinition {
   default: SettingsValue;
   description?: string;
   parentKey?: string;
-  childKey?: string;
   key?: string;
   properties?: SettingsSchema;
   showInDialog?: boolean;
@@ -132,7 +132,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: undefined as string | undefined,
         description: 'The preferred editor to open files in.',
-        showInDialog: false,
+        showInDialog: true,
       },
       vimMode: {
         type: 'boolean',
@@ -163,13 +163,13 @@ const SETTINGS_SCHEMA = {
       },
       gitCoAuthor: {
         type: 'boolean',
-        label: 'Git Co-Author',
+        label: 'Attribution: commit',
         category: 'General',
         requiresRestart: false,
         default: true,
         description:
           'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
-        showInDialog: false,
+        showInDialog: true,
       },
       checkpointing: {
         type: 'object',
@@ -198,30 +198,35 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description: 'Enable debug logging of keystrokes to the console.',
-        showInDialog: true,
+        showInDialog: false,
       },
       language: {
         type: 'enum',
-        label: 'Language',
+        label: 'Language: UI',
         category: 'General',
-        requiresRestart: false,
+        requiresRestart: true,
         default: 'auto',
         description:
           'The language for the user interface. Use "auto" to detect from system settings. ' +
           'You can also use custom language codes (e.g., "es", "fr") by placing JS language files ' +
           'in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js).',
         showInDialog: true,
-        options: [
-          { value: 'auto', label: 'Auto (detect from system)' },
-          { value: 'en', label: 'English' },
-          { value: 'zh', label: '中文 (Chinese)' },
-          { value: 'ru', label: 'Русский (Russian)' },
-          { value: 'de', label: 'Deutsch (German)' },
-        ],
+        options: [] as readonly SettingEnumOption[],
+      },
+      outputLanguage: {
+        type: 'string',
+        label: 'Language: Model',
+        category: 'General',
+        requiresRestart: true,
+        default: 'auto',
+        description:
+          'The language for LLM output. Use "auto" to detect from system settings, ' +
+          'or set a specific language.',
+        showInDialog: true,
       },
       terminalBell: {
         type: 'boolean',
-        label: 'Terminal Bell',
+        label: 'Terminal Bell Notification',
         category: 'General',
         requiresRestart: false,
         default: true,
@@ -238,6 +243,20 @@ const SETTINGS_SCHEMA = {
         description:
           'Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.',
         showInDialog: false,
+      },
+      defaultFileEncoding: {
+        type: 'enum',
+        label: 'Default File Encoding',
+        category: 'General',
+        requiresRestart: false,
+        default: 'utf-8',
+        description:
+          'Default encoding for new files. Use "utf-8" (default) for UTF-8 without BOM, or "utf-8-bom" for UTF-8 with BOM. Only change this if your project specifically requires BOM.',
+        showInDialog: false,
+        options: [
+          { value: 'utf-8', label: 'UTF-8 (without BOM)' },
+          { value: 'utf-8-bom', label: 'UTF-8 with BOM' },
+        ],
       },
     },
   },
@@ -257,7 +276,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 'text',
         description: 'The format of the CLI output.',
-        showInDialog: true,
+        showInDialog: false,
         options: [
           { value: 'text', label: 'Text' },
           { value: 'json', label: 'JSON' },
@@ -280,9 +299,9 @@ const SETTINGS_SCHEMA = {
         label: 'Theme',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as string | undefined,
+        default: 'Qwen Dark' as string,
         description: 'The color theme for the UI.',
-        showInDialog: false,
+        showInDialog: true,
       },
       customThemes: {
         type: 'object',
@@ -300,7 +319,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description: 'Hide the window title bar',
-        showInDialog: true,
+        showInDialog: false,
       },
       showStatusInTitle: {
         type: 'boolean',
@@ -310,7 +329,7 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Show Qwen Code status and thoughts in the terminal window title',
-        showInDialog: true,
+        showInDialog: false,
       },
       hideTips: {
         type: 'boolean',
@@ -321,89 +340,13 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
-      hideBanner: {
-        type: 'boolean',
-        label: 'Hide Banner',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description: 'Hide the application banner',
-        showInDialog: true,
-      },
-      hideContextSummary: {
-        type: 'boolean',
-        label: 'Hide Context Summary',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description:
-          'Hide the context summary (QWEN.md, MCP servers) above the input.',
-        showInDialog: true,
-      },
-      footer: {
-        type: 'object',
-        label: 'Footer',
-        category: 'UI',
-        requiresRestart: false,
-        default: {},
-        description: 'Settings for the footer.',
-        showInDialog: false,
-        properties: {
-          hideCWD: {
-            type: 'boolean',
-            label: 'Hide CWD',
-            category: 'UI',
-            requiresRestart: false,
-            default: false,
-            description:
-              'Hide the current working directory path in the footer.',
-            showInDialog: true,
-          },
-          hideSandboxStatus: {
-            type: 'boolean',
-            label: 'Hide Sandbox Status',
-            category: 'UI',
-            requiresRestart: false,
-            default: false,
-            description: 'Hide the sandbox status indicator in the footer.',
-            showInDialog: true,
-          },
-          hideModelInfo: {
-            type: 'boolean',
-            label: 'Hide Model Info',
-            category: 'UI',
-            requiresRestart: false,
-            default: false,
-            description: 'Hide the model name and context usage in the footer.',
-            showInDialog: true,
-          },
-        },
-      },
-      hideFooter: {
-        type: 'boolean',
-        label: 'Hide Footer',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description: 'Hide the footer from the UI',
-        showInDialog: true,
-      },
-      showMemoryUsage: {
-        type: 'boolean',
-        label: 'Show Memory Usage',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        description: 'Display memory usage information in the UI',
-        showInDialog: true,
-      },
       showLineNumbers: {
         type: 'boolean',
-        label: 'Show Line Numbers',
+        label: 'Show Line Numbers in Code',
         category: 'UI',
         requiresRestart: false,
         default: false,
-        description: 'Show line numbers in the chat.',
+        description: 'Show line numbers in the code output.',
         showInDialog: true,
       },
       showCitations: {
@@ -413,7 +356,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description: 'Show citations for generated text in the chat.',
-        showInDialog: true,
+        showInDialog: false,
       },
       customWittyPhrases: {
         type: 'array',
@@ -426,12 +369,22 @@ const SETTINGS_SCHEMA = {
       },
       enableWelcomeBack: {
         type: 'boolean',
-        label: 'Enable Welcome Back',
+        label: 'Show Welcome Back Dialog',
         category: 'UI',
         requiresRestart: false,
         default: true,
         description:
           'Show welcome back dialog when returning to a project with conversation history.',
+        showInDialog: true,
+      },
+      enableUserFeedback: {
+        type: 'boolean',
+        label: 'Enable User Feedback',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show optional feedback dialog after conversations to help improve Qwen performance.',
         showInDialog: true,
       },
       accessibility: {
@@ -450,7 +403,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: false,
             description: 'Disable loading phrases for accessibility',
-            showInDialog: true,
+            showInDialog: false,
           },
           screenReader: {
             type: 'boolean',
@@ -460,9 +413,18 @@ const SETTINGS_SCHEMA = {
             default: undefined as boolean | undefined,
             description:
               'Render output in plain-text to be more screen reader accessible',
-            showInDialog: true,
+            showInDialog: false,
           },
         },
+      },
+      feedbackLastShownTimestamp: {
+        type: 'number',
+        label: 'Feedback Last Shown Timestamp',
+        category: 'UI',
+        requiresRestart: false,
+        default: 0,
+        description: 'The last time the feedback dialog was shown.',
+        showInDialog: false,
       },
     },
   },
@@ -478,7 +440,7 @@ const SETTINGS_SCHEMA = {
     properties: {
       enabled: {
         type: 'boolean',
-        label: 'IDE Mode',
+        label: 'Auto-connect to IDE',
         category: 'IDE',
         requiresRestart: true,
         default: false,
@@ -513,7 +475,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description: 'Enable collection of usage statistics',
-        showInDialog: false,
+        showInDialog: true,
       },
     },
   },
@@ -554,7 +516,7 @@ const SETTINGS_SCHEMA = {
         default: -1,
         description:
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
-        showInDialog: true,
+        showInDialog: false,
       },
       summarizeToolOutput: {
         type: 'object',
@@ -592,7 +554,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description: 'Skip the next speaker check.',
-        showInDialog: true,
+        showInDialog: false,
       },
       skipLoopDetection: {
         type: 'boolean',
@@ -601,7 +563,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description: 'Disable all loop detection checks (streaming and LLM).',
-        showInDialog: true,
+        showInDialog: false,
       },
       skipStartupContext: {
         type: 'boolean',
@@ -611,7 +573,7 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'Avoid sending the workspace startup context at the beginning of each session.',
-        showInDialog: true,
+        showInDialog: false,
       },
       enableOpenAILogging: {
         type: 'boolean',
@@ -620,7 +582,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description: 'Enable OpenAI logging.',
-        showInDialog: true,
+        showInDialog: false,
       },
       openAILoggingDir: {
         type: 'string',
@@ -630,7 +592,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description:
           'Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.',
-        showInDialog: true,
+        showInDialog: false,
       },
       generationConfig: {
         type: 'object',
@@ -649,8 +611,7 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description: 'Request timeout in milliseconds.',
             parentKey: 'generationConfig',
-            childKey: 'timeout',
-            showInDialog: true,
+            showInDialog: false,
           },
           maxRetries: {
             type: 'number',
@@ -660,8 +621,7 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description: 'Maximum number of retries for failed requests.',
             parentKey: 'generationConfig',
-            childKey: 'maxRetries',
-            showInDialog: true,
+            showInDialog: false,
           },
           disableCacheControl: {
             type: 'boolean',
@@ -669,10 +629,10 @@ const SETTINGS_SCHEMA = {
             category: 'Generation Configuration',
             requiresRestart: false,
             default: false,
-            description: 'Disable cache control for DashScope providers.',
+            description:
+              'Disable cache control for Anthropic and DashScope providers.',
             parentKey: 'generationConfig',
-            childKey: 'disableCacheControl',
-            showInDialog: true,
+            showInDialog: false,
           },
           schemaCompliance: {
             type: 'enum',
@@ -683,12 +643,22 @@ const SETTINGS_SCHEMA = {
             description:
               'The compliance mode for tool schemas sent to the model. Use "openapi_30" for strict OpenAPI 3.0 compatibility (e.g., for Gemini).',
             parentKey: 'generationConfig',
-            childKey: 'schemaCompliance',
-            showInDialog: true,
+            showInDialog: false,
             options: [
               { value: 'auto', label: 'Auto (Default)' },
               { value: 'openapi_30', label: 'OpenAPI 3.0 Strict' },
             ],
+          },
+          contextWindowSize: {
+            type: 'number',
+            label: 'Context Window Size',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined,
+            description:
+              "Overrides the default context window size for the selected model. Use this setting when a provider's effective context limit differs from Qwen Code's default. This value defines the model's assumed maximum context capacity, not a per-request token limit.",
+            parentKey: 'generationConfig',
+            showInDialog: false,
           },
         },
       },
@@ -722,15 +692,6 @@ const SETTINGS_SCHEMA = {
         description: 'The format to use when importing memory.',
         showInDialog: false,
       },
-      discoveryMaxDirs: {
-        type: 'number',
-        label: 'Memory Discovery Max Dirs',
-        category: 'Context',
-        requiresRestart: false,
-        default: 200,
-        description: 'Maximum number of directories to search for memory.',
-        showInDialog: true,
-      },
       includeDirectories: {
         type: 'array',
         label: 'Include Directories',
@@ -742,14 +703,14 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
       },
-      loadMemoryFromIncludeDirectories: {
+      loadFromIncludeDirectories: {
         type: 'boolean',
         label: 'Load Memory From Include Directories',
         category: 'Context',
         requiresRestart: false,
         default: false,
         description: 'Whether to load memory files from include directories.',
-        showInDialog: true,
+        showInDialog: false,
       },
       fileFiltering: {
         type: 'object',
@@ -785,7 +746,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: true,
             description: 'Enable recursive file search functionality',
-            showInDialog: true,
+            showInDialog: false,
           },
           disableFuzzySearch: {
             type: 'boolean',
@@ -794,7 +755,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: false,
             description: 'Disable fuzzy search when searching for files.',
-            showInDialog: true,
+            showInDialog: false,
           },
         },
       },
@@ -831,7 +792,7 @@ const SETTINGS_SCHEMA = {
         properties: {
           enableInteractiveShell: {
             type: 'boolean',
-            label: 'Enable Interactive Shell',
+            label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
             default: false,
@@ -856,19 +817,9 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: false,
             description: 'Show color in shell output.',
-            showInDialog: true,
+            showInDialog: false,
           },
         },
-      },
-      autoAccept: {
-        type: 'boolean',
-        label: 'Auto Accept',
-        category: 'Tools',
-        requiresRestart: false,
-        default: false,
-        description:
-          'Automatically accept and execute tool calls that are considered safe (e.g., read-only operations).',
-        showInDialog: true,
       },
       core: {
         type: 'array',
@@ -901,7 +852,7 @@ const SETTINGS_SCHEMA = {
       },
       approvalMode: {
         type: 'enum',
-        label: 'Approval Mode',
+        label: 'Tool Approval Mode',
         category: 'Tools',
         requiresRestart: false,
         default: ApprovalMode.DEFAULT,
@@ -914,6 +865,16 @@ const SETTINGS_SCHEMA = {
           { value: ApprovalMode.AUTO_EDIT, label: 'Auto Edit' },
           { value: ApprovalMode.YOLO, label: 'YOLO' },
         ],
+      },
+      autoAccept: {
+        type: 'boolean',
+        label: 'Auto Accept',
+        category: 'Tools',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.',
+        showInDialog: false,
       },
       discoveryCommand: {
         type: 'string',
@@ -941,7 +902,7 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Use ripgrep for file content search instead of the fallback implementation. Provides faster search performance.',
-        showInDialog: true,
+        showInDialog: false,
       },
       useBuiltinRipgrep: {
         type: 'boolean',
@@ -951,7 +912,7 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
-        showInDialog: true,
+        showInDialog: false,
       },
       enableToolOutputTruncation: {
         type: 'boolean',
@@ -960,7 +921,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: true,
         description: 'Enable truncation of large tool outputs.',
-        showInDialog: true,
+        showInDialog: false,
       },
       truncateToolOutputThreshold: {
         type: 'number',
@@ -970,7 +931,7 @@ const SETTINGS_SCHEMA = {
         default: DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         description:
           'Truncate tool output if it is larger than this many characters. Set to -1 to disable.',
-        showInDialog: true,
+        showInDialog: false,
       },
       truncateToolOutputLines: {
         type: 'number',
@@ -979,28 +940,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         description: 'The number of lines to keep when truncating tool output.',
-        showInDialog: true,
-      },
-      experimental: {
-        type: 'object',
-        label: 'Experimental',
-        category: 'Tools',
-        requiresRestart: true,
-        default: {},
-        description: 'Experimental tool features.',
         showInDialog: false,
-        properties: {
-          skills: {
-            type: 'boolean',
-            label: 'Skills',
-            category: 'Tools',
-            requiresRestart: true,
-            default: false,
-            description:
-              'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
-            showInDialog: true,
-          },
-        },
       },
     },
   },
@@ -1077,7 +1017,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: true,
             default: false,
             description: 'Setting to track whether Folder trust is enabled.',
-            showInDialog: true,
+            showInDialog: false,
           },
         },
       },
@@ -1228,14 +1168,15 @@ const SETTINGS_SCHEMA = {
     description: 'Setting to enable experimental features',
     showInDialog: false,
     properties: {
-      extensionManagement: {
+      skills: {
         type: 'boolean',
-        label: 'Extension Management',
+        label: 'Experimental: Skills',
         category: 'Experimental',
         requiresRestart: true,
-        default: true,
-        description: 'Enable extension management features.',
-        showInDialog: false,
+        default: false,
+        description:
+          'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
+        showInDialog: true,
       },
       visionModelPreview: {
         type: 'boolean',
@@ -1245,7 +1186,7 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
-        showInDialog: true,
+        showInDialog: false,
       },
       vlmSwitchMode: {
         type: 'string',
@@ -1259,44 +1200,20 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
-
-  extensions: {
-    type: 'object',
-    label: 'Extensions',
-    category: 'Extensions',
-    requiresRestart: true,
-    default: {},
-    description: 'Settings for extensions.',
-    showInDialog: false,
-    properties: {
-      disabled: {
-        type: 'array',
-        label: 'Disabled Extensions',
-        category: 'Extensions',
-        requiresRestart: true,
-        default: [] as string[],
-        description: 'List of disabled extensions.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-      workspacesWithMigrationNudge: {
-        type: 'array',
-        label: 'Workspaces with Migration Nudge',
-        category: 'Extensions',
-        requiresRestart: false,
-        default: [] as string[],
-        description:
-          'List of workspaces for which the migration nudge has been shown.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-    },
-  },
 } as const satisfies SettingsSchema;
 
 export type SettingsSchemaType = typeof SETTINGS_SCHEMA;
 
 export function getSettingsSchema(): SettingsSchemaType {
+  // Inject dynamic language options
+  const schema = SETTINGS_SCHEMA as unknown as SettingsSchema;
+  if (schema['general']?.properties?.['language']) {
+    (
+      schema['general'].properties['language'] as {
+        options?: SettingEnumOption[];
+      }
+    ).options = getLanguageSettingsOptions();
+  }
   return SETTINGS_SCHEMA;
 }
 
@@ -1313,9 +1230,3 @@ type InferSettings<T extends SettingsSchema> = {
 };
 
 export type Settings = InferSettings<SettingsSchemaType>;
-
-export interface FooterSettings {
-  hideCWD?: boolean;
-  hideSandboxStatus?: boolean;
-  hideModelInfo?: boolean;
-}

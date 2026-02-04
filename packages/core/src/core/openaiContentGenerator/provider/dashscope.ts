@@ -8,7 +8,6 @@ import {
   DEFAULT_MAX_RETRIES,
   DEFAULT_DASHSCOPE_BASE_URL,
 } from '../constants.js';
-import { tokenLimit } from '../../tokenLimits.js';
 import type {
   OpenAICompatibleProvider,
   DashScopeRequestMetadata,
@@ -16,6 +15,8 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
+import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import { tokenLimit } from '../../tokenLimits.js';
 
 export class DashScopeOpenAICompatibleProvider
   implements OpenAICompatibleProvider
@@ -68,12 +69,19 @@ export class DashScopeOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
+    // Configure fetch options to ensure user-configured timeout works as expected
+    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'openai',
+      this.cliConfig.getProxy(),
+    );
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
       timeout,
       maxRetries,
       defaultHeaders,
+      ...(runtimeOptions || {}),
     });
   }
 
@@ -111,10 +119,9 @@ export class DashScopeOpenAICompatibleProvider
 
     // Apply output token limits based on model capabilities
     // This ensures max_tokens doesn't exceed the model's maximum output limit
-    const requestWithTokenLimits = this.applyOutputTokenLimit(
-      request,
-      request.model,
-    );
+    const requestWithTokenLimits = this.applyOutputTokenLimit(request);
+
+    const extraBody = this.contentGeneratorConfig.extra_body;
 
     if (this.isVisionModel(request.model)) {
       return {
@@ -124,6 +131,7 @@ export class DashScopeOpenAICompatibleProvider
         ...(this.buildMetadata(userPromptId) || {}),
         /* @ts-expect-error dashscope exclusive */
         vl_high_resolution_images: true,
+        ...(extraBody ? extraBody : {}),
       } as OpenAI.Chat.ChatCompletionCreateParams;
     }
 
@@ -132,6 +140,7 @@ export class DashScopeOpenAICompatibleProvider
       messages,
       ...(tools ? { tools } : {}),
       ...(this.buildMetadata(userPromptId) || {}),
+      ...(extraBody ? extraBody : {}),
     } as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
@@ -257,31 +266,15 @@ export class DashScopeOpenAICompatibleProvider
     contentArray: ChatCompletionContentPartWithCache[],
   ): ChatCompletionContentPartWithCache[] {
     if (contentArray.length === 0) {
-      return [
-        {
-          type: 'text',
-          text: '',
-          cache_control: { type: 'ephemeral' },
-        } as ChatCompletionContentPartTextWithCache,
-      ];
+      return contentArray;
     }
 
+    // Add cache_control to the last text item
     const lastItem = contentArray[contentArray.length - 1];
-
-    if (lastItem.type === 'text') {
-      // Add cache_control to the last text item
-      contentArray[contentArray.length - 1] = {
-        ...lastItem,
-        cache_control: { type: 'ephemeral' },
-      } as ChatCompletionContentPartTextWithCache;
-    } else {
-      // If the last item is not text, add a new text item with cache_control
-      contentArray.push({
-        type: 'text',
-        text: '',
-        cache_control: { type: 'ephemeral' },
-      } as ChatCompletionContentPartTextWithCache);
-    }
+    contentArray[contentArray.length - 1] = {
+      ...lastItem,
+      cache_control: { type: 'ephemeral' },
+    } as ChatCompletionContentPartTextWithCache;
 
     return contentArray;
   }
@@ -315,13 +308,11 @@ export class DashScopeOpenAICompatibleProvider
    * token limit. Only modifies max_tokens when already present in the request.
    *
    * @param request - The chat completion request parameters
-   * @param model - The model name to get the output token limit for
    * @returns The request with max_tokens adjusted to respect the model's limits (if present)
    */
-  private applyOutputTokenLimit<T extends { max_tokens?: number | null }>(
-    request: T,
-    model: string,
-  ): T {
+  private applyOutputTokenLimit<
+    T extends { max_tokens?: number | null; model: string },
+  >(request: T): T {
     const currentMaxTokens = request.max_tokens;
 
     // Only process if max_tokens is already present in the request
@@ -329,7 +320,9 @@ export class DashScopeOpenAICompatibleProvider
       return request; // No max_tokens parameter, return unchanged
     }
 
-    const modelLimit = tokenLimit(model, 'output');
+    // Dynamically calculate output token limit using tokenLimit function
+    // This ensures we always use the latest model-specific limits without relying on user configuration
+    const modelLimit = tokenLimit(request.model, 'output');
 
     // If max_tokens exceeds the model limit, cap it to the model's limit
     if (currentMaxTokens > modelLimit) {

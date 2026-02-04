@@ -127,8 +127,8 @@ export function SessionPicker(props: SessionPickerProps) {
 
   const { columns: width, rows: height } = useTerminalSize();
 
-  // Calculate box width (width + 6 for border padding)
-  const boxWidth = width + 6;
+  // Calculate box width (marginX={2})
+  const boxWidth = width - 4;
   // Calculate visible items (same heuristic as before)
   // Reserved space: header (1), footer (1), separators (2), borders (2)
   const reservedLines = 6;
@@ -179,7 +179,7 @@ export function SessionPicker(props: SessionPickerProps) {
 
         {/* Separator */}
         <Box>
-          <Text color={theme.border.default}>{'─'.repeat(width - 2)}</Text>
+          <Text color={theme.border.default}>{'─'.repeat(boxWidth - 2)}</Text>
         </Box>
 
         {/* Session list */}
@@ -212,7 +212,7 @@ export function SessionPicker(props: SessionPickerProps) {
                   isLast={visibleIndex === picker.visibleSessions.length - 1}
                   showScrollUp={picker.showScrollUp}
                   showScrollDown={picker.showScrollDown}
-                  maxPromptWidth={width}
+                  maxPromptWidth={boxWidth - 6}
                   prefixChars={PREFIX_CHARS}
                   boldSelectedPrefix={false}
                 />
@@ -223,7 +223,7 @@ export function SessionPicker(props: SessionPickerProps) {
 
         {/* Separator */}
         <Box>
-          <Text color={theme.border.default}>{'─'.repeat(width - 2)}</Text>
+          <Text color={theme.border.default}>{'─'.repeat(boxWidth - 2)}</Text>
         </Box>
 
         {/* Footer */}

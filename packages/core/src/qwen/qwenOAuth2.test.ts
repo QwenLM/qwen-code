@@ -751,6 +751,7 @@ describe('getQwenOAuthClient', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -839,9 +840,7 @@ describe('getQwenOAuthClient', () => {
           requireCachedCredentials: true,
         }),
       ),
-    ).rejects.toThrow(
-      'No cached Qwen-OAuth credentials found. Please re-authenticate.',
-    );
+    ).rejects.toThrow('Please use /auth to re-authenticate.');
 
     expect(global.fetch).not.toHaveBeenCalled();
 
@@ -1007,6 +1006,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1202,6 +1202,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1405,6 +1406,7 @@ describe('Browser Launch and Error Handling', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -2043,6 +2045,7 @@ describe('SharedTokenManager Integration in QwenOAuth2Client', () => {
   it('should handle TokenManagerError types correctly in getQwenOAuthClient', async () => {
     const mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     // Test different TokenManagerError types

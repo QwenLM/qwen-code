@@ -92,11 +92,15 @@ const findCodeBlocks = (
 
 describe('memoryImportProcessor', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks(); // Use resetAllMocks to clear mock implementations
     // Mock console methods
     console.warn = vi.fn();
     console.error = vi.fn();
     console.debug = vi.fn();
+    // Default mock for lstat (used by findProjectRoot)
+    mockedFs.lstat.mockRejectedValue(
+      Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+    );
   });
 
   afterEach(() => {
@@ -204,20 +208,43 @@ describe('memoryImportProcessor', () => {
       );
     });
 
-    it('should handle file not found errors', async () => {
+    it('should silently preserve content when file not found (ENOENT)', async () => {
       const content = 'Content @./nonexistent.md more content';
       const basePath = testPath('test', 'path');
 
-      mockedFs.access.mockRejectedValue(new Error('File not found'));
+      // Mock ENOENT error (file not found)
+      mockedFs.access.mockRejectedValue(
+        Object.assign(new Error('ENOENT: no such file or directory'), {
+          code: 'ENOENT',
+        }),
+      );
 
       const result = await processImports(content, basePath, true);
 
+      // Content should be preserved as-is when file doesn't exist
+      expect(result.content).toBe(content);
+      // No error should be logged for ENOENT
+      expect(console.error).not.toHaveBeenCalled();
+    });
+
+    it('should log error for non-ENOENT file access errors', async () => {
+      const content = 'Content @./permission-denied.md more content';
+      const basePath = testPath('test', 'path');
+
+      // Mock a permission denied error (not ENOENT)
+      mockedFs.access.mockRejectedValue(
+        Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+      );
+
+      const result = await processImports(content, basePath, true);
+
+      // Should show error comment for non-ENOENT errors
       expect(result.content).toContain(
-        '<!-- Import failed: ./nonexistent.md - File not found -->',
+        '<!-- Import failed: ./permission-denied.md - Permission denied -->',
       );
       expect(console.error).toHaveBeenCalledWith(
         '[ERROR] [ImportProcessor]',
-        'Failed to import ./nonexistent.md: File not found',
+        'Failed to import ./permission-denied.md: Permission denied',
       );
     });
 
@@ -446,6 +473,50 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(content, testRootDir);
       expect(result.content).toBe(content);
       expect(result.importTree.imports).toBeUndefined();
+    });
+
+    it('should still import valid paths while ignoring non-existent paths', async () => {
+      const content = '使用 @./valid.md 文件和 @中文路径 注解';
+      const basePath = testPath('test', 'path');
+      const importedContent = 'Valid imported content';
+
+      // Mock: valid.md exists, 中文路径 doesn't exist
+      mockedFs.access
+        .mockResolvedValueOnce(undefined) // ./valid.md exists
+        .mockRejectedValueOnce(
+          Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+        ); // 中文路径 doesn't exist
+      mockedFs.readFile.mockResolvedValue(importedContent);
+
+      const result = await processImports(content, basePath, true);
+
+      // Should import valid.md
+      expect(result.content).toContain(importedContent);
+      expect(result.content).toContain('<!-- Imported from: ./valid.md -->');
+      // The non-existent path should remain as-is
+      expect(result.content).toContain('@中文路径');
+    });
+
+    it('should import Chinese file names if they exist', async () => {
+      const content = '导入 @./中文文档.md 文件';
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+      const importedContent = '这是中文文档的内容';
+
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockResolvedValue(importedContent);
+
+      const result = await processImports(
+        content,
+        basePath,
+        true,
+        undefined,
+        projectRoot,
+      );
+
+      // Should successfully import the Chinese-named file
+      expect(result.content).toContain(importedContent);
+      expect(result.content).toContain('<!-- Imported from: ./中文文档.md -->');
     });
 
     it('should allow imports from parent and subdirectories within project root', async () => {

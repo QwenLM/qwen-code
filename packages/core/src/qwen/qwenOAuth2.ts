@@ -516,9 +516,7 @@ export async function getQwenOAuthClient(
     }
 
     if (options?.requireCachedCredentials) {
-      throw new Error(
-        'No cached Qwen-OAuth credentials found. Please re-authenticate.',
-      );
+      throw new Error('Please use /auth to re-authenticate.');
     }
 
     // If we couldn't obtain valid credentials via SharedTokenManager, fall back to
@@ -740,11 +738,9 @@ async function authWithQwenDeviceFlow(
     // Emit device authorization event for UI integration immediately
     qwenOAuth2Events.emit(QwenOAuth2Event.AuthUri, deviceAuth);
 
-    // Always show the fallback message in non-interactive environments to ensure
-    // users can see the authorization URL even if browser launching is attempted.
-    // This is critical for headless/remote environments where browser launching
-    // may silently fail without throwing an error.
-    showFallbackMessage(deviceAuth.verification_uri_complete);
+    if (config.isBrowserLaunchSuppressed() || !config.isInteractive()) {
+      showFallbackMessage(deviceAuth.verification_uri_complete);
+    }
 
     // Try to open browser if not suppressed
     if (!config.isBrowserLaunchSuppressed()) {

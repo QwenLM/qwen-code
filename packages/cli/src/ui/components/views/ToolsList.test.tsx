@@ -33,11 +33,7 @@ const mockTools: ToolDefinition[] = [
 describe('<ToolsList />', () => {
   it('renders correctly with descriptions', () => {
     const { lastFrame } = render(
-      <ToolsList
-        tools={mockTools}
-        showDescriptions={true}
-        terminalWidth={40}
-      />,
+      <ToolsList tools={mockTools} showDescriptions={true} contentWidth={40} />,
     );
     expect(lastFrame()).toMatchSnapshot();
   });
@@ -47,7 +43,7 @@ describe('<ToolsList />', () => {
       <ToolsList
         tools={mockTools}
         showDescriptions={false}
-        terminalWidth={40}
+        contentWidth={40}
       />,
     );
     expect(lastFrame()).toMatchSnapshot();
@@ -55,7 +51,7 @@ describe('<ToolsList />', () => {
 
   it('renders correctly with no tools', () => {
     const { lastFrame } = render(
-      <ToolsList tools={[]} showDescriptions={true} terminalWidth={40} />,
+      <ToolsList tools={[]} showDescriptions={true} contentWidth={40} />,
     );
     expect(lastFrame()).toMatchSnapshot();
   });

@@ -15,11 +15,13 @@ import type {
   GetPromptResult,
   JSONRPCMessage,
   Prompt,
+  ReadResourceResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
   GetPromptResultSchema,
   ListPromptsResultSchema,
   ListRootsRequestSchema,
+  ReadResourceResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
@@ -192,6 +194,26 @@ export class McpClient {
    */
   getStatus(): MCPServerStatus {
     return this.status;
+  }
+
+  async readResource(
+    uri: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ReadResourceResult> {
+    if (this.status !== MCPServerStatus.CONNECTED) {
+      throw new Error('Client is not connected.');
+    }
+
+    // Only request resources if the server supports them.
+    if (this.client.getServerCapabilities()?.resources == null) {
+      throw new Error('MCP server does not support resources.');
+    }
+
+    return this.client.request(
+      { method: 'resources/read', params: { uri } },
+      ReadResourceResultSchema,
+      options,
+    );
   }
 
   private updateStatus(status: MCPServerStatus): void {

@@ -39,8 +39,10 @@ import type {
   ExtensionDisableEvent,
   AuthEvent,
   SkillLaunchEvent,
+  UserFeedbackEvent,
   RipgrepFallbackEvent,
   EndSessionEvent,
+  ExtensionUpdateEvent,
 } from '../types.js';
 import type {
   RumEvent,
@@ -739,6 +741,22 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logExtensionUpdateEvent(event: ExtensionUpdateEvent): void {
+    const rumEvent = this.createActionEvent('extension', 'extension_update', {
+      properties: {
+        extension_name: event.extension_name,
+        status: event.status,
+        extension_id: event.extension_id,
+        extension_previous_version: event.extension_previous_version,
+        extension_version: event.extension_version,
+        extension_source: event.extension_source,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logExtensionEnableEvent(event: ExtensionEnableEvent): void {
     const rumEvent = this.createActionEvent('extension', 'extension_enable', {
       properties: {
@@ -835,6 +853,21 @@ export class QwenLogger {
       properties: {
         skill_name: event.skill_name,
         success: event.success ? 1 : 0,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logUserFeedbackEvent(event: UserFeedbackEvent): void {
+    const rumEvent = this.createActionEvent('user', 'user_feedback', {
+      properties: {
+        session_id: event.session_id,
+        rating: event.rating,
+        model: event.model,
+        approval_mode: event.approval_mode,
+        prompt_id: event.prompt_id || '',
       },
     });
 

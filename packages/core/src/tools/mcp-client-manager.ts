@@ -4,19 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, MCPServerConfig } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { isSdkMcpServerConfig } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
-import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import {
   McpClient,
   MCPDiscoveryState,
+  MCPServerStatus,
   populateMcpServerCommand,
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { EventEmitter } from 'node:events';
-import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
@@ -25,32 +25,21 @@ import type { WorkspaceContext } from '../utils/workspaceContext.js';
  */
 export class McpClientManager {
   private clients: Map<string, McpClient> = new Map();
-  private readonly mcpServers: Record<string, MCPServerConfig>;
-  private readonly mcpServerCommand: string | undefined;
   private readonly toolRegistry: ToolRegistry;
-  private readonly promptRegistry: PromptRegistry;
-  private readonly debugMode: boolean;
-  private readonly workspaceContext: WorkspaceContext;
+  private readonly cliConfig: Config;
   private discoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
   private readonly eventEmitter?: EventEmitter;
   private readonly sendSdkMcpMessage?: SendSdkMcpMessage;
 
   constructor(
-    mcpServers: Record<string, MCPServerConfig>,
-    mcpServerCommand: string | undefined,
+    config: Config,
     toolRegistry: ToolRegistry,
-    promptRegistry: PromptRegistry,
-    debugMode: boolean,
-    workspaceContext: WorkspaceContext,
     eventEmitter?: EventEmitter,
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.mcpServers = mcpServers;
-    this.mcpServerCommand = mcpServerCommand;
+    this.cliConfig = config;
     this.toolRegistry = toolRegistry;
-    this.promptRegistry = promptRegistry;
-    this.debugMode = debugMode;
-    this.workspaceContext = workspaceContext;
+
     this.eventEmitter = eventEmitter;
     this.sendSdkMcpMessage = sendSdkMcpMessage;
   }
@@ -67,8 +56,8 @@ export class McpClientManager {
     await this.stop();
 
     const servers = populateMcpServerCommand(
-      this.mcpServers,
-      this.mcpServerCommand,
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
     );
 
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
@@ -85,9 +74,9 @@ export class McpClientManager {
           name,
           config,
           this.toolRegistry,
-          this.promptRegistry,
-          this.workspaceContext,
-          this.debugMode,
+          this.cliConfig.getPromptRegistry(),
+          this.cliConfig.getWorkspaceContext(),
+          this.cliConfig.getDebugMode(),
           sdkCallback,
         );
         this.clients.set(name, client);
@@ -114,6 +103,73 @@ export class McpClientManager {
   }
 
   /**
+   * Connects to a single MCP server and discovers its tools/prompts.
+   * The connected client is tracked so it can be closed by {@link stop}.
+   *
+   * This is primarily used for on-demand re-discovery flows (e.g. after OAuth).
+   */
+  async discoverMcpToolsForServer(
+    serverName: string,
+    cliConfig: Config,
+  ): Promise<void> {
+    const servers = populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+    );
+    const serverConfig = servers[serverName];
+    if (!serverConfig) {
+      return;
+    }
+
+    // Ensure we don't leak an existing connection for this server.
+    const existingClient = this.clients.get(serverName);
+    if (existingClient) {
+      try {
+        await existingClient.disconnect();
+      } catch (error) {
+        console.error(
+          `Error stopping client '${serverName}': ${getErrorMessage(error)}`,
+        );
+      } finally {
+        this.clients.delete(serverName);
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+      }
+    }
+
+    // For SDK MCP servers, pass the sendSdkMcpMessage callback.
+    const sdkCallback = isSdkMcpServerConfig(serverConfig)
+      ? this.sendSdkMcpMessage
+      : undefined;
+
+    const client = new McpClient(
+      serverName,
+      serverConfig,
+      this.toolRegistry,
+      this.cliConfig.getPromptRegistry(),
+      this.cliConfig.getWorkspaceContext(),
+      this.cliConfig.getDebugMode(),
+      sdkCallback,
+    );
+
+    this.clients.set(serverName, client);
+    this.eventEmitter?.emit('mcp-client-update', this.clients);
+
+    try {
+      await client.connect();
+      await client.discover(cliConfig);
+    } catch (error) {
+      // Log the error but don't throw: callers expect best-effort discovery.
+      console.error(
+        `Error during discovery for server '${serverName}': ${getErrorMessage(
+          error,
+        )}`,
+      );
+    } finally {
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+  }
+
+  /**
    * Stops all running local MCP servers and closes all client connections.
    * This is the cleanup method to be called on application exit.
    */
@@ -136,5 +192,45 @@ export class McpClientManager {
 
   getDiscoveryState(): MCPDiscoveryState {
     return this.discoveryState;
+  }
+
+  async readResource(
+    serverName: string,
+    uri: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ReadResourceResult> {
+    let client = this.clients.get(serverName);
+    if (!client) {
+      const servers = populateMcpServerCommand(
+        this.cliConfig.getMcpServers() || {},
+        this.cliConfig.getMcpServerCommand(),
+      );
+      const serverConfig = servers[serverName];
+      if (!serverConfig) {
+        throw new Error(`MCP server '${serverName}' is not configured.`);
+      }
+
+      const sdkCallback = isSdkMcpServerConfig(serverConfig)
+        ? this.sendSdkMcpMessage
+        : undefined;
+
+      client = new McpClient(
+        serverName,
+        serverConfig,
+        this.toolRegistry,
+        this.cliConfig.getPromptRegistry(),
+        this.cliConfig.getWorkspaceContext(),
+        this.cliConfig.getDebugMode(),
+        sdkCallback,
+      );
+      this.clients.set(serverName, client);
+      this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+
+    if (client.getStatus() !== MCPServerStatus.CONNECTED) {
+      await client.connect();
+    }
+
+    return client.readResource(uri, options);
   }
 }

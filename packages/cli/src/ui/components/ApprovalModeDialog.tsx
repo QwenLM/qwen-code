@@ -54,7 +54,7 @@ export function ApprovalModeDialog({
 }: ApprovalModeDialogProps): React.JSX.Element {
   // Start with User scope by default
   const [selectedScope, setSelectedScope] = useState<SettingScope>(
-    SettingScope.Workspace,
+    SettingScope.User,
   );
 
   // Track the currently highlighted approval mode
@@ -90,19 +90,17 @@ export function ApprovalModeDialog({
     setSelectedScope(scope);
   }, []);
 
-  const handleScopeSelect = useCallback(
-    (scope: SettingScope) => {
-      onSelect(highlightedMode, scope);
-    },
-    [onSelect, highlightedMode],
-  );
+  const handleScopeSelect = useCallback((scope: SettingScope) => {
+    setSelectedScope(scope);
+    setMode('mode');
+  }, []);
 
-  const [focusSection, setFocusSection] = useState<'mode' | 'scope'>('mode');
+  const [mode, setMode] = useState<'mode' | 'scope'>('mode');
 
   useKeypress(
     (key) => {
       if (key.name === 'tab') {
-        setFocusSection((prev) => (prev === 'mode' ? 'scope' : 'mode'));
+        setMode((prev) => (prev === 'mode' ? 'scope' : 'mode'));
       }
       if (key.name === 'escape') {
         onSelect(undefined, selectedScope);
@@ -127,59 +125,56 @@ export function ApprovalModeDialog({
     <Box
       borderStyle="round"
       borderColor={theme.border.default}
-      flexDirection="row"
+      flexDirection="column"
       padding={1}
       width="100%"
-      height="100%"
     >
-      <Box flexDirection="column" flexGrow={1}>
-        {/* Approval Mode Selection */}
-        <Text bold={focusSection === 'mode'} wrap="truncate">
-          {focusSection === 'mode' ? '> ' : '  '}
-          {t('Approval Mode')}{' '}
-          <Text color={theme.text.secondary}>{otherScopeModifiedMessage}</Text>
-        </Text>
-        <Box height={1} />
-        <RadioButtonSelect
-          items={modeItems}
-          initialIndex={safeInitialModeIndex}
-          onSelect={handleModeSelect}
-          onHighlight={handleModeHighlight}
-          isFocused={focusSection === 'mode'}
-          maxItemsToShow={10}
-          showScrollArrows={false}
-          showNumbers={focusSection === 'mode'}
-        />
-
-        <Box height={1} />
-
-        {/* Scope Selection */}
-        <Box marginTop={1}>
-          <ScopeSelector
-            onSelect={handleScopeSelect}
-            onHighlight={handleScopeHighlight}
-            isFocused={focusSection === 'scope'}
-            initialScope={selectedScope}
-          />
-        </Box>
-
-        <Box height={1} />
-
-        {/* Warning when workspace setting will override user setting */}
-        {showWorkspacePriorityWarning && (
-          <>
-            <Text color={theme.status.warning} wrap="wrap">
-              ⚠{' '}
-              {t(
-                'Workspace approval mode exists and takes priority. User-level change will have no effect.',
-              )}
+      {mode === 'mode' ? (
+        <Box flexDirection="column" flexGrow={1}>
+          {/* Approval Mode Selection */}
+          <Text bold={mode === 'mode'} wrap="truncate">
+            {mode === 'mode' ? '> ' : '  '}
+            {t('Approval Mode')}{' '}
+            <Text color={theme.text.secondary}>
+              {otherScopeModifiedMessage}
             </Text>
-            <Box height={1} />
-          </>
-        )}
-
-        <Text color={theme.text.secondary}>
-          {t('(Use Enter to select, Tab to change focus)')}
+          </Text>
+          <Box height={1} />
+          <RadioButtonSelect
+            items={modeItems}
+            initialIndex={safeInitialModeIndex}
+            onSelect={handleModeSelect}
+            onHighlight={handleModeHighlight}
+            isFocused={mode === 'mode'}
+            maxItemsToShow={10}
+            showScrollArrows={false}
+            showNumbers={mode === 'mode'}
+          />
+          {/* Warning when workspace setting will override user setting */}
+          {showWorkspacePriorityWarning && (
+            <Box marginTop={1}>
+              <Text color={theme.status.warning} wrap="wrap">
+                ⚠{' '}
+                {t(
+                  'Workspace approval mode exists and takes priority. User-level change will have no effect.',
+                )}
+              </Text>
+            </Box>
+          )}
+        </Box>
+      ) : (
+        <ScopeSelector
+          onSelect={handleScopeSelect}
+          onHighlight={handleScopeHighlight}
+          isFocused={mode === 'scope'}
+          initialScope={selectedScope}
+        />
+      )}
+      <Box marginTop={1}>
+        <Text color={theme.text.secondary} wrap="truncate">
+          {mode === 'mode'
+            ? t('(Use Enter to select, Tab to configure scope)')
+            : t('(Use Enter to apply scope, Tab to go back)')}
         </Text>
       </Box>
     </Box>

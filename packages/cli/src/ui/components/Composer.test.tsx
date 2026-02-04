@@ -14,7 +14,6 @@ import {
   type UIActions,
 } from '../contexts/UIActionsContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { SettingsContext } from '../contexts/SettingsContext.js';
 // Mock VimModeContext hook
 vi.mock('../contexts/VimModeContext.js', () => ({
   useVimMode: vi.fn(() => ({
@@ -146,91 +145,32 @@ const createMockConfig = (overrides = {}) => ({
   ...overrides,
 });
 
-const createMockSettings = (merged = {}) => ({
-  merged: {
-    hideFooter: false,
-    showMemoryUsage: false,
-    ...merged,
-  },
-});
-
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const renderComposer = (
   uiState: UIState,
-  settings = createMockSettings(),
   config = createMockConfig(),
   uiActions = createMockUIActions(),
 ) =>
   render(
     <ConfigContext.Provider value={config as any}>
-      <SettingsContext.Provider value={settings as any}>
-        <UIStateContext.Provider value={uiState}>
-          <UIActionsContext.Provider value={uiActions}>
-            <Composer />
-          </UIActionsContext.Provider>
-        </UIStateContext.Provider>
-      </SettingsContext.Provider>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          <Composer />
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
     </ConfigContext.Provider>,
   );
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
 describe('Composer', () => {
-  describe('Footer Display Settings', () => {
-    it('renders Footer by default when hideFooter is false', () => {
+  describe('Footer Display', () => {
+    it('renders Footer by default', () => {
       const uiState = createMockUIState();
-      const settings = createMockSettings({ hideFooter: false });
 
-      const { lastFrame } = renderComposer(uiState, settings);
+      const { lastFrame } = renderComposer(uiState);
 
-      // Smoke check that the Footer renders when enabled.
+      // Smoke check that the Footer renders
       expect(lastFrame()).toContain('Footer');
-    });
-
-    it('does NOT render Footer when hideFooter is true', () => {
-      const uiState = createMockUIState();
-      const settings = createMockSettings({ hideFooter: true });
-
-      const { lastFrame } = renderComposer(uiState, settings);
-
-      // Check for content that only appears IN the Footer component itself
-      expect(lastFrame()).not.toContain('[NORMAL]'); // Vim mode indicator
-      expect(lastFrame()).not.toContain('(main'); // Branch name with parentheses
-    });
-
-    it('passes correct props to Footer including vim mode when enabled', async () => {
-      const uiState = createMockUIState({
-        branchName: 'feature-branch',
-        errorCount: 2,
-        sessionStats: {
-          sessionId: 'test-session',
-          sessionStartTime: new Date(),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          metrics: {} as any,
-          lastPromptTokenCount: 150,
-          promptCount: 5,
-        },
-      });
-      const config = createMockConfig({
-        getModel: vi.fn(() => 'gemini-1.5-flash'),
-        getTargetDir: vi.fn(() => '/project/path'),
-        getDebugMode: vi.fn(() => true),
-      });
-      const settings = createMockSettings({
-        hideFooter: false,
-        showMemoryUsage: true,
-      });
-      // Mock vim mode for this test
-      const { useVimMode } = await import('../contexts/VimModeContext.js');
-      vi.mocked(useVimMode).mockReturnValueOnce({
-        vimEnabled: true,
-        vimMode: 'INSERT',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
-
-      const { lastFrame } = renderComposer(uiState, settings, config);
-
-      expect(lastFrame()).toContain('Footer');
-      // Footer should be rendered with all the state passed through
     });
   });
 
@@ -261,7 +201,7 @@ describe('Composer', () => {
         getAccessibility: vi.fn(() => ({ disableLoadingPhrases: true })),
       });
 
-      const { lastFrame } = renderComposer(uiState, undefined, config);
+      const { lastFrame } = renderComposer(uiState, config);
 
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
@@ -318,7 +258,8 @@ describe('Composer', () => {
   });
 
   describe('Context and Status Display', () => {
-    it('shows ContextSummaryDisplay in normal state', () => {
+    // Note: ContextSummaryDisplay and status prompts are now rendered in Footer, not Composer
+    it('shows empty space in normal state (ContextSummaryDisplay moved to Footer)', () => {
       const uiState = createMockUIState({
         ctrlCPressedOnce: false,
         ctrlDPressedOnce: false,
@@ -327,37 +268,43 @@ describe('Composer', () => {
 
       const { lastFrame } = renderComposer(uiState);
 
-      expect(lastFrame()).toContain('ContextSummaryDisplay');
+      // ContextSummaryDisplay is now in Footer, so we just verify normal state renders
+      expect(lastFrame()).toBeDefined();
     });
 
-    it('shows Ctrl+C exit prompt when ctrlCPressedOnce is true', () => {
+    // Note: Ctrl+C, Ctrl+D, and Escape prompts are now rendered in Footer component
+    // These are tested in Footer.test.tsx
+    it('renders Footer which handles Ctrl+C exit prompt', () => {
       const uiState = createMockUIState({
         ctrlCPressedOnce: true,
       });
 
       const { lastFrame } = renderComposer(uiState);
 
-      expect(lastFrame()).toContain('Press Ctrl+C again to exit');
+      // Ctrl+C prompt is now inside Footer, verify Footer renders
+      expect(lastFrame()).toContain('Footer');
     });
 
-    it('shows Ctrl+D exit prompt when ctrlDPressedOnce is true', () => {
+    it('renders Footer which handles Ctrl+D exit prompt', () => {
       const uiState = createMockUIState({
         ctrlDPressedOnce: true,
       });
 
       const { lastFrame } = renderComposer(uiState);
 
-      expect(lastFrame()).toContain('Press Ctrl+D again to exit');
+      // Ctrl+D prompt is now inside Footer, verify Footer renders
+      expect(lastFrame()).toContain('Footer');
     });
 
-    it('shows escape prompt when showEscapePrompt is true', () => {
+    it('renders Footer which handles escape prompt', () => {
       const uiState = createMockUIState({
         showEscapePrompt: true,
       });
 
       const { lastFrame } = renderComposer(uiState);
 
-      expect(lastFrame()).toContain('Press Esc again to clear');
+      // Escape prompt is now inside Footer, verify Footer renders
+      expect(lastFrame()).toContain('Footer');
     });
   });
 
@@ -382,7 +329,9 @@ describe('Composer', () => {
       expect(lastFrame()).not.toContain('InputPrompt');
     });
 
-    it('shows AutoAcceptIndicator when approval mode is not default and shell mode is inactive', () => {
+    // Note: AutoAcceptIndicator and ShellModeIndicator are now rendered inside Footer component
+    // These are tested in Footer.test.tsx
+    it('renders Footer which contains AutoAcceptIndicator when approval mode is not default', () => {
       const uiState = createMockUIState({
         showAutoAcceptIndicator: ApprovalMode.YOLO,
         shellModeActive: false,
@@ -390,17 +339,19 @@ describe('Composer', () => {
 
       const { lastFrame } = renderComposer(uiState);
 
-      expect(lastFrame()).toContain('AutoAcceptIndicator');
+      // AutoAcceptIndicator is now inside Footer, verify Footer renders
+      expect(lastFrame()).toContain('Footer');
     });
 
-    it('shows ShellModeIndicator when shell mode is active', () => {
+    it('renders Footer which contains ShellModeIndicator when shell mode is active', () => {
       const uiState = createMockUIState({
         shellModeActive: true,
       });
 
       const { lastFrame } = renderComposer(uiState);
 
-      expect(lastFrame()).toContain('ShellModeIndicator');
+      // ShellModeIndicator is now inside Footer, verify Footer renders
+      expect(lastFrame()).toContain('Footer');
     });
   });
 

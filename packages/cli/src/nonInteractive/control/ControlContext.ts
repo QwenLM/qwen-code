@@ -35,6 +35,7 @@ export interface IControlContext {
   permissionMode: PermissionMode;
   sdkMcpServers: Set<string>;
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
+  inputClosed: boolean;
 
   onInterrupt?: () => void;
 }
@@ -52,6 +53,7 @@ export class ControlContext implements IControlContext {
   permissionMode: PermissionMode;
   sdkMcpServers: Set<string>;
   mcpClients: Map<string, { client: Client; config: MCPServerConfig }>;
+  inputClosed: boolean;
 
   onInterrupt?: () => void;
 
@@ -71,6 +73,7 @@ export class ControlContext implements IControlContext {
     this.permissionMode = options.permissionMode || 'default';
     this.sdkMcpServers = new Set();
     this.mcpClients = new Map();
+    this.inputClosed = false;
     this.onInterrupt = options.onInterrupt;
   }
 }

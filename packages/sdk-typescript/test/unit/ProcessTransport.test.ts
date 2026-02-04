@@ -647,7 +647,7 @@ describe('ProcessTransport', () => {
       );
     });
 
-    it('should throw if writing to ended stream', () => {
+    it('should throw when writing to ended stream', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',
         args: [],
@@ -664,9 +664,7 @@ describe('ProcessTransport', () => {
 
       mockStdin.end();
 
-      expect(() => transport.write('test')).toThrow(
-        'Cannot write to ended stream',
-      );
+      expect(() => transport.write('test')).toThrow('Input stream closed');
     });
 
     it('should throw if writing to terminated process', () => {

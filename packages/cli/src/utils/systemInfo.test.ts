@@ -58,6 +58,7 @@ describe('systemInfo', () => {
           getIdeMode: vi.fn().mockReturnValue(true),
           getSessionId: vi.fn().mockReturnValue('test-session-id'),
           getAuthType: vi.fn().mockReturnValue('test-auth'),
+          getProxy: vi.fn().mockReturnValue(undefined),
           getContentGeneratorConfig: vi.fn().mockReturnValue({
             baseUrl: 'https://api.openai.com',
           }),
@@ -235,6 +236,7 @@ describe('systemInfo', () => {
         selectedAuthType: 'test-auth',
         ideClient: 'test-ide',
         sessionId: 'test-session-id',
+        proxy: undefined,
       });
     });
 

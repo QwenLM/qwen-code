@@ -11,15 +11,13 @@ exports[`<ToolsList /> > renders correctly with descriptions 1`] = `
        2. note use this tool wisely and be sure to consider how this tool interacts with word wrap.
        3. important this tool is awesome.
   - Test Tool Three (test-tool-three)
-    This is the third test tool.
-"
+    This is the third test tool."
 `;
 
 exports[`<ToolsList /> > renders correctly with no tools 1`] = `
 "Available Qwen Code CLI tools:
 
- No tools available
-"
+ No tools available"
 `;
 
 exports[`<ToolsList /> > renders correctly without descriptions 1`] = `
@@ -27,6 +25,5 @@ exports[`<ToolsList /> > renders correctly without descriptions 1`] = `
 
   - Test Tool One
   - Test Tool Two
-  - Test Tool Three
-"
+  - Test Tool Three"
 `;

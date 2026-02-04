@@ -376,6 +376,32 @@ export class AcpSessionManager {
   }
 
   /**
+   * Set model for current session (ACP session/set_model)
+   *
+   * @param modelId - Model ID
+   */
+  async setModel(
+    modelId: string,
+    child: ChildProcess | null,
+    pendingRequests: Map<number, PendingRequest<unknown>>,
+    nextRequestId: { value: number },
+  ): Promise<AcpResponse> {
+    if (!this.sessionId) {
+      throw new Error('No active ACP session');
+    }
+    console.log('[ACP] Sending session/set_model:', modelId);
+    const res = await this.sendRequest<AcpResponse>(
+      AGENT_METHODS.session_set_model,
+      { sessionId: this.sessionId, modelId },
+      child,
+      pendingRequests,
+      nextRequestId,
+    );
+    console.log('[ACP] set_model response:', res);
+    return res;
+  }
+
+  /**
    * Switch to specified session
    *
    * @param sessionId - Session ID

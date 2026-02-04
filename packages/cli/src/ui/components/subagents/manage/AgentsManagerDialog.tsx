@@ -95,7 +95,11 @@ export function AgentsManagerDialog({
 
       try {
         const subagentManager = config.getSubagentManager();
-        await subagentManager.deleteSubagent(agent.name, agent.level);
+        await subagentManager.deleteSubagent(
+          agent.name,
+          agent.level,
+          agent.extensionName,
+        );
 
         // Reload agents to get updated state
         await loadAgents();

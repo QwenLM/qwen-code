@@ -71,7 +71,7 @@ export type ContentGeneratorConfig = {
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
   maxRetries?: number; // Maximum retries for failed requests
-  disableCacheControl?: boolean; // Disable cache control for DashScope providers
+  disableCacheControl?: boolean; // Disable prompt caching (Anthropic, DashScope)
   samplingParams?: {
     top_p?: number;
     top_k?: number;
@@ -91,8 +91,13 @@ export type ContentGeneratorConfig = {
   userAgent?: string;
   // Schema compliance mode for tool definitions
   schemaCompliance?: 'auto' | 'openapi_30';
+  // Context window size override. If set to a positive number, it will override
+  // the automatic detection. Leave undefined to use automatic detection.
+  contextWindowSize?: number;
   // Custom HTTP headers to be sent with requests
   customHeaders?: Record<string, string>;
+  // Extra body parameters to be merged into the request body
+  extra_body?: Record<string, unknown>;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

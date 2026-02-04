@@ -8,8 +8,9 @@
  * Represents the storage level for a skill configuration.
  * - 'project': Stored in `.qwen/skills/` within the project directory
  * - 'user': Stored in `~/.qwen/skills/` in the user's home directory
+ * - 'extension': Provided by an installed extension
  */
-export type SkillLevel = 'project' | 'user';
+export type SkillLevel = 'project' | 'user' | 'extension';
 
 /**
  * Core configuration for a skill as stored in SKILL.md files.
@@ -43,6 +44,11 @@ export interface SkillConfig {
    * The markdown body content from SKILL.md (after the frontmatter)
    */
   body: string;
+
+  /**
+   * For extension-level skills: the name of the providing extension
+   */
+  extensionName?: string;
 }
 
 /**

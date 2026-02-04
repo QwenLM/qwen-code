@@ -7,6 +7,7 @@
 import type { IMessageHandler } from './BaseMessageHandler.js';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import type { ConversationStore } from '../../services/conversationStore.js';
+import type { PermissionResponseMessage } from '../../types/webviewMessageTypes.js';
 import { SessionMessageHandler } from './SessionMessageHandler.js';
 import { FileMessageHandler } from './FileMessageHandler.js';
 import { EditorMessageHandler } from './EditorMessageHandler.js';
@@ -22,7 +23,7 @@ export class MessageRouter {
   private authHandler: AuthMessageHandler;
   private currentConversationId: string | null = null;
   private permissionHandler:
-    | ((message: { type: string; data: { optionId: string } }) => void)
+    | ((message: PermissionResponseMessage) => void)
     | null = null;
 
   constructor(
@@ -80,9 +81,7 @@ export class MessageRouter {
     // Handle permission response specially
     if (message.type === 'permissionResponse') {
       if (this.permissionHandler) {
-        this.permissionHandler(
-          message as { type: string; data: { optionId: string } },
-        );
+        this.permissionHandler(message as PermissionResponseMessage);
       }
       return;
     }
@@ -131,7 +130,7 @@ export class MessageRouter {
    * Set permission handler
    */
   setPermissionHandler(
-    handler: (message: { type: string; data: { optionId: string } }) => void,
+    handler: (message: PermissionResponseMessage) => void,
   ): void {
     this.permissionHandler = handler;
   }

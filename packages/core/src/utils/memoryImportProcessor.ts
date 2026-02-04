@@ -150,6 +150,18 @@ function isLetter(char: string): boolean {
   ); // a-z
 }
 
+/**
+ * Checks if an error is a "file not found" error (ENOENT)
+ */
+function isFileNotFoundError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code: unknown }).code === 'ENOENT'
+  );
+}
+
 function findCodeRegions(content: string): Array<[number, number]> {
   const regions: Array<[number, number]> = [];
   const tokens = marked.lexer(content);
@@ -292,7 +304,9 @@ export async function processImports(
             depth + 1,
           );
         } catch (error) {
-          if (debugMode) {
+          // If file doesn't exist, silently skip this import (it's not a real import)
+          // Only log warnings for other types of errors
+          if (!isFileNotFoundError(error) && debugMode) {
             logger.warn(
               `Failed to import ${fullPath}: ${hasMessage(error) ? error.message : 'Unknown error'}`,
             );
@@ -371,6 +385,12 @@ export async function processImports(
       result += `<!-- Imported from: ${importPath} -->\n${imported.content}\n<!-- End of import from: ${importPath} -->`;
       imports.push(imported.importTree);
     } catch (err: unknown) {
+      // If file doesn't exist, preserve the original @path text (it's not a real import)
+      if (isFileNotFoundError(err)) {
+        result += `@${importPath}`;
+        continue;
+      }
+      // For other errors, log and add error comment
       let message = 'Unknown error';
       if (hasMessage(err)) {
         message = err.message;

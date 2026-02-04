@@ -17,6 +17,8 @@ const ayuDarkColors: ColorsTheme = {
   AccentGreen: '#AAD94C',
   AccentYellow: '#FFB454',
   AccentRed: '#F26D78',
+  AccentYellowDim: '#8B7530',
+  AccentRedDim: '#8B3A4A',
   DiffAdded: '#293022',
   DiffRemoved: '#3D1215',
   Comment: '#646A71',

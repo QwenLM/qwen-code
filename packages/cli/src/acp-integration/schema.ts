@@ -15,6 +15,7 @@ export const AGENT_METHODS = {
   session_prompt: 'session/prompt',
   session_list: 'session/list',
   session_set_mode: 'session/set_mode',
+  session_set_model: 'session/set_model',
 };
 
 export const CLIENT_METHODS = {
@@ -266,6 +267,18 @@ export const modelInfoSchema = z.object({
   name: z.string(),
 });
 
+export const setModelRequestSchema = z.object({
+  sessionId: z.string(),
+  modelId: z.string(),
+});
+
+export const setModelResponseSchema = z.object({
+  modelId: z.string(),
+});
+
+export type SetModelRequest = z.infer<typeof setModelRequestSchema>;
+export type SetModelResponse = z.infer<typeof setModelResponseSchema>;
+
 export const sessionModelStateSchema = z.object({
   _meta: acpMetaSchema,
   availableModels: z.array(modelInfoSchema),
@@ -353,6 +366,9 @@ export type Usage = z.infer<typeof usageSchema>;
 export const sessionUpdateMetaSchema = z.object({
   usage: usageSchema.optional().nullable(),
   durationMs: z.number().optional().nullable(),
+  toolName: z.string().optional().nullable(),
+  parentToolCallId: z.string().optional().nullable(),
+  subagentType: z.string().optional().nullable(),
 });
 
 export type SessionUpdateMeta = z.infer<typeof sessionUpdateMetaSchema>;
@@ -560,6 +576,7 @@ export const sessionUpdateSchema = z.union([
     kind: toolKindSchema,
     locations: z.array(toolCallLocationSchema).optional(),
     rawInput: z.unknown().optional(),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
     sessionUpdate: z.literal('tool_call'),
     status: toolCallStatusSchema,
     title: z.string(),
@@ -571,6 +588,7 @@ export const sessionUpdateSchema = z.union([
     locations: z.array(toolCallLocationSchema).optional().nullable(),
     rawInput: z.unknown().optional(),
     rawOutput: z.unknown().optional(),
+    _meta: sessionUpdateMetaSchema.optional().nullable(),
     sessionUpdate: z.literal('tool_call_update'),
     status: toolCallStatusSchema.optional().nullable(),
     title: z.string().optional().nullable(),
@@ -592,6 +610,7 @@ export const agentResponseSchema = z.union([
   promptResponseSchema,
   listSessionsResponseSchema,
   setModeResponseSchema,
+  setModelResponseSchema,
 ]);
 
 export const requestPermissionRequestSchema = z.object({
@@ -624,6 +643,7 @@ export const agentRequestSchema = z.union([
   promptRequestSchema,
   listSessionsRequestSchema,
   setModeRequestSchema,
+  setModelRequestSchema,
 ]);
 
 export const agentNotificationSchema = sessionNotificationSchema;

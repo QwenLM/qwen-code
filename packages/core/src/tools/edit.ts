@@ -20,6 +20,7 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { FileEncoding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -367,9 +368,22 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
     try {
       this.ensureParentDirectoriesExist(this.params.file_path);
-      await this.config
-        .getFileSystemService()
-        .writeTextFile(this.params.file_path, editData.newContent);
+
+      // For new files, apply default file encoding setting
+      // For existing files, keep original content as-is (including any BOM character)
+      if (editData.isNewFile) {
+        const useBOM =
+          this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
+        await this.config
+          .getFileSystemService()
+          .writeTextFile(this.params.file_path, editData.newContent, {
+            bom: useBOM,
+          });
+      } else {
+        await this.config
+          .getFileSystemService()
+          .writeTextFile(this.params.file_path, editData.newContent);
+      }
 
       const fileName = path.basename(this.params.file_path);
       const originallyProposedContent =

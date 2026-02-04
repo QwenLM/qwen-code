@@ -34,7 +34,7 @@ export const PlanSummaryDisplay: React.FC<PlanSummaryDisplayProps> = ({
         text={plan}
         isPending={false}
         availableTerminalHeight={availableHeight}
-        terminalWidth={childWidth}
+        contentWidth={childWidth}
       />
     </Box>
   );

@@ -29,6 +29,7 @@ export interface SystemInfo {
   selectedAuthType: string;
   ideClient: string;
   sessionId: string;
+  proxy?: string;
 }
 
 /**
@@ -38,6 +39,7 @@ export interface ExtendedSystemInfo extends SystemInfo {
   memoryUsage: string;
   baseUrl?: string;
   gitCommit?: string;
+  proxy?: string;
 }
 
 /**
@@ -118,6 +120,7 @@ export async function getSystemInfo(
   const selectedAuthType = context.services.config?.getAuthType() || '';
   const ideClient = await getIdeClientName(context);
   const sessionId = context.services.config?.getSessionId() || 'unknown';
+  const proxy = context.services.config?.getProxy();
 
   return {
     cliVersion,
@@ -131,6 +134,7 @@ export async function getSystemInfo(
     selectedAuthType,
     ideClient,
     sessionId,
+    proxy,
   };
 }
 

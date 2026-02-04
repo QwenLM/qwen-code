@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GeminiCLIExtension } from '@qwen-code/qwen-code-core';
+import type { ExtensionManager } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import {
   ExtensionUpdateState,
@@ -13,12 +13,12 @@ import {
 } from '../state/extensions.js';
 import { useCallback, useEffect, useMemo, useReducer } from 'react';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import { MessageType, type ConfirmationRequest } from '../types.js';
 import {
-  checkForAllExtensionUpdates,
-  updateExtension,
-} from '../../config/extensions/update.js';
-import { requestConsentInteractive } from '../../config/extension.js';
+  MessageType,
+  type ConfirmationRequest,
+  type SettingInputRequest,
+  type PluginChoiceRequest,
+} from '../types.js';
 import { checkExhaustive } from '../../utils/checks.js';
 
 type ConfirmationRequestWrapper = {
@@ -45,15 +45,7 @@ function confirmationRequestsReducer(
   }
 }
 
-export const useExtensionUpdates = (
-  extensions: GeminiCLIExtension[],
-  addItem: UseHistoryManagerReturn['addItem'],
-  cwd: string,
-) => {
-  const [extensionsUpdateState, dispatchExtensionStateUpdate] = useReducer(
-    extensionUpdatesReducer,
-    initialExtensionUpdatesState,
-  );
+export const useConfirmUpdateRequests = () => {
   const [
     confirmUpdateExtensionRequests,
     dispatchConfirmUpdateExtensionRequests,
@@ -78,15 +70,185 @@ export const useExtensionUpdates = (
     },
     [dispatchConfirmUpdateExtensionRequests],
   );
+  return {
+    addConfirmUpdateExtensionRequest,
+    confirmUpdateExtensionRequests,
+    dispatchConfirmUpdateExtensionRequests,
+  };
+};
+
+type SettingInputRequestWrapper = {
+  settingName: string;
+  settingDescription: string;
+  sensitive: boolean;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+};
+
+type SettingInputRequestAction =
+  | { type: 'add'; request: SettingInputRequestWrapper }
+  | { type: 'remove'; request: SettingInputRequestWrapper };
+
+function settingInputRequestsReducer(
+  state: SettingInputRequestWrapper[],
+  action: SettingInputRequestAction,
+): SettingInputRequestWrapper[] {
+  switch (action.type) {
+    case 'add':
+      return [...state, action.request];
+    case 'remove':
+      return state.filter((r) => r !== action.request);
+    default:
+      checkExhaustive(action);
+      return state;
+  }
+}
+
+export const useSettingInputRequests = () => {
+  const [settingInputRequests, dispatchSettingInputRequests] = useReducer(
+    settingInputRequestsReducer,
+    [],
+  );
+  const addSettingInputRequest = useCallback(
+    (original: SettingInputRequest) => {
+      const wrappedRequest: SettingInputRequestWrapper = {
+        settingName: original.settingName,
+        settingDescription: original.settingDescription,
+        sensitive: original.sensitive,
+        onSubmit: (value: string) => {
+          // Remove it from the outstanding list of requests by identity.
+          dispatchSettingInputRequests({
+            type: 'remove',
+            request: wrappedRequest,
+          });
+          original.onSubmit(value);
+        },
+        onCancel: () => {
+          dispatchSettingInputRequests({
+            type: 'remove',
+            request: wrappedRequest,
+          });
+          original.onCancel();
+        },
+      };
+      dispatchSettingInputRequests({
+        type: 'add',
+        request: wrappedRequest,
+      });
+    },
+    [dispatchSettingInputRequests],
+  );
+  return {
+    addSettingInputRequest,
+    settingInputRequests,
+    dispatchSettingInputRequests,
+  };
+};
+
+type PluginChoiceRequestWrapper = {
+  marketplaceName: string;
+  plugins: Array<{ name: string; description?: string }>;
+  onSelect: (pluginName: string) => void;
+  onCancel: () => void;
+};
+
+type PluginChoiceRequestAction =
+  | { type: 'add'; request: PluginChoiceRequestWrapper }
+  | { type: 'remove'; request: PluginChoiceRequestWrapper };
+
+function pluginChoiceRequestsReducer(
+  state: PluginChoiceRequestWrapper[],
+  action: PluginChoiceRequestAction,
+): PluginChoiceRequestWrapper[] {
+  switch (action.type) {
+    case 'add':
+      return [...state, action.request];
+    case 'remove':
+      return state.filter((r) => r !== action.request);
+    default:
+      checkExhaustive(action);
+      return state;
+  }
+}
+
+export const usePluginChoiceRequests = () => {
+  const [pluginChoiceRequests, dispatchPluginChoiceRequests] = useReducer(
+    pluginChoiceRequestsReducer,
+    [],
+  );
+  const addPluginChoiceRequest = useCallback(
+    (original: PluginChoiceRequest) => {
+      const wrappedRequest: PluginChoiceRequestWrapper = {
+        marketplaceName: original.marketplaceName,
+        plugins: original.plugins,
+        onSelect: (pluginName: string) => {
+          dispatchPluginChoiceRequests({
+            type: 'remove',
+            request: wrappedRequest,
+          });
+          original.onSelect(pluginName);
+        },
+        onCancel: () => {
+          dispatchPluginChoiceRequests({
+            type: 'remove',
+            request: wrappedRequest,
+          });
+          original.onCancel();
+        },
+      };
+      dispatchPluginChoiceRequests({
+        type: 'add',
+        request: wrappedRequest,
+      });
+    },
+    [dispatchPluginChoiceRequests],
+  );
+  return {
+    addPluginChoiceRequest,
+    pluginChoiceRequests,
+    dispatchPluginChoiceRequests,
+  };
+};
+
+export const useExtensionUpdates = (
+  extensionManager: ExtensionManager,
+  addItem: UseHistoryManagerReturn['addItem'],
+  cwd: string,
+) => {
+  const [extensionsUpdateState, dispatchExtensionStateUpdate] = useReducer(
+    extensionUpdatesReducer,
+    initialExtensionUpdatesState,
+  );
+  const extensions = extensionManager.getLoadedExtensions();
 
   useEffect(() => {
     (async () => {
-      await checkForAllExtensionUpdates(
-        extensions,
-        dispatchExtensionStateUpdate,
+      const extensionsToCheck = extensions.filter((extension) => {
+        const currentStatus = extensionsUpdateState.extensionStatuses.get(
+          extension.name,
+        );
+        if (!currentStatus) return true;
+        const currentState = currentStatus.status;
+        return !currentState || currentState === ExtensionUpdateState.UNKNOWN;
+      });
+      if (extensionsToCheck.length === 0) return;
+      dispatchExtensionStateUpdate({ type: 'BATCH_CHECK_START' });
+      await extensionManager.checkForAllExtensionUpdates(
+        (extensionName: string, state: ExtensionUpdateState) => {
+          dispatchExtensionStateUpdate({
+            type: 'SET_STATE',
+            payload: { name: extensionName, state },
+          });
+        },
       );
+      dispatchExtensionStateUpdate({ type: 'BATCH_CHECK_END' });
     })();
-  }, [extensions, extensions.length, dispatchExtensionStateUpdate]);
+  }, [
+    extensions,
+    extensionManager,
+    extensionsUpdateState.extensionStatuses,
+    dispatchExtensionStateUpdate,
+  ]);
 
   useEffect(() => {
     if (extensionsUpdateState.batchChecksInProgress > 0) {
@@ -113,17 +275,17 @@ export const useExtensionUpdates = (
       });
 
       if (extension.installMetadata?.autoUpdate) {
-        updateExtension(
-          extension,
-          cwd,
-          (description) =>
-            requestConsentInteractive(
-              description,
-              addConfirmUpdateExtensionRequest,
-            ),
-          currentState.status,
-          dispatchExtensionStateUpdate,
-        )
+        extensionManager
+          .updateExtension(
+            extension,
+            currentState.status,
+            (extensionName, state) => {
+              dispatchExtensionStateUpdate({
+                type: 'SET_STATE',
+                payload: { name: extensionName, state },
+              });
+            },
+          )
           .then((result) => {
             if (!result) return;
             addItem(
@@ -157,13 +319,7 @@ export const useExtensionUpdates = (
         Date.now(),
       );
     }
-  }, [
-    extensions,
-    extensionsUpdateState,
-    addConfirmUpdateExtensionRequest,
-    addItem,
-    cwd,
-  ]);
+  }, [extensions, extensionManager, extensionsUpdateState, addItem, cwd]);
 
   const extensionsUpdateStateComputed = useMemo(() => {
     const result = new Map<string, ExtensionUpdateState>();
@@ -180,7 +336,5 @@ export const useExtensionUpdates = (
     extensionsUpdateState: extensionsUpdateStateComputed,
     extensionsUpdateStateInternal: extensionsUpdateState.extensionStatuses,
     dispatchExtensionStateUpdate,
-    confirmUpdateExtensionRequests,
-    addConfirmUpdateExtensionRequest,
   };
 };

@@ -13,7 +13,7 @@ interface GeminiThoughtMessageProps {
   text: string;
   isPending: boolean;
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
 }
 
 /**
@@ -24,13 +24,13 @@ export const GeminiThoughtMessage: React.FC<GeminiThoughtMessageProps> = ({
   text,
   isPending,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
 }) => {
   const prefix = '✦ ';
   const prefixWidth = prefix.length;
 
   return (
-    <Box flexDirection="row" marginBottom={1}>
+    <Box flexDirection="row">
       <Box width={prefixWidth}>
         <Text color={theme.text.secondary}>{prefix}</Text>
       </Box>
@@ -39,7 +39,7 @@ export const GeminiThoughtMessage: React.FC<GeminiThoughtMessageProps> = ({
           text={text}
           isPending={isPending}
           availableTerminalHeight={availableTerminalHeight}
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth - prefixWidth}
           textColor={theme.text.secondary}
         />
       </Box>

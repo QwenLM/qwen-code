@@ -23,6 +23,7 @@ export const MainContent = () => {
   const uiState = useUIState();
   const {
     pendingHistoryItems,
+    terminalWidth,
     mainAreaWidth,
     staticAreaMaxItemHeight,
     availableTerminalHeight,
@@ -36,7 +37,8 @@ export const MainContent = () => {
           <AppHeader key="app-header" version={version} />,
           ...uiState.history.map((h) => (
             <HistoryItemDisplay
-              terminalWidth={mainAreaWidth}
+              terminalWidth={terminalWidth}
+              mainAreaWidth={mainAreaWidth}
               availableTerminalHeight={staticAreaMaxItemHeight}
               availableTerminalHeightGemini={MAX_GEMINI_MESSAGE_LINES}
               key={h.id}
@@ -57,7 +59,8 @@ export const MainContent = () => {
               availableTerminalHeight={
                 uiState.constrainHeight ? availableTerminalHeight : undefined
               }
-              terminalWidth={mainAreaWidth}
+              terminalWidth={terminalWidth}
+              mainAreaWidth={mainAreaWidth}
               item={{ ...item, id: 0 }}
               isPending={true}
               isFocused={!uiState.isEditorDialogOpen}

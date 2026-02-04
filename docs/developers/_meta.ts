@@ -19,9 +19,6 @@ export default {
 
   tools: 'Tools',
 
-  extensions: {
-    display: 'hidden',
-  },
   examples: {
     display: 'hidden',
   },
