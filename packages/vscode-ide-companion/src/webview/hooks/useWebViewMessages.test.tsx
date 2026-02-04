@@ -6,15 +6,11 @@
 
 /** @vitest-environment jsdom */
 
- 
-import React from 'react';
+import type React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createRoot } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
-import type {
-  PermissionOption,
-  ToolCall as PermissionToolCall,
-} from '../components/PermissionDrawer/PermissionRequest.js';
+import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { ToolCallUpdate } from '../../types/chatTypes.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../../types/chatTypes.js';
@@ -57,13 +53,14 @@ interface WebViewMessageProps {
     setActiveSelection: (
       selection: { startLine: number; endLine: number } | null,
     ) => void;
-    setWorkspaceFiles: (
+    setWorkspaceFilesFromResponse: (
       files: Array<{
         id: string;
         label: string;
         description: string;
         path: string;
       }>,
+      requestId?: number,
     ) => void;
     addFileReference: (name: string, path: string) => void;
   };
@@ -130,7 +127,7 @@ const createProps = (overrides: Partial<WebViewMessageProps> = {}) => {
       setActiveFileName: vi.fn(),
       setActiveFilePath: vi.fn(),
       setActiveSelection: vi.fn(),
-      setWorkspaceFiles: vi.fn(),
+      setWorkspaceFilesFromResponse: vi.fn(),
       addFileReference: vi.fn(),
     },
     messageHandling: {
@@ -150,7 +147,9 @@ const createProps = (overrides: Partial<WebViewMessageProps> = {}) => {
     clearToolCalls: vi.fn(),
     setPlanEntries: vi.fn(),
     handlePermissionRequest: vi.fn(),
-    inputFieldRef: React.createRef<HTMLDivElement>(),
+    inputFieldRef: {
+      current: document.createElement('div'),
+    } as React.RefObject<HTMLDivElement>,
     setInputText: vi.fn(),
     setEditMode: vi.fn(),
     setIsAuthenticated: vi.fn(),
