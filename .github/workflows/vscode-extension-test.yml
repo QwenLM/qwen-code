@@ -26,6 +26,7 @@ permissions:
   contents: 'read'
   checks: 'write'
   pull-requests: 'write' # Needed to comment on PRs
+  issues: 'write' # Needed to create issues on push failures
 
 jobs:
   unit-test:
@@ -36,8 +37,11 @@ jobs:
       matrix:
         os:
           - 'ubuntu-latest'
+          - 'macos-latest'
+          - 'windows-latest'
         node-version:
           - '20.x'
+          - '22.x'
 
     steps:
       - name: 'Checkout'
