@@ -281,6 +281,95 @@ The SDK provides specific exception types for different error scenarios:
 - `SessionSendPromptException`: Thrown when there's an issue sending a prompt or receiving a response
 - `SessionClosedException`: Thrown when attempting to use a closed session
 
+## Advantages and Disadvantages
+
+### Advantages
+
+#### 1. **Easy Integration**
+- Simple API design with `QwenCodeCli.simpleQuery()` for quick start
+- Minimal setup required - just add the SDK as a Maven/Gradle dependency
+- Works seamlessly with existing Java applications without complex configuration
+
+#### 2. **Flexible Permission Control**
+- Multiple permission modes (`default`, `plan`, `auto-edit`, `yolo`) for different security requirements
+- Fine-grained control over tool execution with `allowedTools` and `excludeTools`
+- Callback-based permission system for custom approval logic
+
+#### 3. **Comprehensive Event Handling**
+- Rich event system with `SessionEventConsumers` and `AssistantContentConsumers` interfaces
+- Support for streaming responses with partial message handling
+- Separate handlers for different content types (text, thinking, tool use, tool results)
+
+#### 4. **Production-Ready Features**
+- Built-in thread pool for concurrent operations with configurable parameters
+- Robust timeout handling at multiple levels (turn, message, event)
+- Proper error handling with specific exception types
+- Session resumption capability for long-running workflows
+
+#### 5. **Session Management**
+- Full session lifecycle control (create, manage, interrupt, close)
+- Dynamic model and permission mode switching during sessions
+- Support for custom environment variables and working directories
+- Multiple concurrent sessions for parallel processing
+
+#### 6. **Java Ecosystem Compatibility**
+- Supports Java 1.8+ for broad compatibility
+- Uses mature, well-maintained dependencies (fastjson2, logback, commons-lang3)
+- Standard Maven/Gradle build integration
+- Follows Java best practices and conventions
+
+### Disadvantages
+
+#### 1. **CLI Dependency**
+- Requires separate Qwen Code CLI installation (qwen-code >= 0.5.0)
+- Process-based communication adds overhead compared to direct library integration
+- Updates to the CLI may require SDK updates for compatibility
+
+#### 2. **Limited to Process Transport**
+- Currently only supports process-based transport mechanism
+- No support for remote API calls or network-based communication
+- All communication happens through local process spawning
+
+#### 3. **Experimental Status**
+- Marked as "minimum experimental SDK" indicating API instability
+- API may change in future versions without backward compatibility
+- Limited production deployment examples and best practices
+
+#### 4. **Learning Curve**
+- Complex event hierarchy (`SessionEventConsumers` → `AssistantContentConsumers`)
+- Multiple timeout configuration points require understanding of the system
+- Permission modes require careful consideration to balance security and usability
+
+#### 5. **Resource Consumption**
+- Thread pool overhead (30 core threads, up to 100 max threads)
+- Each session spawns a separate CLI process
+- Memory usage scales with number of concurrent sessions
+
+#### 6. **Limited Documentation**
+- No detailed API reference documentation (JavaDoc)
+- Limited examples for advanced use cases
+- Error handling patterns not comprehensively documented
+- Troubleshooting guide is basic
+
+#### 7. **Platform Dependencies**
+- Requires Node.js environment for CLI (which is written in TypeScript)
+- Cross-platform compatibility depends on CLI support
+- May have issues on restricted environments where process spawning is limited
+
+### Recommendations for Use
+
+**Use the Java SDK when:**
+- Building Java/JVM-based applications that need AI coding assistance
+- You need fine-grained control over tool execution and permissions
+- You require session management and long-running workflows
+- You want to integrate Qwen Code capabilities into existing Java infrastructure
+
+**Consider alternatives when:**
+- You need a production-stable API with guaranteed backward compatibility
+- You require remote API access or cloud-based deployment
+- Your environment doesn't support process spawning (e.g., some containers, serverless)
+- You need comprehensive API documentation and extensive examples
+
 ## FAQ / Troubleshooting
 
 ### Q: Do I need to install the Qwen CLI separately?
