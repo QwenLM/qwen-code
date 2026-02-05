@@ -54,13 +54,14 @@ interface UseWebViewMessagesProps {
     setActiveSelection: (
       selection: { startLine: number; endLine: number } | null,
     ) => void;
-    setWorkspaceFiles: (
+    setWorkspaceFilesFromResponse: (
       files: Array<{
         id: string;
         label: string;
         description: string;
         path: string;
       }>,
+      requestId?: number,
     ) => void;
     addFileReference: (name: string, path: string) => void;
   };
@@ -923,9 +924,13 @@ export const useWebViewMessages = ({
             description: string;
             path: string;
           }>;
+          const requestId = message.data?.requestId as number | undefined;
           if (files) {
             console.log('[WebView] Received workspaceFiles:', files.length);
-            handlers.fileContext.setWorkspaceFiles(files);
+            handlers.fileContext.setWorkspaceFilesFromResponse(
+              files,
+              requestId,
+            );
           }
           break;
         }

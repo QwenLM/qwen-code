@@ -17,6 +17,7 @@
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
+    "dev": "node scripts/dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "build": "node scripts/build.js",
@@ -62,7 +63,8 @@
     "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"
-    }
+    },
+    "baseline-browser-mapping": "^2.9.19"
   },
   "bin": {
     "qwen": "dist/cli.js"

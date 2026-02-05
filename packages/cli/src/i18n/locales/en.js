@@ -29,6 +29,7 @@ export default {
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
   '(shift + tab to cycle)': '(shift + tab to cycle)',
+  '(tab to cycle)': '(tab to cycle)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).',
   '!': '!',
@@ -1107,6 +1108,8 @@ export default {
     'You can resume a previous conversation by running qwen --continue or qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'You can switch permission mode quickly with Tab or /approval-mode.',
 
   // ============================================================================
   // Exit Screen / Stats

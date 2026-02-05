@@ -407,10 +407,32 @@ export class SkillManager {
       const entries = await fs.readdir(baseDir, { withFileTypes: true });
       const skills: SkillConfig[] = [];
       for (const entry of entries) {
-        // Only process directories (each skill is a directory)
-        if (!entry.isDirectory()) continue;
+        // Check if it's a directory or a symlink
+        const isDirectory = entry.isDirectory();
+        const isSymlink = entry.isSymbolicLink();
+
+        if (!isDirectory && !isSymlink) continue;
 
         const skillDir = path.join(baseDir, entry.name);
+
+        // For symlinks, verify the target is a directory
+        if (isSymlink) {
+          try {
+            const targetStat = await fs.stat(skillDir);
+            if (!targetStat.isDirectory()) {
+              console.warn(
+                `Skipping symlink ${entry.name} that does not point to a directory`,
+              );
+              continue;
+            }
+          } catch (error) {
+            console.warn(
+              `Skipping invalid symlink ${entry.name}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            );
+            continue;
+          }
+        }
+
         const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
 
         try {

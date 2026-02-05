@@ -487,6 +487,7 @@ export class SubAgentScope {
             abortController,
             promptId,
             turnCounter,
+            toolsList,
             currentResponseId,
           );
         } else {
@@ -585,9 +586,66 @@ export class SubAgentScope {
     abortController: AbortController,
     promptId: string,
     currentRound: number,
+    toolsList: FunctionDeclaration[],
     responseId?: string,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
+
+    // Build allowed tool names set for filtering
+    const allowedToolNames = new Set(toolsList.map((t) => t.name));
+
+    // Filter unauthorized tool calls before scheduling
+    const authorizedCalls: FunctionCall[] = [];
+    for (const fc of functionCalls) {
+      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+
+      if (!allowedToolNames.has(fc.name)) {
+        const toolName = String(fc.name);
+        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+
+        // Emit TOOL_CALL event for visibility
+        this.eventEmitter?.emit(SubAgentEventType.TOOL_CALL, {
+          subagentId: this.subagentId,
+          round: currentRound,
+          callId,
+          name: toolName,
+          args: fc.args ?? {},
+          description: `Tool "${toolName}" not found`,
+          timestamp: Date.now(),
+        } as SubAgentToolCallEvent);
+
+        // Build function response part (used for both event and LLM)
+        const functionResponsePart = {
+          functionResponse: {
+            id: callId,
+            name: toolName,
+            response: { error: errorMessage },
+          },
+        };
+
+        // Emit TOOL_RESULT event with error (include responseParts for UI rendering)
+        this.eventEmitter?.emit(SubAgentEventType.TOOL_RESULT, {
+          subagentId: this.subagentId,
+          round: currentRound,
+          callId,
+          name: toolName,
+          success: false,
+          error: errorMessage,
+          responseParts: [functionResponsePart],
+          resultDisplay: errorMessage,
+          durationMs: 0,
+          timestamp: Date.now(),
+        } as SubAgentToolResultEvent);
+
+        // Record blocked tool call in stats
+        this.recordToolCallStats(toolName, false, 0, errorMessage);
+
+        // Add function response for LLM
+        toolResponseParts.push(functionResponsePart);
+        continue;
+      }
+      authorizedCalls.push(fc);
+    }
 
     // Build scheduler
     const responded = new Set<string>();
@@ -605,33 +663,8 @@ export class SubAgentScope {
               ? call.response.error?.message
               : undefined;
 
-          // Update aggregate stats
-          this.executionStats.totalToolCalls += 1;
-          if (success) {
-            this.executionStats.successfulToolCalls += 1;
-          } else {
-            this.executionStats.failedToolCalls += 1;
-          }
-
-          // Per-tool usage
-          const tu = this.toolUsage.get(toolName) || {
-            count: 0,
-            success: 0,
-            failure: 0,
-            totalDurationMs: 0,
-            averageDurationMs: 0,
-          };
-          tu.count += 1;
-          if (success) {
-            tu.success += 1;
-          } else {
-            tu.failure += 1;
-            tu.lastError = errorMessage || 'Unknown error';
-          }
-          tu.totalDurationMs = (tu.totalDurationMs || 0) + duration;
-          tu.averageDurationMs =
-            tu.count > 0 ? tu.totalDurationMs / tu.count : 0;
-          this.toolUsage.set(toolName, tu);
+          // Record stats
+          this.recordToolCallStats(toolName, success, duration, errorMessage);
 
           // Emit tool result event
           this.eventEmitter?.emit(SubAgentEventType.TOOL_RESULT, {
@@ -642,12 +675,6 @@ export class SubAgentScope {
             success,
             error: errorMessage,
             responseParts: call.response.responseParts,
-            /**
-             * Tools like todoWrite will add some extra contents to the result,
-             * making it unable to deserialize the `responseParts` to a JSON object.
-             * While `resultDisplay` is normally a string, if not we stringify it,
-             * so that we can deserialize it to a JSON object when needed.
-             */
             resultDisplay: call.response.resultDisplay
               ? typeof call.response.resultDisplay === 'string'
                 ? call.response.resultDisplay
@@ -656,14 +683,6 @@ export class SubAgentScope {
             durationMs: duration,
             timestamp: Date.now(),
           } as SubAgentToolResultEvent);
-
-          // Update statistics service
-          this.stats.recordToolCall(
-            toolName,
-            success,
-            duration,
-            this.toolUsage.get(toolName)?.lastError,
-          );
 
           // post-tool hook
           await this.hooks?.postToolUse?.({
@@ -736,7 +755,7 @@ export class SubAgentScope {
     });
 
     // Prepare requests and emit TOOL_CALL events
-    const requests: ToolCallRequestInfo[] = functionCalls.map((fc) => {
+    const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
       const args = (fc.args ?? {}) as Record<string, unknown>;
@@ -900,6 +919,52 @@ export class SubAgentScope {
       // Safely ignore all runtime errors and return empty string
       return '';
     }
+  }
+
+  /**
+   * Records tool call statistics for both successful and failed tool calls.
+   * This includes updating aggregate stats, per-tool usage, and the statistics service.
+   */
+  private recordToolCallStats(
+    toolName: string,
+    success: boolean,
+    durationMs: number,
+    errorMessage?: string,
+  ): void {
+    // Update aggregate stats
+    this.executionStats.totalToolCalls += 1;
+    if (success) {
+      this.executionStats.successfulToolCalls += 1;
+    } else {
+      this.executionStats.failedToolCalls += 1;
+    }
+
+    // Per-tool usage
+    const tu = this.toolUsage.get(toolName) || {
+      count: 0,
+      success: 0,
+      failure: 0,
+      totalDurationMs: 0,
+      averageDurationMs: 0,
+    };
+    tu.count += 1;
+    if (success) {
+      tu.success += 1;
+    } else {
+      tu.failure += 1;
+      tu.lastError = errorMessage || 'Unknown error';
+    }
+    tu.totalDurationMs = (tu.totalDurationMs || 0) + durationMs;
+    tu.averageDurationMs = tu.count > 0 ? tu.totalDurationMs / tu.count : 0;
+    this.toolUsage.set(toolName, tu);
+
+    // Update statistics service
+    this.stats.recordToolCall(
+      toolName,
+      success,
+      durationMs,
+      this.toolUsage.get(toolName)?.lastError,
+    );
   }
 
   private buildChatSystemPrompt(context: ContextState): string {

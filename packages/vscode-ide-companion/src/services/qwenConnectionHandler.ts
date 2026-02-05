@@ -55,7 +55,7 @@ export class QwenConnectionHandler {
     let availableModels: ModelInfo[] | undefined;
 
     // Build extra CLI arguments (only essential parameters)
-    const extraArgs: string[] = [];
+    const extraArgs: string[] = ['--experimental-skills'];
 
     await connection.connect(cliEntryPath!, workingDir, extraArgs);
 

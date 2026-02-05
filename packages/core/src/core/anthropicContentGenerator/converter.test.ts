@@ -33,7 +33,13 @@ describe('AnthropicContentConverter', () => {
         config: { systemInstruction: 'sys' },
       });
 
-      expect(system).toBe('sys');
+      expect(system).toEqual([
+        {
+          type: 'text',
+          text: 'sys',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
     });
 
     it('extracts systemInstruction text from parts and joins with newlines', () => {
@@ -48,7 +54,13 @@ describe('AnthropicContentConverter', () => {
         },
       });
 
-      expect(system).toBe('a\nb');
+      expect(system).toEqual([
+        {
+          type: 'text',
+          text: 'a\nb',
+          cache_control: { type: 'ephemeral' },
+        },
+      ]);
     });
 
     it('converts a plain string content into a user message', () => {
@@ -58,7 +70,16 @@ describe('AnthropicContentConverter', () => {
       });
 
       expect(messages).toEqual([
-        { role: 'user', content: [{ type: 'text', text: 'Hello' }] },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Hello',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
       ]);
     });
 
@@ -78,7 +99,11 @@ describe('AnthropicContentConverter', () => {
           role: 'user',
           content: [
             { type: 'text', text: 'Hello' },
-            { type: 'text', text: 'World' },
+            {
+              type: 'text',
+              text: 'World',
+              cache_control: { type: 'ephemeral' },
+            },
           ],
         },
       ]);
@@ -651,6 +676,7 @@ describe('AnthropicContentConverter', () => {
           properties: { location: { type: 'string' } },
           required: ['location'],
         },
+        cache_control: { type: 'ephemeral' },
       });
 
       expect(vi.mocked(convertSchema)).toHaveBeenCalledTimes(1);
@@ -694,6 +720,7 @@ describe('AnthropicContentConverter', () => {
         name: 'no_params',
         description: 'no params',
         input_schema: { type: 'object', properties: {} },
+        cache_control: { type: 'ephemeral' },
       });
     });
 
@@ -784,6 +811,80 @@ describe('AnthropicContentConverter', () => {
     it('returns undefined for null/empty', () => {
       expect(converter.mapAnthropicFinishReasonToGemini(null)).toBeUndefined();
       expect(converter.mapAnthropicFinishReasonToGemini('')).toBeUndefined();
+    });
+  });
+
+  describe('disableCacheControl', () => {
+    it('does not add cache_control to system when disabled', () => {
+      const noCacheConverter = new AnthropicContentConverter(
+        'test-model',
+        'auto',
+        true,
+      );
+      const { system } = noCacheConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: 'hi',
+        config: { systemInstruction: 'sys' },
+      });
+
+      expect(system).toBe('sys');
+    });
+
+    it('does not add cache_control to messages when disabled', () => {
+      const noCacheConverter = new AnthropicContentConverter(
+        'test-model',
+        'auto',
+        true,
+      );
+      const { messages } = noCacheConverter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: 'Hello',
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+      ]);
+    });
+
+    it('does not add cache_control to tools when disabled', async () => {
+      const noCacheConverter = new AnthropicContentConverter(
+        'test-model',
+        'auto',
+        true,
+      );
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'get_weather',
+              description: 'Get weather',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { location: { type: 'string' } },
+                required: ['location'],
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result =
+        await noCacheConverter.convertGeminiToolsToAnthropic(tools);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]).toEqual({
+        name: 'get_weather',
+        description: 'Get weather',
+        input_schema: {
+          type: 'object',
+          properties: { location: { type: 'string' } },
+          required: ['location'],
+        },
+      });
+      expect(result[0]).not.toHaveProperty('cache_control');
     });
   });
 });

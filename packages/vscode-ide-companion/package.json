@@ -115,8 +115,8 @@
   "scripts": {
     "prepackage": "node ./scripts/prepackage.js",
     "build": "npm run build:dev",
-    "build:dev": "npm --workspace @qwen-code/webui run build && npm run check-types && npm run lint && node esbuild.js",
-    "build:prod": "npm --workspace @qwen-code/webui run build && node esbuild.js --production",
+    "build:dev": "npm run check-types && npm run lint && node esbuild.js",
+    "build:prod": "node esbuild.js --production",
     "generate:notices": "node ./scripts/generate-notices.js",
     "prepare": "npm run generate:notices",
     "check-types": "tsc --noEmit",

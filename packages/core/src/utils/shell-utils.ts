@@ -240,18 +240,305 @@ export function stripShellWrapper(command: string): string {
  * - Single quotes ('): Everything literal, no substitution possible
  * - Double quotes ("): Command substitution with $() and backticks unless escaped with \
  * - No quotes: Command substitution with $(), <(), and backticks
+ *
+ * This function also understands heredocs:
+ * - If a heredoc delimiter is quoted (e.g. `<<'EOF'`), bash will not perform
+ *   expansions in the heredoc body, so substitution-like text is allowed.
+ * - If a heredoc delimiter is unquoted (e.g. `<<EOF`), bash will perform
+ *   expansions in the heredoc body, so command substitution is blocked there too.
  * @param command The shell command string to check
  * @returns true if command substitution would be executed by bash
  */
 export function detectCommandSubstitution(command: string): boolean {
+  type PendingHeredoc = {
+    delimiter: string;
+    isQuotedDelimiter: boolean;
+    stripLeadingTabs: boolean;
+  };
+
+  const isCommentStart = (index: number): boolean => {
+    if (command[index] !== '#') return false;
+    if (index === 0) return true;
+
+    const prev = command[index - 1]!;
+    if (prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r') {
+      return true;
+    }
+
+    // `#` starts a comment when it begins a word. In practice this includes
+    // common command separators/operators where a new word can begin.
+    return [';', '&', '|', '(', ')', '<', '>'].includes(prev);
+  };
+
+  const isWordBoundary = (char: string): boolean => {
+    if (char === ' ' || char === '\t' || char === '\n' || char === '\r') {
+      return true;
+    }
+    // Shell metacharacters that would terminate a WORD token in this context.
+    // This helps correctly parse heredoc delimiters in cases like `<<EOF;`.
+    return [';', '&', '|', '<', '>', '(', ')'].includes(char);
+  };
+
+  const parseHeredocOperator = (
+    startIndex: number,
+  ): { nextIndex: number; heredoc: PendingHeredoc } | null => {
+    // startIndex points at the first '<' of the `<<` operator.
+    if (command[startIndex] !== '<' || command[startIndex + 1] !== '<') {
+      return null;
+    }
+
+    let i = startIndex + 2;
+    const stripLeadingTabs = command[i] === '-';
+    if (stripLeadingTabs) i++;
+
+    // Skip whitespace between operator and delimiter word.
+    while (i < command.length && (command[i] === ' ' || command[i] === '\t')) {
+      i++;
+    }
+
+    // Parse the delimiter WORD token. If any quoting is used in the delimiter,
+    // bash disables expansions in the heredoc body.
+    let delimiter = '';
+    let isQuotedDelimiter = false;
+    let inSingleQuotes = false;
+    let inDoubleQuotes = false;
+
+    while (i < command.length) {
+      const char = command[i]!;
+      if (!inSingleQuotes && !inDoubleQuotes && isWordBoundary(char)) {
+        break;
+      }
+
+      if (!inSingleQuotes && !inDoubleQuotes) {
+        if (char === "'") {
+          isQuotedDelimiter = true;
+          inSingleQuotes = true;
+          i++;
+          continue;
+        }
+        if (char === '"') {
+          isQuotedDelimiter = true;
+          inDoubleQuotes = true;
+          i++;
+          continue;
+        }
+        if (char === '\\') {
+          isQuotedDelimiter = true;
+          i++;
+          if (i >= command.length) break;
+          delimiter += command[i]!;
+          i++;
+          continue;
+        }
+        delimiter += char;
+        i++;
+        continue;
+      }
+
+      if (inSingleQuotes) {
+        if (char === "'") {
+          inSingleQuotes = false;
+          i++;
+          continue;
+        }
+        delimiter += char;
+        i++;
+        continue;
+      }
+
+      // inDoubleQuotes
+      if (char === '"') {
+        inDoubleQuotes = false;
+        i++;
+        continue;
+      }
+      if (char === '\\') {
+        // Backslash quoting is supported in double-quoted words. For our
+        // purposes, treat it as quoting and include the escaped char as-is.
+        isQuotedDelimiter = true;
+        i++;
+        if (i >= command.length) break;
+        delimiter += command[i]!;
+        i++;
+        continue;
+      }
+      delimiter += char;
+      i++;
+    }
+
+    // If we couldn't parse a delimiter WORD, this isn't a supported heredoc
+    // operator for our purposes (e.g. a here-string like `<<<`).
+    if (delimiter.length === 0) {
+      return null;
+    }
+
+    return {
+      nextIndex: i,
+      heredoc: {
+        delimiter,
+        isQuotedDelimiter,
+        stripLeadingTabs,
+      },
+    };
+  };
+
+  const lineHasCommandSubstitution = (line: string): boolean => {
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i]!;
+      const nextChar = line[i + 1];
+
+      // In unquoted heredocs, backslash can be used to escape `$` and backticks.
+      if (char === '\\') {
+        i++; // Skip the escaped char (if any)
+        continue;
+      }
+
+      if (char === '$' && nextChar === '(') {
+        return true;
+      }
+
+      if (char === '`') {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const consumeHeredocBodies = (
+    startIndex: number,
+    pending: PendingHeredoc[],
+  ): { nextIndex: number; hasSubstitution: boolean } => {
+    let i = startIndex;
+
+    for (const heredoc of pending) {
+      // Track `$\<newline>` line continuations in unquoted heredocs, since
+      // bash ignores `\<newline>` during heredoc expansions and this can join
+      // `$` and `(` across lines to form `$(`.
+      let pendingDollarLineContinuation = false;
+
+      while (i <= command.length) {
+        const lineStart = i;
+        while (
+          i < command.length &&
+          command[i] !== '\n' &&
+          command[i] !== '\r'
+        ) {
+          i++;
+        }
+        const lineEnd = i;
+
+        let newlineLength = 0;
+        if (
+          i < command.length &&
+          command[i] === '\r' &&
+          command[i + 1] === '\n'
+        ) {
+          newlineLength = 2;
+        } else if (
+          i < command.length &&
+          (command[i] === '\n' || command[i] === '\r')
+        ) {
+          newlineLength = 1;
+        }
+
+        const rawLine = command.slice(lineStart, lineEnd);
+        const effectiveLine = heredoc.stripLeadingTabs
+          ? rawLine.replace(/^\t+/, '')
+          : rawLine;
+
+        if (effectiveLine === heredoc.delimiter) {
+          i = lineEnd + newlineLength;
+          break;
+        }
+
+        if (!heredoc.isQuotedDelimiter) {
+          if (pendingDollarLineContinuation && effectiveLine.startsWith('(')) {
+            return { nextIndex: i, hasSubstitution: true };
+          }
+
+          if (lineHasCommandSubstitution(effectiveLine)) {
+            return { nextIndex: i, hasSubstitution: true };
+          }
+
+          pendingDollarLineContinuation = false;
+          if (
+            newlineLength > 0 &&
+            rawLine.length >= 2 &&
+            rawLine.endsWith('\\') &&
+            rawLine[rawLine.length - 2] === '$'
+          ) {
+            let backslashCount = 0;
+            for (
+              let j = rawLine.length - 3;
+              j >= 0 && rawLine[j] === '\\';
+              j--
+            ) {
+              backslashCount++;
+            }
+            const isEscapedDollar = backslashCount % 2 === 1;
+            pendingDollarLineContinuation = !isEscapedDollar;
+          }
+        }
+
+        // Advance to the next line (or end).
+        i = lineEnd + newlineLength;
+        if (newlineLength === 0) {
+          break;
+        }
+      }
+    }
+
+    return { nextIndex: i, hasSubstitution: false };
+  };
+
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
   let inBackticks = false;
+  let inComment = false;
+  const pendingHeredocs: PendingHeredoc[] = [];
   let i = 0;
 
   while (i < command.length) {
-    const char = command[i];
+    const char = command[i]!;
     const nextChar = command[i + 1];
+
+    // If we just finished parsing a heredoc operator, the heredoc body begins
+    // after the command line ends (a newline). Once we hit that newline,
+    // consume heredoc bodies sequentially before continuing.
+    if (!inSingleQuotes && !inDoubleQuotes && !inBackticks) {
+      if (char === '\r' && nextChar === '\n') {
+        inComment = false;
+        if (pendingHeredocs.length > 0) {
+          const result = consumeHeredocBodies(i + 2, pendingHeredocs);
+          if (result.hasSubstitution) return true;
+          pendingHeredocs.length = 0;
+          i = result.nextIndex;
+          continue;
+        }
+      } else if (char === '\n' || char === '\r') {
+        inComment = false;
+        if (pendingHeredocs.length > 0) {
+          const result = consumeHeredocBodies(i + 1, pendingHeredocs);
+          if (result.hasSubstitution) return true;
+          pendingHeredocs.length = 0;
+          i = result.nextIndex;
+          continue;
+        }
+      }
+    }
+
+    if (!inSingleQuotes && !inDoubleQuotes && !inBackticks) {
+      if (!inComment && isCommentStart(i)) {
+        inComment = true;
+        i++;
+        continue;
+      }
+
+      if (inComment) {
+        i++;
+        continue;
+      }
+    }
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
@@ -269,7 +556,24 @@ export function detectCommandSubstitution(command: string): boolean {
       inBackticks = !inBackticks;
     }
 
-    // Check for command substitution patterns that would be executed
+    // Detect heredoc operators (`<<` / `<<-`) only in command-line context.
+    if (
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      char === '<' &&
+      nextChar === '<'
+    ) {
+      const parsed = parseHeredocOperator(i);
+      if (parsed) {
+        pendingHeredocs.push(parsed.heredoc);
+        i = parsed.nextIndex;
+        continue;
+      }
+    }
+
+    // Check for command substitution patterns that would be executed.
+    // Note: heredoc body content is handled separately via consumeHeredocBodies.
     if (!inSingleQuotes) {
       // $(...) command substitution - works in double quotes and unquoted
       if (char === '$' && nextChar === '(') {
@@ -286,9 +590,9 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
-      // Backtick command substitution - check for opening backtick
-      // (We track the state above, so this catches the start of backtick substitution)
-      if (char === '`' && !inBackticks) {
+      // Backtick command substitution.
+      // We treat any unescaped backtick outside single quotes as substitution.
+      if (char === '`') {
         return true;
       }
     }
@@ -296,6 +600,8 @@ export function detectCommandSubstitution(command: string): boolean {
     i++;
   }
 
+  // If there are pending heredocs but no newline/body, there is nothing left to
+  // scan for heredoc-body substitutions.
   return false;
 }
 

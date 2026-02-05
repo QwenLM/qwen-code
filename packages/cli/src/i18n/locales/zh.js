@@ -27,6 +27,7 @@ export default {
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
   '(shift + tab to cycle)': '(shift + tab 切换)',
+  '(tab to cycle)': '(按 tab 切换)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     '通过 {{symbol}} 执行 shell 命令（例如，{{example1}}）或使用自然语言（例如，{{example2}}）',
   '!': '!',
@@ -1046,6 +1047,8 @@ export default {
     '运行 qwen --continue 或 qwen --resume 可继续之前的会话。',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     '按 Shift+Tab 或输入 /approval-mode 可快速切换权限模式。',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
 
   // ============================================================================
   // Exit Screen / Stats

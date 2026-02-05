@@ -46,6 +46,18 @@ const mockCommands: readonly SlashCommand[] = [
 ];
 
 describe('Help Component', () => {
+  it('should render platform-specific keyboard shortcuts', () => {
+    const { lastFrame } = render(<Help commands={mockCommands} />);
+    const output = lastFrame();
+
+    if (process.platform === 'win32') {
+      expect(output).toContain('Tab');
+      expect(output).not.toContain('Shift+Tab');
+    } else {
+      expect(output).toContain('Shift+Tab');
+    }
+  });
+
   it('should not render hidden commands', () => {
     const { lastFrame } = render(<Help commands={mockCommands} />);
     const output = lastFrame();

@@ -29,6 +29,7 @@ export default {
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
   '(shift + tab to cycle)': '(shift + tab для переключения)',
+  '(tab to cycle)': '(Tab для переключения)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Выполняйте команды терминала через {{symbol}} (например, {{example1}}) или используйте естественный язык (например, {{example2}}).',
   '!': '!',
@@ -1378,4 +1379,8 @@ export default {
     'Открываем страницу расширений в браузере: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
 };

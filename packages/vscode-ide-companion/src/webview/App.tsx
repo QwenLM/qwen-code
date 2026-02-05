@@ -264,16 +264,11 @@ export const App: React.FC = () => {
     [fileContext.workspaceFiles],
   );
 
-  // When workspace files update while menu open for @, refresh items so the first @ shows the list
+  // When workspace files update while menu open for @, refresh items to reflect latest search results.
   // Note: Avoid depending on the entire `completion` object here, since its identity
   // changes on every render which would retrigger this effect and can cause a refresh loop.
   useEffect(() => {
-    // Only auto-refresh when there's no query (first @ popup) to avoid repeated refreshes during search
-    if (
-      completion.isOpen &&
-      completion.triggerChar === '@' &&
-      !completion.query
-    ) {
+    if (completion.isOpen && completion.triggerChar === '@') {
       // Only refresh items; do not change other completion state to avoid re-renders loops
       completion.refreshCompletion();
     }

@@ -87,6 +87,7 @@ describe('EditTool', () => {
       getGeminiMdFileCount: () => 0,
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
+      getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -471,6 +472,80 @@ describe('EditTool', () => {
         user_added_chars: 0,
         user_removed_chars: 0,
       });
+    });
+
+    it('should create new file with BOM when defaultFileEncoding is utf-8-bom', async () => {
+      // Change config to use utf-8-bom
+      (mockConfig.getDefaultFileEncoding as Mock).mockReturnValue('utf-8-bom');
+
+      const newFileName = 'bom_new_file.txt';
+      const newFilePath = path.join(rootDir, newFileName);
+      const fileContent = 'Content for BOM file.';
+      const params: EditToolParams = {
+        file_path: newFilePath,
+        old_string: '',
+        new_string: fileContent,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      // Verify file has BOM
+      const fileBuffer = fs.readFileSync(newFilePath);
+      expect(fileBuffer[0]).toBe(0xef);
+      expect(fileBuffer[1]).toBe(0xbb);
+      expect(fileBuffer[2]).toBe(0xbf);
+      expect(fileBuffer.toString('utf8')).toContain(fileContent);
+    });
+
+    it('should create new file without BOM when defaultFileEncoding is utf-8', async () => {
+      // Config defaults to utf-8
+      const newFileName = 'no_bom_new_file.txt';
+      const newFilePath = path.join(rootDir, newFileName);
+      const fileContent = 'Content without BOM.';
+      const params: EditToolParams = {
+        file_path: newFilePath,
+        old_string: '',
+        new_string: fileContent,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      // Verify file does not have BOM
+      const fileBuffer = fs.readFileSync(newFilePath);
+      expect(fileBuffer[0]).not.toBe(0xef);
+      expect(fileBuffer.toString('utf8')).toBe(fileContent);
+    });
+
+    it('should preserve BOM character in content when editing existing file', async () => {
+      const bomFilePath = path.join(rootDir, 'existing_bom.txt');
+      // Create file with BOM (BOM is \ufeff character in string)
+      const originalContent = '\ufeff// Original line\nconst x = 1;';
+      fs.writeFileSync(bomFilePath, originalContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: bomFilePath,
+        old_string: 'const x = 1;',
+        new_string: 'const x = 2;',
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      // Verify file still has BOM and new content
+      const resultContent = fs.readFileSync(bomFilePath, 'utf8');
+      expect(resultContent.charCodeAt(0)).toBe(0xfeff); // BOM preserved
+      expect(resultContent).toContain('const x = 2;');
     });
 
     it('should return error if old_string is not found in file', async () => {
