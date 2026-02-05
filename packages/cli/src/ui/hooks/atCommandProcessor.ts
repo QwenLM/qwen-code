@@ -11,6 +11,7 @@ import type { AnyToolInvocation, Config } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
+  Storage,
   unescapePath,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, IndividualToolCallDisplay } from '../types.js';
@@ -389,7 +390,17 @@ export async function handleAtCommand({
     // Check if path should be ignored based on filtering options
 
     const workspaceContext = config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(pathName)) {
+
+    // Check if path is in project temp directory
+    const projectTempDir = Storage.getGlobalTempDir();
+    const absolutePathName = path.isAbsolute(pathName)
+      ? pathName
+      : path.resolve(workspaceContext.getDirectories()[0] || '', pathName);
+
+    if (
+      !absolutePathName.startsWith(projectTempDir) &&
+      !workspaceContext.isPathWithinWorkspace(pathName)
+    ) {
       onDebugMessage(
         `Path ${pathName} is not in the workspace and will be skipped.`,
       );
