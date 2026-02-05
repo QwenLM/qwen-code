@@ -34,12 +34,49 @@ export interface InsightData {
   activeHours: { [hour: number]: number };
   latestActiveTime: string | null;
   achievements: AchievementData[];
+  facets?: SessionFacets[];
 }
 
 export interface StreakData {
   currentStreak: number;
   longestStreak: number;
   dates: string[];
+}
+
+export interface SessionFacets {
+  session_id: string;
+  underlying_goal: string;
+  goal_categories: Record<string, number>;
+  outcome:
+    | 'fully_achieved'
+    | 'mostly_achieved'
+    | 'partially_achieved'
+    | 'not_achieved'
+    | 'unclear_from_transcript';
+  user_satisfaction_counts: Record<string, number>;
+  Qwen_helpfulness:
+    | 'unhelpful'
+    | 'slightly_helpful'
+    | 'moderately_helpful'
+    | 'very_helpful'
+    | 'essential';
+  session_type:
+    | 'single_task'
+    | 'multi_task'
+    | 'iterative_refinement'
+    | 'exploration'
+    | 'quick_question';
+  friction_counts: Record<string, number>;
+  friction_detail: string;
+  primary_success:
+    | 'none'
+    | 'fast_accurate_search'
+    | 'correct_code_edits'
+    | 'good_explanations'
+    | 'proactive_help'
+    | 'multi_file_changes'
+    | 'good_debugging';
+  brief_summary: string;
 }
 
 export interface StaticInsightTemplateData {

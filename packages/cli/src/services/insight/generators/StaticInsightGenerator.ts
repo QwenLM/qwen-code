@@ -11,12 +11,14 @@ import { DataProcessor } from './DataProcessor.js';
 import { TemplateRenderer } from './TemplateRenderer.js';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
+import type { Config } from '@qwen-code/qwen-code-core';
+
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
 
-  constructor() {
-    this.dataProcessor = new DataProcessor();
+  constructor(config: Config) {
+    this.dataProcessor = new DataProcessor(config);
     this.templateRenderer = new TemplateRenderer();
   }
 
@@ -30,22 +32,41 @@ export class StaticInsightGenerator {
   // Generate the static insight HTML file
   async generateStaticInsight(baseDir: string): Promise<string> {
     try {
+      // Ensure output directory exists
+      const outputDir = await this.ensureOutputDirectory();
+      const facetsDir = path.join(outputDir, 'facets');
+      await fs.mkdir(facetsDir, { recursive: true });
+
       // Process data
       console.log('Processing insight data...');
-      const insights: InsightData =
-        await this.dataProcessor.generateInsights(baseDir);
+      const insights: InsightData = await this.dataProcessor.generateInsights(
+        baseDir,
+        facetsDir,
+      );
 
       // Render HTML
       console.log('Rendering HTML template...');
       const html = await this.templateRenderer.renderInsightHTML(insights);
 
-      // Ensure output directory exists
-      const outputDir = await this.ensureOutputDirectory();
       const outputPath = path.join(outputDir, 'insight.html');
 
       // Write the HTML file
       console.log(`Writing HTML file to: ${outputPath}`);
       await fs.writeFile(outputPath, html, 'utf-8');
+
+      // Write the JSON data file
+      const jsonPath = path.join(outputDir, 'insight.json');
+      console.log(`Writing JSON data to: ${jsonPath}`);
+
+      // Exclude facets from the main JSON file as they are stored individually
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { facets, ...insightsWithoutFacets } = insights;
+
+      await fs.writeFile(
+        jsonPath,
+        JSON.stringify(insightsWithoutFacets, null, 2),
+        'utf-8',
+      );
 
       console.log('Static insight generation completed successfully');
       return outputPath;
