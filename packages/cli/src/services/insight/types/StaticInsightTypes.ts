@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { QualitativeInsights } from './QualitativeInsightTypes.js';
+
 export interface UsageMetadata {
   input: number;
   output: number;
@@ -34,7 +36,11 @@ export interface InsightData {
   activeHours: { [hour: number]: number };
   latestActiveTime: string | null;
   achievements: AchievementData[];
-  facets?: SessionFacets[];
+  totalSessions?: number;
+  totalMessages?: number;
+  totalHours?: number;
+  topTools?: Array<[string, number]>;
+  qualitative?: QualitativeInsights;
 }
 
 export interface StreakData {
