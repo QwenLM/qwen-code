@@ -12,7 +12,10 @@ import { createRoot } from 'react-dom/client';
 import { act } from 'react-dom/test-utils';
 import { fireEvent } from '@testing-library/dom';
 import { PermissionDrawer } from './PermissionDrawer.js';
-import type { PermissionOption, ToolCall } from './PermissionRequest.js';
+import type {
+  PermissionOption,
+  PermissionToolCall,
+} from './PermissionDrawer.js';
 
 const render = (ui: React.ReactElement) => {
   const container = document.createElement('div');
@@ -37,7 +40,7 @@ const baseOptions: PermissionOption[] = [
   { name: 'Reject', kind: 'reject', optionId: 'reject' },
 ];
 
-const baseToolCall: ToolCall = {
+const baseToolCall: PermissionToolCall = {
   kind: 'edit',
   title: 'Edit file',
   locations: [{ path: '/repo/src/file.ts' }],
