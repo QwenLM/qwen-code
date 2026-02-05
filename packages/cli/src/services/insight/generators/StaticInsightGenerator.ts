@@ -53,22 +53,6 @@ export class StaticInsightGenerator {
       // Write the HTML file
       console.log(`Writing HTML file to: ${outputPath}`);
       await fs.writeFile(outputPath, html, 'utf-8');
-
-      // Write the JSON data file
-      const jsonPath = path.join(outputDir, 'insight.json');
-      console.log(`Writing JSON data to: ${jsonPath}`);
-
-      // Exclude facets from the main JSON file as they are stored individually
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { facets, ...insightsWithoutFacets } = insights;
-
-      await fs.writeFile(
-        jsonPath,
-        JSON.stringify(insightsWithoutFacets, null, 2),
-        'utf-8',
-      );
-
-      console.log('Static insight generation completed successfully');
       return outputPath;
     } catch (error) {
       console.log(`Error generating static insight: ${error}`);
