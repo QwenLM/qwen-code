@@ -60,7 +60,12 @@ export const insightCommand: SlashCommand = {
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(os.homedir(), '.qwen', 'projects');
-      const insightGenerator = new StaticInsightGenerator();
+      if (!context.services.config) {
+        throw new Error('Config service is not available');
+      }
+      const insightGenerator = new StaticInsightGenerator(
+        context.services.config,
+      );
 
       context.ui.addItem(
         {
