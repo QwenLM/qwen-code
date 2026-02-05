@@ -12,9 +12,7 @@ import { VSCodePlatformProvider } from './context/VSCodePlatformProvider.js';
 import '@qwen-code/webui/styles.css';
 
 // VSCode-specific: Tailwind utilities + theme variables
-// eslint-disable-next-line import/no-internal-modules
 import './styles/tailwind.css';
-// eslint-disable-next-line import/no-internal-modules
 import './styles/App.css';
 
 const container = document.getElementById('root');
