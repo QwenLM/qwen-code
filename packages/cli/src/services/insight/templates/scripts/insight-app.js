@@ -17,14 +17,381 @@ function InsightApp({ data }) {
 
   return (
     <div>
+      {data.qualitative && (
+        <>
+          <AtAGlance qualitative={data.qualitative} />
+          <NavToc />
+        </>
+      )}
+
       <DashboardCards insights={data} />
+
+      {data.qualitative && (
+        <>
+          <ProjectAreas qualitative={data.qualitative} />
+        </>
+      )}
+
       <HeatmapSection heatmap={data.heatmap} />
+
+      {data.qualitative && (
+        <>
+          <InteractionStyle qualitative={data.qualitative} />
+        </>
+      )}
+
       <TokenUsageSection tokenUsage={data.tokenUsage} />
       <AchievementsSection achievements={data.achievements} />
+
+      {data.qualitative && (
+        <>
+          <ImpressiveWorkflows qualitative={data.qualitative} />
+          <FrictionPoints qualitative={data.qualitative} />
+          <Improvements qualitative={data.qualitative} />
+          <FutureOpportunities qualitative={data.qualitative} />
+          <MemorableMoment qualitative={data.qualitative} />
+        </>
+      )}
+
       <ExportButton />
     </div>
   );
 }
+
+// -----------------------------------------------------------------------------
+// Qualitative Insight Components
+// -----------------------------------------------------------------------------
+
+function AtAGlance({ qualitative }) {
+  const { atAGlance } = qualitative;
+  if (!atAGlance) return null;
+
+  return (
+    <div className="at-a-glance">
+      <div className="glance-title">At a Glance</div>
+      <div className="glance-sections">
+        <div className="glance-section">
+          <strong>What&apos;s working:</strong> {atAGlance.whats_working}
+          <a href="#section-wins" className="see-more">
+            Impressive Things You Did →
+          </a>
+        </div>
+        <div className="glance-section">
+          <strong>What&apos;s hindering you:</strong>{' '}
+          {atAGlance.whats_hindering}
+          <a href="#section-friction" className="see-more">
+            Where Things Go Wrong →
+          </a>
+        </div>
+        <div className="glance-section">
+          <strong>Quick wins to try:</strong> {atAGlance.quick_wins}
+          <a href="#section-features" className="see-more">
+            Features to Try →
+          </a>
+        </div>
+        <div className="glance-section">
+          <strong>Ambitious workflows:</strong> {atAGlance.ambitious_workflows}
+          <a href="#section-horizon" className="see-more">
+            On the Horizon →
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NavToc() {
+  return (
+    <nav className="nav-toc">
+      <a href="#section-work">What You Work On</a>
+      <a href="#section-usage">How You Use QC</a>
+      <a href="#section-wins">Impressive Things</a>
+      <a href="#section-friction">Where Things Go Wrong</a>
+      <a href="#section-features">Features to Try</a>
+      <a href="#section-patterns">New Usage Patterns</a>
+      <a href="#section-horizon">On the Horizon</a>
+      <a href="#section-feedback">Team Feedback</a>
+    </nav>
+  );
+}
+
+function ProjectAreas({ qualitative }) {
+  const { projectAreas } = qualitative;
+  if (!projectAreas?.areas?.length) return null;
+
+  return (
+    <>
+      <h2
+        id="section-work"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        What You Work On
+      </h2>
+      <div className="project-areas">
+        {projectAreas.areas.map((area, idx) => (
+          <div key={idx} className="project-area">
+            <div className="area-header">
+              <span className="area-name">{area.name}</span>
+              <span className="area-count">~{area.session_count} sessions</span>
+            </div>
+            <div className="area-desc">{area.description}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function InteractionStyle({ qualitative }) {
+  const { interactionStyle } = qualitative;
+  if (!interactionStyle) return null;
+
+  return (
+    <>
+      <h2
+        id="section-usage"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        How You Use Qwen Code
+      </h2>
+      <div className="narrative">
+        <p>{interactionStyle.narrative}</p>
+        {interactionStyle.key_pattern && (
+          <div className="key-insight">
+            <strong>Key pattern:</strong> {interactionStyle.key_pattern}
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
+function ImpressiveWorkflows({ qualitative }) {
+  const { impressiveWorkflows } = qualitative;
+  if (!impressiveWorkflows) return null;
+
+  return (
+    <>
+      <h2
+        id="section-wins"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        Impressive Things You Did
+      </h2>
+      {impressiveWorkflows.intro && (
+        <p className="section-intro">{impressiveWorkflows.intro}</p>
+      )}
+      <div className="big-wins">
+        {impressiveWorkflows.impressive_workflows?.map((win, idx) => (
+          <div key={idx} className="big-win">
+            <div className="big-win-title">{win.title}</div>
+            <div className="big-win-desc">{win.description}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function FrictionPoints({ qualitative }) {
+  const { frictionPoints } = qualitative;
+  if (!frictionPoints) return null;
+
+  return (
+    <>
+      <h2
+        id="section-friction"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        Where Things Go Wrong
+      </h2>
+      {frictionPoints.intro && (
+        <p className="section-intro">{frictionPoints.intro}</p>
+      )}
+      <div className="friction-categories">
+        {frictionPoints.categories?.map((cat, idx) => (
+          <div key={idx} className="friction-category">
+            <div className="friction-title">{cat.category}</div>
+            <div className="friction-desc">{cat.description}</div>
+            {cat.examples?.length > 0 && (
+              <ul className="friction-examples">
+                {cat.examples.map((ex, i) => (
+                  <li key={i}>{ex}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function CopyButton({ text, label = 'Copy' }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <button className="copy-btn" onClick={handleCopy}>
+      {copied ? 'Copied!' : label}
+    </button>
+  );
+}
+
+function Improvements({ qualitative }) {
+  const { improvements } = qualitative;
+  if (!improvements) return null;
+
+  return (
+    <>
+      <h2
+        id="section-features"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        Existing QC Features to Try
+      </h2>
+
+      {/* Qwen.md Additions */}
+      {improvements.Qwen_md_additions?.length > 0 && (
+        <div className="Qwen-md-section">
+          <h3>Suggested Qwen.md Additions</h3>
+          <p className="text-xs text-slate-500 mb-3">
+            Just copy this into Qwen Code to add it to your Qwen.md.
+          </p>
+
+          <div className="Qwen-md-actions">
+            {/* Note: "Copy All" would require tracking state of all checkboxes, keeping it simple for now */}
+          </div>
+
+          {improvements.Qwen_md_additions.map((item, idx) => (
+            <div key={idx} className="Qwen-md-item">
+              <input type="checkbox" defaultChecked className="cmd-checkbox" />
+              <div style={{ flex: 1 }}>
+                <code className="cmd-code">{item.addition}</code>
+                <div className="cmd-why">{item.why}</div>
+              </div>
+              <CopyButton text={item.addition} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Features to Try */}
+      <div className="features-section">
+        {improvements.features_to_try?.map((feat, idx) => (
+          <div key={idx} className="feature-card">
+            <div className="feature-title">{feat.feature}</div>
+            <div className="feature-oneliner">{feat.one_liner}</div>
+            <div className="feature-why">
+              <strong>Why for you:</strong> {feat.why_for_you}
+            </div>
+            <div className="feature-examples">
+              <div className="feature-example">
+                <div className="example-code-row">
+                  <code className="example-code">{feat.example_code}</code>
+                  <CopyButton text={feat.example_code} />
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <h2
+        id="section-patterns"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        New Ways to Use Qwen Code
+      </h2>
+      <p className="text-xs text-slate-500 mb-3">
+        Just copy this into Qwen Code and it&apos;ll walk you through it.
+      </p>
+
+      <div className="patterns-section">
+        {improvements.usage_patterns?.map((pat, idx) => (
+          <div key={idx} className="pattern-card">
+            <div className="pattern-title">{pat.title}</div>
+            <div className="pattern-summary">{pat.suggestion}</div>
+            <div className="pattern-detail">{pat.detail}</div>
+            <div className="copyable-prompt-section">
+              <div className="prompt-label">Paste into Qwen Code:</div>
+              <div className="copyable-prompt-row">
+                <code className="copyable-prompt">{pat.copyable_prompt}</code>
+                <CopyButton text={pat.copyable_prompt} />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function FutureOpportunities({ qualitative }) {
+  const { futureOpportunities } = qualitative;
+  if (!futureOpportunities) return null;
+
+  return (
+    <>
+      <h2
+        id="section-horizon"
+        className="text-xl font-semibold text-slate-900 mt-8 mb-4"
+      >
+        On the Horizon
+      </h2>
+      {futureOpportunities.intro && (
+        <p className="section-intro">{futureOpportunities.intro}</p>
+      )}
+
+      <div className="horizon-section">
+        {futureOpportunities.opportunities?.map((opp, idx) => (
+          <div key={idx} className="horizon-card">
+            <div className="horizon-title">{opp.title}</div>
+            <div className="horizon-possible">{opp.whats_possible}</div>
+            <div className="horizon-tip">
+              <strong>Getting started:</strong> {opp.how_to_try}
+            </div>
+            <div className="pattern-prompt">
+              <div className="prompt-label">Paste into Qwen Code:</div>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: '8px',
+                }}
+              >
+                <code style={{ flex: 1 }}>{opp.copyable_prompt}</code>
+                <CopyButton text={opp.copyable_prompt} />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function MemorableMoment({ qualitative }) {
+  const { memorableMoment } = qualitative;
+  if (!memorableMoment) return null;
+
+  return (
+    <div className="fun-ending">
+      <div className="fun-headline">&quot;{memorableMoment.headline}&quot;</div>
+      <div className="fun-detail">{memorableMoment.detail}</div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Existing Components
+// -----------------------------------------------------------------------------
 
 // Dashboard Cards Component
 function DashboardCards({ insights }) {
