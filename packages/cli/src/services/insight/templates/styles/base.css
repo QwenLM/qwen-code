@@ -1037,3 +1037,32 @@ body {
   font-size: 14px;
   color: #92400e;
 }
+
+/* Stats Row Styles */
+.stats-row {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 40px;
+  padding: 20px 0;
+  border-top: 1px solid #e2e8f0;
+  border-bottom: 1px solid #e2e8f0;
+  flex-wrap: wrap;
+}
+.stat {
+  text-align: center;
+}
+.stat-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: #0f172a;
+}
+.stat-label {
+  font-size: 11px;
+  color: #64748b;
+  text-transform: uppercase;
+}
+@media (max-width: 640px) {
+  .stats-row {
+    justify-content: center;
+  }
+}

@@ -39,6 +39,9 @@ export interface InsightData {
   totalSessions?: number;
   totalMessages?: number;
   totalHours?: number;
+  totalLinesAdded?: number;
+  totalLinesRemoved?: number;
+  totalFiles?: number;
   topTools?: Array<[string, number]>;
   qualitative?: QualitativeInsights;
 }
