@@ -75,7 +75,7 @@ const commandExists = (cmd) => {
     // This works in both cmd.exe and PowerShell environments
     try {
       execSync(
-        `powershell -NoProfile -Command "Get-Command ${cmd} -ErrorAction SilentlyContinue"`,
+        `powershell -NoProfile -Command "if (Get-Command ${cmd} -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"`,
         { stdio: 'ignore' },
       );
       return true;
