@@ -6,6 +6,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { AsyncFzf } from 'fzf';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import {
   CommandKind,
@@ -29,13 +30,15 @@ interface FzfCommandCacheEntry {
   commandMap: Map<string, SlashCommand>;
 }
 
+const debugLogger = createDebugLogger('SLASH_COMPLETION');
+
 // Utility function to safely handle errors without information disclosure
 function logErrorSafely(error: unknown, context: string): void {
   if (error instanceof Error) {
     // Log full error details securely for debugging
-    console.error(`[${context}]`, error);
+    debugLogger.error(`[${context}]`, error);
   } else {
-    console.error(`[${context}] Non-error thrown:`, error);
+    debugLogger.error(`[${context}] Non-error thrown:`, error);
   }
 }
 
@@ -190,7 +193,7 @@ function useCommandSuggestions(
 
         // Safety check: ensure leafCommand and completion exist
         if (!leafCommand?.completion) {
-          console.warn(
+          debugLogger.warn(
             'Attempted argument completion without completion function',
           );
           return;

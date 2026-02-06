@@ -206,7 +206,6 @@ describe('Server Config (config.ts)', () => {
   const TARGET_DIR = '/path/to/target';
   const DEBUG_MODE = false;
   const QUESTION = 'test question';
-  const FULL_CONTEXT = false;
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
@@ -217,7 +216,6 @@ describe('Server Config (config.ts)', () => {
     targetDir: TARGET_DIR,
     debugMode: DEBUG_MODE,
     question: QUESTION,
-    fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
@@ -1266,7 +1264,6 @@ describe('BaseLlmClient Lifecycle', () => {
   const TARGET_DIR = '/path/to/target';
   const DEBUG_MODE = false;
   const QUESTION = 'test question';
-  const FULL_CONTEXT = false;
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
@@ -1277,7 +1274,6 @@ describe('BaseLlmClient Lifecycle', () => {
     targetDir: TARGET_DIR,
     debugMode: DEBUG_MODE,
     question: QUESTION,
-    fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
@@ -1337,7 +1333,7 @@ describe('Model Switching and Config Updates', () => {
       ['apiKey']: 'test-key',
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
-      ['disableCacheControl']: false,
+      ['enableCacheControl']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -1362,7 +1358,7 @@ describe('Model Switching and Config Updates', () => {
       ['apiKey']: 'test-key',
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
-      ['disableCacheControl']: true,
+      ['enableCacheControl']: false,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -1371,7 +1367,7 @@ describe('Model Switching and Config Updates', () => {
         model: { kind: 'programmatic', detail: 'user' },
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
-        disableCacheControl: { kind: 'settings' },
+        enableCacheControl: { kind: 'settings' },
       },
     });
 
@@ -1390,7 +1386,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['model']).toBe('qwen-max');
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
-    expect(updatedConfig['disableCacheControl']).toBe(true);
+    expect(updatedConfig['enableCacheControl']).toBe(false);
 
     // Verify sources are also updated
     const sources = config.getContentGeneratorConfigSources();
@@ -1399,7 +1395,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.kind).toBe('computed');
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
-    expect(sources['disableCacheControl']?.kind).toBe('settings');
+    expect(sources['enableCacheControl']?.kind).toBe('settings');
   });
 
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {

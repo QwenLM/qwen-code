@@ -8,6 +8,9 @@ import * as cp from 'node:child_process';
 import * as net from 'node:net';
 import { DEFAULT_LSP_REQUEST_TIMEOUT_MS } from './constants.js';
 import type { JsonRpcMessage } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LSP');
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -375,7 +378,7 @@ export class LspConnectionFactory {
       try {
         await lspConnection.connection.shutdown();
       } catch (e) {
-        console.warn('LSP shutdown failed:', e);
+        debugLogger.warn('LSP shutdown failed:', e);
       } finally {
         lspConnection.connection.end();
       }

@@ -18,6 +18,7 @@ import {
   InputFormat,
   uiTelemetryService,
   parseAndFormatApiError,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -34,6 +35,8 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -145,9 +148,7 @@ export async function runNonInteractive(
 
     // Setup signal handlers for graceful shutdown
     const shutdownHandler = () => {
-      if (config.getDebugMode()) {
-        console.error('[runNonInteractive] Shutdown signal received');
-      }
+      debugLogger.debug('[runNonInteractive] Shutdown signal received');
       abortController.abort();
     };
 
@@ -224,7 +225,6 @@ export async function runNonInteractive(
           const { processedQuery, shouldProceed } = await handleAtCommand({
             query: input,
             config,
-            addItem: (_item, _timestamp) => 0,
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
@@ -409,7 +409,7 @@ export async function runNonInteractive(
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);
       if (isTelemetrySdkInitialized()) {
-        await shutdownTelemetry(config);
+        await shutdownTelemetry();
       }
     }
   });

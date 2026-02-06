@@ -6,7 +6,6 @@
 
 import type React from 'react';
 import { Box } from 'ink';
-import { Notifications } from '../components/Notifications.js';
 import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
@@ -23,8 +22,6 @@ export const DefaultAppLayout: React.FC = () => {
       <MainContent />
 
       <Box flexDirection="column" ref={uiState.mainControlsRef}>
-        <Notifications />
-
         {uiState.dialogsVisible ? (
           <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
             <DialogManager

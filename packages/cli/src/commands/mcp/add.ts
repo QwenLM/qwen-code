@@ -7,6 +7,7 @@
 // File for 'gemini mcp add' command
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 
 async function addMcpServer(
@@ -41,7 +42,7 @@ async function addMcpServer(
   const inHome = settings.workspace.path === settings.user.path;
 
   if (scope === 'project' && inHome) {
-    console.error(
+    writeStderrLine(
       'Error: Please use --scope user to edit settings in the home directory.',
     );
     process.exit(1);
@@ -116,7 +117,7 @@ async function addMcpServer(
 
   const isExistingServer = !!mcpServers[name];
   if (isExistingServer) {
-    console.log(
+    writeStdoutLine(
       `MCP server "${name}" is already configured within ${scope} settings.`,
     );
   }
@@ -126,9 +127,9 @@ async function addMcpServer(
   settings.setValue(settingsScope, 'mcpServers', mcpServers);
 
   if (isExistingServer) {
-    console.log(`MCP server "${name}" updated in ${scope} settings.`);
+    writeStdoutLine(`MCP server "${name}" updated in ${scope} settings.`);
   } else {
-    console.log(
+    writeStdoutLine(
       `MCP server "${name}" added to ${scope} settings. (${transport})`,
     );
   }

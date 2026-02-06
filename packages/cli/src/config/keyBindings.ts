@@ -45,7 +45,6 @@ export enum Command {
   PASTE_CLIPBOARD_IMAGE = 'pasteClipboardImage',
 
   // App level bindings
-  SHOW_ERROR_DETAILS = 'showErrorDetails',
   TOGGLE_TOOL_DESCRIPTIONS = 'toggleToolDescriptions',
   TOGGLE_IDE_CONTEXT_DETAIL = 'toggleIDEContextDetail',
   QUIT = 'quit',
@@ -156,7 +155,6 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.PASTE_CLIPBOARD_IMAGE]: [{ key: 'v', ctrl: true }],
 
   // App level bindings
-  [Command.SHOW_ERROR_DETAILS]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
   [Command.QUIT]: [{ key: 'c', ctrl: true }],

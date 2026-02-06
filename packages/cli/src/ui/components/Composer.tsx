@@ -5,15 +5,12 @@
  */
 
 import { Box, useIsScreenReaderEnabled } from 'ink';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
-import { DetailedMessagesDisplay } from './DetailedMessagesDisplay.js';
-import { InputPrompt, calculatePromptWidths } from './InputPrompt.js';
+import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
-import { ShowMoreLines } from './ShowMoreLines.js';
 import { QueuedMessageDisplay } from './QueuedMessageDisplay.js';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
-import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
@@ -29,8 +26,6 @@ export const Composer = () => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
-  const terminalWidth = process.stdout.columns;
-  const debugConsoleMaxHeight = Math.floor(Math.max(terminalWidth * 0.2, 5));
 
   const { showAutoAcceptIndicator } = uiState;
 
@@ -46,24 +41,20 @@ export const Composer = () => {
     setShowSuggestions(visible);
   }, []);
 
-  // Use the container width of InputPrompt for width of DetailedMessagesDisplay
-  const { containerWidth } = useMemo(
-    () => calculatePromptWidths(uiState.terminalWidth),
-    [uiState.terminalWidth],
-  );
-
   return (
     <Box flexDirection="column" marginTop={1}>
       {!uiState.embeddedShellFocused && (
         <LoadingIndicator
+          // Hide loading phrases when enableLoadingPhrases is explicitly false.
+          // Using === false ensures phrases show by default when undefined.
           thought={
             uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.disableLoadingPhrases
+            config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.thought
           }
           currentLoadingPhrase={
-            config.getAccessibility()?.disableLoadingPhrases
+            config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.currentLoadingPhrase
           }
@@ -74,21 +65,6 @@ export const Composer = () => {
       {!uiState.isConfigInitialized && <ConfigInitDisplay />}
 
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
-
-      {uiState.showErrorDetails && (
-        <OverflowProvider>
-          <Box flexDirection="column">
-            <DetailedMessagesDisplay
-              messages={uiState.filteredConsoleMessages}
-              maxHeight={
-                uiState.constrainHeight ? debugConsoleMaxHeight : undefined
-              }
-              width={containerWidth}
-            />
-            <ShowMoreLines constrainHeight={uiState.constrainHeight} />
-          </Box>
-        </OverflowProvider>
-      )}
 
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
 

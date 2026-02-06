@@ -41,6 +41,9 @@ import {
   isCommandNeedsPermission,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
@@ -271,7 +274,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             .filter(Boolean);
           for (const line of pgrepLines) {
             if (!/^\d+$/.test(line)) {
-              console.error(`pgrep: ${line}`);
+              debugLogger.warn(`pgrep: ${line}`);
             }
             const pid = Number(line);
             if (pid !== result.pid) {
@@ -280,7 +283,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           }
         } else {
           if (!signal.aborted) {
-            console.error('missing pgrep output');
+            debugLogger.warn('missing pgrep output');
           }
         }
       }
@@ -372,6 +375,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             },
           }
         : {};
+
       if (summarizeConfig && summarizeConfig[ShellTool.Name]) {
         const summary = await summarizeToolOutput(
           llmContent,
@@ -543,7 +547,7 @@ export class ShellTool extends BaseDeclarativeTool<
           is_background: {
             type: 'boolean',
             description:
-              'Whether to run the command in background. Default is false. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
+              'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
           },
           timeout: {
             type: 'number',
@@ -560,7 +564,7 @@ export class ShellTool extends BaseDeclarativeTool<
               '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
           },
         },
-        required: ['command', 'is_background'],
+        required: ['command'],
       },
       false, // output is not markdown
       true, // output can be updated
@@ -573,7 +577,7 @@ export class ShellTool extends BaseDeclarativeTool<
     const commandCheck = isCommandAllowed(params.command, this.config);
     if (!commandCheck.allowed) {
       if (!commandCheck.reason) {
-        console.error(
+        debugLogger.error(
           'Unexpected: isCommandAllowed returned false without a reason',
         );
         return `Command is not allowed: ${params.command}`;

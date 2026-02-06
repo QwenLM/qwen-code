@@ -266,6 +266,7 @@ export async function parseInstallSource(
   if (marketplaceConfig) {
     installMetadata.type = 'marketplace';
     installMetadata.marketplaceConfig = marketplaceConfig;
+    installMetadata.originSource = 'Claude';
   }
 
   return installMetadata;

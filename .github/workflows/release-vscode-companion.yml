@@ -18,7 +18,7 @@ on:
         type: 'boolean'
         default: true
       create_preview_release:
-        description: 'Auto apply the preview release tag, input version is ignored.'
+        description: 'Create a preview release. If version includes -preview.<id>, it is used as-is; otherwise a timestamp is appended.'
         required: false
         type: 'boolean'
         default: false
@@ -95,10 +95,24 @@ jobs:
           BASE_VERSION=$(node -p "require('./package.json').version")
 
           if [[ "${IS_PREVIEW}" == "true" ]]; then
-            # Generate preview version with timestamp based on actual package version
-            TIMESTAMP=$(date +%Y%m%d%H%M%S)
-            PREVIEW_VERSION="${BASE_VERSION}-preview.${TIMESTAMP}"
-            RELEASE_TAG="preview.${TIMESTAMP}"
+            # Generate preview version. If a manual version is provided and already
+            # contains -preview.<id>, use it as-is (no timestamp). Otherwise, append
+            # a timestamp for uniqueness.
+            if [[ -n "${MANUAL_VERSION}" ]]; then
+              MANUAL_CLEAN="${MANUAL_VERSION#v}" # Remove 'v' prefix if present
+              if [[ "${MANUAL_CLEAN}" == *"-preview."* ]]; then
+                PREVIEW_VERSION="${MANUAL_CLEAN}"
+              else
+                PREVIEW_BASE="${MANUAL_CLEAN%%-*}" # Strip any prerelease/build
+                TIMESTAMP=$(date +%Y%m%d%H%M%S)
+                PREVIEW_VERSION="${PREVIEW_BASE}-preview.${TIMESTAMP}"
+              fi
+            else
+              TIMESTAMP=$(date +%Y%m%d%H%M%S)
+              PREVIEW_VERSION="${BASE_VERSION}-preview.${TIMESTAMP}"
+            fi
+
+            RELEASE_TAG="${PREVIEW_VERSION}"
 
             echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
             echo "RELEASE_VERSION=${PREVIEW_VERSION}" >> "$GITHUB_OUTPUT"
@@ -121,14 +135,11 @@ jobs:
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           MANUAL_VERSION: '${{ inputs.version }}'
 
-      - name: 'Update package version (for preview releases)'
-        if: '${{ steps.vars.outputs.is_preview == ''true'' }}'
-        working-directory: 'packages/vscode-ide-companion'
-        env:
-          RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
-        run: |-
-          # Update package.json with preview version
-          npm version "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
+      - name: 'Build webui dependency'
+        if: |-
+          ${{ github.event.inputs.force_skip_tests != 'true' }}
+        run: |
+          npm run build --workspace=@qwen-code/webui
 
       - name: 'Run Tests'
         if: |-
@@ -171,11 +182,11 @@ jobs:
           VSCE_PAT: '${{ secrets.VSCE_PAT }}'
           VSCODE_TAG: '${{ steps.version.outputs.VSCODE_TAG }}'
         run: |-
-          if [[ "${{ steps.vars.outputs.is_preview }}" == "true" ]]; then
-            echo "Skipping Microsoft Marketplace for preview release"
-          else
-            vsce publish --pat "${VSCE_PAT}" --tag "${VSCODE_TAG}"
-          fi
+          echo "Publishing to Microsoft Marketplace..."
+          for vsix in vsix-artifacts/*.vsix; do
+            echo "Publishing: ${vsix}"
+            vsce publish --packagePath "${vsix}" --pat "${VSCE_PAT}" --skip-duplicate
+          done
 
       - name: 'Publish to OpenVSX'
         if: '${{ steps.vars.outputs.is_dry_run == ''false'' }}'

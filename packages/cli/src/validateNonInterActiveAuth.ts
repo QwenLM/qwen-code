@@ -11,6 +11,7 @@ import { type LoadedSettings } from './config/settings.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import { runExitCleanup } from './utils/cleanup.js';
+import { writeStderrLine } from './utils/stdioHelpers.js';
 
 export async function validateNonInteractiveAuth(
   useExternalAuth: boolean | undefined,
@@ -76,7 +77,7 @@ export async function validateNonInteractiveAuth(
     }
 
     // For other modes (text), use existing error handling
-    console.error(error instanceof Error ? error.message : String(error));
+    writeStderrLine(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 }

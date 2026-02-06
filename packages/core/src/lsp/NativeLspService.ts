@@ -40,6 +40,9 @@ import type {
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import * as fs from 'node:fs';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LSP');
 
 export class NativeLspService {
   private config: CoreConfig;
@@ -93,7 +96,9 @@ export class NativeLspService {
 
     // Check if workspace is trusted
     if (this.requireTrustedWorkspace && !workspaceTrusted) {
-      console.log('Workspace is not trusted, skipping LSP server discovery');
+      debugLogger.warn(
+        'Workspace is not trusted, skipping LSP server discovery',
+      );
       return;
     }
 
@@ -217,7 +222,10 @@ export class NativeLspService {
           }
         }
       } catch (error) {
-        console.warn(`LSP workspace/symbol failed for ${serverName}:`, error);
+        debugLogger.warn(
+          `LSP workspace/symbol failed for ${serverName}:`,
+          error,
+        );
       }
     }
 
@@ -263,7 +271,10 @@ export class NativeLspService {
           return definitions.slice(0, limit);
         }
       } catch (error) {
-        console.warn(`LSP textDocument/definition failed for ${name}:`, error);
+        debugLogger.warn(
+          `LSP textDocument/definition failed for ${name}:`,
+          error,
+        );
       }
     }
 
@@ -309,7 +320,10 @@ export class NativeLspService {
           return refs.slice(0, limit);
         }
       } catch (error) {
-        console.warn(`LSP textDocument/references failed for ${name}:`, error);
+        debugLogger.warn(
+          `LSP textDocument/references failed for ${name}:`,
+          error,
+        );
       }
     }
 
@@ -337,7 +351,7 @@ export class NativeLspService {
           return normalized;
         }
       } catch (error) {
-        console.warn(`LSP textDocument/hover failed for ${name}:`, error);
+        debugLogger.warn(`LSP textDocument/hover failed for ${name}:`, error);
       }
     }
 
@@ -397,7 +411,7 @@ export class NativeLspService {
           return symbols.slice(0, limit);
         }
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `LSP textDocument/documentSymbol failed for ${name}:`,
           error,
         );
@@ -449,7 +463,7 @@ export class NativeLspService {
           return implementations.slice(0, limit);
         }
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `LSP textDocument/implementation failed for ${name}:`,
           error,
         );
@@ -501,7 +515,7 @@ export class NativeLspService {
           return items.slice(0, limit);
         }
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `LSP textDocument/prepareCallHierarchy failed for ${name}:`,
           error,
         );
@@ -548,7 +562,7 @@ export class NativeLspService {
           return calls.slice(0, limit);
         }
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `LSP callHierarchy/incomingCalls failed for ${name}:`,
           error,
         );
@@ -595,7 +609,7 @@ export class NativeLspService {
           return calls.slice(0, limit);
         }
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `LSP callHierarchy/outgoingCalls failed for ${name}:`,
           error,
         );
@@ -645,7 +659,10 @@ export class NativeLspService {
       } catch (error) {
         // Fall back to cached diagnostics from publishDiagnostics notifications
         // This is handled by the notification handler if implemented
-        console.warn(`LSP textDocument/diagnostic failed for ${name}:`, error);
+        debugLogger.warn(
+          `LSP textDocument/diagnostic failed for ${name}:`,
+          error,
+        );
       }
     }
 
@@ -693,7 +710,7 @@ export class NativeLspService {
           }
         }
       } catch (error) {
-        console.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+        debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
       }
 
       if (results.length >= limit) {
@@ -760,7 +777,10 @@ export class NativeLspService {
           return actions.slice(0, limit);
         }
       } catch (error) {
-        console.warn(`LSP textDocument/codeAction failed for ${name}:`, error);
+        debugLogger.warn(
+          `LSP textDocument/codeAction failed for ${name}:`,
+          error,
+        );
       }
     }
 
@@ -794,7 +814,7 @@ export class NativeLspService {
 
       return true;
     } catch (error) {
-      console.error('Failed to apply workspace edit:', error);
+      debugLogger.error('Failed to apply workspace edit:', error);
       return false;
     }
   }

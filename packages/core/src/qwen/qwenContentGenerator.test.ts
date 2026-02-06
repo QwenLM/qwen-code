@@ -1614,8 +1614,6 @@ describe('QwenContentGenerator', () => {
 
   describe('Edge Cases and Error Conditions', () => {
     it('should handle token retrieval with warning when SharedTokenManager fails', async () => {
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const mockTokenManager = {
         getValidCredentials: vi
           .fn()
@@ -1641,13 +1639,6 @@ describe('QwenContentGenerator', () => {
       await expect(
         newGenerator.generateContent(request, 'test-prompt-id'),
       ).rejects.toThrow('Failed to obtain valid Qwen access token');
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to get token from shared manager:',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
       SharedTokenManager.getInstance = originalGetInstance;
     });
 

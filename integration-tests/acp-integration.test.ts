@@ -146,7 +146,9 @@ function setupAcpTest(
     clearTimeout(waiter.timeout);
     pending.delete(msg.id);
     if (msg.error) {
-      waiter.reject(new Error(msg.error.message ?? 'Unknown error'));
+      const error = new Error(msg.error.message ?? 'Unknown error');
+      (error as Error & { response?: unknown }).response = msg.error;
+      waiter.reject(error);
     } else {
       waiter.resolve(msg.result);
     }
@@ -399,14 +401,67 @@ function setupAcpTest(
       expect(setModeResult3).toBeDefined();
       expect(setModeResult3.modeId).toBe('default');
 
-      // Test 7: Set model using first available model
-      const firstModel = newSession.models.availableModels[0];
+      // Test 7: Set model using openai model instead of first available model (index=0) which could be qwen-oauth requiring login
+      const openaiModel = newSession.models.availableModels.find((model) =>
+        model.modelId.includes('openai'),
+      );
+      expect(openaiModel).toBeDefined();
       const setModelResult = (await sendRequest('session/set_model', {
         sessionId: newSession.sessionId,
-        modelId: firstModel.modelId,
+        modelId: openaiModel!.modelId,
       })) as { modelId: string };
       expect(setModelResult).toBeDefined();
       expect(setModelResult.modelId).toBeTruthy();
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('includes authMethods in error data when auth is required', async () => {
+    const rig = new TestRig();
+    rig.setup('acp auth methods in error data');
+
+    const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+
+      // Create a new session first
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as {
+        sessionId: string;
+        models: {
+          availableModels: Array<{ modelId: string }>;
+        };
+      };
+
+      // Attempt to set the first model (which might be qwen-oauth requiring login) without authenticating
+      // This should trigger an auth error with authMethods in the response
+      const firstModel = newSession.models.availableModels[0];
+      await expect(
+        sendRequest('session/set_model', {
+          sessionId: newSession.sessionId,
+          modelId: firstModel.modelId,
+        }),
+      ).rejects.toMatchObject({
+        response: {
+          data: {
+            authMethods: expect.any(Array),
+          },
+        },
+      });
     } catch (e) {
       if (stderr.length) {
         console.error('Agent stderr:', stderr.join(''));

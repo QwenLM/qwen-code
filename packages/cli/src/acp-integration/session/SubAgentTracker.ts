@@ -18,12 +18,15 @@ import type {
 import {
   SubAgentEventType,
   ToolConfirmationOutcome,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 import type { SessionContext } from './types.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type * as acp from '../acp.js';
+
+const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 
 /**
  * Permission option kind type matching ACP schema.
@@ -151,7 +154,7 @@ export class SubAgentTracker {
           invocation = tool.build(event.args);
         } catch (e) {
           // If building fails, continue with defaults
-          console.warn(`Failed to build subagent tool ${event.name}:`, e);
+          debugLogger.warn(`Failed to build subagent tool ${event.name}:`, e);
         }
       }
 
@@ -268,7 +271,7 @@ export class SubAgentTracker {
         await event.respond(outcome);
       } catch (error) {
         // If permission request fails, cancel the tool call
-        console.error(
+        debugLogger.error(
           `Permission request failed for subagent tool ${event.name}:`,
           error,
         );

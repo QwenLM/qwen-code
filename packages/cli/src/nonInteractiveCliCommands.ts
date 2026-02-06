@@ -10,6 +10,7 @@ import {
   Logger,
   uiTelemetryService,
   type Config,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
@@ -24,6 +25,8 @@ import { createNonInteractiveUI } from './ui/noninteractive/nonInteractiveUi.js'
 import type { LoadedSettings } from './config/settings.js';
 import type { SessionStatsState } from './ui/contexts/SessionContext.js';
 import { t } from './i18n/index.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
 
 /**
  * Built-in commands that are allowed in non-interactive modes (CLI and ACP).
@@ -377,7 +380,7 @@ export const getAvailableCommands = async (
     return filteredCommands.filter((cmd) => !cmd.hidden);
   } catch (error) {
     // Handle errors gracefully - log and return empty array
-    console.error('Error loading available commands:', error);
+    debugLogger.error('Error loading available commands:', error);
     return [];
   }
 };

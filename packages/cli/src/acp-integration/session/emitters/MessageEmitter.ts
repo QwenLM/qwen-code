@@ -18,31 +18,55 @@ import { BaseEmitter } from './BaseEmitter.js';
 export class MessageEmitter extends BaseEmitter {
   /**
    * Emits a user message chunk.
+   *
+   * @param text - The user message text content
+   * @param timestamp - Optional server-side timestamp (ISO string or ms) for message ordering
    */
-  async emitUserMessage(text: string): Promise<void> {
+  async emitUserMessage(
+    text: string,
+    timestamp?: string | number,
+  ): Promise<void> {
+    const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text },
+      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
     });
   }
 
   /**
    * Emits an agent thought chunk.
+   *
+   * @param text - The thought text content
+   * @param timestamp - Optional server-side timestamp (ISO string or ms) for message ordering
    */
-  async emitAgentThought(text: string): Promise<void> {
+  async emitAgentThought(
+    text: string,
+    timestamp?: string | number,
+  ): Promise<void> {
+    const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text },
+      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
     });
   }
 
   /**
    * Emits an agent message chunk.
+   *
+   * @param text - The agent message text content
+   * @param timestamp - Optional server-side timestamp (ISO string or ms) for message ordering
    */
-  async emitAgentMessage(text: string): Promise<void> {
+  async emitAgentMessage(
+    text: string,
+    timestamp?: string | number,
+  ): Promise<void> {
+    const epochMs = BaseEmitter.toEpochMs(timestamp);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text },
+      ...(epochMs != null && { _meta: { timestamp: epochMs } }),
     });
   }
 
@@ -82,17 +106,19 @@ export class MessageEmitter extends BaseEmitter {
    * @param text - The message text content
    * @param role - Whether this is a user or assistant message
    * @param isThought - Whether this is an assistant thought (only applies to assistant role)
+   * @param timestamp - Optional server-side timestamp (ISO string or ms) for message ordering
    */
   async emitMessage(
     text: string,
     role: 'user' | 'assistant',
     isThought: boolean = false,
+    timestamp?: string | number,
   ): Promise<void> {
     if (role === 'user') {
-      return this.emitUserMessage(text);
+      return this.emitUserMessage(text, timestamp);
     }
     return isThought
-      ? this.emitAgentThought(text)
-      : this.emitAgentMessage(text);
+      ? this.emitAgentThought(text, timestamp)
+      : this.emitAgentMessage(text, timestamp);
   }
 }

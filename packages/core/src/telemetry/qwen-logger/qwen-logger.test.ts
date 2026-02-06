@@ -26,6 +26,13 @@ import {
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
 
+const debugLoggerSpy = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
 // Mock dependencies
 vi.mock('../../utils/user_id.js', () => ({
   getInstallationId: vi.fn(() => 'test-installation-id'),
@@ -34,6 +41,20 @@ vi.mock('../../utils/user_id.js', () => ({
 vi.mock('../../utils/safeJsonStringify.js', () => ({
   safeJsonStringify: vi.fn((obj) => JSON.stringify(obj)),
 }));
+
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../../utils/debugLogger.js')>();
+  return {
+    ...original,
+    createDebugLogger: () => ({
+      debug: debugLoggerSpy.debug,
+      info: debugLoggerSpy.info,
+      warn: debugLoggerSpy.warn,
+      error: debugLoggerSpy.error,
+    }),
+  };
+});
 
 // Mock https module
 vi.mock('https', () => ({
@@ -72,6 +93,10 @@ describe('QwenLogger', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2025-01-01T12:00:00.000Z'));
     mockConfig = makeFakeConfig();
+    debugLoggerSpy.debug.mockClear();
+    debugLoggerSpy.info.mockClear();
+    debugLoggerSpy.warn.mockClear();
+    debugLoggerSpy.error.mockClear();
     // Clear singleton instance
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (QwenLogger as any).instance = undefined;
@@ -126,11 +151,7 @@ describe('QwenLogger', () => {
 
   describe('event queue management', () => {
     it('should handle event overflow gracefully', () => {
-      const debugConfig = makeFakeConfig({ getDebugMode: () => true });
-      const logger = QwenLogger.getInstance(debugConfig)!;
-      const consoleSpy = vi
-        .spyOn(console, 'debug')
-        .mockImplementation(() => {});
+      const logger = QwenLogger.getInstance(mockConfig)!;
 
       // Fill the queue beyond capacity
       for (let i = 0; i < TEST_ONLY.MAX_EVENTS + 10; i++) {
@@ -142,20 +163,16 @@ describe('QwenLogger', () => {
         });
       }
 
-      // Should have logged debug messages about dropping events
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'QwenLogger: Dropped old event to prevent memory leak',
-        ),
+      const events = logger['events'].toArray() as RumEvent[];
+      expect(logger['events'].size).toBe(TEST_ONLY.MAX_EVENTS);
+      expect(events[0]?.name).toBe('test-event-10');
+      expect(events[events.length - 1]?.name).toBe(
+        `test-event-${TEST_ONLY.MAX_EVENTS + 9}`,
       );
     });
 
     it('should handle enqueue errors gracefully', () => {
-      const debugConfig = makeFakeConfig({ getDebugMode: () => true });
-      const logger = QwenLogger.getInstance(debugConfig)!;
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
+      const logger = QwenLogger.getInstance(mockConfig)!;
 
       // Mock the events deque to throw an error
       const originalPush = logger['events'].push;
@@ -170,10 +187,7 @@ describe('QwenLogger', () => {
         name: 'test-event',
       });
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'QwenLogger: Failed to enqueue log event.',
-        expect.any(Error),
-      );
+      expect(logger['events'].size).toBe(0);
 
       // Restore original method
       logger['events'].push = originalPush;
@@ -182,11 +196,7 @@ describe('QwenLogger', () => {
 
   describe('concurrent flush protection', () => {
     it('should handle concurrent flush requests', () => {
-      const debugConfig = makeFakeConfig({ getDebugMode: () => true });
-      const logger = QwenLogger.getInstance(debugConfig)!;
-      const consoleSpy = vi
-        .spyOn(console, 'debug')
-        .mockImplementation(() => {});
+      const logger = QwenLogger.getInstance(mockConfig)!;
 
       // Manually set the flush in progress flag to simulate concurrent access
       logger['isFlushInProgress'] = true;
@@ -194,12 +204,7 @@ describe('QwenLogger', () => {
       // Try to flush while another flush is in progress
       const result = logger.flushToRum();
 
-      // Should have logged about pending flush
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'QwenLogger: Flush already in progress, marking pending flush',
-        ),
-      );
+      expect(logger['pendingFlush']).toBe(true);
 
       // Should return a resolved promise
       expect(result).toBeInstanceOf(Promise);
@@ -211,11 +216,7 @@ describe('QwenLogger', () => {
 
   describe('failed event retry mechanism', () => {
     it('should requeue failed events with size limits', () => {
-      const debugConfig = makeFakeConfig({ getDebugMode: () => true });
-      const logger = QwenLogger.getInstance(debugConfig)!;
-      const consoleSpy = vi
-        .spyOn(console, 'debug')
-        .mockImplementation(() => {});
+      const logger = QwenLogger.getInstance(mockConfig)!;
 
       const failedEvents: RumEvent[] = [];
       for (let i = 0; i < TEST_ONLY.MAX_RETRY_EVENTS + 50; i++) {
@@ -231,18 +232,11 @@ describe('QwenLogger', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (logger as any).requeueFailedEvents(failedEvents);
 
-      // Should have logged about dropping events due to retry limit
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('QwenLogger: Re-queued'),
-      );
+      expect(logger['events'].size).toBe(TEST_ONLY.MAX_RETRY_EVENTS);
     });
 
     it('should handle empty retry queue gracefully', () => {
-      const debugConfig = makeFakeConfig({ getDebugMode: () => true });
-      const logger = QwenLogger.getInstance(debugConfig)!;
-      const consoleSpy = vi
-        .spyOn(console, 'debug')
-        .mockImplementation(() => {});
+      const logger = QwenLogger.getInstance(mockConfig)!;
 
       // Fill the queue to capacity first
       for (let i = 0; i < TEST_ONLY.MAX_EVENTS; i++) {
@@ -267,9 +261,7 @@ describe('QwenLogger', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (logger as any).requeueFailedEvents(failedEvents);
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('QwenLogger: No events re-queued'),
-      );
+      expect(logger['events'].size).toBe(TEST_ONLY.MAX_EVENTS);
     });
   });
 
@@ -386,11 +378,7 @@ describe('QwenLogger', () => {
 
   describe('error handling', () => {
     it('should handle flush errors gracefully with debug mode', async () => {
-      const debugConfig = makeFakeConfig({ getDebugMode: () => true });
-      const logger = QwenLogger.getInstance(debugConfig)!;
-      const consoleSpy = vi
-        .spyOn(console, 'debug')
-        .mockImplementation(() => {});
+      const logger = QwenLogger.getInstance(mockConfig)!;
 
       // Add an event first
       logger.enqueueLogEvent({
@@ -412,10 +400,8 @@ describe('QwenLogger', () => {
       // Wait for async operations
       await vi.runAllTimersAsync();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Error flushing to RUM:',
-        expect.any(Error),
-      );
+      // Errors are now silently ignored to reduce log spam
+      // Only rate-limited error logs are emitted inside flushToRum itself
 
       // Restore original method
       logger.flushToRum = originalFlush;

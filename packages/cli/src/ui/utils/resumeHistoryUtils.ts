@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import type { Part, FunctionCall } from '@google/genai';
 import type {
   ResumedSessionData,
@@ -12,8 +13,13 @@ import type {
   AnyDeclarativeTool,
   ToolResultDisplay,
   SlashCommandRecordPayload,
+  AtCommandRecordPayload,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import type {
+  HistoryItem,
+  HistoryItemWithoutId,
+  IndividualToolCallDisplay,
+} from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
 /**
@@ -137,6 +143,8 @@ function convertToHistoryItems(
   config: Config,
 ): HistoryItemWithoutId[] {
   const items: HistoryItemWithoutId[] = [];
+  const pendingAtCommands: AtCommandRecordPayload[] = [];
+  let atCommandCounter = 0;
 
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
@@ -151,6 +159,59 @@ function convertToHistoryItems(
     status: ToolCallStatus;
     confirmationDetails: undefined;
   }> = [];
+
+  const buildAtCommandDisplays = (
+    payload: AtCommandRecordPayload,
+  ): IndividualToolCallDisplay[] => {
+    // Error case: single "Read File(s)" with error message
+    if (payload.status === 'error') {
+      atCommandCounter += 1;
+      const filesLabel = payload.filesRead?.length
+        ? payload.filesRead.join(', ')
+        : 'files';
+      return [
+        {
+          callId: `at-command-${atCommandCounter}`,
+          name: 'Read File(s)',
+          description: 'Error attempting to read files',
+          status: ToolCallStatus.Error,
+          resultDisplay:
+            payload.message || `Error reading files (${filesLabel})`,
+          confirmationDetails: undefined,
+        },
+      ];
+    }
+
+    // Success case: individual tool calls for each file
+    if (!payload.filesRead?.length) {
+      atCommandCounter += 1;
+      return [
+        {
+          callId: `at-command-${atCommandCounter}`,
+          name: 'Read File',
+          description: 'Read File(s)',
+          status: ToolCallStatus.Success,
+          resultDisplay: undefined,
+          confirmationDetails: undefined,
+        },
+      ];
+    }
+
+    return payload.filesRead.map((filePath) => {
+      atCommandCounter += 1;
+      const isDir = filePath.endsWith('/');
+      return {
+        callId: `at-command-${atCommandCounter}`,
+        name: isDir ? 'Read Directory' : 'Read File',
+        description: isDir
+          ? `Read directory ${path.basename(filePath)}`
+          : `Read file ${path.basename(filePath)}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      };
+    });
+  };
 
   for (const record of conversation.messages) {
     if (record.type === 'system') {
@@ -180,10 +241,44 @@ function convertToHistoryItems(
           }
         }
       }
+      if (record.subtype === 'at_command') {
+        const payload = record.systemPayload as
+          | AtCommandRecordPayload
+          | undefined;
+        if (!payload) continue;
+        pendingAtCommands.push(payload);
+      }
       continue;
     }
     switch (record.type) {
       case 'user': {
+        if (pendingAtCommands.length > 0) {
+          // Flush any pending tool group before user message
+          if (currentToolGroup.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: [...currentToolGroup],
+            });
+            currentToolGroup = [];
+          }
+
+          const payload = pendingAtCommands.shift()!;
+          const text =
+            payload.userText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            items.push({ type: 'user', text });
+          }
+
+          const toolDisplays = buildAtCommandDisplays(payload);
+          if (toolDisplays.length > 0) {
+            items.push({
+              type: 'tool_group',
+              tools: toolDisplays,
+            });
+          }
+          break;
+        }
         // Flush any pending tool group before user message
         if (currentToolGroup.length > 0) {
           items.push({
@@ -287,6 +382,31 @@ function convertToHistoryItems(
       default:
         // Skip unknown record types
         break;
+    }
+  }
+
+  if (pendingAtCommands.length > 0) {
+    for (const payload of pendingAtCommands) {
+      // Flush any pending tool group before standalone @-command
+      if (currentToolGroup.length > 0) {
+        items.push({
+          type: 'tool_group',
+          tools: [...currentToolGroup],
+        });
+        currentToolGroup = [];
+      }
+
+      const text = payload.userText;
+      if (text) {
+        items.push({ type: 'user', text });
+      }
+      const toolDisplays = buildAtCommandDisplays(payload);
+      if (toolDisplays.length > 0) {
+        items.push({
+          type: 'tool_group',
+          tools: toolDisplays,
+        });
+      }
     }
   }
 

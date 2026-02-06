@@ -15,8 +15,11 @@ import {
 } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type { EventEmitter } from 'node:events';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+
+const debugLogger = createDebugLogger('MCP');
 
 /**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
@@ -89,7 +92,7 @@ export class McpClientManager {
         } catch (error) {
           this.eventEmitter?.emit('mcp-client-update', this.clients);
           // Log the error but don't let a single failed server stop the others
-          console.error(
+          debugLogger.error(
             `Error during discovery for server '${name}': ${getErrorMessage(
               error,
             )}`,
@@ -127,7 +130,7 @@ export class McpClientManager {
       try {
         await existingClient.disconnect();
       } catch (error) {
-        console.error(
+        debugLogger.error(
           `Error stopping client '${serverName}': ${getErrorMessage(error)}`,
         );
       } finally {
@@ -159,7 +162,7 @@ export class McpClientManager {
       await client.discover(cliConfig);
     } catch (error) {
       // Log the error but don't throw: callers expect best-effort discovery.
-      console.error(
+      debugLogger.error(
         `Error during discovery for server '${serverName}': ${getErrorMessage(
           error,
         )}`,
@@ -179,7 +182,7 @@ export class McpClientManager {
         try {
           await client.disconnect();
         } catch (error) {
-          console.error(
+          debugLogger.error(
             `Error stopping client '${name}': ${getErrorMessage(error)}`,
           );
         }

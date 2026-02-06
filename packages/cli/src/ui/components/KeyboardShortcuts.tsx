@@ -28,7 +28,10 @@ const getShortcuts = (): Shortcut[] => [
   { key: '/', description: t('for commands') },
   { key: '@', description: t('for file paths') },
   { key: 'esc esc', description: t('to clear input') },
-  { key: 'shift+tab', description: t('to cycle approvals') },
+  {
+    key: process.platform === 'win32' ? 'tab' : 'shift+tab',
+    description: t('to cycle approvals'),
+  },
   { key: 'ctrl+c', description: t('to quit') },
   { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
   { key: 'ctrl+l', description: t('to clear screen') },

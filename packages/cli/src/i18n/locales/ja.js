@@ -326,6 +326,8 @@ export default {
   'List active extensions': '有効な拡張機能を一覧表示',
   'Update extensions. Usage: update <extension-names>|--all':
     '拡張機能を更新。使い方: update <拡張機能名>|--all',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    '{{originSource}} から拡張機能をインストールしています。一部の機能は Qwen Code で完全に動作しない可能性があります。',
   'manage IDE integration': 'IDE連携を管理',
   'check status of IDE integration': 'IDE連携の状態を確認',
   'install required IDE companion for {{ideName}}':

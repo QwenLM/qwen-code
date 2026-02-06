@@ -240,7 +240,13 @@ describe('useAutoAcceptIndicator', () => {
         shift: false,
       } as Key);
     });
-    expect(mockConfigInstance.setApprovalMode).not.toHaveBeenCalled();
+    if (process.platform === 'win32') {
+      // On Windows, Tab alone toggles approval mode
+      expect(mockConfigInstance.setApprovalMode).toHaveBeenCalled();
+      mockConfigInstance.setApprovalMode.mockClear();
+    } else {
+      expect(mockConfigInstance.setApprovalMode).not.toHaveBeenCalled();
+    }
 
     act(() => {
       capturedUseKeypressHandler({

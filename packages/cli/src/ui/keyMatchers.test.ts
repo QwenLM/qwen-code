@@ -50,7 +50,6 @@ describe('keyMatchers', () => {
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) => key.ctrl && key.name === 'v',
-    [Command.SHOW_ERROR_DETAILS]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
@@ -222,11 +221,6 @@ describe('keyMatchers', () => {
     },
 
     // App level bindings
-    {
-      command: Command.SHOW_ERROR_DETAILS,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('e', { ctrl: true })],
-    },
     {
       command: Command.TOGGLE_TOOL_DESCRIPTIONS,
       positive: [createKey('t', { ctrl: true })],

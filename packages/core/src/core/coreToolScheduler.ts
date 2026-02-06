@@ -18,6 +18,9 @@ import type {
   AnyToolInvocation,
   ChatRecordingService,
 } from '../index.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -1327,7 +1330,7 @@ export class CoreToolScheduler {
           this.setStatusInternal(pendingTool.request.callId, 'scheduled');
         }
       } catch (error) {
-        console.error(
+        debugLogger.error(
           `Error checking confirmation for tool ${pendingTool.request.callId}:`,
           error,
         );

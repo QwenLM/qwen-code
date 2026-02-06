@@ -20,6 +20,15 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStdoutLine: mockWriteStdoutLine,
+  clearScreen: vi.fn(),
+}));
+
 const createNativeLspServiceInstance = () => ({
   discoverAndPrepare: vi.fn(),
   start: vi.fn(),
@@ -158,23 +167,19 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --prompt (-p) and --prompt-interactive (-i) together',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should throw an error when using short flags -p and -i together', async () => {
@@ -190,23 +195,19 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --prompt (-p) and --prompt-interactive (-i) together',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should allow --prompt without --prompt-interactive', async () => {
@@ -389,23 +390,19 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should throw an error when using short flags -y and --approval-mode together', async () => {
@@ -414,23 +411,19 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should throw an error when include-partial-messages is used without stream-json output', async () => {
@@ -439,23 +432,19 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         '--include-partial-messages requires --output-format stream-json',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should parse stream-json formats and include-partial-messages flag', async () => {
@@ -496,21 +485,17 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Invalid values:'),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should support comma-separated values for --allowed-tools', async () => {
@@ -900,21 +885,17 @@ describe('loadCliConfig telemetry', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Invalid values:'),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 });
 
@@ -2045,13 +2026,13 @@ describe('loadCliConfig fileFiltering', () => {
     value: boolean;
   }> = [
     {
-      property: 'disableFuzzySearch',
-      getter: (c) => c.getFileFilteringDisableFuzzySearch(),
+      property: 'enableFuzzySearch',
+      getter: (c) => c.getFileFilteringEnableFuzzySearch(),
       value: true,
     },
     {
-      property: 'disableFuzzySearch',
-      getter: (c) => c.getFileFilteringDisableFuzzySearch(),
+      property: 'enableFuzzySearch',
+      getter: (c) => c.getFileFilteringEnableFuzzySearch(),
       value: false,
     },
     {
@@ -2138,17 +2119,14 @@ describe('Output format', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Invalid values:'),
     );
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 });
 
@@ -2172,23 +2150,19 @@ describe('parseArguments with positional prompt', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
 
     await expect(parseArguments({} as Settings)).rejects.toThrow(
       'process.exit called',
     );
 
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both a positional prompt and the --prompt (-p) flag together',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should correctly parse a positional prompt to query field', async () => {

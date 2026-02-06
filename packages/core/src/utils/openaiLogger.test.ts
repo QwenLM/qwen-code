@@ -12,11 +12,15 @@ import { OpenAILogger } from './openaiLogger.js';
 
 describe('OpenAILogger', () => {
   let originalCwd: string;
+  let originalHome: string | undefined;
   let testTempDir: string;
   const createdDirs: string[] = [];
+  const testHomeDir = path.join(os.tmpdir(), 'openai-logger-home');
 
   beforeEach(() => {
     originalCwd = process.cwd();
+    originalHome = process.env['HOME'];
+    process.env['HOME'] = testHomeDir;
     testTempDir = path.join(os.tmpdir(), `openai-logger-test-${Date.now()}`);
     createdDirs.length = 0; // Clear array
   });
@@ -41,6 +45,11 @@ describe('OpenAILogger', () => {
 
     await Promise.all(cleanupPromises);
     process.chdir(originalCwd);
+    if (originalHome === undefined) {
+      delete process.env['HOME'];
+    } else {
+      process.env['HOME'] = originalHome;
+    }
   });
 
   describe('constructor', () => {

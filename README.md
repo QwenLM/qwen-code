@@ -24,7 +24,7 @@ Qwen Code is an open-source AI agent for the terminal, optimized for [Qwen3-Code
 
 ## Why Qwen Code?
 
-- **OpenAI-compatible, OAuth free tier**: use an OpenAI-compatible API, or sign in with Qwen OAuth to get 2,000 free requests/day.
+- **OpenAI-compatible, OAuth free tier**: use an OpenAI-compatible API, or sign in with Qwen OAuth to get 1,000 free requests/day.
 - **Open-source, co-evolving**: both the framework and the Qwen3-Coder model are open-source—and they ship and evolve together.
 - **Agentic workflow, feature-rich**: rich built-in tools (Skills, SubAgents, Plan Mode) for a full agentic workflow and a Claude Code-like experience.
 - **Terminal-first, IDE-friendly**: built for developers who live in the command line, with optional integration for VS Code, Zed, and JetBrains IDEs.

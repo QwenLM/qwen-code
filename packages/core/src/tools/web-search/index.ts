@@ -18,6 +18,7 @@ import { ToolErrorType } from '../tool-error.js';
 import type { Config } from '../../config/config.js';
 import { ApprovalMode } from '../../config/config.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { buildContentWithSources } from './utils.js';
 import { TavilyProvider } from './providers/tavily-provider.js';
 import { GoogleProvider } from './providers/google-provider.js';
@@ -31,6 +32,8 @@ import type {
   DashScopeProviderConfig,
 } from './types.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+
+const debugLogger = createDebugLogger('WEB_SEARCH');
 
 class WebSearchToolInvocation extends BaseToolInvocation<
   WebSearchToolParams,
@@ -114,7 +117,7 @@ class WebSearchToolInvocation extends BaseToolInvocation<
           providers.set(config.type, provider);
         }
       } catch (error) {
-        console.warn(`Failed to create ${config.type} provider:`, error);
+        debugLogger.warn(`Failed to create ${config.type} provider:`, error);
       }
     }
 
@@ -259,7 +262,7 @@ class WebSearchToolInvocation extends BaseToolInvocation<
       };
     } catch (error: unknown) {
       const errorMessage = `Error during web search: ${getErrorMessage(error)}`;
-      console.error(errorMessage, error);
+      debugLogger.error(errorMessage, error);
       return {
         llmContent: errorMessage,
         returnDisplay: 'Error performing web search.',

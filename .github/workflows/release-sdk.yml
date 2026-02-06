@@ -8,10 +8,15 @@ on:
         required: false
         type: 'string'
       ref:
-        description: 'The branch or ref (full git sha) to release from.'
+        description: 'The branch or ref (full git sha) to release SDK from.'
         required: true
         type: 'string'
         default: 'main'
+      cli_ref:
+        description: 'CLI ref to bundle (tag, branch, or commit). Default: latest stable CLI release tag (recommended for stable releases)'
+        required: false
+        type: 'string'
+        default: ''
       dry_run:
         description: 'Run a dry-run of the release process; no branches, npm packages or GitHub releases will be created.'
         required: true
@@ -136,10 +141,62 @@ jobs:
           # This is required for nightly/preview because npm does not allow re-publishing the same version.
           npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
 
-      - name: 'Build CLI Bundle'
+      - name: 'Determine CLI ref to bundle'
+        id: 'cli_ref'
+        env:
+          CLI_REF_INPUT: '${{ github.event.inputs.cli_ref }}'
+          IS_STABLE: '${{ steps.vars.outputs.is_nightly == false && steps.vars.outputs.is_preview == false }}'
         run: |
-          npm run build
+          if [[ -n "${CLI_REF_INPUT}" ]]; then
+            # User explicitly specified CLI ref
+            echo "CLI_REF=${CLI_REF_INPUT}" >> "$GITHUB_OUTPUT"
+            echo "Using user-specified CLI ref: ${CLI_REF_INPUT}"
+          else
+            # Auto-detect latest stable CLI release tag
+            # Exclude sdk-typescript tags, nightly, and preview tags
+            LATEST_CLI_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v 'sdk-typescript' | grep -v 'nightly' | grep -v 'preview' | head -1)
+            if [[ -z "${LATEST_CLI_TAG}" ]]; then
+              echo '::error::Could not find latest stable CLI tag'
+              exit 1
+            fi
+            echo "CLI_REF=${LATEST_CLI_TAG}" >> "$GITHUB_OUTPUT"
+            echo "Using latest stable CLI tag: ${LATEST_CLI_TAG}"
+          fi
+
+      - name: 'Validate CLI ref for stable releases'
+        env:
+          CLI_REF: '${{ steps.cli_ref.outputs.CLI_REF }}'
+          IS_STABLE: '${{ steps.vars.outputs.is_nightly == false && steps.vars.outputs.is_preview == false }}'
+        run: |
+          if [[ "${IS_STABLE}" == "true" ]]; then
+            # For stable releases, ensure CLI ref is a tag (not main or a branch)
+            if [[ "${CLI_REF}" == "main" ]] || [[ "${CLI_REF}" == "master" ]]; then
+              echo "::error::Stable SDK releases cannot bundle CLI from '${CLI_REF}' branch. Please specify a CLI release tag via 'cli_ref' input, or ensure the latest stable CLI tag is available."
+              exit 1
+            fi
+            # Check if it's a valid tag
+            if ! git rev-parse "refs/tags/${CLI_REF}" >/dev/null 2>&1; then
+              echo "::warning::CLI ref '${CLI_REF}' is not a tag. Stable releases should use tagged CLI versions."
+            else
+              echo "✓ CLI ref '${CLI_REF}' is a valid tag"
+            fi
+          fi
+
+      - name: 'Build CLI Bundle'
+        env:
+          CLI_REF: '${{ steps.cli_ref.outputs.CLI_REF }}'
+        run: |
+          echo "Building CLI from ref: ${CLI_REF}"
+          # Save current state
+          CURRENT_REF=$(git rev-parse HEAD)
+          # Checkout CLI ref
+          git checkout "${CLI_REF}"
+          # Install dependencies and build CLI
+          npm ci
           npm run bundle
+          # Return to original ref for SDK build
+          git checkout "${CURRENT_REF}"
+          echo "CLI bundle built successfully from ${CLI_REF}"
 
       - name: 'Run Tests'
         if: |-
@@ -172,6 +229,14 @@ jobs:
         working-directory: 'packages/sdk-typescript'
         run: |-
           npm run build
+
+      - name: 'Record bundled CLI version'
+        env:
+          CLI_REF: '${{ steps.cli_ref.outputs.CLI_REF }}'
+        run: |
+          # Create a metadata file to record which CLI version was bundled
+          echo "${CLI_REF}" > packages/sdk-typescript/dist/BUNDLED_CLI_VERSION
+          echo "Bundled CLI version: ${CLI_REF}"
 
       - name: 'Publish @qwen-code/sdk'
         working-directory: 'packages/sdk-typescript'
@@ -219,6 +284,7 @@ jobs:
           IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
           IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
           REF: '${{ github.event.inputs.ref || github.sha }}'
+          CLI_REF: '${{ steps.cli_ref.outputs.CLI_REF }}'
         run: |-
           # For stable releases, use the release branch; for nightly/preview, use the current ref
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
@@ -229,11 +295,14 @@ jobs:
             PRERELEASE_FLAG=""
           fi
 
+          # Create release notes with CLI version info
+          NOTES="## Bundled CLI Version\n\nThis SDK release bundles CLI version: \`${CLI_REF}\`\n\n---\n\n"
+
           gh release create "sdk-typescript-${RELEASE_TAG}" \
             --target "${TARGET}" \
             --title "SDK TypeScript Release ${RELEASE_TAG}" \
             --notes-start-tag "sdk-typescript-${PREVIOUS_RELEASE_TAG}" \
-            --generate-notes \
+            --notes "${NOTES}$(gh release view "sdk-typescript-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')" \
             ${PRERELEASE_FLAG}
 
       - name: 'Create PR to merge release branch into main'
