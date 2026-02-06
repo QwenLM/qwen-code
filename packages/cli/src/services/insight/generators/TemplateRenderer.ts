@@ -48,12 +48,23 @@ export class TemplateRenderer {
   }
 
   private async loadScripts(): Promise<string> {
-    const scriptsPath = path.join(
-      this.templateDir,
-      'scripts',
-      'insight-app.js',
+    const componentsDir = path.join(this.templateDir, 'scripts', 'components');
+
+    const componentFiles = [
+      'utils.js',
+      'Header.js',
+      'Qualitative.js',
+      'Charts.js',
+      'App.js',
+    ];
+
+    const scripts = await Promise.all(
+      componentFiles.map((file) =>
+        fs.readFile(path.join(componentsDir, file), 'utf-8'),
+      ),
     );
-    return await fs.readFile(scriptsPath, 'utf-8');
+
+    return scripts.join('\n\n');
   }
 
   // Render the complete HTML file
