@@ -848,6 +848,9 @@ None captured`;
     const sessionStartTimes: { [sessionId: string]: Date } = {};
     const sessionEndTimes: { [sessionId: string]: Date } = {};
     let totalMessages = 0;
+    let totalLinesAdded = 0;
+    let totalLinesRemoved = 0;
+    const uniqueFiles = new Set<string>();
     const toolUsage: Record<string, number> = {};
 
     for (const fileInfo of files) {
@@ -893,6 +896,31 @@ None captured`;
             if ('functionCall' in part) {
               const name = part.functionCall!.name!;
               toolUsage[name] = (toolUsage[name] || 0) + 1;
+            }
+          }
+        }
+
+        // Track lines and files from tool results
+        if (
+          record.type === 'tool_result' &&
+          record.toolCallResult?.resultDisplay
+        ) {
+          const display = record.toolCallResult.resultDisplay;
+          // Check if it matches FileDiff shape
+          if (
+            typeof display === 'object' &&
+            display !== null &&
+            'fileName' in display
+          ) {
+            // Cast to any to avoid importing FileDiff type which might not be available here
+            const diff = display;
+            if (typeof diff.fileName === 'string') {
+              uniqueFiles.add(diff.fileName);
+            }
+
+            if (diff.diffStat) {
+              totalLinesAdded += diff.diffStat.model_added_lines || 0;
+              totalLinesRemoved += diff.diffStat.model_removed_lines || 0;
             }
           }
         }
@@ -966,6 +994,9 @@ None captured`;
       totalMessages,
       totalHours,
       topTools,
+      totalLinesAdded,
+      totalLinesRemoved,
+      totalFiles: uniqueFiles.size,
     };
   }
 

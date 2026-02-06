@@ -5,14 +5,31 @@
 
 const { useState, useRef, useEffect } = React;
 
+// Simple Markdown Parser Component
+function MarkdownText({ children }) {
+  if (!children || typeof children !== 'string') return children;
+
+  // Split by bold markers (**text**)
+  const parts = children.split(/(\*\*.*?\*\*)/g);
+
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
+          return <strong key={i}>{part.slice(2, -2)}</strong>;
+        }
+        return part;
+      })}
+    </>
+  );
+}
+
 // Header Component
-function Header({ data }) {
+function Header({ data, dateRangeStr }) {
   const { totalMessages, totalSessions } = data;
+
   return (
     <header className="mb-8 space-y-3 text-center">
-      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
-        Insights
-      </p>
       <h1 className="text-3xl font-semibold text-slate-900 md:text-4xl">
         Qwen Code Insights
       </h1>
@@ -20,8 +37,59 @@ function Header({ data }) {
         {totalMessages
           ? `${totalMessages} messages across ${totalSessions} sessions`
           : 'Your personalized coding journey and patterns'}
+        {dateRangeStr && ` | ${dateRangeStr}`}
       </p>
     </header>
+  );
+}
+
+function StatsRow({ data }) {
+  const {
+    totalMessages = 0,
+    totalLinesAdded = 0,
+    totalLinesRemoved = 0,
+    totalFiles = 0,
+    // totalSessions = 0,
+    // totalHours = 0,
+  } = data;
+
+  const heatmapKeys = Object.keys(data.heatmap || {});
+  let daysSpan = 0;
+  if (heatmapKeys.length > 0) {
+    const dates = heatmapKeys.map((d) => new Date(d));
+    const minDate = new Date(Math.min(...dates));
+    const maxDate = new Date(Math.max(...dates));
+    const diffTime = Math.abs(maxDate - minDate);
+    daysSpan = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
+  }
+
+  const msgsPerDay = daysSpan > 0 ? Math.round(totalMessages / daysSpan) : 0;
+
+  return (
+    <div className="stats-row">
+      <div className="stat">
+        <div className="stat-value">{totalMessages}</div>
+        <div className="stat-label">Messages</div>
+      </div>
+      <div className="stat">
+        <div className="stat-value">
+          +{totalLinesAdded}/-{totalLinesRemoved}
+        </div>
+        <div className="stat-label">Lines</div>
+      </div>
+      <div className="stat">
+        <div className="stat-value">{totalFiles}</div>
+        <div className="stat-label">Files</div>
+      </div>
+      <div className="stat">
+        <div className="stat-value">{daysSpan}</div>
+        <div className="stat-label">Days</div>
+      </div>
+      <div className="stat">
+        <div className="stat-value">{msgsPerDay}</div>
+        <div className="stat-label">Msgs/Day</div>
+      </div>
+    </div>
   );
 }
 
@@ -35,9 +103,20 @@ function InsightApp({ data }) {
     );
   }
 
+  // Calculate date range
+  const heatmapKeys = Object.keys(data.heatmap || {});
+  let dateRangeStr = '';
+  if (heatmapKeys.length > 0) {
+    const dates = heatmapKeys.map((d) => new Date(d));
+    const minDate = new Date(Math.min(...dates));
+    const maxDate = new Date(Math.max(...dates));
+    const formatDate = (d) => d.toISOString().split('T')[0];
+    dateRangeStr = `${formatDate(minDate)} to ${formatDate(maxDate)}`;
+  }
+
   return (
     <div>
-      <Header data={data} />
+      <Header data={data} dateRangeStr={dateRangeStr} />
 
       {data.qualitative && (
         <>
@@ -45,6 +124,8 @@ function InsightApp({ data }) {
           <NavToc />
         </>
       )}
+
+      <StatsRow data={data} />
 
       <DashboardCards insights={data} />
 
@@ -93,26 +174,29 @@ function AtAGlance({ qualitative }) {
       <div className="glance-title">At a Glance</div>
       <div className="glance-sections">
         <div className="glance-section">
-          <strong>What&apos;s working:</strong> {atAGlance.whats_working}
+          <strong>What&apos;s working:</strong>{' '}
+          <MarkdownText>{atAGlance.whats_working}</MarkdownText>
           <a href="#section-wins" className="see-more">
             Impressive Things You Did →
           </a>
         </div>
         <div className="glance-section">
           <strong>What&apos;s hindering you:</strong>{' '}
-          {atAGlance.whats_hindering}
+          <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
           <a href="#section-friction" className="see-more">
             Where Things Go Wrong →
           </a>
         </div>
         <div className="glance-section">
-          <strong>Quick wins to try:</strong> {atAGlance.quick_wins}
+          <strong>Quick wins to try:</strong>{' '}
+          <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
           <a href="#section-features" className="see-more">
             Features to Try →
           </a>
         </div>
         <div className="glance-section">
-          <strong>Ambitious workflows:</strong> {atAGlance.ambitious_workflows}
+          <strong>Ambitious workflows:</strong>{' '}
+          <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
           <a href="#section-horizon" className="see-more">
             On the Horizon →
           </a>
@@ -139,7 +223,8 @@ function NavToc() {
 
 function ProjectAreas({ qualitative }) {
   const { projectAreas } = qualitative;
-  if (!projectAreas?.areas?.length) return null;
+  if (!Array.isArray(projectAreas?.areas) || !projectAreas.areas.length)
+    return null;
 
   return (
     <>
@@ -156,7 +241,9 @@ function ProjectAreas({ qualitative }) {
               <span className="area-name">{area.name}</span>
               <span className="area-count">~{area.session_count} sessions</span>
             </div>
-            <div className="area-desc">{area.description}</div>
+            <div className="area-desc">
+              <MarkdownText>{area.description}</MarkdownText>
+            </div>
           </div>
         ))}
       </div>
@@ -177,10 +264,13 @@ function InteractionStyle({ qualitative }) {
         How You Use Qwen Code
       </h2>
       <div className="narrative">
-        <p>{interactionStyle.narrative}</p>
+        <p>
+          <MarkdownText>{interactionStyle.narrative}</MarkdownText>
+        </p>
         {interactionStyle.key_pattern && (
           <div className="key-insight">
-            <strong>Key pattern:</strong> {interactionStyle.key_pattern}
+            <strong>Key pattern:</strong>{' '}
+            <MarkdownText>{interactionStyle.key_pattern}</MarkdownText>
           </div>
         )}
       </div>
@@ -201,15 +291,20 @@ function ImpressiveWorkflows({ qualitative }) {
         Impressive Things You Did
       </h2>
       {impressiveWorkflows.intro && (
-        <p className="section-intro">{impressiveWorkflows.intro}</p>
+        <p className="section-intro">
+          <MarkdownText>{impressiveWorkflows.intro}</MarkdownText>
+        </p>
       )}
       <div className="big-wins">
-        {impressiveWorkflows.impressive_workflows?.map((win, idx) => (
-          <div key={idx} className="big-win">
-            <div className="big-win-title">{win.title}</div>
-            <div className="big-win-desc">{win.description}</div>
-          </div>
-        ))}
+        {Array.isArray(impressiveWorkflows.impressive_workflows) &&
+          impressiveWorkflows.impressive_workflows.map((win, idx) => (
+            <div key={idx} className="big-win">
+              <div className="big-win-title">{win.title}</div>
+              <div className="big-win-desc">
+                <MarkdownText>{win.description}</MarkdownText>
+              </div>
+            </div>
+          ))}
       </div>
     </>
   );
@@ -228,22 +323,29 @@ function FrictionPoints({ qualitative }) {
         Where Things Go Wrong
       </h2>
       {frictionPoints.intro && (
-        <p className="section-intro">{frictionPoints.intro}</p>
+        <p className="section-intro">
+          <MarkdownText>{frictionPoints.intro}</MarkdownText>
+        </p>
       )}
       <div className="friction-categories">
-        {frictionPoints.categories?.map((cat, idx) => (
-          <div key={idx} className="friction-category">
-            <div className="friction-title">{cat.category}</div>
-            <div className="friction-desc">{cat.description}</div>
-            {cat.examples?.length > 0 && (
-              <ul className="friction-examples">
-                {cat.examples.map((ex, i) => (
-                  <li key={i}>{ex}</li>
-                ))}
-              </ul>
-            )}
-          </div>
-        ))}
+        {Array.isArray(frictionPoints.categories) &&
+          frictionPoints.categories.map((cat, idx) => (
+            <div key={idx} className="friction-category">
+              <div className="friction-title">{cat.category}</div>
+              <div className="friction-desc">
+                <MarkdownText>{cat.description}</MarkdownText>
+              </div>
+              {Array.isArray(cat.examples) && cat.examples.length > 0 && (
+                <ul className="friction-examples">
+                  {cat.examples.map((ex, i) => (
+                    <li key={i}>
+                      <MarkdownText>{ex}</MarkdownText>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
       </div>
     </>
   );
@@ -265,6 +367,73 @@ function CopyButton({ text, label = 'Copy' }) {
     </button>
   );
 }
+// Qwen.md Additions Section Component
+function QwenMdAdditionsSection({ additions }) {
+  const [checkedState, setCheckedState] = useState(
+    new Array(additions.length).fill(true),
+  );
+  const [copiedAll, setCopiedAll] = useState(false);
+
+  const handleCheckboxChange = (position) => {
+    const updatedCheckedState = checkedState.map((item, index) =>
+      index === position ? !item : item,
+    );
+    setCheckedState(updatedCheckedState);
+  };
+
+  const handleCopyAll = () => {
+    const textToCopy = additions
+      .filter((_, index) => checkedState[index])
+      .map((item) => item.addition)
+      .join('\n\n');
+
+    if (!textToCopy) return;
+
+    navigator.clipboard.writeText(textToCopy).then(() => {
+      setCopiedAll(true);
+      setTimeout(() => setCopiedAll(false), 2000);
+    });
+  };
+
+  const checkedCount = checkedState.filter(Boolean).length;
+
+  return (
+    <div className="qwen-md-section">
+      <h3>Suggested QWEN.md Additions</h3>
+      <p className="text-xs text-slate-500 mb-3">
+        Just copy this into Qwen Code to add it to your QWEN.md.
+      </p>
+
+      <div className="qwen-md-actions" style={{ marginBottom: '12px' }}>
+        <button
+          className={`copy-all-btn ${copiedAll ? 'copied' : ''}`}
+          onClick={handleCopyAll}
+          disabled={checkedCount === 0}
+        >
+          {copiedAll ? 'Copied All!' : `Copy All Checked (${checkedCount})`}
+        </button>
+      </div>
+
+      {additions.map((item, idx) => (
+        <div key={idx} className="qwen-md-item">
+          <input
+            type="checkbox"
+            checked={checkedState[idx]}
+            onChange={() => handleCheckboxChange(idx)}
+            className="cmd-checkbox"
+          />
+          <div style={{ flex: 1 }}>
+            <code className="cmd-code">{item.addition}</code>
+            <div className="cmd-why">
+              <MarkdownText>{item.why}</MarkdownText>
+            </div>
+          </div>
+          <CopyButton text={item.addition} />
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function Improvements({ qualitative }) {
   const { improvements } = qualitative;
@@ -279,50 +448,39 @@ function Improvements({ qualitative }) {
         Existing QC Features to Try
       </h2>
 
-      {/* Qwen.md Additions */}
-      {improvements.Qwen_md_additions?.length > 0 && (
-        <div className="qwen-md-section">
-          <h3>Suggested Qwen.md Additions</h3>
-          <p className="text-xs text-slate-500 mb-3">
-            Just copy this into Qwen Code to add it to your Qwen.md.
-          </p>
+      {/* QWEN.md Additions */}
+      {Array.isArray(improvements.Qwen_md_additions) &&
+        improvements.Qwen_md_additions.length > 0 && (
+          <QwenMdAdditionsSection additions={improvements.Qwen_md_additions} />
+        )}
 
-          <div className="qwen-md-actions">
-            {/* Note: "Copy All" would require tracking state of all checkboxes, keeping it simple for now */}
-          </div>
-
-          {improvements.Qwen_md_additions.map((item, idx) => (
-            <div key={idx} className="qwen-md-item">
-              <input type="checkbox" defaultChecked className="cmd-checkbox" />
-              <div style={{ flex: 1 }}>
-                <code className="cmd-code">{item.addition}</code>
-                <div className="cmd-why">{item.why}</div>
-              </div>
-              <CopyButton text={item.addition} />
-            </div>
-          ))}
-        </div>
-      )}
+      <p className="text-xs text-slate-500 mb-3">
+        Just copy this into Qwen Code and it&apos;ll set it up for you.
+      </p>
 
       {/* Features to Try */}
       <div className="features-section">
-        {improvements.features_to_try?.map((feat, idx) => (
-          <div key={idx} className="feature-card">
-            <div className="feature-title">{feat.feature}</div>
-            <div className="feature-oneliner">{feat.one_liner}</div>
-            <div className="feature-why">
-              <strong>Why for you:</strong> {feat.why_for_you}
-            </div>
-            <div className="feature-examples">
-              <div className="feature-example">
-                <div className="example-code-row">
-                  <code className="example-code">{feat.example_code}</code>
-                  <CopyButton text={feat.example_code} />
+        {Array.isArray(improvements.features_to_try) &&
+          improvements.features_to_try.map((feat, idx) => (
+            <div key={idx} className="feature-card">
+              <div className="feature-title">{feat.feature}</div>
+              <div className="feature-oneliner">
+                <MarkdownText>{feat.one_liner}</MarkdownText>
+              </div>
+              <div className="feature-why">
+                <strong>Why for you:</strong>{' '}
+                <MarkdownText>{feat.why_for_you}</MarkdownText>
+              </div>
+              <div className="feature-examples">
+                <div className="feature-example">
+                  <div className="example-code-row">
+                    <code className="example-code">{feat.example_code}</code>
+                    <CopyButton text={feat.example_code} />
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        ))}
+          ))}
       </div>
 
       <h2
@@ -336,20 +494,25 @@ function Improvements({ qualitative }) {
       </p>
 
       <div className="patterns-section">
-        {improvements.usage_patterns?.map((pat, idx) => (
-          <div key={idx} className="pattern-card">
-            <div className="pattern-title">{pat.title}</div>
-            <div className="pattern-summary">{pat.suggestion}</div>
-            <div className="pattern-detail">{pat.detail}</div>
-            <div className="copyable-prompt-section">
-              <div className="prompt-label">Paste into Qwen Code:</div>
-              <div className="copyable-prompt-row">
-                <code className="copyable-prompt">{pat.copyable_prompt}</code>
-                <CopyButton text={pat.copyable_prompt} />
+        {Array.isArray(improvements.usage_patterns) &&
+          improvements.usage_patterns.map((pat, idx) => (
+            <div key={idx} className="pattern-card">
+              <div className="pattern-title">{pat.title}</div>
+              <div className="pattern-summary">
+                <MarkdownText>{pat.suggestion}</MarkdownText>
+              </div>
+              <div className="pattern-detail">
+                <MarkdownText>{pat.detail}</MarkdownText>
+              </div>
+              <div className="copyable-prompt-section">
+                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div className="copyable-prompt-row">
+                  <code className="copyable-prompt">{pat.copyable_prompt}</code>
+                  <CopyButton text={pat.copyable_prompt} />
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          ))}
       </div>
     </>
   );
@@ -368,32 +531,38 @@ function FutureOpportunities({ qualitative }) {
         On the Horizon
       </h2>
       {futureOpportunities.intro && (
-        <p className="section-intro">{futureOpportunities.intro}</p>
+        <p className="section-intro">
+          <MarkdownText>{futureOpportunities.intro}</MarkdownText>
+        </p>
       )}
 
       <div className="horizon-section">
-        {futureOpportunities.opportunities?.map((opp, idx) => (
-          <div key={idx} className="horizon-card">
-            <div className="horizon-title">{opp.title}</div>
-            <div className="horizon-possible">{opp.whats_possible}</div>
-            <div className="horizon-tip">
-              <strong>Getting started:</strong> {opp.how_to_try}
-            </div>
-            <div className="pattern-prompt">
-              <div className="prompt-label">Paste into Qwen Code:</div>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '8px',
-                }}
-              >
-                <code style={{ flex: 1 }}>{opp.copyable_prompt}</code>
-                <CopyButton text={opp.copyable_prompt} />
+        {Array.isArray(futureOpportunities.opportunities) &&
+          futureOpportunities.opportunities.map((opp, idx) => (
+            <div key={idx} className="horizon-card">
+              <div className="horizon-title">{opp.title}</div>
+              <div className="horizon-possible">
+                <MarkdownText>{opp.whats_possible}</MarkdownText>
+              </div>
+              <div className="horizon-tip">
+                <strong>Getting started:</strong>{' '}
+                <MarkdownText>{opp.how_to_try}</MarkdownText>
+              </div>
+              <div className="pattern-prompt">
+                <div className="prompt-label">Paste into Qwen Code:</div>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '8px',
+                  }}
+                >
+                  <code style={{ flex: 1 }}>{opp.copyable_prompt}</code>
+                  <CopyButton text={opp.copyable_prompt} />
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          ))}
       </div>
     </>
   );
@@ -406,7 +575,9 @@ function MemorableMoment({ qualitative }) {
   return (
     <div className="fun-ending">
       <div className="fun-headline">&quot;{memorableMoment.headline}&quot;</div>
-      <div className="fun-detail">{memorableMoment.detail}</div>
+      <div className="fun-detail">
+        <MarkdownText>{memorableMoment.detail}</MarkdownText>
+      </div>
     </div>
   );
 }
@@ -805,10 +976,10 @@ function AchievementsSection({ achievements }) {
       <div className="flex items-center justify-between">
         <h3 className={sectionTitleClass}>Achievements</h3>
         <span className="text-xs font-semibold text-slate-500">
-          {achievements.length} total
+          {Array.isArray(achievements) ? achievements.length : 0} total
         </span>
       </div>
-      {achievements.length === 0 ? (
+      {!Array.isArray(achievements) || achievements.length === 0 ? (
         <p className="text-sm text-slate-600">
           No achievements yet. Keep coding!
         </p>
