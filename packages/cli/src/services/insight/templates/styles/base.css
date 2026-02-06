@@ -620,6 +620,7 @@ body {
   border-radius: 8px;
   border: 1px solid #e2e8f0;
 }
+
 .nav-toc a {
   font-size: 12px;
   color: #64748b;
@@ -629,6 +630,7 @@ body {
   background: #f1f5f9;
   transition: all 0.15s;
 }
+
 .nav-toc a:hover {
   background: #e2e8f0;
   color: #334155;
@@ -641,26 +643,31 @@ body {
   padding: 20px 24px;
   margin-bottom: 32px;
 }
+
 .glance-title {
   font-size: 16px;
   font-weight: 700;
   color: #92400e;
   margin-bottom: 16px;
 }
+
 .glance-sections {
   display: flex;
   flex-direction: column;
   gap: 12px;
 }
+
 .glance-section {
   font-size: 14px;
   color: #78350f;
   line-height: 1.6;
 }
+
 .glance-section strong {
   color: #92400e;
   font-weight: 700;
 }
+
 .see-more {
   color: #b45309;
   text-decoration: none;
@@ -668,6 +675,7 @@ body {
   white-space: nowrap;
   margin-left: 4px;
 }
+
 .see-more:hover {
   text-decoration: underline;
 }
@@ -678,23 +686,27 @@ body {
   gap: 12px;
   margin-bottom: 32px;
 }
+
 .project-area {
   background: white;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   padding: 16px;
 }
+
 .area-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
 }
+
 .area-name {
   font-weight: 600;
   font-size: 15px;
   color: #0f172a;
 }
+
 .area-count {
   font-size: 12px;
   color: #64748b;
@@ -702,6 +714,7 @@ body {
   padding: 2px 8px;
   border-radius: 4px;
 }
+
 .area-desc {
   font-size: 14px;
   color: #475569;
@@ -715,12 +728,14 @@ body {
   padding: 20px;
   margin-bottom: 24px;
 }
+
 .narrative p {
   margin-bottom: 12px;
   font-size: 14px;
   color: #475569;
   line-height: 1.7;
 }
+
 .key-insight {
   background: #f0fdf4;
   border: 1px solid #bbf7d0;
@@ -743,18 +758,21 @@ body {
   gap: 12px;
   margin-bottom: 24px;
 }
+
 .big-win {
   background: #f0fdf4;
   border: 1px solid #bbf7d0;
   border-radius: 8px;
   padding: 16px;
 }
+
 .big-win-title {
   font-weight: 600;
   font-size: 15px;
   color: #166534;
   margin-bottom: 8px;
 }
+
 .big-win-desc {
   font-size: 14px;
   color: #15803d;
@@ -767,29 +785,35 @@ body {
   gap: 16px;
   margin-bottom: 24px;
 }
+
 .friction-category {
   background: #fef2f2;
   border: 1px solid #fca5a5;
   border-radius: 8px;
   padding: 16px;
 }
+
 .friction-title {
   font-weight: 600;
   font-size: 15px;
   color: #991b1b;
   margin-bottom: 6px;
 }
+
 .friction-desc {
   font-size: 13px;
   color: #7f1d1d;
   margin-bottom: 10px;
 }
+
 .friction-examples {
-  margin: 0 0 0 20px;
+  margin: 0 0 0 10px;
+  padding: 0;
   font-size: 13px;
   color: #334155;
   list-style-type: disc;
 }
+
 .friction-examples li {
   margin-bottom: 4px;
 }
@@ -801,17 +825,20 @@ body {
   padding: 12px;
   margin-bottom: 20px;
 }
+
 .qwen-md-section h3 {
   font-size: 13px;
   font-weight: 600;
   color: #1e40af;
   margin: 0 0 8px 0;
 }
+
 .qwen-md-actions {
   margin-bottom: 8px;
   padding-bottom: 8px;
   border-bottom: 1px solid #dbeafe;
 }
+
 .copy-all-btn {
   background: #2563eb;
   color: white;
@@ -823,12 +850,15 @@ body {
   font-weight: 500;
   transition: all 0.2s;
 }
+
 .copy-all-btn:hover {
   background: #1d4ed8;
 }
+
 .copy-all-btn.copied {
   background: #16a34a;
 }
+
 .qwen-md-item {
   display: flex;
   flex-wrap: wrap;
@@ -837,12 +867,15 @@ body {
   padding: 8px 0;
   border-bottom: 1px solid #dbeafe;
 }
+
 .qwen-md-item:last-child {
   border-bottom: none;
 }
+
 .cmd-checkbox {
   margin-top: 2px;
 }
+
 .cmd-code {
   background: white;
   padding: 6px 10px;
@@ -856,6 +889,7 @@ body {
   word-break: break-word;
   flex: 1;
 }
+
 .cmd-why {
   font-size: 11px;
   color: #64748b;
@@ -871,18 +905,21 @@ body {
   gap: 12px;
   margin: 16px 0;
 }
+
 .feature-card {
   background: #f0fdf4;
   border: 1px solid #86efac;
   border-radius: 8px;
   padding: 16px;
 }
+
 .pattern-card {
   background: #f0f9ff;
   border: 1px solid #7dd3fc;
   border-radius: 8px;
   padding: 16px;
 }
+
 .feature-title,
 .pattern-title {
   font-weight: 600;
@@ -890,37 +927,46 @@ body {
   color: #0f172a;
   margin-bottom: 6px;
 }
+
 .feature-oneliner {
   font-size: 14px;
   color: #475569;
   margin-bottom: 8px;
 }
+
 .pattern-summary {
   font-size: 14px;
   color: #475569;
   margin-bottom: 8px;
 }
+
 .feature-why,
 .pattern-detail {
   font-size: 13px;
   color: #334155;
   line-height: 1.5;
 }
+
 .feature-examples {
   margin-top: 12px;
 }
+
 .feature-example {
   padding: 8px 0;
   border-top: 1px solid #d1fae5;
 }
+
 .feature-example:first-child {
   border-top: none;
 }
-.example-code-row, .copyable-prompt-row {
+
+.example-code-row,
+.copyable-prompt-row {
   display: flex;
   align-items: flex-start;
   gap: 8px;
 }
+
 .example-code {
   flex: 1;
   background: #f1f5f9;
@@ -932,11 +978,13 @@ body {
   overflow-x: auto;
   white-space: pre-wrap;
 }
+
 .copyable-prompt-section {
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid #e2e8f0;
 }
+
 .copyable-prompt {
   flex: 1;
   background: #f8fafc;
@@ -949,6 +997,7 @@ body {
   white-space: pre-wrap;
   line-height: 1.5;
 }
+
 .prompt-label {
   font-size: 11px;
   font-weight: 600;
@@ -956,6 +1005,7 @@ body {
   color: #64748b;
   margin-bottom: 6px;
 }
+
 .copy-btn {
   background: #e2e8f0;
   border: none;
@@ -967,6 +1017,7 @@ body {
   flex-shrink: 0;
   transition: all 0.2s;
 }
+
 .copy-btn:hover {
   background: #cbd5e1;
 }
@@ -976,24 +1027,28 @@ body {
   flex-direction: column;
   gap: 16px;
 }
+
 .horizon-card {
   background: linear-gradient(135deg, #faf5ff 0%, #f5f3ff 100%);
   border: 1px solid #c4b5fd;
   border-radius: 8px;
   padding: 16px;
 }
+
 .horizon-title {
   font-weight: 600;
   font-size: 15px;
   color: #5b21b6;
   margin-bottom: 8px;
 }
+
 .horizon-possible {
   font-size: 14px;
   color: #334155;
   margin-bottom: 10px;
   line-height: 1.5;
 }
+
 .horizon-tip {
   font-size: 13px;
   color: #6b21a8;
@@ -1001,6 +1056,7 @@ body {
   padding: 8px 12px;
   border-radius: 4px;
 }
+
 .pattern-prompt {
   background: #f8fafc;
   padding: 12px;
@@ -1011,6 +1067,7 @@ body {
   flex-direction: column;
   gap: 8px;
 }
+
 .pattern-prompt code {
   font-family: monospace;
   font-size: 12px;
@@ -1027,12 +1084,14 @@ body {
   margin-top: 40px;
   text-align: center;
 }
+
 .fun-headline {
   font-size: 18px;
   font-weight: 600;
   color: #78350f;
   margin-bottom: 8px;
 }
+
 .fun-detail {
   font-size: 14px;
   color: #92400e;
@@ -1048,19 +1107,23 @@ body {
   border-bottom: 1px solid #e2e8f0;
   flex-wrap: wrap;
 }
+
 .stat {
   text-align: center;
 }
+
 .stat-value {
   font-size: 24px;
   font-weight: 700;
   color: #0f172a;
 }
+
 .stat-label {
   font-size: 11px;
   color: #64748b;
   text-transform: uppercase;
 }
+
 @media (max-width: 640px) {
   .stats-row {
     justify-content: center;
