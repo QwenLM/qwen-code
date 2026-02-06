@@ -7,8 +7,7 @@
 import * as vscode from 'vscode';
 import { QwenAgentManager } from '../services/qwenAgentManager.js';
 import { ConversationStore } from '../services/conversationStore.js';
-import type { AcpPermissionRequest } from '../types/acpTypes.js';
-import type { ModelInfo } from '../types/acpTypes.js';
+import type { AcpPermissionRequest, ModelInfo } from '../types/acpTypes.js';
 import type { PermissionResponseMessage } from '../types/webviewMessageTypes.js';
 import { PanelManager } from '../webview/PanelManager.js';
 import { MessageHandler } from '../webview/MessageHandler.js';
@@ -16,6 +15,7 @@ import { WebViewContent } from '../webview/WebViewContent.js';
 import { getFileName } from './utils/webviewUtils.js';
 import { type ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
+import { DedicatedTerminalManager } from '../services/dedicatedTerminalManager.js';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -34,6 +34,8 @@ export class WebViewProvider {
   private authState: boolean | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
+  /** Dedicated terminal manager for displaying shell command execution */
+  private dedicatedTerminal: DedicatedTerminalManager;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -41,6 +43,7 @@ export class WebViewProvider {
   ) {
     this.agentManager = new QwenAgentManager();
     this.conversationStore = new ConversationStore(context);
+    this.dedicatedTerminal = new DedicatedTerminalManager();
     this.panelManager = new PanelManager(extensionUri, () => {
       // Panel dispose callback
       this.disposables.forEach((d) => d.dispose());
@@ -200,6 +203,11 @@ export class WebViewProvider {
         }
       }
 
+      // Route shell command events to dedicated terminal
+      if (update.kind === 'execute') {
+        this.dedicatedTerminal.handleToolCall(update);
+      }
+
       this.sendMessageToWebView({
         type: 'toolCall',
         data: {
@@ -219,6 +227,14 @@ export class WebViewProvider {
 
     this.agentManager.onPermissionRequest(
       async (request: AcpPermissionRequest) => {
+        // Route shell command permission requests to dedicated terminal
+        if (
+          request.toolCall?.kind === 'execute' ||
+          request.toolCall?.rawInput?.command
+        ) {
+          this.dedicatedTerminal.handlePermissionRequest(request);
+        }
+
         // Auto-approve in auto/yolo mode (no UI, no diff)
         if (this.isAutoMode()) {
           const options = request.options || [];
@@ -1340,6 +1356,7 @@ export class WebViewProvider {
   dispose(): void {
     this.panelManager.dispose();
     this.agentManager.disconnect();
+    this.dedicatedTerminal.dispose();
     this.disposables.forEach((d) => d.dispose());
   }
 }
