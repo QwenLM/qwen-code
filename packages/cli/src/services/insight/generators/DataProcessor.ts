@@ -12,8 +12,6 @@ import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
   HeatMapData,
-  TokenUsageData,
-  AchievementData,
   StreakData,
   SessionFacets,
 } from '../types/StaticInsightTypes.js';
@@ -258,109 +256,6 @@ export class DataProcessor {
       longestStreak: maxStreak,
       dates,
     };
-  }
-
-  // Calculate achievements based on user behavior
-  private calculateAchievements(
-    activeHours: { [hour: number]: number },
-    heatmap: HeatMapData,
-    _tokenUsage: TokenUsageData,
-  ): AchievementData[] {
-    const achievements: AchievementData[] = [];
-
-    // Total activities
-    const totalActivities = Object.values(heatmap).reduce(
-      (sum, count) => sum + count,
-      0,
-    );
-
-    // Total sessions
-    const totalSessions = Object.keys(heatmap).length;
-
-    // Calculate percentage of activity per hour
-    const totalHourlyActivity = Object.values(activeHours).reduce(
-      (sum, count) => sum + count,
-      0,
-    );
-
-    if (totalHourlyActivity > 0) {
-      // Midnight debugger: 20% of sessions happen between 12AM-5AM
-      const midnightActivity =
-        (activeHours[0] || 0) +
-        (activeHours[1] || 0) +
-        (activeHours[2] || 0) +
-        (activeHours[3] || 0) +
-        (activeHours[4] || 0) +
-        (activeHours[5] || 0);
-
-      if (midnightActivity / totalHourlyActivity >= 0.2) {
-        achievements.push({
-          id: 'midnight-debugger',
-          name: 'Midnight Debugger',
-          description: '20% of your sessions happen between 12AM-5AM',
-        });
-      }
-
-      // Morning coder: 20% of sessions happen between 6AM-9AM
-      const morningActivity =
-        (activeHours[6] || 0) +
-        (activeHours[7] || 0) +
-        (activeHours[8] || 0) +
-        (activeHours[9] || 0);
-
-      if (morningActivity / totalHourlyActivity >= 0.2) {
-        achievements.push({
-          id: 'morning-coder',
-          name: 'Morning Coder',
-          description: '20% of your sessions happen between 6AM-9AM',
-        });
-      }
-    }
-
-    // Patient king: average conversation length >= 10 exchanges
-    if (totalSessions > 0) {
-      const avgExchanges = totalActivities / totalSessions;
-      if (avgExchanges >= 10) {
-        achievements.push({
-          id: 'patient-king',
-          name: 'Patient King',
-          description: 'Your average conversation length is 10+ exchanges',
-        });
-      }
-    }
-
-    // Quick finisher: 70% of sessions have <= 2 exchanges
-    let quickSessions = 0;
-    // Since we don't have per-session exchange counts easily available,
-    // we'll estimate based on the distribution of activities
-    if (totalSessions > 0) {
-      // This is a simplified calculation - in a real implementation,
-      // we'd need to count exchanges per session
-      const avgPerSession = totalActivities / totalSessions;
-      if (avgPerSession <= 2) {
-        // Estimate based on low average
-        quickSessions = Math.floor(totalSessions * 0.7);
-      }
-
-      if (quickSessions / totalSessions >= 0.7) {
-        achievements.push({
-          id: 'quick-finisher',
-          name: 'Quick Finisher',
-          description: '70% of your sessions end in 2 exchanges or fewer',
-        });
-      }
-    }
-
-    // Explorer: for users with insufficient data or default
-    if (achievements.length === 0) {
-      achievements.push({
-        id: 'explorer',
-        name: 'Explorer',
-        description: 'Getting started with Qwen Code',
-      });
-    }
-
-    return achievements;
   }
 
   // Process chat files from all projects in the base directory and generate insights
@@ -843,7 +738,6 @@ None captured`;
   ): Promise<Omit<InsightData, 'facets' | 'qualitative'>> {
     // Initialize data structures
     const heatmap: HeatMapData = {};
-    const tokenUsage: TokenUsageData = {};
     const activeHours: { [hour: number]: number } = {};
     const sessionStartTimes: { [sessionId: string]: Date } = {};
     const sessionEndTimes: { [sessionId: string]: Date } = {};
@@ -868,21 +762,6 @@ None captured`;
 
         // Update active hours
         activeHours[hour] = (activeHours[hour] || 0) + 1;
-
-        // Update token usage
-        if (record.usageMetadata) {
-          const usage = tokenUsage[dateKey] || {
-            input: 0,
-            output: 0,
-            total: 0,
-          };
-
-          usage.input += record.usageMetadata.promptTokenCount || 0;
-          usage.output += record.usageMetadata.candidatesTokenCount || 0;
-          usage.total += record.usageMetadata.totalTokenCount || 0;
-
-          tokenUsage[dateKey] = usage;
-        }
 
         // Track session times
         if (!sessionStartTimes[record.sessionId]) {
@@ -973,23 +852,14 @@ None captured`;
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10);
 
-    // Calculate achievements
-    const achievements = this.calculateAchievements(
-      activeHours,
-      heatmap,
-      tokenUsage,
-    );
-
     return {
       heatmap,
-      tokenUsage,
       currentStreak: streakData.currentStreak,
       longestStreak: streakData.longestStreak,
       longestWorkDate,
       longestWorkDuration,
       activeHours,
       latestActiveTime,
-      achievements,
       totalSessions,
       totalMessages,
       totalHours,

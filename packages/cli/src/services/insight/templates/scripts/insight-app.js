@@ -143,9 +143,6 @@ function InsightApp({ data }) {
         </>
       )}
 
-      <TokenUsageSection tokenUsage={data.tokenUsage} />
-      <AchievementsSection achievements={data.achievements} />
-
       {data.qualitative && (
         <>
           <ImpressiveWorkflows qualitative={data.qualitative} />
@@ -914,95 +911,6 @@ function ActivityHeatmap({ heatmapData }) {
         More
       </text>
     </svg>
-  );
-}
-
-// Token Usage Section Component
-function TokenUsageSection({ tokenUsage }) {
-  const cardClass = 'glass-card p-6';
-  const sectionTitleClass =
-    'text-lg font-semibold tracking-tight text-slate-900';
-
-  function calculateTotalTokens(tokenUsage, type) {
-    return Object.values(tokenUsage).reduce(
-      (acc, usage) => acc + usage[type],
-      0,
-    );
-  }
-
-  return (
-    <div className={`${cardClass} mt-4 md:mt-6`}>
-      <div className="space-y-3">
-        <h3 className={sectionTitleClass}>Token Usage</h3>
-        <div className="grid grid-cols-3 gap-3">
-          <TokenUsageCard
-            label="Input"
-            value={calculateTotalTokens(tokenUsage, 'input').toLocaleString()}
-          />
-          <TokenUsageCard
-            label="Output"
-            value={calculateTotalTokens(tokenUsage, 'output').toLocaleString()}
-          />
-          <TokenUsageCard
-            label="Total"
-            value={calculateTotalTokens(tokenUsage, 'total').toLocaleString()}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Token Usage Card Component
-function TokenUsageCard({ label, value }) {
-  return (
-    <div className="rounded-xl bg-slate-50 px-4 py-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-        {label}
-      </p>
-      <p className="mt-1 text-2xl font-bold text-slate-900">{value}</p>
-    </div>
-  );
-}
-
-// Achievements Section Component
-function AchievementsSection({ achievements }) {
-  const cardClass = 'glass-card p-6';
-  const sectionTitleClass =
-    'text-lg font-semibold tracking-tight text-slate-900';
-
-  return (
-    <div className={`${cardClass} mt-4 space-y-4 md:mt-6`}>
-      <div className="flex items-center justify-between">
-        <h3 className={sectionTitleClass}>Achievements</h3>
-        <span className="text-xs font-semibold text-slate-500">
-          {Array.isArray(achievements) ? achievements.length : 0} total
-        </span>
-      </div>
-      {!Array.isArray(achievements) || achievements.length === 0 ? (
-        <p className="text-sm text-slate-600">
-          No achievements yet. Keep coding!
-        </p>
-      ) : (
-        <div className="divide-y divide-slate-200">
-          {achievements.map((achievement, index) => (
-            <AchievementItem key={index} achievement={achievement} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Achievement Item Component
-function AchievementItem({ achievement }) {
-  return (
-    <div className="flex flex-col gap-1 py-3 text-left">
-      <span className="text-base font-semibold text-slate-900">
-        {achievement.name}
-      </span>
-      <p className="text-sm text-slate-600">{achievement.description}</p>
-    </div>
   );
 }
 
