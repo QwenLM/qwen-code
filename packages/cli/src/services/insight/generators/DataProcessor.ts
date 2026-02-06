@@ -185,6 +185,11 @@ export class DataProcessor {
         schema: INSIGHT_SCHEMA,
         abortSignal: AbortSignal.timeout(60000), // 1 minute timeout per session
       });
+
+      if (!result || Object.keys(result).length === 0) {
+        return null;
+      }
+
       return {
         ...(result as unknown as SessionFacets),
         session_id: records[0].sessionId,
@@ -584,7 +589,7 @@ export class DataProcessor {
       ],
     };
 
-    const limit = pLimit(4);
+    const limit = pLimit(2);
 
     try {
       const [
@@ -643,6 +648,39 @@ export class DataProcessor {
           generate<InsightAtAGlance>(PROMPT_AT_A_GLANCE, schemaAtAGlance),
         ),
       ]);
+
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ impressiveWorkflows:',
+        impressiveWorkflows,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ atAGlance:',
+        atAGlance,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ interactionStyle:',
+        interactionStyle,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ improvements:',
+        improvements,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ memorableMoment:',
+        memorableMoment,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ frictionPoints:',
+        frictionPoints,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ futureOpportunities:',
+        futureOpportunities,
+      );
+      console.log(
+        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ projectAreas:',
+        projectAreas,
+      );
 
       return {
         impressiveWorkflows,
