@@ -794,22 +794,22 @@ body {
   margin-bottom: 4px;
 }
 
-.claude-md-section {
+.qwen-md-section {
   background: #eff6ff;
   border: 1px solid #bfdbfe;
   border-radius: 8px;
-  padding: 16px;
+  padding: 12px;
   margin-bottom: 20px;
 }
-.claude-md-section h3 {
-  font-size: 14px;
+.qwen-md-section h3 {
+  font-size: 13px;
   font-weight: 600;
   color: #1e40af;
-  margin: 0 0 12px 0;
+  margin: 0 0 8px 0;
 }
-.claude-md-actions {
-  margin-bottom: 12px;
-  padding-bottom: 12px;
+.qwen-md-actions {
+  margin-bottom: 8px;
+  padding-bottom: 8px;
   border-bottom: 1px solid #dbeafe;
 }
 .copy-all-btn {
@@ -817,8 +817,8 @@ body {
   color: white;
   border: none;
   border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 12px;
+  padding: 4px 10px;
+  font-size: 11px;
   cursor: pointer;
   font-weight: 500;
   transition: all 0.2s;
@@ -829,15 +829,15 @@ body {
 .copy-all-btn.copied {
   background: #16a34a;
 }
-.claude-md-item {
+.qwen-md-item {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
   gap: 8px;
-  padding: 10px 0;
+  padding: 8px 0;
   border-bottom: 1px solid #dbeafe;
 }
-.claude-md-item:last-child {
+.qwen-md-item:last-child {
   border-bottom: none;
 }
 .cmd-checkbox {
@@ -845,9 +845,9 @@ body {
 }
 .cmd-code {
   background: white;
-  padding: 8px 12px;
+  padding: 6px 10px;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 11px;
   color: #1e40af;
   border: 1px solid #bfdbfe;
   font-family: monospace;
@@ -857,10 +857,10 @@ body {
   flex: 1;
 }
 .cmd-why {
-  font-size: 12px;
+  font-size: 11px;
   color: #64748b;
   width: 100%;
-  padding-left: 24px;
+  padding-left: 20px;
   margin-top: 4px;
 }
 

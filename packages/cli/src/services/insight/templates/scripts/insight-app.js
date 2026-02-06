@@ -5,6 +5,26 @@
 
 const { useState, useRef, useEffect } = React;
 
+// Header Component
+function Header({ data }) {
+  const { totalMessages, totalSessions } = data;
+  return (
+    <header className="mb-8 space-y-3 text-center">
+      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+        Insights
+      </p>
+      <h1 className="text-3xl font-semibold text-slate-900 md:text-4xl">
+        Qwen Code Insights
+      </h1>
+      <p className="text-sm text-slate-600">
+        {totalMessages
+          ? `${totalMessages} messages across ${totalSessions} sessions`
+          : 'Your personalized coding journey and patterns'}
+      </p>
+    </header>
+  );
+}
+
 // Main App Component
 function InsightApp({ data }) {
   if (!data) {
@@ -17,6 +37,8 @@ function InsightApp({ data }) {
 
   return (
     <div>
+      <Header data={data} />
+
       {data.qualitative && (
         <>
           <AtAGlance qualitative={data.qualitative} />
@@ -259,18 +281,18 @@ function Improvements({ qualitative }) {
 
       {/* Qwen.md Additions */}
       {improvements.Qwen_md_additions?.length > 0 && (
-        <div className="Qwen-md-section">
+        <div className="qwen-md-section">
           <h3>Suggested Qwen.md Additions</h3>
           <p className="text-xs text-slate-500 mb-3">
             Just copy this into Qwen Code to add it to your Qwen.md.
           </p>
 
-          <div className="Qwen-md-actions">
+          <div className="qwen-md-actions">
             {/* Note: "Copy All" would require tracking state of all checkboxes, keeping it simple for now */}
           </div>
 
           {improvements.Qwen_md_additions.map((item, idx) => (
-            <div key={idx} className="Qwen-md-item">
+            <div key={idx} className="qwen-md-item">
               <input type="checkbox" defaultChecked className="cmd-checkbox" />
               <div style={{ flex: 1 }}>
                 <code className="cmd-code">{item.addition}</code>
