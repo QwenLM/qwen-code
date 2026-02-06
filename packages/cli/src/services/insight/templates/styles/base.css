@@ -730,6 +730,7 @@ body {
 }
 
 .narrative p {
+  margin-top: 0;
   margin-bottom: 12px;
   font-size: 14px;
   color: #475569;
