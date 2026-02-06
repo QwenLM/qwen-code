@@ -74,12 +74,50 @@ export function useCommandCompletion(
   const { completionMode, query, completionStart, completionEnd } =
     useMemo(() => {
       const currentLine = buffer.lines[cursorRow] || '';
-      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
+      const trimmedLine = currentLine.trim();
+
+      // Check if @ is at word boundary (start of a word, not in middle like emails)
+      const isAtWordBoundary = (index: number, line: string): boolean => {
+        if (index === 0) return true;
+        const prevChar = line[index - 1];
+        // @ is at word boundary if preceded by space, punctuation, or command chars
+        return /[\s\-_/:\\]/.test(prevChar);
+      };
+
+      if (cursorRow === 0 && isSlashCommand(trimmedLine)) {
+        // Check if there's an @ after the command name (for file completion)
+        const commandEnd = trimmedLine.indexOf(' ');
+        const atIndex = trimmedLine.indexOf(
+          '@',
+          commandEnd > 0 ? commandEnd : 0,
+        );
+
+        if (atIndex !== -1 && isAtWordBoundary(atIndex, trimmedLine)) {
+          // Find the end of the @ path (space or end of line)
+          let end = trimmedLine.length;
+          for (let i = atIndex + 1; i < trimmedLine.length; i++) {
+            if (/\s/.test(trimmedLine[i])) {
+              end = i;
+              break;
+            }
+          }
+          const pathStart = atIndex + 1;
+          const partialPath = trimmedLine.substring(pathStart, end);
+
+          return {
+            completionMode: CompletionMode.AT,
+            query: partialPath,
+            completionStart: pathStart,
+            completionEnd: end,
+          };
+        }
+
+        // No @ found, use slash completion
         return {
           completionMode: CompletionMode.SLASH,
-          query: currentLine,
+          query: trimmedLine,
           completionStart: 0,
-          completionEnd: currentLine.length,
+          completionEnd: trimmedLine.length,
         };
       }
 
@@ -96,6 +134,11 @@ export function useCommandCompletion(
             break;
           }
         } else if (char === '@') {
+          // Only trigger @ completion at word boundary
+          if (!isAtWordBoundary(i, currentLine)) {
+            break;
+          }
+
           let end = codePoints.length;
           for (let i = cursorCol; i < codePoints.length; i++) {
             if (codePoints[i] === ' ') {

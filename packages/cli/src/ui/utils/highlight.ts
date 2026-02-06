@@ -13,6 +13,17 @@ export type HighlightToken = {
 
 const HIGHLIGHT_REGEX = /(^\/[a-zA-Z0-9_-]+|@(?:\\ |[a-zA-Z0-9_./-])+)/g;
 
+export function isAtWordBoundary(text: string, index: number): boolean {
+  if (index === 0) return true;
+  const prevChar = text[index - 1];
+  // @ is at word boundary if preceded by space, punctuation, or command chars
+  if (/[\s\-_/:\\]/.test(prevChar)) return true;
+  // Also treat @ as at word boundary if text before @ contains a / (command context)
+  // This handles cases like /run@file.js where @ follows a command without space
+  if (text.slice(0, index).includes('/')) return true;
+  return false;
+}
+
 export function parseInputForHighlighting(
   text: string,
   index: number,
@@ -38,19 +49,24 @@ export function parseInputForHighlighting(
     }
 
     // Add the matched token
-    const type = fullMatch.startsWith('/') ? 'command' : 'file';
+    let type: 'default' | 'command' | 'file' = fullMatch.startsWith('/')
+      ? 'command'
+      : 'file';
+
     // Only highlight slash commands if the index is 0.
     if (type === 'command' && index !== 0) {
-      tokens.push({
-        text: fullMatch,
-        type: 'default',
-      });
-    } else {
-      tokens.push({
-        text: fullMatch,
-        type,
-      });
+      type = 'default';
     }
+
+    // For @ references, only highlight if at word boundary (not emails or mid-word @)
+    if (type === 'file' && !isAtWordBoundary(text, matchIndex)) {
+      type = 'default';
+    }
+
+    tokens.push({
+      text: fullMatch,
+      type,
+    });
 
     lastIndex = matchIndex + fullMatch.length;
   }
