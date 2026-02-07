@@ -38,10 +38,10 @@ describe('keyMatchers', () => {
     [Command.NAVIGATION_DOWN]: (key: Key) => key.name === 'down',
     [Command.ACCEPT_SUGGESTION]: (key: Key) =>
       key.name === 'tab' || (key.name === 'return' && !key.ctrl),
-    [Command.COMPLETION_UP]: (key: Key) =>
-      key.name === 'up' || (key.ctrl && key.name === 'p'),
-    [Command.COMPLETION_DOWN]: (key: Key) =>
-      key.name === 'down' || (key.ctrl && key.name === 'n'),
+    // Completion navigation only uses arrow keys (not Ctrl+P/N)
+    // to allow Ctrl+P/N to always navigate history
+    [Command.COMPLETION_UP]: (key: Key) => key.name === 'up',
+    [Command.COMPLETION_DOWN]: (key: Key) => key.name === 'down',
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
@@ -50,7 +50,6 @@ describe('keyMatchers', () => {
     [Command.OPEN_EXTERNAL_EDITOR]: (key: Key) =>
       key.ctrl && (key.name === 'x' || key.sequence === '\x18'),
     [Command.PASTE_CLIPBOARD_IMAGE]: (key: Key) => key.ctrl && key.name === 'v',
-    [Command.SHOW_ERROR_DETAILS]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
@@ -164,14 +163,26 @@ describe('keyMatchers', () => {
       negative: [createKey('return', { ctrl: true }), createKey('space')],
     },
     {
+      // Completion navigation only uses arrow keys (not Ctrl+P/N)
+      // to allow Ctrl+P/N to always navigate history
       command: Command.COMPLETION_UP,
-      positive: [createKey('up'), createKey('p', { ctrl: true })],
-      negative: [createKey('p'), createKey('down')],
+      positive: [createKey('up')],
+      negative: [
+        createKey('p'),
+        createKey('down'),
+        createKey('p', { ctrl: true }),
+      ],
     },
     {
+      // Completion navigation only uses arrow keys (not Ctrl+P/N)
+      // to allow Ctrl+P/N to always navigate history
       command: Command.COMPLETION_DOWN,
-      positive: [createKey('down'), createKey('n', { ctrl: true })],
-      negative: [createKey('n'), createKey('up')],
+      positive: [createKey('down')],
+      negative: [
+        createKey('n'),
+        createKey('up'),
+        createKey('n', { ctrl: true }),
+      ],
     },
 
     // Text input
@@ -210,11 +221,6 @@ describe('keyMatchers', () => {
     },
 
     // App level bindings
-    {
-      command: Command.SHOW_ERROR_DETAILS,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('e', { ctrl: true })],
-    },
     {
       command: Command.TOGGLE_TOOL_DESCRIPTIONS,
       positive: [createKey('t', { ctrl: true })],

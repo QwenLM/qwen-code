@@ -6,6 +6,9 @@
 
 import type { SlashCommand } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('CLI_COMMANDS');
 
 /**
  * Orchestrates the discovery and loading of all slash commands for the CLI.
@@ -57,7 +60,7 @@ export class CommandService {
       if (result.status === 'fulfilled') {
         allCommands.push(...result.value);
       } else {
-        console.debug('A command loader failed:', result.reason);
+        debugLogger.debug('A command loader failed:', result.reason);
       }
     }
 

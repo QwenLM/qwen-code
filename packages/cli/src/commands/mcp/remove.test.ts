@@ -9,10 +9,23 @@ import yargs from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { removeCommand } from './remove.js';
 
-vi.mock('fs/promises', () => ({
-  readFile: vi.fn(),
-  writeFile: vi.fn(),
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
 }));
+
+vi.mock('fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs/promises')>();
+  return {
+    ...actual,
+    readFile: vi.fn(),
+    writeFile: vi.fn(),
+  };
+});
 
 vi.mock('../../config/settings.js', async () => {
   const actual = await vi.importActual('../../config/settings.js');
@@ -45,6 +58,7 @@ describe('mcp remove command', () => {
       forScope: () => ({ settings: mockSettings }),
       setValue: mockSetValue,
     });
+    mockWriteStdoutLine.mockClear();
   });
 
   it('should remove a server from project settings', async () => {
@@ -58,11 +72,10 @@ describe('mcp remove command', () => {
   });
 
   it('should show a message if server not found', async () => {
-    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     await parser.parseAsync('remove non-existent-server');
 
     expect(mockSetValue).not.toHaveBeenCalled();
-    expect(consoleSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Server "non-existent-server" not found in project settings.',
     );
   });

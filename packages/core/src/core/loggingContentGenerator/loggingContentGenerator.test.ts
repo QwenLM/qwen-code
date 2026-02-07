@@ -12,6 +12,7 @@ import type {
 import { GenerateContentResponse } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import type { ContentGenerator } from '../contentGenerator.js';
+import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import {
@@ -50,14 +51,17 @@ const convertGeminiResponseToOpenAISpy = vi
     choices: [],
   } as OpenAI.Chat.ChatCompletion);
 
-const createConfig = (overrides: Record<string, unknown> = {}): Config =>
-  ({
-    getContentGeneratorConfig: () => ({
-      authType: 'openai',
-      enableOpenAILogging: false,
-      ...overrides,
-    }),
-  }) as Config;
+const createConfig = (overrides: Record<string, unknown> = {}): Config => {
+  const configContent = {
+    authType: 'openai',
+    enableOpenAILogging: false,
+    ...overrides,
+  };
+  return {
+    getContentGeneratorConfig: () => configContent,
+    getAuthType: () => configContent.authType as AuthType | undefined,
+  } as Config;
+};
 
 const createWrappedGenerator = (
   generateContent: ContentGenerator['generateContent'],
@@ -124,13 +128,17 @@ describe('LoggingContentGenerator', () => {
       ),
       vi.fn(),
     );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+      schemaCompliance: 'openapi_30' as const,
+    };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig({
-        enableOpenAILogging: true,
-        openAILoggingDir: 'logs',
-        schemaCompliance: 'openapi_30',
-      }),
+      createConfig(),
+      generatorConfig,
     );
 
     const request = {
@@ -225,9 +233,15 @@ describe('LoggingContentGenerator', () => {
       vi.fn().mockRejectedValue(error),
       vi.fn(),
     );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig({ enableOpenAILogging: true }),
+      createConfig(),
+      generatorConfig,
     );
 
     const request = {
@@ -293,9 +307,15 @@ describe('LoggingContentGenerator', () => {
         })(),
       ),
     );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig({ enableOpenAILogging: true }),
+      createConfig(),
+      generatorConfig,
     );
 
     const request = {
@@ -345,9 +365,15 @@ describe('LoggingContentGenerator', () => {
         })(),
       ),
     );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig({ enableOpenAILogging: true }),
+      createConfig(),
+      generatorConfig,
     );
 
     const request = {

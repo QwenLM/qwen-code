@@ -23,6 +23,7 @@ export default {
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
   '(shift + tab to cycle)': '(shift + tab to cycle)',
+  '(tab to cycle)': '(tab to cycle)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).',
   '!': '!',
@@ -33,6 +34,25 @@ export default {
   'Model Context Protocol command (from external servers)':
     'Model Context Protocol command (from external servers)',
   'Keyboard Shortcuts:': 'Keyboard Shortcuts:',
+  'Toggle this help display': 'Toggle this help display',
+  'Toggle shell mode': 'Toggle shell mode',
+  'Open command menu': 'Open command menu',
+  'Add file context': 'Add file context',
+  'Accept suggestion / Autocomplete': 'Accept suggestion / Autocomplete',
+  'Reverse search history': 'Reverse search history',
+  'Press ? again to close': 'Press ? again to close',
+  // Keyboard shortcuts panel descriptions
+  'for shell mode': 'for shell mode',
+  'for commands': 'for commands',
+  'for file paths': 'for file paths',
+  'to clear input': 'to clear input',
+  'to cycle approvals': 'to cycle approvals',
+  'to quit': 'to quit',
+  'for newline': 'for newline',
+  'to clear screen': 'to clear screen',
+  'to search history': 'to search history',
+  'to paste images': 'to paste images',
+  'for external editor': 'for external editor',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -46,6 +66,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
+  '? for shortcuts': '? for shortcuts',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':
@@ -59,10 +80,15 @@ export default {
   'show version info': 'show version info',
   'submit a bug report': 'submit a bug report',
   'About Qwen Code': 'About Qwen Code',
+  Status: 'Status',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: 'Runtime',
+  OS: 'OS',
+  Auth: 'Auth',
   'CLI Version': 'CLI Version',
   'Git Commit': 'Git Commit',
   Model: 'Model',
@@ -75,6 +101,7 @@ export default {
   'Session ID': 'Session ID',
   'Auth Method': 'Auth Method',
   'Base URL': 'Base URL',
+  Proxy: 'Proxy',
   'Memory Usage': 'Memory Usage',
   'IDE Client': 'IDE Client',
 
@@ -98,8 +125,8 @@ export default {
   Preview: 'Preview',
   '(Use Enter to select, Tab to configure scope)':
     '(Use Enter to select, Tab to configure scope)',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '(Use Enter to apply scope, Tab to select theme)',
+  '(Use Enter to apply scope, Tab to go back)':
+    '(Use Enter to apply scope, Tab to go back)',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     'Theme configuration unavailable due to NO_COLOR env variable.',
   'Theme "{{themeName}}" not found.': 'Theme "{{themeName}}" not found.',
@@ -152,6 +179,7 @@ export default {
   'Project Level ({{path}})': 'Project Level ({{path}})',
   'User Level ({{path}})': 'User Level ({{path}})',
   'Built-in Agents': 'Built-in Agents',
+  'Extension Agents': 'Extension Agents',
   'Using: {{count}} agents': 'Using: {{count}} agents',
   'View Agent': 'View Agent',
   'Edit Agent': 'Edit Agent',
@@ -257,8 +285,6 @@ export default {
   // ============================================================================
   'View and edit Qwen Code settings': 'View and edit Qwen Code settings',
   Settings: 'Settings',
-  '(Use Enter to select{{tabText}})': '(Use Enter to select{{tabText}})',
-  ', Tab to change focus': ', Tab to change focus',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -268,24 +294,33 @@ export default {
   // ============================================================================
   'Vim Mode': 'Vim Mode',
   'Disable Auto Update': 'Disable Auto Update',
+  'Attribution: commit': 'Attribution: commit',
+  'Terminal Bell Notification': 'Terminal Bell Notification',
+  'Enable Usage Statistics': 'Enable Usage Statistics',
+  Theme: 'Theme',
+  'Preferred Editor': 'Preferred Editor',
+  'Auto-connect to IDE': 'Auto-connect to IDE',
   'Enable Prompt Completion': 'Enable Prompt Completion',
   'Debug Keystroke Logging': 'Debug Keystroke Logging',
-  Language: 'Language',
+  'Language: UI': 'Language: UI',
+  'Language: Model': 'Language: Model',
   'Output Format': 'Output Format',
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
-  'Hide Banner': 'Hide Banner',
-  'Hide Context Summary': 'Hide Context Summary',
-  'Hide CWD': 'Hide CWD',
-  'Hide Sandbox Status': 'Hide Sandbox Status',
-  'Hide Model Info': 'Hide Model Info',
-  'Hide Footer': 'Hide Footer',
-  'Show Memory Usage': 'Show Memory Usage',
-  'Show Line Numbers': 'Show Line Numbers',
+  'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
-  'Enable Welcome Back': 'Enable Welcome Back',
+  'Show Welcome Back Dialog': 'Show Welcome Back Dialog',
+  'Enable User Feedback': 'Enable User Feedback',
+  'How is Qwen doing this session? (optional)':
+    'How is Qwen doing this session? (optional)',
+  Bad: 'Bad',
+  Fine: 'Fine',
+  Good: 'Good',
+  Dismiss: 'Dismiss',
+  'Not Sure Yet': 'Not Sure Yet',
+  'Any other key': 'Any other key',
   'Disable Loading Phrases': 'Disable Loading Phrases',
   'Screen Reader Mode': 'Screen Reader Mode',
   'IDE Mode': 'IDE Mode',
@@ -305,7 +340,7 @@ export default {
   'Respect .qwenignore': 'Respect .qwenignore',
   'Enable Recursive File Search': 'Enable Recursive File Search',
   'Disable Fuzzy Search': 'Disable Fuzzy Search',
-  'Enable Interactive Shell': 'Enable Interactive Shell',
+  'Interactive Shell (PTY)': 'Interactive Shell (PTY)',
   'Show Color': 'Show Color',
   'Auto Accept': 'Auto Accept',
   'Use Ripgrep': 'Use Ripgrep',
@@ -340,10 +375,174 @@ export default {
   'Show all directories in the workspace':
     'Show all directories in the workspace',
   'set external editor preference': 'set external editor preference',
+  'Select Editor': 'Select Editor',
+  'Editor Preference': 'Editor Preference',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.',
+  'Your preferred editor is:': 'Your preferred editor is:',
   'Manage extensions': 'Manage extensions',
   'List active extensions': 'List active extensions',
   'Update extensions. Usage: update <extension-names>|--all':
     'Update extensions. Usage: update <extension-names>|--all',
+  'Disable an extension': 'Disable an extension',
+  'Enable an extension': 'Enable an extension',
+  'Install an extension from a git repo or local path':
+    'Install an extension from a git repo or local path',
+  'Uninstall an extension': 'Uninstall an extension',
+  'No extensions installed.': 'No extensions installed.',
+  'Usage: /extensions update <extension-names>|--all':
+    'Usage: /extensions update <extension-names>|--all',
+  'Extension "{{name}}" not found.': 'Extension "{{name}}" not found.',
+  'No extensions to update.': 'No extensions to update.',
+  'Usage: /extensions install <source>': 'Usage: /extensions install <source>',
+  'Installing extension from "{{source}}"...':
+    'Installing extension from "{{source}}"...',
+  'Extension "{{name}}" installed successfully.':
+    'Extension "{{name}}" installed successfully.',
+  'Failed to install extension from "{{source}}": {{error}}':
+    'Failed to install extension from "{{source}}": {{error}}',
+  'Usage: /extensions uninstall <extension-name>':
+    'Usage: /extensions uninstall <extension-name>',
+  'Uninstalling extension "{{name}}"...':
+    'Uninstalling extension "{{name}}"...',
+  'Extension "{{name}}" uninstalled successfully.':
+    'Extension "{{name}}" uninstalled successfully.',
+  'Failed to uninstall extension "{{name}}": {{error}}':
+    'Failed to uninstall extension "{{name}}": {{error}}',
+  'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]':
+    'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]',
+  'Unsupported scope "{{scope}}", should be one of "user" or "workspace"':
+    'Unsupported scope "{{scope}}", should be one of "user" or "workspace"',
+  'Extension "{{name}}" disabled for scope "{{scope}}"':
+    'Extension "{{name}}" disabled for scope "{{scope}}"',
+  'Extension "{{name}}" enabled for scope "{{scope}}"':
+    'Extension "{{name}}" enabled for scope "{{scope}}"',
+  'Do you want to continue? [Y/n]: ': 'Do you want to continue? [Y/n]: ',
+  'Do you want to continue?': 'Do you want to continue?',
+  'Installing extension "{{name}}".': 'Installing extension "{{name}}".',
+  '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
+    '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**',
+  'This extension will run the following MCP servers:':
+    'This extension will run the following MCP servers:',
+  local: 'local',
+  remote: 'remote',
+  'This extension will add the following commands: {{commands}}.':
+    'This extension will add the following commands: {{commands}}.',
+  'This extension will append info to your QWEN.md context using {{fileName}}':
+    'This extension will append info to your QWEN.md context using {{fileName}}',
+  'This extension will exclude the following core tools: {{tools}}':
+    'This extension will exclude the following core tools: {{tools}}',
+  'This extension will install the following skills:':
+    'This extension will install the following skills:',
+  'This extension will install the following subagents:':
+    'This extension will install the following subagents:',
+  'Installation cancelled for "{{name}}".':
+    'Installation cancelled for "{{name}}".',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.',
+  '--ref and --auto-update are not applicable for marketplace extensions.':
+    '--ref and --auto-update are not applicable for marketplace extensions.',
+  'Extension "{{name}}" installed successfully and enabled.':
+    'Extension "{{name}}" installed successfully and enabled.',
+  'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
+    'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).',
+  'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
+    'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
+  'The git ref to install from.': 'The git ref to install from.',
+  'Enable auto-update for this extension.':
+    'Enable auto-update for this extension.',
+  'Enable pre-release versions for this extension.':
+    'Enable pre-release versions for this extension.',
+  'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
+    'Acknowledge the security risks of installing an extension and skip the confirmation prompt.',
+  'The source argument must be provided.':
+    'The source argument must be provided.',
+  'Extension "{{name}}" successfully uninstalled.':
+    'Extension "{{name}}" successfully uninstalled.',
+  'Uninstalls an extension.': 'Uninstalls an extension.',
+  'The name or source path of the extension to uninstall.':
+    'The name or source path of the extension to uninstall.',
+  'Please include the name of the extension to uninstall as a positional argument.':
+    'Please include the name of the extension to uninstall as a positional argument.',
+  'Enables an extension.': 'Enables an extension.',
+  'The name of the extension to enable.':
+    'The name of the extension to enable.',
+  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+    'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+  'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
+    'Extension "{{name}}" successfully enabled for scope "{{scope}}".',
+  'Extension "{{name}}" successfully enabled in all scopes.':
+    'Extension "{{name}}" successfully enabled in all scopes.',
+  'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
+    'Invalid scope: {{scope}}. Please use one of {{scopes}}.',
+  'Disables an extension.': 'Disables an extension.',
+  'The name of the extension to disable.':
+    'The name of the extension to disable.',
+  'The scope to disable the extenison in.':
+    'The scope to disable the extenison in.',
+  'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
+    'Extension "{{name}}" successfully disabled for scope "{{scope}}".',
+  'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
+    'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.',
+  'Unable to install extension "{{name}}" due to missing install metadata':
+    'Unable to install extension "{{name}}" due to missing install metadata',
+  'Extension "{{name}}" is already up to date.':
+    'Extension "{{name}}" is already up to date.',
+  'Updates all extensions or a named extension to the latest version.':
+    'Updates all extensions or a named extension to the latest version.',
+  'Update all extensions.': 'Update all extensions.',
+  'Either an extension name or --all must be provided':
+    'Either an extension name or --all must be provided',
+  'Lists installed extensions.': 'Lists installed extensions.',
+  'Path:': 'Path:',
+  'Source:': 'Source:',
+  'Type:': 'Type:',
+  'Ref:': 'Ref:',
+  'Release tag:': 'Release tag:',
+  'Enabled (User):': 'Enabled (User):',
+  'Enabled (Workspace):': 'Enabled (Workspace):',
+  'Context files:': 'Context files:',
+  'Skills:': 'Skills:',
+  'Agents:': 'Agents:',
+  'MCP servers:': 'MCP servers:',
+  'Link extension failed to install.': 'Link extension failed to install.',
+  'Extension "{{name}}" linked successfully and enabled.':
+    'Extension "{{name}}" linked successfully and enabled.',
+  'Links an extension from a local path. Updates made to the local path will always be reflected.':
+    'Links an extension from a local path. Updates made to the local path will always be reflected.',
+  'The name of the extension to link.': 'The name of the extension to link.',
+  'Set a specific setting for an extension.':
+    'Set a specific setting for an extension.',
+  'Name of the extension to configure.': 'Name of the extension to configure.',
+  'The setting to configure (name or env var).':
+    'The setting to configure (name or env var).',
+  'The scope to set the setting in.': 'The scope to set the setting in.',
+  'List all settings for an extension.': 'List all settings for an extension.',
+  'Name of the extension.': 'Name of the extension.',
+  'Extension "{{name}}" has no settings to configure.':
+    'Extension "{{name}}" has no settings to configure.',
+  'Settings for "{{name}}":': 'Settings for "{{name}}":',
+  '(workspace)': '(workspace)',
+  '(user)': '(user)',
+  '[not set]': '[not set]',
+  '[value stored in keychain]': '[value stored in keychain]',
+  'Value:': 'Value:',
+  'Manage extension settings.': 'Manage extension settings.',
+  'You need to specify a command (set or list).':
+    'You need to specify a command (set or list).',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.':
+    'No plugins available in this marketplace.',
+  'Select a plugin to install from marketplace "{{name}}":':
+    'Select a plugin to install from marketplace "{{name}}":',
+  'Plugin selection cancelled.': 'Plugin selection cancelled.',
+  'Select a plugin from "{{name}}"': 'Select a plugin from "{{name}}"',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel',
+  '{{count}} more above': '{{count}} more above',
+  '{{count}} more below': '{{count}} more below',
   'manage IDE integration': 'manage IDE integration',
   'check status of IDE integration': 'check status of IDE integration',
   'install required IDE companion for {{ideName}}':
@@ -390,8 +589,8 @@ export default {
   // ============================================================================
   // Commands - Language
   // ============================================================================
-  'Invalid language. Available: en-US, zh-CN':
-    'Invalid language. Available: en-US, zh-CN',
+  'Invalid language. Available: {{options}}':
+    'Invalid language. Available: {{options}}',
   'Language subcommands do not accept additional arguments.':
     'Language subcommands do not accept additional arguments.',
   'Current UI language: {{lang}}': 'Current UI language: {{lang}}',
@@ -400,12 +599,14 @@ export default {
   'LLM output language not set': 'LLM output language not set',
   'Set UI language': 'Set UI language',
   'Set LLM output language': 'Set LLM output language',
-  'Usage: /language ui [zh-CN|en-US]': 'Usage: /language ui [zh-CN|en-US]',
+  'Usage: /language ui [{{options}}]': 'Usage: /language ui [{{options}}]',
   'Usage: /language output <language>': 'Usage: /language output <language>',
   'Example: /language output 中文': 'Example: /language output 中文',
   'Example: /language output English': 'Example: /language output English',
   'Example: /language output 日本語': 'Example: /language output 日本語',
+  'Example: /language output Português': 'Example: /language output Português',
   'UI language changed to {{lang}}': 'UI language changed to {{lang}}',
+  'LLM output language set to {{lang}}': 'LLM output language set to {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'LLM output language rule file generated at {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -418,16 +619,12 @@ export default {
   'To request additional UI language packs, please open an issue on GitHub.':
     'To request additional UI language packs, please open an issue on GitHub.',
   'Available options:': 'Available options:',
-  '  - zh-CN: Simplified Chinese': '  - zh-CN: Simplified Chinese',
-  '  - en-US: English': '  - en-US: English',
-  'Set UI language to Simplified Chinese (zh-CN)':
-    'Set UI language to Simplified Chinese (zh-CN)',
-  'Set UI language to English (en-US)': 'Set UI language to English (en-US)',
+  'Set UI language to {{name}}': 'Set UI language to {{name}}',
 
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
-  'Approval Mode': 'Approval Mode',
+  'Tool Approval Mode': 'Tool Approval Mode',
   'Current approval mode: {{mode}}': 'Current approval mode: {{mode}}',
   'Available approval modes:': 'Available approval modes:',
   'Approval mode changed to: {{mode}}': 'Approval mode changed to: {{mode}}',
@@ -466,8 +663,6 @@ export default {
   'Automatically approve all tools': 'Automatically approve all tools',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
-  '(Use Enter to select, Tab to change focus)':
-    '(Use Enter to select, Tab to change focus)',
   'Apply To': 'Apply To',
   'User Settings': 'User Settings',
   'Workspace Settings': 'Workspace Settings',
@@ -891,14 +1086,25 @@ export default {
   // ============================================================================
   // Startup Tips
   // ============================================================================
-  'Tips for getting started:': 'Tips for getting started:',
-  '1. Ask questions, edit files, or run commands.':
-    '1. Ask questions, edit files, or run commands.',
-  '2. Be specific for the best results.':
-    '2. Be specific for the best results.',
-  'files to customize your interactions with Qwen Code.':
-    'files to customize your interactions with Qwen Code.',
-  'for more information.': 'for more information.',
+  'Tips:': 'Tips:',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    'Use /compress when the conversation gets long to summarize history and free up context.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    'Start a fresh idea with /clear or /new; the previous session stays available in history.',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    'Use /bug to submit issues to the maintainers when something goes off.',
+  'Switch auth type quickly with /auth.':
+    'Switch auth type quickly with /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    'You can resume a previous conversation by running qwen --continue or qwen --resume.',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'You can switch permission mode quickly with Tab or /approval-mode.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -957,6 +1163,18 @@ export default {
     'No tool calls have been made in this session.',
   'Session start time is unavailable, cannot calculate stats.':
     'Session start time is unavailable, cannot calculate stats.',
+
+  // ============================================================================
+  // Command Format Migration
+  // ============================================================================
+  'Command Format Migration': 'Command Format Migration',
+  'Found {{count}} TOML command file:': 'Found {{count}} TOML command file:',
+  'Found {{count}} TOML command files:': 'Found {{count}} TOML command files:',
+  '... and {{count}} more': '... and {{count}} more',
+  'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
+    'The TOML format is deprecated. Would you like to migrate them to Markdown format?',
+  '(Backups will be created and original files will be preserved)':
+    '(Backups will be created and original files will be preserved)',
 
   // ============================================================================
   // Loading Phrases
@@ -1096,4 +1314,55 @@ export default {
     'Have you tried turning it off and on again? (The loading screen, not me.)',
     'Constructing additional pylons...',
   ],
+
+  // ============================================================================
+  // Extension Settings Input
+  // ============================================================================
+  'Enter value...': 'Enter value...',
+  'Enter sensitive value...': 'Enter sensitive value...',
+  'Press Enter to submit, Escape to cancel':
+    'Press Enter to submit, Escape to cancel',
+
+  // ============================================================================
+  // Command Migration Tool
+  // ============================================================================
+  'Markdown file already exists: {{filename}}':
+    'Markdown file already exists: {{filename}}',
+  'TOML Command Format Deprecation Notice':
+    'TOML Command Format Deprecation Notice',
+  'Found {{count}} command file(s) in TOML format:':
+    'Found {{count}} command file(s) in TOML format:',
+  'The TOML format for commands is being deprecated in favor of Markdown format.':
+    'The TOML format for commands is being deprecated in favor of Markdown format.',
+  'Markdown format is more readable and easier to edit.':
+    'Markdown format is more readable and easier to edit.',
+  'You can migrate these files automatically using:':
+    'You can migrate these files automatically using:',
+  'Or manually convert each file:': 'Or manually convert each file:',
+  'TOML: prompt = "..." / description = "..."':
+    'TOML: prompt = "..." / description = "..."',
+  'Markdown: YAML frontmatter + content':
+    'Markdown: YAML frontmatter + content',
+  'The migration tool will:': 'The migration tool will:',
+  'Convert TOML files to Markdown': 'Convert TOML files to Markdown',
+  'Create backups of original files': 'Create backups of original files',
+  'Preserve all command functionality': 'Preserve all command functionality',
+  'TOML format will continue to work for now, but migration is recommended.':
+    'TOML format will continue to work for now, but migration is recommended.',
+
+  // ============================================================================
+  // Extensions - Explore Command
+  // ============================================================================
+  'Open extensions page in your browser':
+    'Open extensions page in your browser',
+  'Unknown extensions source: {{source}}.':
+    'Unknown extensions source: {{source}}.',
+  'Would open extensions page in your browser: {{url}} (skipped in test environment)':
+    'Would open extensions page in your browser: {{url}} (skipped in test environment)',
+  'View available extensions at {{url}}':
+    'View available extensions at {{url}}',
+  'Opening extensions page in your browser: {{url}}':
+    'Opening extensions page in your browser: {{url}}',
+  'Failed to open browser. Check out the extensions gallery at {{url}}':
+    'Failed to open browser. Check out the extensions gallery at {{url}}',
 };

@@ -30,13 +30,14 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { tokenLimit } from '../core/tokenLimits.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
+  type FileEncodingType,
+  FileEncoding,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
 
@@ -49,11 +50,9 @@ import { LSTool } from '../tools/ls.js';
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
 import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
 import { ReadFileTool } from '../tools/read-file.js';
-import { ReadManyFilesTool } from '../tools/read-many-files.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
-import { SmartEditTool } from '../tools/smart-edit.js';
 import { SkillTool } from '../tools/skill.js';
 import { TaskTool } from '../tools/task.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
@@ -61,6 +60,8 @@ import { ToolRegistry } from '../tools/tool-registry.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
+import { LspTool } from '../tools/lsp.js';
+import type { LspClient } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -78,8 +79,11 @@ import {
   RipgrepFallbackEvent,
   StartSessionEvent,
   type TelemetryTarget,
-  uiTelemetryService,
 } from '../telemetry/index.js';
+import {
+  ExtensionManager,
+  type Extension,
+} from '../extension/extensionManager.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -102,12 +106,20 @@ import {
   type ResumedSessionData,
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
+import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import {
+  createDebugLogger,
+  setDebugLogSession,
+  type DebugLogger,
+} from '../utils/debugLogger.js';
 
 import {
   ModelsConfig,
   type ModelProvidersConfig,
   type AvailableModel,
+  type RuntimeModelSnapshot,
 } from '../models/index.js';
+import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
@@ -162,7 +174,7 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
 };
 
 export interface AccessibilitySettings {
-  disableLoadingPhrases?: boolean;
+  enableLoadingPhrases?: boolean;
   screenReader?: boolean;
 }
 
@@ -198,20 +210,18 @@ export interface GitCoAuthorSettings {
   email?: string;
 }
 
-export interface GeminiCLIExtension {
-  name: string;
-  version: string;
-  isActive: boolean;
-  path: string;
-  installMetadata?: ExtensionInstallMetadata;
-}
+export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release';
+  type: 'git' | 'local' | 'link' | 'github-release' | 'marketplace';
+  originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release installs.
   ref?: string;
   autoUpdate?: boolean;
+  allowPreRelease?: boolean;
+  marketplaceConfig?: ClaudeMarketplaceConfig;
+  pluginName?: string;
 }
 
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
@@ -279,7 +289,6 @@ export interface ConfigParameters {
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
-  fullContext?: boolean;
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
@@ -287,10 +296,13 @@ export interface ConfigParameters {
   toolCallCommand?: string;
   mcpServerCommand?: string;
   mcpServers?: Record<string, MCPServerConfig>;
+  lsp?: {
+    enabled?: boolean;
+  };
+  lspClient?: LspClient;
   userMemory?: string;
   geminiMdFileCount?: number;
   approvalMode?: ApprovalMode;
-  showMemoryUsage?: boolean;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
@@ -300,7 +312,7 @@ export interface ConfigParameters {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
     enableRecursiveFileSearch?: boolean;
-    disableFuzzySearch?: boolean;
+    enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
   proxy?: string;
@@ -309,14 +321,14 @@ export interface ConfigParameters {
   includeDirectories?: string[];
   bugCommand?: BugCommandSettings;
   model?: string;
-  extensionContextFilePaths?: string[];
+  outputLanguageFilePath?: string;
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
-  experimentalSkills?: boolean;
   experimentalZedIntegration?: boolean;
   listExtensions?: boolean;
-  extensions?: GeminiCLIExtension[];
-  blockedMcpServers?: Array<{ name: string; extensionName: string }>;
+  overrideExtensions?: string[];
+  allowedMcpServers?: string[];
+  excludedMcpServers?: string[];
   noBrowser?: boolean;
   summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
   folderTrustFeature?: boolean;
@@ -331,6 +343,7 @@ export interface ConfigParameters {
   generationConfigSources?: ContentGeneratorConfigSources;
   cliVersion?: string;
   loadMemoryFromIncludeDirectories?: boolean;
+  importFormat?: 'tree' | 'flat';
   chatRecording?: boolean;
   // Web search providers
   webSearch?: {
@@ -344,19 +357,18 @@ export interface ConfigParameters {
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
+  defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
   shouldUseNodePtyShell?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
-  extensionManagement?: boolean;
   skipLoopDetection?: boolean;
   vlmSwitchMode?: string;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
   enableToolOutputTruncation?: boolean;
   eventEmitter?: EventEmitter;
-  useSmartEdit?: boolean;
   output?: OutputSettings;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
@@ -401,17 +413,19 @@ export interface ConfigInitializeOptions {
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
-  private skillManager!: SkillManager;
+  private extensionManager!: ExtensionManager;
+  private skillManager: SkillManager | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
   private contentGenerator!: ContentGenerator;
   private readonly embeddingModel: string;
 
-  private _modelsConfig!: ModelsConfig;
+  private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private readonly targetDir: string;
@@ -421,7 +435,6 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
-  private readonly fullContext: boolean;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
@@ -429,12 +442,15 @@ export class Config {
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
   private mcpServers: Record<string, MCPServerConfig> | undefined;
+  private readonly lspEnabled: boolean;
+  private lspClient?: LspClient;
+  private readonly allowedMcpServers?: string[];
+  private readonly excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
-  private readonly showMemoryUsage: boolean;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -445,7 +461,7 @@ export class Config {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
     enableRecursiveFileSearch: boolean;
-    disableFuzzySearch: boolean;
+    enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private gitService: GitService | undefined = undefined;
@@ -455,7 +471,7 @@ export class Config {
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly bugCommand: BugCommandSettings | undefined;
-  private readonly extensionContextFilePaths: string[];
+  private readonly outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
   private readonly folderTrustFeature: boolean;
   private readonly folderTrust: boolean;
@@ -464,19 +480,16 @@ export class Config {
   private readonly maxSessionTurns: number;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
-  private readonly _extensions: GeminiCLIExtension[];
-  private readonly _blockedMcpServers: Array<{
-    name: string;
-    extensionName: string;
-  }>;
+  private readonly overrideExtensions?: string[];
+
   private readonly summarizeToolOutput:
     | Record<string, SummarizeToolOutputSettings>
     | undefined;
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly experimentalSkills: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
+  private readonly importFormat: 'tree' | 'flat';
   private readonly webSearch?: {
     provider: Array<{
       type: 'tavily' | 'google' | 'dashscope';
@@ -493,7 +506,6 @@ export class Config {
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
-  private readonly extensionManagement: boolean = true;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly vlmSwitchMode: string | undefined;
@@ -504,12 +516,14 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
-  private readonly useSmartEdit: boolean;
   private readonly channel: string | undefined;
+  private readonly defaultFileEncoding: FileEncodingType;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
     this.sessionData = params.sessionData;
+    setDebugLogSession(this);
+    this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
@@ -526,7 +540,6 @@ export class Config {
     this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
     this.includePartialMessages = params.includePartialMessages ?? false;
     this.question = params.question;
-    this.fullContext = params.fullContext ?? false;
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
@@ -534,12 +547,15 @@ export class Config {
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
     this.mcpServers = params.mcpServers;
+    this.lspEnabled = params.lsp?.enabled ?? false;
+    this.lspClient = params.lspClient;
+    this.allowedMcpServers = params.allowedMcpServers;
+    this.excludedMcpServers = params.excludedMcpServers;
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
-    this.showMemoryUsage = params.showMemoryUsage ?? false;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
@@ -556,28 +572,26 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
+    this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
       respectGitIgnore: params.fileFiltering?.respectGitIgnore ?? true,
       respectQwenIgnore: params.fileFiltering?.respectQwenIgnore ?? true,
       enableRecursiveFileSearch:
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
-      disableFuzzySearch: params.fileFiltering?.disableFuzzySearch ?? false,
+      enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
-    this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.experimentalSkills = params.experimentalSkills ?? false;
     this.listExtensions = params.listExtensions ?? false;
-    this._extensions = params.extensions ?? [];
-    this._blockedMcpServers = params.blockedMcpServers ?? [];
+    this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
     this.summarizeToolOutput = params.summarizeToolOutput;
     this.folderTrustFeature = params.folderTrustFeature ?? false;
@@ -590,6 +604,7 @@ export class Config {
 
     this.loadMemoryFromIncludeDirectories =
       params.loadMemoryFromIncludeDirectories ?? false;
+    this.importFormat = params.importFormat ?? 'tree';
     this.chatCompression = params.chatCompression;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
@@ -614,9 +629,8 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
-    this.useSmartEdit = params.useSmartEdit ?? false;
-    this.extensionManagement = params.extensionManagement ?? true;
     this.channel = params.channel;
+    this.defaultFileEncoding = params.defaultFileEncoding ?? FileEncoding.UTF8;
     this.storage = new Storage(this.targetDir);
     this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -630,7 +644,7 @@ export class Config {
     // Prefer params.authType over generationConfig.authType because:
     // - params.authType preserves undefined (user hasn't selected yet)
     // - generationConfig.authType may have a default value from resolvers
-    this._modelsConfig = new ModelsConfig({
+    this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
       generationConfig: {
@@ -653,6 +667,11 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
+    this.extensionManager = new ExtensionManager({
+      workspaceDir: this.targetDir,
+      enabledExtensionOverrides: this.overrideExtensions,
+      isWorkspaceTrusted: this.isTrustedFolder(),
+    });
   }
 
   /**
@@ -664,6 +683,7 @@ export class Config {
       throw Error('Config was already initialized');
     }
     this.initialized = true;
+    this.debugLogger.info('Config initialization started');
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -671,21 +691,55 @@ export class Config {
       await this.getGitService();
     }
     this.promptRegistry = new PromptRegistry();
+    this.extensionManager.setConfig(this);
+    await this.extensionManager.refreshCache();
+    this.debugLogger.debug('Extension manager initialized');
+
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
+    await this.skillManager.startWatching();
+    this.debugLogger.debug('Skill manager initialized');
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
+    await this.extensionManager.refreshCache();
+
+    await this.refreshHierarchicalMemory();
+    this.debugLogger.debug('Hierarchical memory loaded');
+
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
     );
+    this.debugLogger.info(
+      `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
+    );
 
     await this.geminiClient.initialize();
+    this.debugLogger.info('Gemini client initialized');
+
+    // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
+    this.modelsConfig.detectAndCaptureRuntimeModel();
 
     logStartSession(this, new StartSessionEvent(this));
+    this.debugLogger.info('Config initialization completed');
+  }
+
+  async refreshHierarchicalMemory(): Promise<void> {
+    const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.shouldLoadMemoryFromIncludeDirectories()
+        ? this.getWorkspaceContext().getDirectories()
+        : [],
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+    );
+    this.setUserMemory(memoryContent);
+    this.setGeminiMdFileCount(fileCount);
   }
 
   getContentGenerator(): ContentGenerator {
@@ -696,8 +750,8 @@ export class Config {
    * Get the ModelsConfig instance for model-related operations.
    * External code (e.g., CLI) can use this to access model configuration.
    */
-  get modelsConfig(): ModelsConfig {
-    return this._modelsConfig;
+  getModelsConfig(): ModelsConfig {
+    return this.modelsConfig;
   }
 
   /**
@@ -705,12 +759,15 @@ export class Config {
    * Exclusive for `OpenAIKeyPrompt` to update credentials via `/auth`
    * Delegates to ModelsConfig.
    */
-  updateCredentials(credentials: {
-    apiKey?: string;
-    baseUrl?: string;
-    model?: string;
-  }): void {
-    this._modelsConfig.updateCredentials(credentials);
+  updateCredentials(
+    credentials: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+    },
+    settingsGenerationConfig?: Partial<ContentGeneratorConfig>,
+  ): void {
+    this.modelsConfig.updateCredentials(credentials, settingsGenerationConfig);
   }
 
   /**
@@ -718,21 +775,20 @@ export class Config {
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
     // Sync modelsConfig state for this auth refresh
-    const modelId = this._modelsConfig.getModel();
-    this._modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
+    const modelId = this.modelsConfig.getModel();
+    this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
     // Check and consume cached credentials flag
     const requireCached =
-      this._modelsConfig.consumeRequireCachedCredentialsFlag();
+      this.modelsConfig.consumeRequireCachedCredentialsFlag();
 
     const { config, sources } = resolveContentGeneratorConfigWithSources(
       this,
       authMethod,
-      this._modelsConfig.getGenerationConfig(),
-      this._modelsConfig.getGenerationConfigSources(),
+      this.modelsConfig.getGenerationConfig(),
+      this.modelsConfig.getGenerationConfigSources(),
       {
-        strictModelProvider:
-          this._modelsConfig.isStrictModelProviderSelection(),
+        strictModelProvider: this.modelsConfig.isStrictModelProviderSelection(),
       },
     );
     const newContentGeneratorConfig = config;
@@ -773,6 +829,10 @@ export class Config {
     return this.sessionId;
   }
 
+  getDebugLogger(): DebugLogger {
+    return this.debugLogger;
+  }
+
   /**
    * Starts a new session and resets session-scoped services.
    */
@@ -782,6 +842,8 @@ export class Config {
   ): string {
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
+    setDebugLogSession(this);
+    this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
@@ -802,6 +864,10 @@ export class Config {
     return this.loadMemoryFromIncludeDirectories;
   }
 
+  getImportFormat(): 'tree' | 'flat' {
+    return this.importFormat;
+  }
+
   getContentGeneratorConfig(): ContentGeneratorConfig {
     return this.contentGeneratorConfig;
   }
@@ -811,15 +877,15 @@ export class Config {
     // get sources from ModelsConfig
     if (
       Object.keys(this.contentGeneratorConfigSources).length === 0 &&
-      this._modelsConfig
+      this.modelsConfig
     ) {
-      return this._modelsConfig.getGenerationConfigSources();
+      return this.modelsConfig.getGenerationConfigSources();
     }
     return this.contentGeneratorConfigSources;
   }
 
   getModel(): string {
-    return this.contentGeneratorConfig?.model || this._modelsConfig.getModel();
+    return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
   }
 
   /**
@@ -830,7 +896,7 @@ export class Config {
     newModel: string,
     metadata?: { reason?: string; context?: string },
   ): Promise<void> {
-    await this._modelsConfig.setModel(newModel, metadata);
+    await this.modelsConfig.setModel(newModel, metadata);
     // Also update contentGeneratorConfig for hot-update compatibility
     if (this.contentGeneratorConfig) {
       this.contentGeneratorConfig.model = newModel;
@@ -860,19 +926,20 @@ export class Config {
       const { config, sources } = resolveContentGeneratorConfigWithSources(
         this,
         authType,
-        this._modelsConfig.getGenerationConfig(),
-        this._modelsConfig.getGenerationConfigSources(),
+        this.modelsConfig.getGenerationConfig(),
+        this.modelsConfig.getGenerationConfigSources(),
         {
           strictModelProvider:
-            this._modelsConfig.isStrictModelProviderSelection(),
+            this.modelsConfig.isStrictModelProviderSelection(),
         },
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
-      this.contentGeneratorConfig.disableCacheControl =
-        config.disableCacheControl;
+      this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
+      this.contentGeneratorConfig.enableCacheControl =
+        config.enableCacheControl;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -881,9 +948,13 @@ export class Config {
         this.contentGeneratorConfigSources['samplingParams'] =
           sources['samplingParams'];
       }
-      if ('disableCacheControl' in sources) {
-        this.contentGeneratorConfigSources['disableCacheControl'] =
-          sources['disableCacheControl'];
+      if ('enableCacheControl' in sources) {
+        this.contentGeneratorConfigSources['enableCacheControl'] =
+          sources['enableCacheControl'];
+      }
+      if ('contextWindowSize' in sources) {
+        this.contentGeneratorConfigSources['contextWindowSize'] =
+          sources['contextWindowSize'];
       }
       return;
     }
@@ -897,7 +968,7 @@ export class Config {
    * Delegates to ModelsConfig.
    */
   getAvailableModels(): AvailableModel[] {
-    return this._modelsConfig.getAvailableModels();
+    return this.modelsConfig.getAvailableModels();
   }
 
   /**
@@ -905,26 +976,43 @@ export class Config {
    * Delegates to ModelsConfig.
    */
   getAvailableModelsForAuthType(authType: AuthType): AvailableModel[] {
-    return this._modelsConfig.getAvailableModelsForAuthType(authType);
+    return this.modelsConfig.getAvailableModelsForAuthType(authType);
   }
 
   /**
-   * Switch authType+model via registry-backed selection.
+   * Get all configured models across authTypes.
+   * Delegates to ModelsConfig.
+   */
+  getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
+    return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * Get the currently active runtime model snapshot.
+   * Delegates to ModelsConfig.
+   */
+  getActiveRuntimeModelSnapshot(): RuntimeModelSnapshot | undefined {
+    return this.modelsConfig.getActiveRuntimeModelSnapshot();
+  }
+
+  /**
+   * Switch authType+model.
+   * Supports both registry-backed models and runtime model snapshots.
+   *
+   * For runtime models, the modelId should be in format `$runtime|${authType}|${modelId}`.
    * This triggers a refresh of the ContentGenerator when required (always on authType changes).
    * For qwen-oauth model switches that are hot-update safe, this may update in place.
    *
    * @param authType - Target authentication type
-   * @param modelId - Target model ID
+   * @param modelId - Target model ID (or `$runtime|${authType}|${modelId}` for runtime models)
    * @param options - Additional options like requireCachedCredentials
-   * @param metadata - Metadata for logging/tracking
    */
   async switchModel(
     authType: AuthType,
     modelId: string,
     options?: { requireCachedCredentials?: boolean },
-    metadata?: { reason?: string; context?: string },
   ): Promise<void> {
-    await this._modelsConfig.switchModel(authType, modelId, options, metadata);
+    await this.modelsConfig.switchModel(authType, modelId, options);
   }
 
   getMaxSessionTurns(): number {
@@ -970,6 +1058,28 @@ export class Config {
     return this.toolRegistry;
   }
 
+  /**
+   * Shuts down the Config and releases all resources.
+   * This method is idempotent and safe to call multiple times.
+   * It handles the case where initialization was not completed.
+   */
+  async shutdown(): Promise<void> {
+    if (!this.initialized) {
+      // Nothing to clean up if not initialized
+      return;
+    }
+    try {
+      this.skillManager?.stopWatching();
+
+      if (this.toolRegistry) {
+        await this.toolRegistry.stop();
+      }
+    } catch (error) {
+      // Log but don't throw - cleanup should be best-effort
+      this.debugLogger.error('Error during Config shutdown:', error);
+    }
+  }
+
   getPromptRegistry(): PromptRegistry {
     return this.promptRegistry;
   }
@@ -980,10 +1090,6 @@ export class Config {
 
   getQuestion(): string | undefined {
     return this.question;
-  }
-
-  getFullContext(): boolean {
-    return this.fullContext;
   }
 
   getCoreTools(): string[] | undefined {
@@ -1011,7 +1117,37 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    return this.mcpServers;
+    let mcpServers = { ...(this.mcpServers || {}) };
+    const extensions = this.getActiveExtensions();
+    for (const extension of extensions) {
+      Object.entries(extension.config.mcpServers || {}).forEach(
+        ([key, server]) => {
+          if (mcpServers[key]) return;
+          mcpServers[key] = {
+            ...server,
+            extensionName: extension.config.name,
+          };
+        },
+      );
+    }
+
+    if (this.allowedMcpServers) {
+      mcpServers = Object.fromEntries(
+        Object.entries(mcpServers).filter(([key]) =>
+          this.allowedMcpServers?.includes(key),
+        ),
+      );
+    }
+
+    if (this.excludedMcpServers) {
+      mcpServers = Object.fromEntries(
+        Object.entries(mcpServers).filter(
+          ([key]) => !this.excludedMcpServers?.includes(key),
+        ),
+      );
+    }
+
+    return mcpServers;
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
@@ -1019,6 +1155,24 @@ export class Config {
       throw new Error('Cannot modify mcpServers after initialization');
     }
     this.mcpServers = { ...this.mcpServers, ...servers };
+  }
+
+  isLspEnabled(): boolean {
+    return this.lspEnabled;
+  }
+
+  getLspClient(): LspClient | undefined {
+    return this.lspClient;
+  }
+
+  /**
+   * Allows wiring an LSP client after Config construction but before initialize().
+   */
+  setLspClient(client: LspClient | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP client after initialization');
+    }
+    this.lspClient = client;
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -1073,10 +1227,6 @@ export class Config {
     this.approvalMode = mode;
   }
 
-  getShowMemoryUsage(): boolean {
-    return this.showMemoryUsage;
-  }
-
   getInputFormat(): 'text' | 'stream-json' {
     return this.inputFormat;
   }
@@ -1129,8 +1279,8 @@ export class Config {
     return this.fileFiltering.enableRecursiveFileSearch;
   }
 
-  getFileFilteringDisableFuzzySearch(): boolean {
-    return this.fileFiltering.disableFuzzySearch;
+  getFileFilteringEnableFuzzySearch(): boolean {
+    return this.fileFiltering.enableFuzzySearch;
   }
 
   getFileFilteringRespectGitIgnore(): boolean {
@@ -1190,31 +1340,71 @@ export class Config {
   }
 
   getExtensionContextFilePaths(): string[] {
-    return this.extensionContextFilePaths;
+    const extensionContextFilePaths = this.getActiveExtensions().flatMap(
+      (e) => e.contextFiles,
+    );
+    return [
+      ...extensionContextFilePaths,
+      ...(this.outputLanguageFilePath ? [this.outputLanguageFilePath] : []),
+    ];
   }
 
   getExperimentalZedIntegration(): boolean {
     return this.experimentalZedIntegration;
   }
 
-  getExperimentalSkills(): boolean {
-    return this.experimentalSkills;
-  }
-
   getListExtensions(): boolean {
     return this.listExtensions;
   }
 
-  getExtensionManagement(): boolean {
-    return this.extensionManagement;
+  getExtensionManager(): ExtensionManager {
+    return this.extensionManager;
   }
 
-  getExtensions(): GeminiCLIExtension[] {
-    return this._extensions;
+  getExtensions(): Extension[] {
+    const extensions = this.extensionManager.getLoadedExtensions();
+    if (this.overrideExtensions) {
+      return extensions.filter((e) =>
+        this.overrideExtensions?.includes(e.name),
+      );
+    } else {
+      return extensions;
+    }
+  }
+
+  getActiveExtensions(): Extension[] {
+    return this.getExtensions().filter((e) => e.isActive);
   }
 
   getBlockedMcpServers(): Array<{ name: string; extensionName: string }> {
-    return this._blockedMcpServers;
+    const mcpServers = { ...(this.mcpServers || {}) };
+    const extensions = this.getActiveExtensions();
+    for (const extension of extensions) {
+      Object.entries(extension.config.mcpServers || {}).forEach(
+        ([key, server]) => {
+          if (mcpServers[key]) return;
+          mcpServers[key] = {
+            ...server,
+            extensionName: extension.config.name,
+          };
+        },
+      );
+    }
+    const blockedMcpServers: Array<{ name: string; extensionName: string }> =
+      [];
+
+    if (this.allowedMcpServers) {
+      Object.entries(mcpServers).forEach(([key, server]) => {
+        const isAllowed = this.allowedMcpServers?.includes(key);
+        if (!isAllowed) {
+          blockedMcpServers.push({
+            name: key,
+            extensionName: server.extensionName || '',
+          });
+        }
+      });
+    }
+    return blockedMcpServers;
   }
 
   getNoBrowser(): boolean {
@@ -1285,6 +1475,14 @@ export class Config {
 
   getChannel(): string | undefined {
     return this.channel;
+  }
+
+  /**
+   * Get the default file encoding for new files.
+   * @returns FileEncodingType
+   */
+  getDefaultFileEncoding(): FileEncodingType {
+    return this.defaultFileEncoding;
   }
 
   /**
@@ -1367,13 +1565,7 @@ export class Config {
       return Number.POSITIVE_INFINITY;
     }
 
-    return Math.min(
-      // Estimate remaining context window in characters (1 token ~= 4 chars).
-      4 *
-        (tokenLimit(this.getModel()) -
-          uiTelemetryService.getLastPromptTokenCount()),
-      this.truncateToolOutputThreshold,
-    );
+    return this.truncateToolOutputThreshold;
   }
 
   getTruncateToolOutputLines(): number {
@@ -1382,10 +1574,6 @@ export class Config {
     }
 
     return this.truncateToolOutputLines;
-  }
-
-  getUseSmartEdit(): boolean {
-    return this.useSmartEdit;
   }
 
   getOutputFormat(): OutputFormat {
@@ -1431,7 +1619,7 @@ export class Config {
     return this.subagentManager;
   }
 
-  getSkillManager(): SkillManager {
+  getSkillManager(): SkillManager | null {
     return this.skillManager;
   }
 
@@ -1455,10 +1643,9 @@ export class Config {
 
       if (!toolName) {
         // Log warning and skip this tool instead of crashing
-        console.warn(
-          `[Config] Skipping tool registration: ${className} is missing static Name property. ` +
-            `Tools must define a static Name property to be registered. ` +
-            `Location: config.ts:registerCoreTool`,
+        this.debugLogger.warn(
+          `Skipping tool registration: ${className} is missing static Name property. ` +
+            `Tools must define a static Name property to be registered.`,
         );
         return;
       }
@@ -1467,8 +1654,8 @@ export class Config {
         try {
           registry.registerTool(new ToolClass(...args));
         } catch (error) {
-          console.error(
-            `[Config] Failed to register tool ${className} (${toolName}):`,
+          this.debugLogger.error(
+            `Failed to register tool ${className} (${toolName}):`,
             error,
           );
           throw error; // Re-throw after logging context
@@ -1477,9 +1664,7 @@ export class Config {
     };
 
     registerCoreTool(TaskTool, this);
-    if (this.getExperimentalSkills()) {
-      registerCoreTool(SkillTool, this);
-    }
+    registerCoreTool(SkillTool, this);
     registerCoreTool(LSTool, this);
     registerCoreTool(ReadFileTool, this);
 
@@ -1510,13 +1695,8 @@ export class Config {
     }
 
     registerCoreTool(GlobTool, this);
-    if (this.getUseSmartEdit()) {
-      registerCoreTool(SmartEditTool, this);
-    } else {
-      registerCoreTool(EditTool, this);
-    }
+    registerCoreTool(EditTool, this);
     registerCoreTool(WriteFileTool, this);
-    registerCoreTool(ReadManyFilesTool, this);
     registerCoreTool(ShellTool, this);
     registerCoreTool(MemoryTool);
     registerCoreTool(TodoWriteTool, this);
@@ -1528,9 +1708,15 @@ export class Config {
     if (this.getWebSearchConfig()) {
       registerCoreTool(WebSearchTool, this);
     }
+    if (this.isLspEnabled() && this.getLspClient()) {
+      // Register the unified LSP tool
+      registerCoreTool(LspTool, this);
+    }
 
     await registry.discoverAllTools();
-    console.debug('ToolRegistry created', registry.getAllToolNames());
+    this.debugLogger.debug(
+      `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
+    );
     return registry;
   }
 }

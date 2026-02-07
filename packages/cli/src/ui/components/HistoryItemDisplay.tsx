@@ -30,6 +30,7 @@ import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
 import { ExtensionsList } from './views/ExtensionsList.js';
 import { getMCPServerStatus } from '@qwen-code/qwen-code-core';
+import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 
@@ -37,6 +38,7 @@ interface HistoryItemDisplayProps {
   item: HistoryItem;
   availableTerminalHeight?: number;
   terminalWidth: number;
+  mainAreaWidth?: number;
   isPending: boolean;
   isFocused?: boolean;
   commands?: readonly SlashCommand[];
@@ -49,6 +51,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   item,
   availableTerminalHeight,
   terminalWidth,
+  mainAreaWidth,
   isPending,
   commands,
   isFocused = true,
@@ -57,9 +60,16 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   availableTerminalHeightGemini,
 }) => {
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
+  const contentWidth = terminalWidth - 4;
+  const boxWidth = mainAreaWidth || contentWidth;
 
   return (
-    <Box flexDirection="column" key={itemForDisplay.id}>
+    <Box
+      flexDirection="column"
+      key={itemForDisplay.id}
+      marginLeft={2}
+      marginRight={2}
+    >
       {/* Render standard message types */}
       {itemForDisplay.type === 'user' && (
         <UserMessage text={itemForDisplay.text} />
@@ -74,7 +84,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth}
         />
       )}
       {itemForDisplay.type === 'gemini_content' && (
@@ -84,7 +94,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth}
         />
       )}
       {itemForDisplay.type === 'gemini_thought' && (
@@ -94,7 +104,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth}
         />
       )}
       {itemForDisplay.type === 'gemini_thought_content' && (
@@ -104,7 +114,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth}
         />
       )}
       {itemForDisplay.type === 'info' && (
@@ -117,25 +127,32 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <ErrorMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
-        <AboutBox {...itemForDisplay.systemInfo} />
+        <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
       )}
       {itemForDisplay.type === 'help' && commands && (
-        <Help commands={commands} />
+        <Help commands={commands} width={boxWidth} />
       )}
       {itemForDisplay.type === 'stats' && (
-        <StatsDisplay duration={itemForDisplay.duration} />
+        <StatsDisplay duration={itemForDisplay.duration} width={boxWidth} />
       )}
-      {itemForDisplay.type === 'model_stats' && <ModelStatsDisplay />}
-      {itemForDisplay.type === 'tool_stats' && <ToolStatsDisplay />}
+      {itemForDisplay.type === 'model_stats' && (
+        <ModelStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'tool_stats' && (
+        <ToolStatsDisplay width={boxWidth} />
+      )}
       {itemForDisplay.type === 'quit' && (
-        <SessionSummaryDisplay duration={itemForDisplay.duration} />
+        <SessionSummaryDisplay
+          duration={itemForDisplay.duration}
+          width={boxWidth}
+        />
       )}
       {itemForDisplay.type === 'tool_group' && (
         <ToolGroupMessage
           toolCalls={itemForDisplay.tools}
           groupId={itemForDisplay.id}
           availableTerminalHeight={availableTerminalHeight}
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth}
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
@@ -148,10 +165,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'extensions_list' && <ExtensionsList />}
       {itemForDisplay.type === 'tools_list' && (
         <ToolsList
-          terminalWidth={terminalWidth}
+          contentWidth={contentWidth}
           tools={itemForDisplay.tools}
           showDescriptions={itemForDisplay.showDescriptions}
         />
+      )}
+      {itemForDisplay.type === 'skills_list' && (
+        <SkillsList skills={itemForDisplay.skills} />
       )}
       {itemForDisplay.type === 'mcp_status' && (
         <McpStatus {...itemForDisplay} serverStatus={getMCPServerStatus} />

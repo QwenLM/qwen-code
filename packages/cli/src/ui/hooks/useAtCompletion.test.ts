@@ -49,7 +49,7 @@ describe('useAtCompletion', () => {
         respectQwenIgnore: true,
       })),
       getEnableRecursiveFileSearch: () => true,
-      getFileFilteringDisableFuzzySearch: () => false,
+      getFileFilteringEnableFuzzySearch: () => true,
     } as unknown as Config;
     vi.clearAllMocks();
   });
@@ -197,7 +197,7 @@ describe('useAtCompletion', () => {
         cache: false,
         cacheTtl: 0,
         enableRecursiveFileSearch: true,
-        disableFuzzySearch: false,
+        enableFuzzySearch: true,
       });
       await realFileSearch.initialize();
 
@@ -479,7 +479,7 @@ describe('useAtCompletion', () => {
           respectGitIgnore: true,
           respectQwenIgnore: true,
         })),
-        getFileFilteringDisableFuzzySearch: () => false,
+        getFileFilteringEnableFuzzySearch: () => true,
       } as unknown as Config;
 
       const { result } = renderHook(() =>

@@ -62,7 +62,6 @@ vi.mock('./hooks/useEditorSettings.js');
 vi.mock('./hooks/useSettingsCommand.js');
 vi.mock('./hooks/useModelCommand.js');
 vi.mock('./hooks/slashCommandProcessor.js');
-vi.mock('./hooks/useConsoleMessages.js');
 vi.mock('./hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 80, rows: 24 })),
 }));
@@ -76,7 +75,6 @@ vi.mock('./hooks/useFolderTrust.js');
 vi.mock('./hooks/useIdeTrustListener.js');
 vi.mock('./hooks/useMessageQueue.js');
 vi.mock('./hooks/useAutoAcceptIndicator.js');
-vi.mock('./hooks/useWorkspaceMigration.js');
 vi.mock('./hooks/useGitBranchName.js');
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
@@ -86,7 +84,6 @@ vi.mock('./hooks/useLogger.js');
 // Mock external utilities
 vi.mock('../utils/events.js');
 vi.mock('../utils/handleAutoUpdate.js');
-vi.mock('./utils/ConsolePatcher.js');
 vi.mock('../utils/cleanup.js');
 
 import { useHistory } from './hooks/useHistoryManager.js';
@@ -96,14 +93,12 @@ import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
-import { useConsoleMessages } from './hooks/useConsoleMessages.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
-import { useWorkspaceMigration } from './hooks/useWorkspaceMigration.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { useSessionStats } from './contexts/SessionContext.js';
@@ -127,14 +122,12 @@ describe('AppContainer State Management', () => {
   const mockedUseSettingsCommand = useSettingsCommand as Mock;
   const mockedUseModelCommand = useModelCommand as Mock;
   const mockedUseSlashCommandProcessor = useSlashCommandProcessor as Mock;
-  const mockedUseConsoleMessages = useConsoleMessages as Mock;
   const mockedUseGeminiStream = useGeminiStream as Mock;
   const mockedUseVim = useVim as Mock;
   const mockedUseFolderTrust = useFolderTrust as Mock;
   const mockedUseIdeTrustListener = useIdeTrustListener as Mock;
   const mockedUseMessageQueue = useMessageQueue as Mock;
   const mockedUseAutoAcceptIndicator = useAutoAcceptIndicator as Mock;
-  const mockedUseWorkspaceMigration = useWorkspaceMigration as Mock;
   const mockedUseGitBranchName = useGitBranchName as Mock;
   const mockedUseVimMode = useVimMode as Mock;
   const mockedUseSessionStats = useSessionStats as Mock;
@@ -209,11 +202,6 @@ describe('AppContainer State Management', () => {
       shellConfirmationRequest: null,
       confirmationRequest: null,
     });
-    mockedUseConsoleMessages.mockReturnValue({
-      consoleMessages: [],
-      handleNewMessage: vi.fn(),
-      clearConsoleMessages: vi.fn(),
-    });
     mockedUseGeminiStream.mockReturnValue({
       streamingState: 'idle',
       submitQuery: vi.fn(),
@@ -239,12 +227,6 @@ describe('AppContainer State Management', () => {
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
-    mockedUseWorkspaceMigration.mockReturnValue({
-      showWorkspaceMigrationDialog: false,
-      workspaceExtensions: [],
-      onWorkspaceMigrationDialogOpen: vi.fn(),
-      onWorkspaceMigrationDialogClose: vi.fn(),
-    });
     mockedUseGitBranchName.mockReturnValue('main');
     mockedUseVimMode.mockReturnValue({
       isVimEnabled: false,
@@ -294,10 +276,7 @@ describe('AppContainer State Management', () => {
     // Mock LoadedSettings
     mockSettings = {
       merged: {
-        hideBanner: false,
-        hideFooter: false,
         hideTips: false,
-        showMemoryUsage: false,
         theme: 'default',
         ui: {
           showStatusInTitle: false,
@@ -445,10 +424,7 @@ describe('AppContainer State Management', () => {
     it('handles settings with all display options disabled', () => {
       const settingsAllHidden = {
         merged: {
-          hideBanner: true,
-          hideFooter: true,
           hideTips: true,
-          showMemoryUsage: false,
         },
       } as unknown as LoadedSettings;
 
@@ -457,28 +433,6 @@ describe('AppContainer State Management', () => {
           <AppContainer
             config={mockConfig}
             settings={settingsAllHidden}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
-    });
-
-    it('handles settings with memory usage enabled', () => {
-      const settingsWithMemory = {
-        merged: {
-          hideBanner: false,
-          hideFooter: false,
-          hideTips: false,
-          showMemoryUsage: true,
-        },
-      } as unknown as LoadedSettings;
-
-      expect(() => {
-        render(
-          <AppContainer
-            config={mockConfig}
-            settings={settingsWithMemory}
             version="1.0.0"
             initializationResult={mockInitResult}
           />,

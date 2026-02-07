@@ -166,15 +166,6 @@ export SANDBOX_SET_UID_GID=true   # Force host UID/GID
 export SANDBOX_SET_UID_GID=false  # Disable UID/GID mapping
 ```
 
-## Customizing the sandbox environment (Docker/Podman)
-
-If you need extra tools inside the container (e.g., `git`, `python`, `rg`), create a custom Dockerfile:
-
-- Path: `.qwen/sandbox.Dockerfile`
-- Then run with: `BUILD_SANDBOX=1 qwen -s ...`
-
-This builds a project-specific image based on the default sandbox image.
-
 ## Troubleshooting
 
 ### Common issues

@@ -59,7 +59,6 @@ describe('executeToolCall', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -309,11 +308,13 @@ describe('executeToolCall', () => {
             name: 'testTool',
             id: 'call6',
             response: {
-              output: 'Binary content of type image/png was processed.',
+              output: '',
             },
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'base64data' } },
+            ],
           },
         },
-        imageDataPart,
       ],
     });
   });

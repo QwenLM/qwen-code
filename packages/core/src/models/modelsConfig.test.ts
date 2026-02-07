@@ -191,7 +191,7 @@ describe('ModelsConfig', () => {
     expect(gc.apiKeyEnvKey).toBe('API_KEY_SHARED');
   });
 
-  it('should preserve settings generationConfig when model is updated via updateCredentials even if it matches modelProviders', () => {
+  it('should use provider config when modelId exists in registry even after updateCredentials', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
         {
@@ -213,7 +213,7 @@ describe('ModelsConfig', () => {
       initialAuthType: AuthType.USE_OPENAI,
       modelProvidersConfig,
       generationConfig: {
-        model: 'model-a',
+        model: 'custom-model',
         samplingParams: { temperature: 0.9, max_tokens: 999 },
         timeout: 9999,
         maxRetries: 9,
@@ -235,30 +235,30 @@ describe('ModelsConfig', () => {
       },
     });
 
-    // User manually updates the model via updateCredentials (e.g. key prompt flow).
-    // Even if the model ID matches a modelProviders entry, we must not apply provider defaults
-    // that would overwrite settings.model.generationConfig.
-    modelsConfig.updateCredentials({ model: 'model-a' });
+    // User manually updates credentials via updateCredentials.
+    // Note: In practice, handleAuthSelect prevents using a modelId that matches a provider model,
+    // but if syncAfterAuthRefresh is called with a modelId that exists in registry,
+    // we should use provider config.
+    modelsConfig.updateCredentials({ apiKey: 'manual-key' });
 
-    modelsConfig.syncAfterAuthRefresh(
-      AuthType.USE_OPENAI,
-      modelsConfig.getModel(),
-    );
+    // syncAfterAuthRefresh with a modelId that exists in registry should use provider config
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'model-a');
 
     const gc = currentGenerationConfig(modelsConfig);
     expect(gc.model).toBe('model-a');
-    expect(gc.samplingParams?.temperature).toBe(0.9);
-    expect(gc.samplingParams?.max_tokens).toBe(999);
-    expect(gc.timeout).toBe(9999);
-    expect(gc.maxRetries).toBe(9);
+    // Provider config should be applied
+    expect(gc.samplingParams?.temperature).toBe(0.1);
+    expect(gc.samplingParams?.max_tokens).toBe(123);
+    expect(gc.timeout).toBe(111);
+    expect(gc.maxRetries).toBe(1);
   });
 
-  it('should preserve settings generationConfig across multiple auth refreshes after updateCredentials', () => {
+  it('should preserve settings generationConfig when modelId does not exist in registry', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
         {
-          id: 'model-a',
-          name: 'Model A',
+          id: 'provider-model',
+          name: 'Provider Model',
           baseUrl: 'https://api.example.com/v1',
           envKey: 'API_KEY_A',
           generationConfig: {
@@ -270,11 +270,12 @@ describe('ModelsConfig', () => {
       ],
     };
 
+    // Simulate settings with a custom model (not in registry)
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,
       modelProvidersConfig,
       generationConfig: {
-        model: 'model-a',
+        model: 'custom-model',
         samplingParams: { temperature: 0.9, max_tokens: 999 },
         timeout: 9999,
         maxRetries: 9,
@@ -296,25 +297,21 @@ describe('ModelsConfig', () => {
       },
     });
 
+    // User manually sets credentials for a custom model (not in registry)
     modelsConfig.updateCredentials({
       apiKey: 'manual-key',
       baseUrl: 'https://manual.example.com/v1',
-      model: 'model-a',
+      model: 'custom-model',
     });
 
-    // First auth refresh
-    modelsConfig.syncAfterAuthRefresh(
-      AuthType.USE_OPENAI,
-      modelsConfig.getModel(),
-    );
+    // First auth refresh - modelId doesn't exist in registry, so credentials should be preserved
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'custom-model');
     // Second auth refresh should still preserve settings generationConfig
-    modelsConfig.syncAfterAuthRefresh(
-      AuthType.USE_OPENAI,
-      modelsConfig.getModel(),
-    );
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'custom-model');
 
     const gc = currentGenerationConfig(modelsConfig);
-    expect(gc.model).toBe('model-a');
+    expect(gc.model).toBe('custom-model');
+    // Settings-sourced generation config should be preserved since modelId doesn't exist in registry
     expect(gc.samplingParams?.temperature).toBe(0.9);
     expect(gc.samplingParams?.max_tokens).toBe(999);
     expect(gc.timeout).toBe(9999);
@@ -480,6 +477,91 @@ describe('ModelsConfig', () => {
     expect(gc.apiKeyEnvKey).toBeUndefined();
   });
 
+  it('should use default model for new authType when switching from different authType with env vars', () => {
+    // Simulate cold start with OPENAI env vars (OPENAI_MODEL and OPENAI_API_KEY)
+    // This sets the model in generationConfig but no authType is selected yet
+    const modelsConfig = new ModelsConfig({
+      generationConfig: {
+        model: 'gpt-4o', // From OPENAI_MODEL env var
+        apiKey: 'openai-key-from-env',
+      },
+    });
+
+    // User switches to qwen-oauth via AuthDialog
+    // refreshAuth calls syncAfterAuthRefresh with the current model (gpt-4o)
+    // which doesn't exist in qwen-oauth registry, so it should use default
+    modelsConfig.syncAfterAuthRefresh(AuthType.QWEN_OAUTH, 'gpt-4o');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Should use default qwen-oauth model (coder-model), not the OPENAI model
+    expect(gc.model).toBe('coder-model');
+    expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
+    expect(gc.apiKeyEnvKey).toBeUndefined();
+  });
+
+  it('should clear manual credentials when switching from USE_OPENAI to QWEN_OAUTH', () => {
+    // User manually set credentials for OpenAI
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'gpt-4o',
+        apiKey: 'manual-openai-key',
+        baseUrl: 'https://manual.example.com/v1',
+      },
+    });
+
+    // Manually set credentials via updateCredentials
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-openai-key',
+      baseUrl: 'https://manual.example.com/v1',
+      model: 'gpt-4o',
+    });
+
+    // User switches to qwen-oauth
+    // Since authType is not USE_OPENAI, manual credentials should be cleared
+    // and default qwen-oauth model should be applied
+    modelsConfig.syncAfterAuthRefresh(AuthType.QWEN_OAUTH, 'gpt-4o');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Should use default qwen-oauth model, not preserve manual OpenAI credentials
+    expect(gc.model).toBe('coder-model');
+    expect(gc.apiKey).toBe('QWEN_OAUTH_DYNAMIC_TOKEN');
+    // baseUrl should be set to qwen-oauth default, not preserved from manual OpenAI config
+    expect(gc.baseUrl).toBe('DYNAMIC_QWEN_OAUTH_BASE_URL');
+    expect(gc.apiKeyEnvKey).toBeUndefined();
+  });
+
+  it('should preserve manual credentials when switching to USE_OPENAI', () => {
+    // User manually set credentials
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'gpt-4o',
+        apiKey: 'manual-openai-key',
+        baseUrl: 'https://manual.example.com/v1',
+        samplingParams: { temperature: 0.9 },
+      },
+    });
+
+    // Manually set credentials via updateCredentials
+    modelsConfig.updateCredentials({
+      apiKey: 'manual-openai-key',
+      baseUrl: 'https://manual.example.com/v1',
+      model: 'gpt-4o',
+    });
+
+    // User switches to USE_OPENAI (same or different model)
+    // Since authType is USE_OPENAI, manual credentials should be preserved
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'gpt-4o');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Should preserve manual credentials
+    expect(gc.model).toBe('gpt-4o');
+    expect(gc.apiKey).toBe('manual-openai-key');
+    expect(gc.baseUrl).toBe('https://manual.example.com/v1');
+    expect(gc.samplingParams?.temperature).toBe(0.9); // Preserved from initial config
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model after initialization', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [
@@ -595,5 +677,589 @@ describe('ModelsConfig', () => {
     // Both should be consistent
     expect(modelsConfig.getModel()).toBe('updated-model');
     expect(modelsConfig.getGenerationConfig().model).toBe('updated-model');
+  });
+
+  describe('getAllConfiguredModels', () => {
+    it('should return all models across all authTypes and put qwen-oauth first', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'openai-model-1',
+            name: 'OpenAI Model 1',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+          {
+            id: 'openai-model-2',
+            name: 'OpenAI Model 2',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'anthropic-model-1',
+            name: 'Anthropic Model 1',
+            baseUrl: 'https://api.anthropic.com/v1',
+            envKey: 'ANTHROPIC_API_KEY',
+          },
+        ],
+        gemini: [
+          {
+            id: 'gemini-model-1',
+            name: 'Gemini Model 1',
+            baseUrl: 'https://generativelanguage.googleapis.com/v1',
+            envKey: 'GEMINI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig,
+      });
+
+      const allModels = modelsConfig.getAllConfiguredModels();
+
+      // qwen-oauth models should be ordered first
+      const firstNonQwenIndex = allModels.findIndex(
+        (m) => m.authType !== AuthType.QWEN_OAUTH,
+      );
+      expect(firstNonQwenIndex).toBeGreaterThan(0);
+      expect(
+        allModels
+          .slice(0, firstNonQwenIndex)
+          .every((m) => m.authType === AuthType.QWEN_OAUTH),
+      ).toBe(true);
+      expect(
+        allModels
+          .slice(firstNonQwenIndex)
+          .every((m) => m.authType !== AuthType.QWEN_OAUTH),
+      ).toBe(true);
+
+      // Should include qwen-oauth models (hard-coded)
+      const qwenModels = allModels.filter(
+        (m) => m.authType === AuthType.QWEN_OAUTH,
+      );
+      expect(qwenModels.length).toBeGreaterThan(0);
+
+      // Should include openai models
+      const openaiModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_OPENAI,
+      );
+      expect(openaiModels.length).toBe(2);
+      expect(openaiModels.map((m) => m.id)).toContain('openai-model-1');
+      expect(openaiModels.map((m) => m.id)).toContain('openai-model-2');
+
+      // Should include anthropic models
+      const anthropicModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_ANTHROPIC,
+      );
+      expect(anthropicModels.length).toBe(1);
+      expect(anthropicModels[0].id).toBe('anthropic-model-1');
+
+      // Should include gemini models
+      const geminiModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_GEMINI,
+      );
+      expect(geminiModels.length).toBe(1);
+      expect(geminiModels[0].id).toBe('gemini-model-1');
+    });
+
+    it('should return empty array when no models are registered', () => {
+      const modelsConfig = new ModelsConfig();
+
+      const allModels = modelsConfig.getAllConfiguredModels();
+
+      // Should still include qwen-oauth models (hard-coded)
+      expect(allModels.length).toBeGreaterThan(0);
+      const qwenModels = allModels.filter(
+        (m) => m.authType === AuthType.QWEN_OAUTH,
+      );
+      expect(qwenModels.length).toBeGreaterThan(0);
+    });
+
+    it('should return models with correct structure', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'test-model',
+            name: 'Test Model',
+            description: 'A test model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey: 'TEST_API_KEY',
+            capabilities: {
+              vision: true,
+            },
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig,
+      });
+
+      const allModels = modelsConfig.getAllConfiguredModels();
+      const testModel = allModels.find((m) => m.id === 'test-model');
+
+      expect(testModel).toBeDefined();
+      expect(testModel?.id).toBe('test-model');
+      expect(testModel?.label).toBe('Test Model');
+      expect(testModel?.description).toBe('A test model');
+      expect(testModel?.authType).toBe(AuthType.USE_OPENAI);
+      expect(testModel?.isVision).toBe(true);
+      expect(testModel?.capabilities?.vision).toBe(true);
+    });
+
+    it('should support filtering by authTypes and still put qwen-oauth first when included', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'openai-model-1',
+            name: 'OpenAI Model 1',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'anthropic-model-1',
+            name: 'Anthropic Model 1',
+            baseUrl: 'https://api.anthropic.com/v1',
+            envKey: 'ANTHROPIC_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig,
+      });
+
+      // Filter: OpenAI only (should not include qwen-oauth)
+      const openaiOnly = modelsConfig.getAllConfiguredModels([
+        AuthType.USE_OPENAI,
+      ]);
+      expect(openaiOnly.every((m) => m.authType === AuthType.USE_OPENAI)).toBe(
+        true,
+      );
+      expect(openaiOnly.map((m) => m.id)).toContain('openai-model-1');
+
+      // Filter: include qwen-oauth but request it later -> still ordered first
+      const withQwen = modelsConfig.getAllConfiguredModels([
+        AuthType.USE_OPENAI,
+        AuthType.QWEN_OAUTH,
+        AuthType.USE_ANTHROPIC,
+      ]);
+      expect(withQwen.length).toBeGreaterThan(0);
+      const firstNonQwenIndex = withQwen.findIndex(
+        (m) => m.authType !== AuthType.QWEN_OAUTH,
+      );
+      expect(firstNonQwenIndex).toBeGreaterThan(0);
+      expect(
+        withQwen
+          .slice(0, firstNonQwenIndex)
+          .every((m) => m.authType === AuthType.QWEN_OAUTH),
+      ).toBe(true);
+    });
+  });
+
+  describe('Runtime Model Snapshot', () => {
+    it('should detect and capture runtime model from CLI source', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'gpt-4-turbo',
+          apiKey: 'sk-test-key',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+          apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+          baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+        },
+      });
+
+      const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+
+      expect(snapshotId).toBe('$runtime|openai|gpt-4-turbo');
+
+      const snapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.id).toBe('$runtime|openai|gpt-4-turbo');
+      expect(snapshot?.authType).toBe(AuthType.USE_OPENAI);
+      expect(snapshot?.modelId).toBe('gpt-4-turbo');
+      expect(snapshot?.apiKey).toBe('sk-test-key');
+      expect(snapshot?.baseUrl).toBe('https://api.openai.com/v1');
+    });
+
+    it('should detect and capture runtime model from ENV source', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'gpt-4o',
+          apiKey: 'sk-env-key',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'settings', detail: 'settings.model.name' },
+          apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+          baseUrl: { kind: 'settings', detail: 'settings.openaiBaseUrl' },
+        },
+      });
+
+      const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+
+      expect(snapshotId).toBe('$runtime|openai|gpt-4o');
+
+      const snapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.modelId).toBe('gpt-4o');
+      expect(snapshot?.apiKey).toBe('sk-env-key');
+    });
+
+    it('should not capture registry models as runtime', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'gpt-4-turbo',
+            name: 'GPT-4 Turbo',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+        generationConfig: {
+          model: 'gpt-4-turbo',
+          apiKey: 'sk-test-key',
+          baseUrl: 'https://api.openai.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+          apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+          baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+        },
+      });
+
+      const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+
+      // Should not create snapshot since model exists in registry
+      expect(snapshotId).toBeUndefined();
+      expect(modelsConfig.getActiveRuntimeModelSnapshot()).toBeUndefined();
+    });
+
+    it('should not capture runtime model without valid credentials', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'custom-model',
+          // Missing apiKey and baseUrl
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+        },
+      });
+
+      const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+
+      expect(snapshotId).toBeUndefined();
+    });
+
+    it('should switch to runtime model and apply snapshot configuration', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'runtime-model',
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+          samplingParams: { temperature: 0.7, max_tokens: 2000 },
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+      });
+
+      // Create initial snapshot
+      const initialSnapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+      expect(initialSnapshotId).toBeDefined();
+
+      // Change to a different state
+      // Note: this updates the existing snapshot, changing its ID
+      modelsConfig.updateCredentials({
+        model: 'different-model',
+        apiKey: 'different-key',
+        baseUrl: 'https://different.example.com/v1',
+      });
+
+      // The snapshot ID has changed because we updated the model
+      const updatedSnapshotId = modelsConfig.getActiveRuntimeModelSnapshotId();
+      expect(updatedSnapshotId).toBe('$runtime|openai|different-model');
+
+      // Create a separate snapshot for the original runtime model
+      // (simulate having multiple runtime models available)
+      modelsConfig['runtimeModelSnapshots'].set(
+        '$runtime|openai|runtime-model',
+        {
+          id: '$runtime|openai|runtime-model',
+          authType: AuthType.USE_OPENAI,
+          modelId: 'runtime-model',
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+          generationConfig: {
+            samplingParams: { temperature: 0.7, max_tokens: 2000 },
+          },
+          sources: {
+            model: { kind: 'programmatic', detail: 'test' },
+            apiKey: { kind: 'programmatic', detail: 'test' },
+            baseUrl: { kind: 'programmatic', detail: 'test' },
+          },
+          createdAt: Date.now(),
+        },
+      );
+
+      // Switch back to original runtime model
+      await modelsConfig.switchToRuntimeModel('$runtime|openai|runtime-model');
+
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.model).toBe('runtime-model');
+      expect(gc.apiKey).toBe('sk-runtime-key');
+      expect(gc.baseUrl).toBe('https://runtime.example.com/v1');
+      expect(gc.samplingParams?.temperature).toBe(0.7);
+      expect(gc.samplingParams?.max_tokens).toBe(2000);
+    });
+
+    it('should throw error when switching to non-existent runtime snapshot', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+      });
+
+      await expect(
+        modelsConfig.switchToRuntimeModel('$runtime|openai|nonexistent'),
+      ).rejects.toThrow(
+        "Runtime model snapshot '$runtime|openai|nonexistent' not found",
+      );
+    });
+
+    it('should return runtime option first in getAllConfiguredModels', () => {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'registry-model',
+            name: 'Registry Model',
+            baseUrl: 'https://api.openai.com/v1',
+            envKey: 'OPENAI_API_KEY',
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+        generationConfig: {
+          model: 'runtime-model',
+          apiKey: 'sk-test-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+      });
+
+      modelsConfig.detectAndCaptureRuntimeModel();
+
+      const allModels = modelsConfig.getAllConfiguredModels();
+
+      // Runtime model should be first for USE_OPENAI
+      const openaiModels = allModels.filter(
+        (m) => m.authType === AuthType.USE_OPENAI,
+      );
+      expect(openaiModels.length).toBe(2);
+      expect(openaiModels[0].isRuntimeModel).toBe(true);
+      // AvailableModel.id should be modelId, runtimeSnapshotId should be snapshot.id
+      expect(openaiModels[0].id).toBe('runtime-model');
+      expect(openaiModels[0].runtimeSnapshotId).toBe(
+        '$runtime|openai|runtime-model',
+      );
+      expect(openaiModels[0].label).toBe('runtime-model');
+      expect(openaiModels[1].isRuntimeModel).toBeUndefined();
+      expect(openaiModels[1].id).toBe('registry-model');
+    });
+
+    it('should create/update runtime snapshot via updateCredentials', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+      });
+
+      // Update with complete credentials
+      modelsConfig.updateCredentials({
+        model: 'custom-model',
+        apiKey: 'sk-custom-key',
+        baseUrl: 'https://custom.example.com/v1',
+      });
+
+      const snapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.modelId).toBe('custom-model');
+      expect(snapshot?.apiKey).toBe('sk-custom-key');
+      expect(snapshot?.baseUrl).toBe('https://custom.example.com/v1');
+    });
+
+    it('should update existing runtime snapshot when credentials change', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'initial-model',
+          apiKey: 'sk-initial-key',
+          baseUrl: 'https://initial.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+      });
+
+      // Create initial snapshot
+      modelsConfig.detectAndCaptureRuntimeModel();
+
+      // Update credentials with different model
+      modelsConfig.updateCredentials({
+        model: 'updated-model',
+        apiKey: 'sk-updated-key',
+      });
+
+      const snapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(snapshot).toBeDefined();
+      expect(snapshot?.modelId).toBe('updated-model');
+      expect(snapshot?.apiKey).toBe('sk-updated-key');
+      // baseUrl should be preserved from initial
+      expect(snapshot?.baseUrl).toBe('https://initial.example.com/v1');
+    });
+
+    it('should enforce per-authType snapshot limit', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+      });
+
+      // Create first snapshot for USE_OPENAI
+      modelsConfig.updateCredentials({
+        model: 'model-a',
+        apiKey: 'sk-key-a',
+        baseUrl: 'https://a.example.com/v1',
+      });
+
+      const firstSnapshotId = modelsConfig.getActiveRuntimeModelSnapshotId();
+      expect(firstSnapshotId).toBe('$runtime|openai|model-a');
+
+      // Create second snapshot for USE_OPENAI (different model)
+      modelsConfig.updateCredentials({
+        model: 'model-b',
+        apiKey: 'sk-key-b',
+        baseUrl: 'https://b.example.com/v1',
+      });
+
+      const secondSnapshotId = modelsConfig.getActiveRuntimeModelSnapshotId();
+      expect(secondSnapshotId).toBe('$runtime|openai|model-b');
+
+      // First snapshot should be cleaned up
+      expect(modelsConfig.getActiveRuntimeModelSnapshot()?.id).toBe(
+        secondSnapshotId,
+      );
+    });
+
+    it('should support multiple authTypes with separate snapshots', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+      });
+
+      // Create OpenAI snapshot
+      modelsConfig.updateCredentials({
+        model: 'openai-model',
+        apiKey: 'sk-openai-key',
+        baseUrl: 'https://openai.example.com/v1',
+      });
+
+      // Verify OpenAI snapshot exists
+      const openaiSnapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(openaiSnapshot?.authType).toBe(AuthType.USE_OPENAI);
+      expect(openaiSnapshot?.modelId).toBe('openai-model');
+
+      // Switch to Anthropic via switchToRuntimeModel
+      // First create an Anthropic snapshot manually
+      modelsConfig['runtimeModelSnapshots'].set(
+        '$runtime|anthropic|anthropic-model',
+        {
+          id: '$runtime|anthropic|anthropic-model',
+          authType: AuthType.USE_ANTHROPIC,
+          modelId: 'anthropic-model',
+          apiKey: 'sk-anthropic-key',
+          baseUrl: 'https://anthropic.example.com/v1',
+          sources: {
+            model: { kind: 'programmatic', detail: 'test' },
+            apiKey: { kind: 'programmatic', detail: 'test' },
+            baseUrl: { kind: 'programmatic', detail: 'test' },
+          },
+          createdAt: Date.now(),
+        },
+      );
+
+      // Switch to the Anthropic runtime model
+      await modelsConfig.switchToRuntimeModel(
+        '$runtime|anthropic|anthropic-model',
+      );
+
+      // Should now have Anthropic snapshot active
+      const anthropicSnapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(anthropicSnapshot?.authType).toBe(AuthType.USE_ANTHROPIC);
+      expect(anthropicSnapshot?.modelId).toBe('anthropic-model');
+    });
+
+    it('should rollback state when switchToRuntimeModel fails', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        generationConfig: {
+          model: 'runtime-model',
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+      });
+
+      // Create snapshot
+      const snapshotId = modelsConfig.detectAndCaptureRuntimeModel();
+      expect(snapshotId).toBeDefined();
+
+      // Set up onModelChange to fail
+      modelsConfig.setOnModelChange(async () => {
+        throw new Error('refresh failed');
+      });
+
+      // Store baseline state
+      const baselineModel = modelsConfig.getModel();
+      const baselineGc = snapshotGenerationConfig(modelsConfig);
+
+      // Try to switch - should fail
+      await expect(
+        modelsConfig.switchToRuntimeModel(snapshotId!),
+      ).rejects.toThrow('refresh failed');
+
+      // State should be rolled back
+      expect(modelsConfig.getModel()).toBe(baselineModel);
+      expect(modelsConfig.getGenerationConfig()).toMatchObject({
+        model: baselineGc.model,
+        apiKey: baselineGc.apiKey,
+        baseUrl: baselineGc.baseUrl,
+      });
+    });
   });
 });

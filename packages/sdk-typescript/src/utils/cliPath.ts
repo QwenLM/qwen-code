@@ -125,8 +125,9 @@ function normalizeForRegex(dirPath: string): string {
 function tryResolveCliFromImportMeta(): string | null {
   try {
     if (typeof import.meta !== 'undefined' && import.meta.url) {
-      const cliUrl = new URL('./cli/cli.js', import.meta.url);
-      const cliPath = fileURLToPath(cliUrl);
+      const currentFilePath = fileURLToPath(import.meta.url);
+      const currentDir = path.dirname(currentFilePath);
+      const cliPath = path.join(currentDir, 'cli', 'cli.js');
       if (fs.existsSync(cliPath)) {
         return cliPath;
       }

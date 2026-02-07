@@ -19,6 +19,7 @@ import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { AGENT_METHODS } from '../constants/acpSchema.js';
 import type { PendingRequest } from '../types/connectionTypes.js';
 import type { ChildProcess } from 'child_process';
+import { isWindows } from '../utils/platform.js';
 
 /**
  * ACP Session Manager Class
@@ -102,7 +103,7 @@ export class AcpSessionManager {
   ): void {
     if (child?.stdin) {
       const jsonString = JSON.stringify(message);
-      const lineEnding = process.platform === 'win32' ? '\r\n' : '\n';
+      const lineEnding = isWindows ? '\r\n' : '\n';
       child.stdin.write(jsonString + lineEnding);
     }
   }
@@ -371,6 +372,32 @@ export class AcpSessionManager {
       nextRequestId,
     );
     console.log('[ACP] set_mode response:', res);
+    return res;
+  }
+
+  /**
+   * Set model for current session (ACP session/set_model)
+   *
+   * @param modelId - Model ID
+   */
+  async setModel(
+    modelId: string,
+    child: ChildProcess | null,
+    pendingRequests: Map<number, PendingRequest<unknown>>,
+    nextRequestId: { value: number },
+  ): Promise<AcpResponse> {
+    if (!this.sessionId) {
+      throw new Error('No active ACP session');
+    }
+    console.log('[ACP] Sending session/set_model:', modelId);
+    const res = await this.sendRequest<AcpResponse>(
+      AGENT_METHODS.session_set_model,
+      { sessionId: this.sessionId, modelId },
+      child,
+      pendingRequests,
+      nextRequestId,
+    );
+    console.log('[ACP] set_model response:', res);
     return res;
   }
 

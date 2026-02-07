@@ -4,6 +4,7 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
+import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
 /**
  * Default provider for standard OpenAI-compatible APIs
@@ -25,9 +26,14 @@ export class DefaultOpenAICompatibleProvider
   buildHeaders(): Record<string, string | undefined> {
     const version = this.cliConfig.getCliVersion() || 'unknown';
     const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
-    return {
+    const { customHeaders } = this.contentGeneratorConfig;
+    const defaultHeaders = {
       'User-Agent': userAgent,
     };
+
+    return customHeaders
+      ? { ...defaultHeaders, ...customHeaders }
+      : defaultHeaders;
   }
 
   buildClient(): OpenAI {
@@ -38,12 +44,19 @@ export class DefaultOpenAICompatibleProvider
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
+    // Configure fetch options to ensure user-configured timeout works as expected
+    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    const runtimeOptions = buildRuntimeFetchOptions(
+      'openai',
+      this.cliConfig.getProxy(),
+    );
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
       timeout,
       maxRetries,
       defaultHeaders,
+      ...(runtimeOptions || {}),
     });
   }
 
@@ -51,9 +64,11 @@ export class DefaultOpenAICompatibleProvider
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams {
+    const extraBody = this.contentGeneratorConfig.extra_body;
     // Default provider doesn't need special enhancements, just pass through all parameters
     return {
       ...request, // Preserve all original parameters including sampling params
+      ...(extraBody ? extraBody : {}),
     };
   }
 

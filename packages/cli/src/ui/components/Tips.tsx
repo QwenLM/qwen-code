@@ -4,42 +4,35 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
+import { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import { type Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
-interface TipsProps {
-  config: Config;
-}
+const startupTips = [
+  'Use /compress when the conversation gets long to summarize history and free up context.',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.',
+  'Use /bug to submit issues to the maintainers when something goes off.',
+  'Switch auth type quickly with /auth.',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.',
+  process.platform === 'win32'
+    ? 'You can switch permission mode quickly with Tab or /approval-mode.'
+    : 'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
+] as const;
 
-export const Tips: React.FC<TipsProps> = ({ config }) => {
-  const geminiMdFileCount = config.getGeminiMdFileCount();
+export const Tips: React.FC = () => {
+  const selectedTip = useMemo(() => {
+    const randomIndex = Math.floor(Math.random() * startupTips.length);
+    return startupTips[randomIndex];
+  }, []);
+
   return (
-    <Box flexDirection="column">
-      <Text color={theme.text.primary}>{t('Tips for getting started:')}</Text>
-      <Text color={theme.text.primary}>
-        {t('1. Ask questions, edit files, or run commands.')}
-      </Text>
-      <Text color={theme.text.primary}>
-        {t('2. Be specific for the best results.')}
-      </Text>
-      {geminiMdFileCount === 0 && (
-        <Text color={theme.text.primary}>
-          3. Create{' '}
-          <Text bold color={theme.text.accent}>
-            QWEN.md
-          </Text>{' '}
-          {t('files to customize your interactions with Qwen Code.')}
-        </Text>
-      )}
-      <Text color={theme.text.primary}>
-        {geminiMdFileCount === 0 ? '4.' : '3.'}{' '}
-        <Text bold color={theme.text.accent}>
-          /help
-        </Text>{' '}
-        {t('for more information.')}
+    <Box marginLeft={2} marginRight={2}>
+      <Text color={theme.text.secondary}>
+        {t('Tips: ')}
+        {t(selectedTip)}
       </Text>
     </Box>
   );

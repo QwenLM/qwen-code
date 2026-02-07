@@ -18,6 +18,7 @@ import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
+import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
@@ -31,6 +32,7 @@ import { quitCommand } from '../ui/commands/quitCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
 import { settingsCommand } from '../ui/commands/settingsCommand.js';
+import { skillsCommand } from '../ui/commands/skillsCommand.js';
 import { statsCommand } from '../ui/commands/statsCommand.js';
 import { summaryCommand } from '../ui/commands/summaryCommand.js';
 import { terminalSetupCommand } from '../ui/commands/terminalSetupCommand.js';
@@ -66,6 +68,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       docsCommand,
       directoryCommand,
       editorCommand,
+      exportCommand,
       extensionsCommand,
       helpCommand,
       await ideCommand(),
@@ -78,6 +81,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       quitCommand,
       restoreCommand(this.config),
       resumeCommand,
+      skillsCommand,
       statsCommand,
       summaryCommand,
       themeCommand,

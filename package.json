@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.7.0",
+  "version": "0.10.0",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -13,10 +13,11 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.7.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.10.0"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
+    "dev": "node scripts/dev.js",
     "debug": "cross-env DEBUG=1 node --inspect-brk scripts/start.js",
     "generate": "node scripts/generate-git-commit-info.js",
     "build": "node scripts/build.js",
@@ -64,7 +65,8 @@
     "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"
-    }
+    },
+    "baseline-browser-mapping": "^2.9.19"
   },
   "bin": {
     "qwen": "dist/cli.js"
@@ -121,8 +123,7 @@
     "@lydell/node-pty-darwin-x64": "1.1.0",
     "@lydell/node-pty-linux-x64": "1.1.0",
     "@lydell/node-pty-win32-arm64": "1.1.0",
-    "@lydell/node-pty-win32-x64": "1.1.0",
-    "node-pty": "^1.0.0"
+    "@lydell/node-pty-win32-x64": "1.1.0"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [

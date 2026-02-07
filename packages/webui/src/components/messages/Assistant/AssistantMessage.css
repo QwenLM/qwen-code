@@ -1,0 +1,99 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * AssistantMessage Component Styles
+ * Pseudo-elements (::before) for bullet points and (::after) for timeline connectors
+ */
+
+/* Base assistant message styles */
+.assistant-message-container {
+  position: relative;
+  --timeline-center-offset: 13px;
+  padding-left: 30px;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  border-radius: 6px;
+}
+
+/*
+ * Timeline positioning calculation (same as ToolCallContainer):
+ * - Container padding-top: 8px
+ * - Bullet font-size: 10px, line-height ~10px
+ * - Bullet vertical center: 8px + 5px = 13px from top
+ * - Line left: 12px (centered under bullet at left: 8px + ~4px offset)
+ */
+
+/* Bullet point indicator - all states use same position */
+.assistant-message-container.assistant-message-default::before,
+.assistant-message-container.assistant-message-success::before,
+.assistant-message-container.assistant-message-error::before,
+.assistant-message-container.assistant-message-warning::before,
+.assistant-message-container.assistant-message-loading::before {
+  content: '\25cf';
+  position: absolute;
+  left: 8px;
+  top: 8px;
+  font-size: 10px;
+  line-height: 20px;
+  z-index: 1;
+}
+
+/* Status colors */
+.assistant-message-container.assistant-message-default::before {
+  color: var(--app-secondary-foreground);
+}
+
+.assistant-message-container.assistant-message-success::before {
+  color: #74c991;
+}
+
+.assistant-message-container.assistant-message-error::before {
+  color: #c74e39;
+}
+
+.assistant-message-container.assistant-message-warning::before {
+  color: #e1c08d;
+}
+
+.assistant-message-container.assistant-message-loading::before {
+  color: var(--app-secondary-foreground);
+  animation: assistantPulse 1s linear infinite;
+}
+
+@keyframes assistantPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Timeline connector line - full height by default */
+.assistant-message-container::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background-color: var(--app-primary-border-color, rgba(255, 255, 255, 0.15));
+}
+
+/* First item in sequence: connector starts from bullet center */
+.assistant-message-container:first-child::after {
+  top: var(--timeline-center-offset, 13px);
+}
+
+/* Last item in sequence: connector ends at bullet center */
+.assistant-message-container:last-child::after {
+  bottom: calc(100% - var(--timeline-center-offset, 13px));
+}
+
+/* Single item (both first and last): no connector */
+.assistant-message-container:first-child:last-child::after {
+  display: none;
+}
+
+/* Loading state doesn't show timeline */
+.assistant-message-container.assistant-message-loading::after {
+  display: none;
+}

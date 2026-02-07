@@ -301,11 +301,8 @@ describe('extractUsageFromGeminiClient', () => {
         throw new Error('Test error');
       }),
     };
-    const consoleSpy = vi.spyOn(console, 'debug').mockImplementation(() => {});
     const result = extractUsageFromGeminiClient(client);
     expect(result).toBeUndefined();
-    expect(consoleSpy).toHaveBeenCalled();
-    consoleSpy.mockRestore();
   });
 
   it('should skip responses without usageMetadata', () => {
@@ -982,26 +979,6 @@ describe('createTaskToolProgressHandler', () => {
 
     // Should not emit tool_result if no content
     expect(mockAdapter.emitToolResult).not.toHaveBeenCalled();
-  });
-
-  it('should work without adapter (non-JSON mode)', () => {
-    const { handler } = createTaskToolProgressHandler(
-      mockConfig,
-      'parent-tool-id',
-      undefined,
-    );
-
-    const taskDisplay: TaskResultDisplay = {
-      type: 'task_execution',
-      subagentName: 'test-agent',
-      taskDescription: 'Test task',
-      taskPrompt: 'Test prompt',
-      status: 'running',
-      toolCalls: [],
-    };
-
-    // Should not throw
-    expect(() => handler('task-call-id', taskDisplay)).not.toThrow();
   });
 
   it('should work with adapter that does not support subagent APIs', () => {

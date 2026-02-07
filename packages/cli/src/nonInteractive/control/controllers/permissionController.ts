@@ -228,11 +228,9 @@ export class PermissionController extends BaseController {
     this.context.permissionMode = mode;
     this.context.config.setApprovalMode(mode as ApprovalMode);
 
-    if (this.context.debugMode) {
-      console.error(
-        `[PermissionController] Permission mode updated to: ${mode}`,
-      );
-    }
+    this.debugLogger.info(
+      `[PermissionController] Permission mode updated to: ${mode}`,
+    );
 
     return { status: 'updated', mode };
   }
@@ -463,27 +461,31 @@ export class PermissionController extends BaseController {
         );
       }
     } catch (error) {
-      if (this.context.debugMode) {
-        console.error(
-          '[PermissionController] Outgoing permission failed:',
-          error,
-        );
-      }
-      // On error, use default cancel message
+      this.debugLogger.error(
+        '[PermissionController] Outgoing permission failed:',
+        error,
+      );
+
+      // Extract error message
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+
+      // On error, pass error message as cancel message
       // Only pass payload for exec and mcp types that support it
       const confirmationType = toolCall.confirmationDetails.type;
       if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
         const execOrMcpDetails = toolCall.confirmationDetails as
           | ToolExecuteConfirmationDetails
           | ToolMcpConfirmationDetails;
-        await execOrMcpDetails.onConfirm(
-          ToolConfirmationOutcome.Cancel,
-          undefined,
-        );
+        await execOrMcpDetails.onConfirm(ToolConfirmationOutcome.Cancel, {
+          cancelMessage: `Error: ${errorMessage}`,
+        });
       } else {
-        // For other types, don't pass payload (backward compatible)
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: `Error: ${errorMessage}`,
+          },
         );
       }
     } finally {

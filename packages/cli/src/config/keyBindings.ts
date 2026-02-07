@@ -45,7 +45,6 @@ export enum Command {
   PASTE_CLIPBOARD_IMAGE = 'pasteClipboardImage',
 
   // App level bindings
-  SHOW_ERROR_DETAILS = 'showErrorDetails',
   TOGGLE_TOOL_DESCRIPTIONS = 'toggleToolDescriptions',
   TOGGLE_IDE_CONTEXT_DETAIL = 'toggleIDEContextDetail',
   QUIT = 'quit',
@@ -122,9 +121,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // Auto-completion
   [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
-  // Completion navigation (arrow or Ctrl+P/N)
-  [Command.COMPLETION_UP]: [{ key: 'up' }, { key: 'p', ctrl: true }],
-  [Command.COMPLETION_DOWN]: [{ key: 'down' }, { key: 'n', ctrl: true }],
+  // Completion navigation uses only arrow keys
+  // Ctrl+P/N are reserved for history navigation (HISTORY_UP/DOWN)
+  [Command.COMPLETION_UP]: [{ key: 'up' }],
+  [Command.COMPLETION_DOWN]: [{ key: 'down' }],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline
@@ -155,7 +155,6 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.PASTE_CLIPBOARD_IMAGE]: [{ key: 'v', ctrl: true }],
 
   // App level bindings
-  [Command.SHOW_ERROR_DETAILS]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
   [Command.QUIT]: [{ key: 'c', ctrl: true }],

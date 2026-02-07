@@ -11,6 +11,7 @@ import {
   AuthType,
   ModelSlashCommandEvent,
   logModelSlashCommand,
+  type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSource,
   type ContentGeneratorConfigSources,
@@ -19,12 +20,9 @@ import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { UIStateContext } from '../contexts/UIStateContext.js';
+import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import {
-  getAvailableModelsForAuthType,
-  MAINLINE_CODER,
-} from '../models/availableModels.js';
+import { MAINLINE_CODER } from '../models/availableModels.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 
@@ -105,6 +103,46 @@ function persistAuthTypeSelection(
   settings.setValue(scope, 'security.auth.selectedType', authType);
 }
 
+interface HandleModelSwitchSuccessParams {
+  settings: ReturnType<typeof useSettings>;
+  uiState: UIState | null;
+  after: ContentGeneratorConfig | undefined;
+  effectiveAuthType: AuthType | undefined;
+  effectiveModelId: string;
+  isRuntime: boolean;
+}
+
+function handleModelSwitchSuccess({
+  settings,
+  uiState,
+  after,
+  effectiveAuthType,
+  effectiveModelId,
+  isRuntime,
+}: HandleModelSwitchSuccessParams): void {
+  persistModelSelection(settings, effectiveModelId);
+  if (effectiveAuthType) {
+    persistAuthTypeSelection(settings, effectiveAuthType);
+  }
+
+  const baseUrl = after?.baseUrl ?? t('(default)');
+  const maskedKey = maskApiKey(after?.apiKey);
+  uiState?.historyManager.addItem(
+    {
+      type: 'info',
+      text:
+        `authType: ${effectiveAuthType ?? '(none)'}` +
+        `\n` +
+        `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}` +
+        `\n` +
+        `Base URL: ${baseUrl}` +
+        `\n` +
+        `API key: ${maskedKey}`,
+    },
+    Date.now(),
+  );
+}
+
 function ConfigRow({
   label,
   value,
@@ -154,13 +192,21 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const sources = readSourcesFromConfig(config);
 
   const availableModelEntries = useMemo(() => {
-    const allAuthTypes = Object.values(AuthType) as AuthType[];
-    const modelsByAuthType = allAuthTypes
-      .map((t) => ({
-        authType: t,
-        models: getAvailableModelsForAuthType(t, config ?? undefined),
-      }))
-      .filter((x) => x.models.length > 0);
+    const allModels = config ? config.getAllConfiguredModels() : [];
+
+    // Separate runtime models from registry models
+    const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
+    const registryModels = allModels.filter((m) => !m.isRuntimeModel);
+
+    // Group registry models by authType
+    const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
+    for (const model of registryModels) {
+      const authType = model.authType;
+      if (!modelsByAuthTypeMap.has(authType)) {
+        modelsByAuthTypeMap.set(authType, []);
+      }
+      modelsByAuthTypeMap.get(authType)!.push(model);
+    }
 
     // Fixed order: qwen-oauth first, then others in a stable order
     const authTypeOrder: AuthType[] = [
@@ -171,44 +217,91 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       AuthType.USE_VERTEX_AI,
     ];
 
-    // Filter to only include authTypes that have models
-    const availableAuthTypes = new Set(modelsByAuthType.map((x) => x.authType));
+    // Filter to only include authTypes that have registry models and maintain order
+    const availableAuthTypes = new Set(modelsByAuthTypeMap.keys());
     const orderedAuthTypes = authTypeOrder.filter((t) =>
       availableAuthTypes.has(t),
     );
 
-    return orderedAuthTypes.flatMap((t) => {
-      const models =
-        modelsByAuthType.find((x) => x.authType === t)?.models ?? [];
-      return models.map((m) => ({ authType: t, model: m }));
-    });
+    // Build ordered list: runtime models first, then registry models grouped by authType
+    const result: Array<{
+      authType: AuthType;
+      model: CoreAvailableModel;
+      isRuntime?: boolean;
+      snapshotId?: string;
+    }> = [];
+
+    // Add all runtime models first
+    for (const runtimeModel of runtimeModels) {
+      result.push({
+        authType: runtimeModel.authType,
+        model: runtimeModel,
+        isRuntime: true,
+        snapshotId: runtimeModel.runtimeSnapshotId,
+      });
+    }
+
+    // Add registry models grouped by authType
+    for (const t of orderedAuthTypes) {
+      for (const model of modelsByAuthTypeMap.get(t) ?? []) {
+        result.push({ authType: t, model, isRuntime: false });
+      }
+    }
+
+    return result;
   }, [config]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
-      availableModelEntries.map(({ authType: t2, model }) => {
-        const value = `${t2}::${model.id}`;
-        const title = (
-          <Text>
-            <Text bold color={theme.text.accent}>
-              [{t2}]
+      availableModelEntries.map(
+        ({ authType: t2, model, isRuntime, snapshotId }) => {
+          // Runtime models use snapshotId directly (format: $runtime|${authType}|${modelId})
+          const value =
+            isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
+
+          const title = (
+            <Text>
+              <Text
+                bold
+                color={isRuntime ? theme.status.warning : theme.text.accent}
+              >
+                [{t2}]
+              </Text>
+              <Text>{` ${model.label}`}</Text>
+              {isRuntime && (
+                <Text color={theme.status.warning}> (Runtime)</Text>
+              )}
             </Text>
-            <Text>{` ${model.label}`}</Text>
-          </Text>
-        );
-        const description = model.description || '';
-        return {
-          value,
-          title,
-          description,
-          key: value,
-        };
-      }),
+          );
+
+          // Include runtime indicator in description
+          let description = model.description || '';
+          if (isRuntime) {
+            description = description
+              ? `${description} (Runtime)`
+              : 'Runtime model';
+          }
+
+          return {
+            value,
+            title,
+            description,
+            key: value,
+          };
+        },
+      ),
     [availableModelEntries],
   );
 
   const preferredModelId = config?.getModel() || MAINLINE_CODER;
-  const preferredKey = authType ? `${authType}::${preferredModelId}` : '';
+  // Check if current model is a runtime model
+  // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
+  const activeRuntimeSnapshot = config?.getActiveRuntimeModelSnapshot?.();
+  const preferredKey = activeRuntimeSnapshot
+    ? activeRuntimeSnapshot.id
+    : authType
+      ? `${authType}::${preferredModelId}`
+      : '';
 
   useKeypress(
     (key) => {
@@ -228,67 +321,81 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
   const handleSelect = useCallback(
     async (selected: string) => {
-      // Clear any previous error
       setErrorMessage(null);
 
-      const sep = '::';
-      const idx = selected.indexOf(sep);
-      const selectedAuthType = (
-        idx >= 0 ? selected.slice(0, idx) : authType
-      ) as AuthType;
-      const modelId = idx >= 0 ? selected.slice(idx + sep.length) : selected;
+      let after: ContentGeneratorConfig | undefined;
+      let effectiveAuthType: AuthType | undefined;
+      let effectiveModelId = selected;
+      let isRuntime = false;
 
-      if (config) {
-        try {
-          await config.switchModel(
-            selectedAuthType,
-            modelId,
-            selectedAuthType !== authType &&
-              selectedAuthType === AuthType.QWEN_OAUTH
-              ? { requireCachedCredentials: true }
-              : undefined,
-            {
-              reason: 'user_manual',
-              context:
-                selectedAuthType === authType
-                  ? 'Model switched via /model dialog'
-                  : 'AuthType+model switched via /model dialog',
-            },
-          );
-        } catch (e) {
-          const baseErrorMessage = e instanceof Error ? e.message : String(e);
-          setErrorMessage(
-            `Failed to switch model to '${modelId}'.\n\n${baseErrorMessage}`,
-          );
-          return;
+      if (!config) {
+        onClose();
+        return;
+      }
+
+      try {
+        // Determine if this is a runtime model selection
+        // Runtime model format: $runtime|${authType}|${modelId}
+        isRuntime = selected.startsWith('$runtime|');
+
+        let selectedAuthType: AuthType;
+        let modelId: string;
+
+        if (isRuntime) {
+          // For runtime models, extract authType from the snapshot ID
+          // Format: $runtime|${authType}|${modelId}
+          const parts = selected.split('|');
+          if (parts.length >= 2 && parts[0] === '$runtime') {
+            selectedAuthType = parts[1] as AuthType;
+          } else {
+            selectedAuthType = authType as AuthType;
+          }
+          modelId = selected; // Pass the full snapshot ID to switchModel
+        } else {
+          const sep = '::';
+          const idx = selected.indexOf(sep);
+          selectedAuthType = (
+            idx >= 0 ? selected.slice(0, idx) : authType
+          ) as AuthType;
+          modelId = idx >= 0 ? selected.slice(idx + sep.length) : selected;
         }
-        const event = new ModelSlashCommandEvent(modelId);
-        logModelSlashCommand(config, event);
 
-        const after = config.getContentGeneratorConfig?.() as
+        await config.switchModel(
+          selectedAuthType,
+          modelId,
+          selectedAuthType !== authType &&
+            selectedAuthType === AuthType.QWEN_OAUTH
+            ? { requireCachedCredentials: true }
+            : undefined,
+        );
+
+        if (!isRuntime) {
+          const event = new ModelSlashCommandEvent(modelId);
+          logModelSlashCommand(config, event);
+        }
+
+        after = config.getContentGeneratorConfig?.() as
           | ContentGeneratorConfig
           | undefined;
-        const effectiveAuthType =
-          after?.authType ?? selectedAuthType ?? authType;
-        const effectiveModelId = after?.model ?? modelId;
-
-        persistModelSelection(settings, effectiveModelId);
-        persistAuthTypeSelection(settings, effectiveAuthType);
-
-        const baseUrl = after?.baseUrl ?? '(default)';
-        const maskedKey = maskApiKey(after?.apiKey);
-        uiState?.historyManager.addItem(
-          {
-            type: 'info',
-            text:
-              `authType: ${effectiveAuthType}\n` +
-              `Using model: ${effectiveModelId}\n` +
-              `Base URL: ${baseUrl}\n` +
-              `API key: ${maskedKey}`,
-          },
-          Date.now(),
-        );
+        effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
+        effectiveModelId = after?.model ?? modelId;
+      } catch (e) {
+        const baseErrorMessage = e instanceof Error ? e.message : String(e);
+        const errorPrefix = isRuntime
+          ? 'Failed to switch to runtime model.'
+          : `Failed to switch model to '${effectiveModelId ?? selected}'.`;
+        setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
+        return;
       }
+
+      handleModelSwitchSuccess({
+        settings,
+        uiState,
+        after,
+        effectiveAuthType,
+        effectiveModelId,
+        isRuntime,
+      });
       onClose();
     },
     [authType, config, onClose, settings, uiState, setErrorMessage],
@@ -322,7 +429,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
             <>
               <ConfigRow
                 label="Base URL"
-                value={effectiveConfig?.baseUrl ?? ''}
+                value={effectiveConfig?.baseUrl ?? t('(default)')}
                 badge={formatSourceBadge(sources['baseUrl'])}
               />
               <ConfigRow

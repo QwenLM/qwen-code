@@ -17,6 +17,7 @@ import { MANAGEMENT_STEPS } from '../types.js';
 import { theme } from '../../../semantic-colors.js';
 import { getColorForDisplay, shouldShowColor } from '../utils.js';
 import type { SubagentConfig, Config } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
 
@@ -24,6 +25,8 @@ interface AgentsManagerDialogProps {
   onClose: () => void;
   config: Config | null;
 }
+
+const debugLogger = createDebugLogger('AGENTS_MANAGER_DIALOG');
 
 /**
  * Main orchestrator component for the agents management dialog.
@@ -95,7 +98,11 @@ export function AgentsManagerDialog({
 
       try {
         const subagentManager = config.getSubagentManager();
-        await subagentManager.deleteSubagent(agent.name, agent.level);
+        await subagentManager.deleteSubagent(
+          agent.name,
+          agent.level,
+          agent.extensionName,
+        );
 
         // Reload agents to get updated state
         await loadAgents();
@@ -104,7 +111,7 @@ export function AgentsManagerDialog({
         setNavigationStack([MANAGEMENT_STEPS.AGENT_SELECTION]);
         setSelectedAgentIndex(-1);
       } catch (error) {
-        console.error('Failed to delete agent:', error);
+        debugLogger.error('Failed to delete agent:', error);
         throw error; // Re-throw to let the component handle the error state
       }
     },
@@ -249,7 +256,7 @@ export function AgentsManagerDialog({
                     await loadAgents();
                     handleNavigateBack();
                   } catch (error) {
-                    console.error('Failed to save agent changes:', error);
+                    debugLogger.error('Failed to save agent changes:', error);
                   }
                 }
               }}
@@ -278,7 +285,7 @@ export function AgentsManagerDialog({
                     await loadAgents();
                     handleNavigateBack();
                   } catch (error) {
-                    console.error('Failed to save color changes:', error);
+                    debugLogger.error('Failed to save color changes:', error);
                   }
                 }
               }}

@@ -9,6 +9,7 @@ import type {
   AcpPermissionRequest,
   AuthenticateUpdateNotification,
   ModelInfo,
+  AvailableCommand,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { QwenSessionReader, type QwenSession } from './qwenSessionReader.js';
@@ -26,7 +27,10 @@ import {
 } from '../services/qwenConnectionHandler.js';
 import { QwenSessionUpdateHandler } from './qwenSessionUpdateHandler.js';
 import { authMethod } from '../types/acpTypes.js';
-import { extractModelInfoFromNewSessionResult } from '../utils/acpModelInfo.js';
+import {
+  extractModelInfoFromNewSessionResult,
+  extractSessionModelState,
+} from '../utils/acpModelInfo.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
 
@@ -84,10 +88,18 @@ export class QwenAgentManager {
         ) {
           const update = (
             data as unknown as {
-              update: { sessionUpdate: string; content?: { text?: string } };
+              update: {
+                sessionUpdate: string;
+                content?: { text?: string };
+                _meta?: { timestamp?: number };
+              };
             }
           ).update;
           const text = update?.content?.text || '';
+          const timestamp =
+            typeof update?._meta?.timestamp === 'number'
+              ? update._meta.timestamp
+              : Date.now();
           if (update?.sessionUpdate === 'user_message_chunk' && text) {
             console.log(
               '[QwenAgentManager] Rehydration: routing user message chunk',
@@ -95,7 +107,7 @@ export class QwenAgentManager {
             this.callbacks.onMessage?.({
               role: 'user',
               content: text,
-              timestamp: Date.now(),
+              timestamp,
             });
             return;
           }
@@ -106,7 +118,7 @@ export class QwenAgentManager {
             this.callbacks.onMessage?.({
               role: 'assistant',
               content: text,
-              timestamp: Date.now(),
+              timestamp,
             });
             return;
           }
@@ -207,6 +219,16 @@ export class QwenAgentManager {
     if (res.modelInfo && this.callbacks.onModelInfo) {
       this.callbacks.onModelInfo(res.modelInfo);
     }
+    // Emit available models from connect result
+    if (res.availableModels && res.availableModels.length > 0) {
+      console.log(
+        '[QwenAgentManager] Emitting availableModels from connect():',
+        res.availableModels.map((m) => m.modelId),
+      );
+      if (this.callbacks.onAvailableModels) {
+        this.callbacks.onAvailableModels(res.availableModels);
+      }
+    }
     return res;
   }
 
@@ -241,6 +263,27 @@ export class QwenAgentManager {
       return confirmed;
     } catch (err) {
       console.error('[QwenAgentManager] Failed to set mode:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Set model from UI
+   */
+  async setModelFromUi(modelId: string): Promise<ModelInfo | null> {
+    try {
+      const res = await this.connection.setModel(modelId);
+      // Parse response and notify UI
+      const result = (res?.result || {}) as { modelId?: string };
+      const confirmedModelId = result.modelId || modelId;
+      const modelInfo: ModelInfo = {
+        modelId: confirmedModelId,
+        name: confirmedModelId,
+      };
+      this.callbacks.onModelChanged?.(modelInfo);
+      return modelInfo;
+    } catch (err) {
+      console.error('[QwenAgentManager] Failed to set model:', err);
       throw err;
     }
   }
@@ -1087,10 +1130,17 @@ export class QwenAgentManager {
     const autoAuthenticate = options?.autoAuthenticate ?? true;
     // Reuse existing session if present
     if (this.connection.currentSessionId) {
+      console.log(
+        '[QwenAgentManager] createNewSession: reusing existing session',
+        this.connection.currentSessionId,
+      );
       return this.connection.currentSessionId;
     }
     // Deduplicate concurrent session/new attempts
     if (this.sessionCreateInFlight) {
+      console.log(
+        '[QwenAgentManager] createNewSession: session creation already in flight',
+      );
       return this.sessionCreateInFlight;
     }
 
@@ -1102,6 +1152,10 @@ export class QwenAgentManager {
         // Try to create a new ACP session. If Qwen asks for auth, let it handle authentication.
         try {
           newSessionResult = await this.connection.newSession(workingDir);
+          console.log(
+            '[QwenAgentManager] newSession returned:',
+            JSON.stringify(newSessionResult, null, 2),
+          );
         } catch (err) {
           const requiresAuth = isAuthenticationRequiredError(err);
 
@@ -1140,6 +1194,30 @@ export class QwenAgentManager {
           extractModelInfoFromNewSessionResult(newSessionResult);
         if (modelInfo && this.callbacks.onModelInfo) {
           this.callbacks.onModelInfo(modelInfo);
+        }
+
+        // Extract and emit available models
+        const modelState = extractSessionModelState(newSessionResult);
+        console.log(
+          '[QwenAgentManager] Extracted model state from session/new:',
+          modelState,
+        );
+        if (
+          modelState?.availableModels &&
+          modelState.availableModels.length > 0
+        ) {
+          console.log(
+            '[QwenAgentManager] Emitting availableModels:',
+            modelState.availableModels,
+          );
+          if (this.callbacks.onAvailableModels) {
+            this.callbacks.onAvailableModels(modelState.availableModels);
+          }
+        } else {
+          console.warn(
+            '[QwenAgentManager] No availableModels found in session/new response. Raw models field:',
+            (newSessionResult as Record<string, unknown>)?.models,
+          );
         }
 
         const newSessionId = this.connection.currentSessionId;
@@ -1285,6 +1363,30 @@ export class QwenAgentManager {
    */
   onModelInfo(callback: (info: ModelInfo) => void): void {
     this.callbacks.onModelInfo = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register callback for model changed updates (from ACP current_model_update)
+   */
+  onModelChanged(callback: (model: ModelInfo) => void): void {
+    this.callbacks.onModelChanged = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register callback for available commands updates (from ACP available_commands_update)
+   */
+  onAvailableCommands(callback: (commands: AvailableCommand[]) => void): void {
+    this.callbacks.onAvailableCommands = callback;
+    this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register callback for available models updates (from session/new response)
+   */
+  onAvailableModels(callback: (models: ModelInfo[]) => void): void {
+    this.callbacks.onAvailableModels = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
   }
 

@@ -15,6 +15,8 @@ import {
   resolveAndValidatePath,
   unescapePath,
   isSubpath,
+  shortenPath,
+  tildeifyPath,
 } from './paths.js';
 import type { Config } from '../config/config.js';
 
@@ -594,5 +596,177 @@ describe('resolveAndValidatePath', () => {
     } finally {
       fs.rmSync(filePath);
     }
+  });
+});
+
+describe('tildeifyPath', () => {
+  it('replaces home directory with tilde', () => {
+    const homeDir = os.homedir();
+    const result = tildeifyPath(`${homeDir}/documents/file.txt`);
+    expect(result).toBe('~/documents/file.txt');
+  });
+
+  it('returns path unchanged if it does not start with home directory', () => {
+    const result = tildeifyPath('/var/log/app.log');
+    expect(result).toBe('/var/log/app.log');
+  });
+
+  it('handles exact home directory path', () => {
+    const homeDir = os.homedir();
+    const result = tildeifyPath(homeDir);
+    expect(result).toBe('~');
+  });
+
+  it('handles paths with home directory in the middle', () => {
+    const homeDir = os.homedir();
+    const result = tildeifyPath(`/mnt/backup${homeDir}/data`);
+    // Should not replace home dir in the middle
+    expect(result).toBe(`/mnt/backup${homeDir}/data`);
+  });
+});
+
+describe('shortenPath', () => {
+  const sep = path.sep;
+  const sepForRegex = sep.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  it('returns path unchanged if it is already short enough', () => {
+    expect(shortenPath('/short/path', 50)).toBe('/short/path');
+    expect(shortenPath('/a/b/c.txt', 100)).toBe('/a/b/c.txt');
+  });
+
+  it('returns path unchanged if length equals maxLen', () => {
+    const testPath = '/exact/length';
+    expect(shortenPath(testPath, testPath.length)).toBe(testPath);
+  });
+
+  it('shortens long paths by showing start and end with ellipsis in between', () => {
+    const longPath = `${sep}home${sep}user${sep}projects${sep}qwen-code${sep}packages${sep}core${sep}src${sep}file.ts`;
+    const result = shortenPath(longPath, 40);
+
+    // Should include root + first segment and ellipsis
+    expect(result).toContain(`${sep}home${sep}...${sep}`);
+    // Should end with file.ts
+    expect(result).toContain('file.ts');
+    // Should be within maxLen
+    expect(result.length).toBeLessThanOrEqual(40);
+  });
+
+  it('includes as many end segments as possible', () => {
+    const testPath = `${sep}home${sep}user${sep}workspace${sep}projects${sep}subdir${sep}file.txt`;
+    const result = shortenPath(testPath, 35);
+
+    // Should have: /home/.../subdir/file.txt (fitting as many end segments as possible)
+    expect(result).toContain('...');
+    expect(result).toContain('file.txt');
+    expect(result.length).toBeLessThanOrEqual(35);
+  });
+
+  it('shows all segments when they all fit after including ellipsis space', () => {
+    const testPath = `${sep}a${sep}b${sep}c${sep}d.txt`;
+    // This path is short, should not need ellipsis
+    const result = shortenPath(testPath, 50);
+    expect(result).toBe(testPath);
+    expect(result).not.toContain('...');
+  });
+
+  it('handles paths with single segment after root', () => {
+    const result = shortenPath(
+      '/verylongfilenamethatshouldbetruncated.txt',
+      20,
+    );
+    expect(result).toContain('...');
+    expect(result.length).toBeLessThanOrEqual(20);
+  });
+
+  it('handles paths with only root', () => {
+    expect(shortenPath('/', 10)).toBe('/');
+    expect(shortenPath('/', 1)).toBe('/');
+  });
+
+  it('handles very short maxLen values', () => {
+    const result = shortenPath('/home/user/file.txt', 5);
+    expect(result).toBe('/h...');
+    expect(result.length).toBe(5);
+  });
+
+  it('handles paths with two segments', () => {
+    const testPath = `${sep}home${sep}file.txt`;
+    const result = shortenPath(testPath, 10);
+
+    expect(result).toContain('...');
+    expect(result.length).toBeLessThanOrEqual(10);
+  });
+
+  it('preserves the root directory in shortened paths', () => {
+    const result = shortenPath(`${sep}a${sep}b${sep}c${sep}d${sep}e.txt`, 15);
+    expect(result.startsWith(sep)).toBe(true);
+  });
+
+  it('handles relative-looking paths correctly', () => {
+    // Note: shortenPath works with any string, but typically gets absolute paths
+    const result = shortenPath('very/long/relative/path/to/file.txt', 20);
+    expect(result).toContain('...');
+    expect(result.length).toBeLessThanOrEqual(20);
+  });
+
+  it('creates ellipsis only when segments are actually omitted', () => {
+    const shortPath = `${sep}a${sep}b${sep}c.txt`;
+    const result1 = shortenPath(shortPath, 100);
+    expect(result1).not.toContain('...');
+
+    const result2 = shortenPath(shortPath, 8);
+    expect(result2).toContain('...');
+  });
+
+  it('uses default maxLen of 80 when not specified', () => {
+    const longPath = Array(100).fill('a').join('');
+    const result = shortenPath(longPath);
+    expect(result.length).toBeLessThanOrEqual(80);
+  });
+
+  it('handles paths where even minimum representation is too long', () => {
+    const path1 = '/verylongdirectoryname/verylongfilename.txt';
+    const result = shortenPath(path1, 15);
+    // Should use simple truncation fallback
+    expect(result).toContain('...');
+    expect(result.length).toBeLessThanOrEqual(15);
+  });
+
+  it('correctly calculates length including ellipsis', () => {
+    const testPath = `${sep}home${sep}user${sep}workspace${sep}project${sep}src${sep}components${sep}app.tsx`;
+    const maxLen = 40;
+    const result = shortenPath(testPath, maxLen);
+
+    expect(result.length).toBeLessThanOrEqual(maxLen);
+    // If ellipsis is present, verify proper structure
+    if (result.includes('...')) {
+      const parts = result.split('...');
+      expect(parts.length).toBe(2);
+      expect(parts[0].length + 3 + parts[1].length).toBeLessThanOrEqual(maxLen);
+    }
+  });
+
+  it('maintains path separator consistency', () => {
+    const testPath = `${sep}a${sep}b${sep}c${sep}d${sep}e${sep}f.txt`;
+    const result = shortenPath(testPath, 20);
+
+    // All separators should be consistent
+    const separators = result.match(new RegExp(`\\${sep}`, 'g'));
+    if (separators) {
+      separators.forEach((s) => {
+        expect(s).toBe(sep);
+      });
+    }
+  });
+
+  it('example from documentation: /path/to/a/very/long/file.txt', () => {
+    const testPath = `${sep}path${sep}to${sep}a${sep}very${sep}long${sep}directory${sep}file.txt`;
+    const result = shortenPath(testPath, 35);
+
+    // Should show start and end with ellipsis
+    expect(result).toMatch(
+      new RegExp(`^${sepForRegex}path${sepForRegex}\\.\\.\\..+file\\.txt$`),
+    );
+    expect(result.length).toBeLessThanOrEqual(35);
   });
 });

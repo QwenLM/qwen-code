@@ -5,39 +5,34 @@
  */
 
 import { promises as fs } from 'node:fs';
+import * as fsSync from 'node:fs';
 import path from 'node:path';
 import toml from '@iarna/toml';
 import { glob } from 'glob';
 import { z } from 'zod';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  EXTENSIONS_CONFIG_FILENAME,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import type { ICommandLoader } from './types.js';
-import type {
-  CommandContext,
-  SlashCommand,
-  SlashCommandActionReturn,
-} from '../ui/commands/types.js';
-import { CommandKind } from '../ui/commands/types.js';
-import { DefaultArgumentProcessor } from './prompt-processors/argumentProcessor.js';
-import type {
-  IPromptProcessor,
-  PromptPipelineContent,
-} from './prompt-processors/types.js';
 import {
-  SHORTHAND_ARGS_PLACEHOLDER,
-  SHELL_INJECTION_TRIGGER,
-  AT_FILE_INJECTION_TRIGGER,
-} from './prompt-processors/types.js';
+  parseMarkdownCommand,
+  MarkdownCommandDefSchema,
+} from './markdown-command-parser.js';
 import {
-  ConfirmationRequiredError,
-  ShellProcessor,
-} from './prompt-processors/shellProcessor.js';
-import { AtFileProcessor } from './prompt-processors/atFileProcessor.js';
+  createSlashCommandFromDefinition,
+  type CommandDefinition,
+} from './command-factory.js';
+import type { SlashCommand } from '../ui/commands/types.js';
 
 interface CommandDirectory {
   path: string;
   extensionName?: string;
 }
+
+const debugLogger = createDebugLogger('FILE_COMMAND_LOADER');
 
 /**
  * Defines the Zod schema for a command definition file. This serves as the
@@ -96,7 +91,12 @@ export class FileCommandLoader implements ICommandLoader {
     const commandDirs = this.getCommandDirectories();
     for (const dirInfo of commandDirs) {
       try {
-        const files = await glob('**/*.toml', {
+        // Scan both .toml and .md files
+        const tomlFiles = await glob('**/*.toml', {
+          ...globOptions,
+          cwd: dirInfo.path,
+        });
+        const mdFiles = await glob('**/*.md', {
           ...globOptions,
           cwd: dirInfo.path,
         });
@@ -105,17 +105,27 @@ export class FileCommandLoader implements ICommandLoader {
           return [];
         }
 
-        const commandPromises = files.map((file) =>
-          this.parseAndAdaptFile(
+        // Process TOML files
+        const tomlCommandPromises = tomlFiles.map((file) =>
+          this.parseAndAdaptTomlFile(
             path.join(dirInfo.path, file),
             dirInfo.path,
             dirInfo.extensionName,
           ),
         );
 
-        const commands = (await Promise.all(commandPromises)).filter(
-          (cmd): cmd is SlashCommand => cmd !== null,
+        // Process Markdown files
+        const mdCommandPromises = mdFiles.map((file) =>
+          this.parseAndAdaptMarkdownFile(
+            path.join(dirInfo.path, file),
+            dirInfo.path,
+            dirInfo.extensionName,
+          ),
         );
+
+        const commands = (
+          await Promise.all([...tomlCommandPromises, ...mdCommandPromises])
+        ).filter((cmd): cmd is SlashCommand => cmd !== null);
 
         // Add all commands without deduplication
         allCommands.push(...commands);
@@ -125,7 +135,7 @@ export class FileCommandLoader implements ICommandLoader {
         const isAbortError =
           error instanceof Error && error.name === 'AbortError';
         if (!isEnoent && !isAbortError) {
-          console.error(
+          debugLogger.error(
             `[FileCommandLoader] Error loading commands from ${dirInfo.path}:`,
             error,
           );
@@ -159,15 +169,74 @@ export class FileCommandLoader implements ICommandLoader {
         .filter((ext) => ext.isActive)
         .sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically for deterministic loading
 
-      const extensionCommandDirs = activeExtensions.map((ext) => ({
-        path: path.join(ext.path, 'commands'),
-        extensionName: ext.name,
-      }));
+      // Collect command directories from each extension
+      for (const ext of activeExtensions) {
+        // Get commands paths from extension config
+        const commandsPaths = this.getExtensionCommandsPaths(ext);
 
-      dirs.push(...extensionCommandDirs);
+        for (const cmdPath of commandsPaths) {
+          dirs.push({
+            path: cmdPath,
+            extensionName: ext.name,
+          });
+        }
+      }
     }
 
     return dirs;
+  }
+
+  /**
+   * Get commands paths from an extension.
+   * Returns paths from config.commands if specified, otherwise defaults to 'commands' directory.
+   */
+  private getExtensionCommandsPaths(ext: {
+    path: string;
+    name: string;
+  }): string[] {
+    // Try to get extension config
+    try {
+      const configPath = path.join(ext.path, EXTENSIONS_CONFIG_FILENAME);
+      if (fsSync.existsSync(configPath)) {
+        const configContent = fsSync.readFileSync(configPath, 'utf-8');
+        const config = JSON.parse(configContent);
+
+        if (config.commands) {
+          const commandsArray = Array.isArray(config.commands)
+            ? config.commands
+            : [config.commands];
+
+          return commandsArray
+            .map((cmdPath: string) =>
+              path.isAbsolute(cmdPath) ? cmdPath : path.join(ext.path, cmdPath),
+            )
+            .filter((cmdPath: string) => {
+              try {
+                return fsSync.existsSync(cmdPath);
+              } catch {
+                return false;
+              }
+            });
+        }
+      }
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to read extension config for ${ext.name}:`,
+        error,
+      );
+    }
+
+    // Default fallback: use 'commands' directory
+    const defaultPath = path.join(ext.path, 'commands');
+    try {
+      if (fsSync.existsSync(defaultPath)) {
+        return [defaultPath];
+      }
+    } catch {
+      // Ignore
+    }
+
+    return [];
   }
 
   /**
@@ -177,7 +246,7 @@ export class FileCommandLoader implements ICommandLoader {
    * @param extensionName Optional extension name to prefix commands with.
    * @returns A promise resolving to a SlashCommand, or null if the file is invalid.
    */
-  private async parseAndAdaptFile(
+  private async parseAndAdaptTomlFile(
     filePath: string,
     baseDir: string,
     extensionName?: string,
@@ -186,7 +255,7 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       fileContent = await fs.readFile(filePath, 'utf-8');
     } catch (error: unknown) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Failed to read file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -197,7 +266,7 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       parsed = toml.parse(fileContent);
     } catch (error: unknown) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Failed to parse TOML file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -207,7 +276,7 @@ export class FileCommandLoader implements ICommandLoader {
     const validationResult = TomlCommandDefSchema.safeParse(parsed);
 
     if (!validationResult.success) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Skipping invalid command file: ${filePath}. Validation errors:`,
         validationResult.error.flatten(),
       );
@@ -216,104 +285,79 @@ export class FileCommandLoader implements ICommandLoader {
 
     const validDef = validationResult.data;
 
-    const relativePathWithExt = path.relative(baseDir, filePath);
-    const relativePath = relativePathWithExt.substring(
-      0,
-      relativePathWithExt.length - 5, // length of '.toml'
-    );
-    const baseCommandName = relativePath
-      .split(path.sep)
-      // Sanitize each path segment to prevent ambiguity. Since ':' is our
-      // namespace separator, we replace any literal colons in filenames
-      // with underscores to avoid naming conflicts.
-      .map((segment) => segment.replaceAll(':', '_'))
-      .join(':');
-
-    // Add extension name tag for extension commands
-    const defaultDescription = `Custom command from ${path.basename(filePath)}`;
-    let description = validDef.description || defaultDescription;
-    if (extensionName) {
-      description = `[${extensionName}] ${description}`;
-    }
-
-    const processors: IPromptProcessor[] = [];
-    const usesArgs = validDef.prompt.includes(SHORTHAND_ARGS_PLACEHOLDER);
-    const usesShellInjection = validDef.prompt.includes(
-      SHELL_INJECTION_TRIGGER,
-    );
-    const usesAtFileInjection = validDef.prompt.includes(
-      AT_FILE_INJECTION_TRIGGER,
-    );
-
-    // 1. @-File Injection (Security First).
-    // This runs first to ensure we're not executing shell commands that
-    // could dynamically generate malicious @-paths.
-    if (usesAtFileInjection) {
-      processors.push(new AtFileProcessor(baseCommandName));
-    }
-
-    // 2. Argument and Shell Injection.
-    // This runs after file content has been safely injected.
-    if (usesShellInjection || usesArgs) {
-      processors.push(new ShellProcessor(baseCommandName));
-    }
-
-    // 3. Default Argument Handling.
-    // Appends the raw invocation if no explicit {{args}} are used.
-    if (!usesArgs) {
-      processors.push(new DefaultArgumentProcessor());
-    }
-
-    return {
-      name: baseCommandName,
-      description,
-      kind: CommandKind.FILE,
+    // Use factory to create command
+    return createSlashCommandFromDefinition(
+      filePath,
+      baseDir,
+      validDef,
       extensionName,
-      action: async (
-        context: CommandContext,
-        _args: string,
-      ): Promise<SlashCommandActionReturn> => {
-        if (!context.invocation) {
-          console.error(
-            `[FileCommandLoader] Critical error: Command '${baseCommandName}' was executed without invocation context.`,
-          );
-          return {
-            type: 'submit_prompt',
-            content: [{ text: validDef.prompt }], // Fallback to unprocessed prompt
-          };
-        }
+      '.toml',
+    );
+  }
 
-        try {
-          let processedContent: PromptPipelineContent = [
-            { text: validDef.prompt },
-          ];
-          for (const processor of processors) {
-            processedContent = await processor.process(
-              processedContent,
-              context,
-            );
-          }
+  /**
+   * Parses a single .md file and transforms it into a SlashCommand object.
+   * @param filePath The absolute path to the .md file.
+   * @param baseDir The root command directory for name calculation.
+   * @param extensionName Optional extension name to prefix commands with.
+   * @returns A promise resolving to a SlashCommand, or null if the file is invalid.
+   */
+  private async parseAndAdaptMarkdownFile(
+    filePath: string,
+    baseDir: string,
+    extensionName?: string,
+  ): Promise<SlashCommand | null> {
+    let fileContent: string;
+    try {
+      fileContent = await fs.readFile(filePath, 'utf-8');
+    } catch (error: unknown) {
+      debugLogger.error(
+        `[FileCommandLoader] Failed to read file ${filePath}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+      return null;
+    }
 
-          return {
-            type: 'submit_prompt',
-            content: processedContent,
-          };
-        } catch (e) {
-          // Check if it's our specific error type
-          if (e instanceof ConfirmationRequiredError) {
-            // Halt and request confirmation from the UI layer.
-            return {
-              type: 'confirm_shell_commands',
-              commandsToConfirm: e.commandsToConfirm,
-              originalInvocation: {
-                raw: context.invocation.raw,
-              },
-            };
-          }
-          // Re-throw other errors to be handled by the global error handler.
-          throw e;
-        }
-      },
+    let parsed: ReturnType<typeof parseMarkdownCommand>;
+    try {
+      parsed = parseMarkdownCommand(fileContent);
+    } catch (error: unknown) {
+      debugLogger.error(
+        `[FileCommandLoader] Failed to parse Markdown file ${filePath}:`,
+        error instanceof Error ? error.message : String(error),
+      );
+      return null;
+    }
+
+    const validationResult = MarkdownCommandDefSchema.safeParse(parsed);
+
+    if (!validationResult.success) {
+      debugLogger.error(
+        `[FileCommandLoader] Skipping invalid command file: ${filePath}. Validation errors:`,
+        validationResult.error.flatten(),
+      );
+      return null;
+    }
+
+    const validDef = validationResult.data;
+
+    // Convert to CommandDefinition format
+    const definition: CommandDefinition = {
+      prompt: validDef.prompt,
+      description:
+        validDef.frontmatter?.description &&
+        typeof validDef.frontmatter.description === 'string'
+          ? validDef.frontmatter.description
+          : undefined,
     };
+
+    // Use factory to create command
+    return createSlashCommandFromDefinition(
+      filePath,
+      baseDir,
+      definition,
+      extensionName,
+      '.md',
+    );
   }
 }

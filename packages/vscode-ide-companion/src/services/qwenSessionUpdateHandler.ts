@@ -10,7 +10,12 @@
  * Handles session updates from ACP and dispatches them to appropriate callbacks
  */
 
-import type { AcpSessionUpdate, SessionUpdateMeta } from '../types/acpTypes.js';
+import type {
+  AcpSessionUpdate,
+  SessionUpdateMeta,
+  ModelInfo,
+  AvailableCommand,
+} from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type {
   QwenAgentCallbacks,
@@ -81,6 +86,9 @@ export class QwenSessionUpdateHandler {
       case 'tool_call': {
         // Handle new tool call
         if (this.callbacks.onToolCall && 'toolCallId' in update) {
+          const meta = update._meta as SessionUpdateMeta | undefined;
+          const timestamp =
+            typeof meta?.timestamp === 'number' ? meta.timestamp : undefined;
           this.callbacks.onToolCall({
             toolCallId: update.toolCallId as string,
             kind: (update.kind as string) || undefined,
@@ -93,6 +101,7 @@ export class QwenSessionUpdateHandler {
             locations: update.locations as
               | Array<{ path: string; line?: number | null }>
               | undefined,
+            ...(timestamp !== undefined && { timestamp }),
           });
         }
         break;
@@ -100,6 +109,9 @@ export class QwenSessionUpdateHandler {
 
       case 'tool_call_update': {
         if (this.callbacks.onToolCall && 'toolCallId' in update) {
+          const meta = update._meta as SessionUpdateMeta | undefined;
+          const timestamp =
+            typeof meta?.timestamp === 'number' ? meta.timestamp : undefined;
           this.callbacks.onToolCall({
             toolCallId: update.toolCallId as string,
             kind: (update.kind as string) || undefined,
@@ -112,6 +124,7 @@ export class QwenSessionUpdateHandler {
             locations: update.locations as
               | Array<{ path: string; line?: number | null }>
               | undefined,
+            ...(timestamp !== undefined && { timestamp }),
           });
         }
         break;
@@ -154,6 +167,40 @@ export class QwenSessionUpdateHandler {
         } catch (err) {
           console.warn(
             '[SessionUpdateHandler] Failed to handle mode update',
+            err,
+          );
+        }
+        break;
+      }
+
+      case 'current_model_update': {
+        // Notify UI about model change
+        try {
+          const model = (update as unknown as { model?: ModelInfo }).model;
+          if (model && this.callbacks.onModelChanged) {
+            this.callbacks.onModelChanged(model);
+          }
+        } catch (err) {
+          console.warn(
+            '[SessionUpdateHandler] Failed to handle model update',
+            err,
+          );
+        }
+        break;
+      }
+
+      case 'available_commands_update': {
+        // Notify UI about available commands
+        try {
+          const commands = (
+            update as unknown as { availableCommands?: AvailableCommand[] }
+          ).availableCommands;
+          if (commands && this.callbacks.onAvailableCommands) {
+            this.callbacks.onAvailableCommands(commands);
+          }
+        } catch (err) {
+          console.warn(
+            '[SessionUpdateHandler] Failed to handle available commands update',
             err,
           );
         }

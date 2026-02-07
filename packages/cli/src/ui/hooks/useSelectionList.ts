@@ -5,6 +5,7 @@
  */
 
 import { useReducer, useRef, useEffect } from 'react';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useKeypress } from './useKeypress.js';
 
 export interface SelectionListItem<T> {
@@ -21,6 +22,8 @@ export interface UseSelectionListOptions<T> {
   isFocused?: boolean;
   showNumbers?: boolean;
 }
+
+const debugLogger = createDebugLogger('SELECTION_LIST');
 
 export interface UseSelectionListResult {
   activeIndex: number;
@@ -203,7 +206,7 @@ function selectionListReducer<T>(
 
     default: {
       const exhaustiveCheck: never = action;
-      console.error(`Unknown selection list action: ${exhaustiveCheck}`);
+      debugLogger.error(`Unknown selection list action: ${exhaustiveCheck}`);
       return state;
     }
   }

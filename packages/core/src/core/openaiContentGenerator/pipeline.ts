@@ -320,13 +320,15 @@ export class ContentGenerationPipeline {
         'frequency_penalty',
         'frequencyPenalty',
       ),
-      ...this.buildReasoningConfig(),
+      ...this.buildReasoningConfig(request),
     };
 
     return params;
   }
 
-  private buildReasoningConfig(): Record<string, unknown> {
+  private buildReasoningConfig(
+    request: GenerateContentParameters,
+  ): Record<string, unknown> {
     // Reasoning configuration for OpenAI-compatible endpoints is highly fragmented.
     // For example, across common providers and models:
     //
@@ -336,13 +338,21 @@ export class ContentGenerationPipeline {
     //   - gpt-5.x series      — thinking is enabled by default; can be disabled via `reasoning.effort`
     //   - qwen3 series        — model-dependent; can be manually disabled via `extra_body.enable_thinking`
     //
-    // Given this inconsistency, we choose not to set any reasoning config here and
-    // instead rely on each model’s default behavior.
+    // Given this inconsistency, we avoid mapping values and only pass through the
+    // configured reasoning object when explicitly enabled. This keeps provider- and
+    // model-specific semantics intact while honoring request-level opt-out.
 
-    // We plan to introduce provider- and model-specific settings to enable more
-    // fine-grained control over reasoning configuration.
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
+      return {};
+    }
 
-    return {};
+    const reasoning = this.contentGeneratorConfig.reasoning;
+
+    if (reasoning === false || reasoning === undefined) {
+      return {};
+    }
+
+    return { reasoning };
   }
 
   /**

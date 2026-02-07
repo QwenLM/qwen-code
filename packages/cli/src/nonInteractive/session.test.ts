@@ -18,7 +18,6 @@ import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlDispatcher } from './control/ControlDispatcher.js';
 import { ControlContext } from './control/ControlContext.js';
 import { ControlService } from './control/ControlService.js';
-import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
 
 const runNonInteractiveMock = vi.fn();
 
@@ -45,10 +44,6 @@ vi.mock('./control/ControlContext.js', () => ({
 
 vi.mock('./control/ControlService.js', () => ({
   ControlService: vi.fn(),
-}));
-
-vi.mock('../ui/utils/ConsolePatcher.js', () => ({
-  ConsolePatcher: vi.fn(),
 }));
 
 interface ConfigOverrides {
@@ -153,30 +148,18 @@ describe('runNonInteractiveStreamJson', () => {
     handleControlResponse: ReturnType<typeof vi.fn>;
     handleCancel: ReturnType<typeof vi.fn>;
     shutdown: ReturnType<typeof vi.fn>;
+    markInputClosed: ReturnType<typeof vi.fn>;
     getPendingIncomingRequestCount: ReturnType<typeof vi.fn>;
     waitForPendingIncomingRequests: ReturnType<typeof vi.fn>;
     sdkMcpController: {
       createSendSdkMcpMessage: ReturnType<typeof vi.fn>;
     };
   };
-  let mockConsolePatcher: {
-    patch: ReturnType<typeof vi.fn>;
-    cleanup: ReturnType<typeof vi.fn>;
-  };
-
   beforeEach(() => {
     config = createConfig();
     runNonInteractiveMock.mockReset();
 
     // Setup mocks
-    mockConsolePatcher = {
-      patch: vi.fn(),
-      cleanup: vi.fn(),
-    };
-    (ConsolePatcher as unknown as ReturnType<typeof vi.fn>).mockImplementation(
-      () => mockConsolePatcher,
-    );
-
     mockOutputAdapter = {
       emitResult: vi.fn(),
     } as {
@@ -192,6 +175,7 @@ describe('runNonInteractiveStreamJson', () => {
       handleControlResponse: vi.fn(),
       handleCancel: vi.fn(),
       shutdown: vi.fn(),
+      markInputClosed: vi.fn(),
       getPendingIncomingRequestCount: vi.fn().mockReturnValue(0),
       waitForPendingIncomingRequests: vi.fn().mockResolvedValue(undefined),
       sdkMcpController: {
@@ -234,9 +218,7 @@ describe('runNonInteractiveStreamJson', () => {
 
     await runNonInteractiveStreamJson(config, '');
 
-    expect(mockConsolePatcher.patch).toHaveBeenCalledTimes(1);
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
-    expect(mockConsolePatcher.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it('processes user message when received as first message', async () => {
@@ -487,8 +469,6 @@ describe('runNonInteractiveStreamJson', () => {
     await expect(runNonInteractiveStreamJson(config, '')).rejects.toThrow(
       'Stream error',
     );
-
-    expect(mockConsolePatcher.cleanup).toHaveBeenCalled();
   });
 
   it('stops processing when abort signal is triggered', async () => {
@@ -565,9 +545,6 @@ describe('runNonInteractiveStreamJson', () => {
     };
 
     await runNonInteractiveStreamJson(config, '');
-
-    expect(mockConsolePatcher.patch).toHaveBeenCalledTimes(1);
-    expect(mockConsolePatcher.cleanup).toHaveBeenCalledTimes(1);
   });
 
   it('cleans up output adapter on completion', async () => {
@@ -596,7 +573,5 @@ describe('runNonInteractiveStreamJson', () => {
     };
 
     await runNonInteractiveStreamJson(config, '');
-
-    expect(mockConsolePatcher.cleanup).toHaveBeenCalled();
   });
 });

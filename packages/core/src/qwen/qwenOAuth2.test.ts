@@ -751,6 +751,7 @@ describe('getQwenOAuthClient', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -840,7 +841,7 @@ describe('getQwenOAuthClient', () => {
         }),
       ),
     ).rejects.toThrow(
-      'No cached Qwen-OAuth credentials found. Please re-authenticate.',
+      'Qwen OAuth credentials expired. Please use /auth to re-authenticate with qwen-oauth.',
     );
 
     expect(global.fetch).not.toHaveBeenCalled();
@@ -1007,6 +1008,7 @@ describe('getQwenOAuthClient - Enhanced Error Scenarios', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1202,6 +1204,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1405,6 +1408,7 @@ describe('Browser Launch and Error Handling', () => {
   beforeEach(() => {
     mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     originalFetch = global.fetch;
@@ -1678,20 +1682,11 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('Manager failed')),
       };
 
-      // Mock console.warn to avoid test noise
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       // With our race condition fix, we no longer fall back to local credentials
       // to ensure single source of truth
       expect(result.token).toBeUndefined();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to get access token from shared manager:',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
     });
 
     it('should return undefined when both manager and cache fail', async () => {
@@ -1714,13 +1709,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('Manager failed')),
       };
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       expect(result.token).toBeUndefined();
-
-      consoleSpy.mockRestore();
     });
 
     it('should handle missing credentials gracefully', async () => {
@@ -1740,13 +1731,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('No credentials')),
       };
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       expect(result.token).toBeUndefined();
-
-      consoleSpy.mockRestore();
     });
   });
 
@@ -2043,6 +2030,7 @@ describe('SharedTokenManager Integration in QwenOAuth2Client', () => {
   it('should handle TokenManagerError types correctly in getQwenOAuthClient', async () => {
     const mockConfig = {
       isBrowserLaunchSuppressed: vi.fn().mockReturnValue(true),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     // Test different TokenManagerError types

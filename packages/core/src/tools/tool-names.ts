@@ -13,7 +13,6 @@ export const ToolNames = {
   EDIT: 'edit',
   WRITE_FILE: 'write_file',
   READ_FILE: 'read_file',
-  READ_MANY_FILES: 'read_many_files',
   GREP: 'grep_search',
   GLOB: 'glob',
   SHELL: 'run_shell_command',
@@ -25,6 +24,7 @@ export const ToolNames = {
   WEB_FETCH: 'web_fetch',
   WEB_SEARCH: 'web_search',
   LS: 'list_directory',
+  LSP: 'lsp',
 } as const;
 
 /**
@@ -36,7 +36,6 @@ export const ToolDisplayNames = {
   EDIT: 'Edit',
   WRITE_FILE: 'WriteFile',
   READ_FILE: 'ReadFile',
-  READ_MANY_FILES: 'ReadManyFiles',
   GREP: 'Grep',
   GLOB: 'Glob',
   SHELL: 'Shell',
@@ -48,6 +47,7 @@ export const ToolDisplayNames = {
   WEB_FETCH: 'WebFetch',
   WEB_SEARCH: 'WebSearch',
   LS: 'ListFiles',
+  LSP: 'Lsp',
 } as const;
 
 // Migration from old tool names to new tool names

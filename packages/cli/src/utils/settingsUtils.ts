@@ -17,6 +17,7 @@ import type {
 } from '../config/settingsSchema.js';
 import { getSettingsSchema } from '../config/settingsSchema.js';
 import { t } from '../i18n/index.js';
+import { isAutoLanguage } from './languageUtils.js';
 
 // The schema is now nested, but many parts of the UI and logic work better
 // with a flattened structure and dot-notation keys. This section flattens the
@@ -249,12 +250,79 @@ export function getDialogSettingsByType(
 }
 
 /**
- * Get all setting keys that should be shown in the dialog
+ * Explicit display order for settings shown in the Settings Dialog.
+ * Settings are ordered by importance and logical grouping:
+ * 1. Workflow control (most impactful)
+ * 2. Localization
+ * 3. Editor/Shell experience
+ * 4. Display preferences
+ * 5. Git behavior
+ * 6. File filtering
+ * 7. System settings (rarely changed)
+ *
+ * New settings with showInDialog: true that are not listed here
+ * will appear at the end of the list.
+ */
+const SETTINGS_DIALOG_ORDER: readonly string[] = [
+  // Workflow Control - most impactful setting
+  'tools.approvalMode',
+
+  // Localization - users often set this first
+  'general.language',
+  'general.outputLanguage',
+
+  // Theme
+  'ui.theme',
+
+  // Editor/Shell Experience
+  'general.vimMode',
+  'tools.shell.enableInteractiveShell',
+
+  // Display Preferences
+  'general.preferredEditor',
+  'ide.enabled',
+  'ui.showLineNumbers',
+  'ui.hideTips',
+  'general.terminalBell',
+  'ui.enableWelcomeBack',
+
+  // Git Behavior
+  'general.gitCoAuthor',
+
+  // File Filtering
+  'context.fileFiltering.respectGitIgnore',
+  'context.fileFiltering.respectQwenIgnore',
+
+  // System Settings - rarely changed
+  'general.disableAutoUpdate',
+
+  // Privacy
+  'privacy.usageStatisticsEnabled',
+] as const;
+
+/**
+ * Get all setting keys that should be shown in the dialog, sorted by display order
  */
 export function getDialogSettingKeys(): string[] {
-  return Object.values(getFlattenedSchema())
-    .filter((definition) => definition.showInDialog !== false)
+  const dialogSettings = Object.values(getFlattenedSchema())
+    .filter((definition) => definition.showInDialog === true)
     .map((definition) => definition.key);
+
+  // Sort by explicit order; settings not in the order array appear at the end
+  return dialogSettings.sort((a, b) => {
+    const indexA = SETTINGS_DIALOG_ORDER.indexOf(a);
+    const indexB = SETTINGS_DIALOG_ORDER.indexOf(b);
+
+    // If both are in the order array, sort by their position
+    if (indexA !== -1 && indexB !== -1) {
+      return indexA - indexB;
+    }
+    // If only one is in the array, prioritize the one in the array
+    if (indexA !== -1) return -1;
+    if (indexB !== -1) return 1;
+    // If neither is in the array, maintain original order
+    return 0;
+  });
 }
 
 // ============================================================================
@@ -401,14 +469,20 @@ export function saveModifiedSettings(
       path,
     );
 
-    if (value === undefined) {
-      return;
-    }
-
     const existsInOriginalFile = settingExistsInScope(
       settingKey,
       loadedSettings.forScope(scope).settings,
     );
+
+    if (value === undefined) {
+      // Treat `undefined` as "unset" when the key exists in the scope file.
+      // LoadedSettings.setValue(..., undefined) is used elsewhere in the codebase
+      // to remove optional settings from disk.
+      if (existsInOriginalFile) {
+        loadedSettings.setValue(scope, settingKey, undefined);
+      }
+      return;
+    }
 
     const isDefaultValue = value === getDefaultValue(settingKey);
 
@@ -445,7 +519,10 @@ export function getDisplayValue(
 
   let valueString = String(value);
 
-  if (definition?.type === 'enum' && definition.options) {
+  // Special handling for outputLanguage 'auto' value
+  if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
+    valueString = t('Auto (detect from system)');
+  } else if (definition?.type === 'enum' && definition.options) {
     const option = definition.options?.find((option) => option.value === value);
     if (option?.label) {
       valueString = t(option.label) || option.label;

@@ -28,6 +28,7 @@ import * as os from 'node:os';
 import type { z } from 'zod';
 import type { DiffManager } from './diff-manager.js';
 import { OpenFilesManager } from './open-files-manager.js';
+import { ACP_ERROR_CODES } from './constants/acpSchema.js';
 
 class CORSError extends Error {
   constructor(message: string) {
@@ -264,7 +265,7 @@ export class IDEServer {
           res.status(400).json({
             jsonrpc: '2.0',
             error: {
-              code: -32000,
+              code: ACP_ERROR_CODES.AUTH_REQUIRED,
               message:
                 'Bad Request: No valid session ID provided for non-initialize request.',
             },
@@ -283,7 +284,7 @@ export class IDEServer {
             res.status(500).json({
               jsonrpc: '2.0' as const,
               error: {
-                code: -32603,
+                code: ACP_ERROR_CODES.INTERNAL_ERROR,
                 message: 'Internal server error',
               },
               id: null,

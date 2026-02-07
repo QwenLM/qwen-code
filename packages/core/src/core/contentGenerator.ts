@@ -71,7 +71,7 @@ export type ContentGeneratorConfig = {
   openAILoggingDir?: string;
   timeout?: number; // Timeout configuration in milliseconds
   maxRetries?: number; // Maximum retries for failed requests
-  disableCacheControl?: boolean; // Disable cache control for DashScope providers
+  enableCacheControl?: boolean; // Enable cache control for DashScope providers
   samplingParams?: {
     top_p?: number;
     top_k?: number;
@@ -91,6 +91,13 @@ export type ContentGeneratorConfig = {
   userAgent?: string;
   // Schema compliance mode for tool definitions
   schemaCompliance?: 'auto' | 'openapi_30';
+  // Context window size override. If set to a positive number, it will override
+  // the automatic detection. Leave undefined to use automatic detection.
+  contextWindowSize?: number;
+  // Custom HTTP headers to be sent with requests
+  customHeaders?: Record<string, string>;
+  // Extra body parameters to be merged into the request body
+  extra_body?: Record<string, unknown>;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
@@ -268,28 +275,28 @@ export function createContentGeneratorConfig(
 }
 
 export async function createContentGenerator(
-  config: ContentGeneratorConfig,
-  gcConfig: Config,
+  generatorConfig: ContentGeneratorConfig,
+  config: Config,
   isInitialAuth?: boolean,
 ): Promise<ContentGenerator> {
-  const validation = validateModelConfig(config, false);
+  const validation = validateModelConfig(generatorConfig, false);
   if (!validation.valid) {
     throw new Error(validation.errors.map((e) => e.message).join('\n'));
   }
 
-  if (config.authType === AuthType.USE_OPENAI) {
-    // Import OpenAIContentGenerator dynamically to avoid circular dependencies
+  const authType = generatorConfig.authType;
+  if (!authType) {
+    throw new Error('ContentGeneratorConfig must have an authType');
+  }
+
+  let baseGenerator: ContentGenerator;
+
+  if (authType === AuthType.USE_OPENAI) {
     const { createOpenAIContentGenerator } = await import(
       './openaiContentGenerator/index.js'
     );
-
-    // Always use OpenAIContentGenerator, logging is controlled by enableOpenAILogging flag
-    const generator = createOpenAIContentGenerator(config, gcConfig);
-    return new LoggingContentGenerator(generator, gcConfig);
-  }
-
-  if (config.authType === AuthType.QWEN_OAUTH) {
-    // Import required classes dynamically
+    baseGenerator = createOpenAIContentGenerator(generatorConfig, config);
+  } else if (authType === AuthType.QWEN_OAUTH) {
     const { getQwenOAuthClient: getQwenOauthClient } = await import(
       '../qwen/qwenOAuth2.js'
     );
@@ -298,44 +305,38 @@ export async function createContentGenerator(
     );
 
     try {
-      // Get the Qwen OAuth client (now includes integrated token management)
-      // If this is initial auth, require cached credentials to detect missing credentials
       const qwenClient = await getQwenOauthClient(
-        gcConfig,
+        config,
         isInitialAuth ? { requireCachedCredentials: true } : undefined,
       );
-
-      // Create the content generator with dynamic token management
-      const generator = new QwenContentGenerator(qwenClient, config, gcConfig);
-      return new LoggingContentGenerator(generator, gcConfig);
+      baseGenerator = new QwenContentGenerator(
+        qwenClient,
+        generatorConfig,
+        config,
+      );
     } catch (error) {
       throw new Error(
         `${error instanceof Error ? error.message : String(error)}`,
       );
     }
-  }
-
-  if (config.authType === AuthType.USE_ANTHROPIC) {
+  } else if (authType === AuthType.USE_ANTHROPIC) {
     const { createAnthropicContentGenerator } = await import(
       './anthropicContentGenerator/index.js'
     );
-
-    const generator = createAnthropicContentGenerator(config, gcConfig);
-    return new LoggingContentGenerator(generator, gcConfig);
-  }
-
-  if (
-    config.authType === AuthType.USE_GEMINI ||
-    config.authType === AuthType.USE_VERTEX_AI
+    baseGenerator = createAnthropicContentGenerator(generatorConfig, config);
+  } else if (
+    authType === AuthType.USE_GEMINI ||
+    authType === AuthType.USE_VERTEX_AI
   ) {
     const { createGeminiContentGenerator } = await import(
       './geminiContentGenerator/index.js'
     );
-    const generator = createGeminiContentGenerator(config, gcConfig);
-    return new LoggingContentGenerator(generator, gcConfig);
+    baseGenerator = createGeminiContentGenerator(generatorConfig, config);
+  } else {
+    throw new Error(
+      `Error creating contentGenerator: Unsupported authType: ${authType}`,
+    );
   }
 
-  throw new Error(
-    `Error creating contentGenerator: Unsupported authType: ${config.authType}`,
-  );
+  return new LoggingContentGenerator(baseGenerator, config, generatorConfig);
 }

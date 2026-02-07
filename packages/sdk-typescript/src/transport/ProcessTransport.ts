@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, fork, type ChildProcess } from 'node:child_process';
 import * as readline from 'node:readline';
 import type { Writable, Readable } from 'node:stream';
 import type { TransportOptions } from '../types/types.js';
@@ -18,6 +18,7 @@ export class ProcessTransport implements Transport {
   private ready = false;
   private _exitError: Error | null = null;
   private closed = false;
+  private inputClosed = false;
   private abortController: AbortController;
   private processExitHandler: (() => void) | null = null;
   private abortHandler: (() => void) | null = null;
@@ -51,20 +52,103 @@ export class ProcessTransport implements Transport {
       const stderrMode =
         this.options.debug || this.options.stderr ? 'pipe' : 'ignore';
 
-      logger.debug(
-        `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
-      );
+      // Check if we should use fork for Electron integration
+      const useFork = env.FORK_MODE === '1';
 
-      this.childProcess = spawn(
-        spawnInfo.command,
-        [...spawnInfo.args, ...cliArgs],
-        {
-          cwd,
-          env,
-          stdio: ['pipe', 'pipe', stderrMode],
-          signal: this.abortController.signal,
-        },
-      );
+      if (useFork) {
+        // Detect Electron environment
+        const isElectron =
+          typeof process !== 'undefined' &&
+          process.versions &&
+          !!process.versions.electron;
+
+        // In Electron, process.execPath points to Electron, not Node.js
+        // When spawnInfo uses process.execPath to run a JS file, we need to handle it specially
+        const isUsingExecPathForJs =
+          spawnInfo.args.length > 0 &&
+          (spawnInfo.args[0]?.endsWith('.js') ||
+            spawnInfo.args[0]?.endsWith('.mjs') ||
+            spawnInfo.args[0]?.endsWith('.cjs'));
+
+        let forkModulePath: string;
+        let forkArgs: string[];
+        let forkExecPath: string | undefined;
+
+        if (isElectron && isUsingExecPathForJs) {
+          // In Electron with JS file: use the JS file as module path, rest as args
+          forkModulePath = spawnInfo.args[0] ?? '';
+          forkArgs = [...spawnInfo.args.slice(1), ...cliArgs];
+        } else if (
+          (spawnInfo.type === 'node' || spawnInfo.type === 'bun') &&
+          spawnInfo.args.length > 0
+        ) {
+          // For node/bun type: command is the runtime, args[0] is the JS module
+          forkModulePath = spawnInfo.args[0] ?? '';
+          forkArgs = [...spawnInfo.args.slice(1), ...cliArgs];
+          forkExecPath = spawnInfo.command;
+        } else {
+          // Native or other types: cannot use fork, fall back to spawn
+          logger.debug(
+            `FORK_MODE enabled but CLI type '${spawnInfo.type}' does not support fork. Falling back to spawn.`,
+          );
+          forkModulePath = '';
+          forkArgs = [];
+        }
+
+        // Only use fork if we have a valid module path
+        if (forkModulePath) {
+          logger.debug(
+            `Forking CLI (${spawnInfo.type}): ${forkModulePath} ${forkArgs.join(' ')}`,
+          );
+
+          const forkOptions: Parameters<typeof fork>[2] = {
+            cwd,
+            env,
+            stdio:
+              stderrMode === 'pipe'
+                ? ['pipe', 'pipe', 'pipe', 'ipc']
+                : ['pipe', 'pipe', 'ignore', 'ipc'],
+            signal: this.abortController.signal,
+          };
+
+          if (forkExecPath) {
+            forkOptions.execPath = forkExecPath;
+          }
+
+          this.childProcess = fork(forkModulePath, forkArgs, forkOptions);
+        } else {
+          // Fallback to spawn for native/unsupported types
+          logger.debug(
+            `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
+          );
+
+          this.childProcess = spawn(
+            spawnInfo.command,
+            [...spawnInfo.args, ...cliArgs],
+            {
+              cwd,
+              env,
+              stdio: ['pipe', 'pipe', stderrMode],
+              signal: this.abortController.signal,
+            },
+          );
+        }
+      } else {
+        logger.debug(
+          `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
+        );
+
+        this.childProcess = spawn(
+          spawnInfo.command,
+          [...spawnInfo.args, ...cliArgs],
+          {
+            cwd,
+            env,
+            stdio: ['pipe', 'pipe', stderrMode],
+            signal: this.abortController.signal,
+          },
+        );
+      }
 
       this.childStdin = this.childProcess.stdin;
       this.childStdout = this.childProcess.stdout;
@@ -142,7 +226,6 @@ export class ProcessTransport implements Transport {
       '--output-format',
       'stream-json',
       '--channel=SDK',
-      '--experimental-skills',
     ];
 
     if (this.options.model) {
@@ -175,6 +258,12 @@ export class ProcessTransport implements Transport {
 
     if (this.options.includePartialMessages) {
       args.push('--include-partial-messages');
+    }
+
+    if (this.options.resume) {
+      args.push('--resume', this.options.resume);
+    } else if (this.options.continue) {
+      args.push('--continue');
     }
 
     return args;
@@ -210,6 +299,7 @@ export class ProcessTransport implements Transport {
 
     this.ready = false;
     this.closed = true;
+    this.inputClosed = true;
   }
 
   async waitForExit(): Promise<void> {
@@ -273,8 +363,16 @@ export class ProcessTransport implements Transport {
       throw new Error('Cannot write to closed transport');
     }
 
-    if (this.childStdin.writableEnded) {
-      throw new Error('Cannot write to ended stream');
+    if (this.inputClosed) {
+      throw new Error('Input stream closed');
+    }
+
+    if (this.childStdin.writableEnded || this.childStdin.destroyed) {
+      this.inputClosed = true;
+      logger.warn(
+        `Cannot write to ${this.childStdin.writableEnded ? 'ended' : 'destroyed'} stdin stream`,
+      );
+      throw new Error('Input stream closed');
     }
 
     if (this.childProcess?.killed || this.childProcess?.exitCode !== null) {
@@ -301,10 +399,24 @@ export class ProcessTransport implements Transport {
         logger.debug(`Write successful (${message.length} bytes)`);
       }
     } catch (error) {
+      // Check if this is a stream-closed error (EPIPE, ERR_STREAM_WRITE_AFTER_END, etc.)
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const isStreamClosedError =
+        errorMsg.includes('EPIPE') ||
+        errorMsg.includes('ERR_STREAM_WRITE_AFTER_END') ||
+        errorMsg.includes('write after end');
+
+      if (isStreamClosedError) {
+        this.inputClosed = true;
+        logger.warn(`Stream closed, cannot write: ${errorMsg}`);
+        throw new Error('Input stream closed');
+      }
+
+      // For other errors, maintain original behavior
       this.ready = false;
-      const errorMsg = `Failed to write to stdin: ${error instanceof Error ? error.message : String(error)}`;
-      logger.error(errorMsg);
-      throw new Error(errorMsg);
+      const fullErrorMsg = `Failed to write to stdin: ${errorMsg}`;
+      logger.error(fullErrorMsg);
+      throw new Error(fullErrorMsg);
     }
   }
 
@@ -344,6 +456,7 @@ export class ProcessTransport implements Transport {
   endInput(): void {
     if (this.childStdin) {
       this.childStdin.end();
+      this.inputClosed = true;
     }
   }
 

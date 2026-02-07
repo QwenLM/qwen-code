@@ -17,6 +17,8 @@ const draculaColors: ColorsTheme = {
   AccentGreen: '#50fa7b',
   AccentYellow: '#fff783',
   AccentRed: '#ff5555',
+  AccentYellowDim: '#8B7530',
+  AccentRedDim: '#8B3A4A',
   DiffAdded: '#11431d',
   DiffRemoved: '#6e1818',
   Comment: '#6272a4',

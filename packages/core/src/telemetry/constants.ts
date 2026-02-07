@@ -17,6 +17,7 @@ export const EVENT_EXTENSION_DISABLE = 'qwen-code.extension_disable';
 export const EVENT_EXTENSION_ENABLE = 'qwen-code.extension_enable';
 export const EVENT_EXTENSION_INSTALL = 'qwen-code.extension_install';
 export const EVENT_EXTENSION_UNINSTALL = 'qwen-code.extension_uninstall';
+export const EVENT_EXTENSION_UPDATE = 'qwen-code.extension_update';
 export const EVENT_FLASH_FALLBACK = 'qwen-code.flash_fallback';
 export const EVENT_RIPGREP_FALLBACK = 'qwen-code.ripgrep_fallback';
 export const EVENT_NEXT_SPEAKER_CHECK = 'qwen-code.next_speaker_check';
@@ -35,6 +36,7 @@ export const EVENT_MODEL_SLASH_COMMAND = 'qwen-code.slash_command.model';
 export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
 export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
+export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
 
 // Performance Events
 export const EVENT_STARTUP_PERFORMANCE = 'qwen-code.startup.performance';

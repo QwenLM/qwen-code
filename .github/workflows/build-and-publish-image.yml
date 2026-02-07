@@ -6,8 +6,12 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Docker image version/tag (e.g., 0.9.1, 0.9.2-rc.1)'
+        type: 'string'
+        required: false
       publish:
-        description: 'Publish to GHCR (only works on main branch)'
+        description: 'Publish to GHCR'
         type: 'boolean'
         default: false
 
@@ -25,6 +29,42 @@ jobs:
     steps:
       - name: 'Checkout repository'
         uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.ref }}'
+
+      - name: 'Process version'
+        id: 'version'
+        run: |
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+
+          # For tag pushes, extract version from the tag
+          if [[ -z "$INPUT_VERSION" && "${{ github.ref_type }}" == "tag" ]]; then
+            INPUT_VERSION="${{ github.ref_name }}"
+          fi
+
+          # Strip 'v' prefix if present
+          CLEAN_VERSION="${INPUT_VERSION#v}"
+
+          # Extract major.minor for floating tag (e.g., 1.0.0 -> 1.0)
+          MAJOR_MINOR=$(echo "$CLEAN_VERSION" | grep -oE '^[0-9]+\.[0-9]+' || true)
+
+          echo "raw=${INPUT_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "clean=${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=${MAJOR_MINOR}" >> "$GITHUB_OUTPUT"
+          echo "Input version: ${INPUT_VERSION}"
+          echo "Clean version: ${CLEAN_VERSION}"
+          echo "Major.minor: ${MAJOR_MINOR}"
+
+      - name: 'Debug inputs'
+        if: |-
+          ${{ runner.debug == '1' }}
+        run: |
+          echo "Event name: ${{ github.event_name }}"
+          echo "Version input (raw): ${{ steps.version.outputs.raw }}"
+          echo "Version (clean): ${{ steps.version.outputs.clean }}"
+          echo "Major.minor: ${{ steps.version.outputs.major_minor }}"
+          echo "Publish input: ${{ github.event.inputs.publish }}"
+          echo "GitHub ref: ${{ github.ref }}"
 
       - name: 'Set up QEMU'
         uses: 'docker/setup-qemu-action@v3' # ratchet:exclude
@@ -38,15 +78,17 @@ jobs:
         with:
           images: '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}'
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ steps.version.outputs.clean }},enable=${{ steps.version.outputs.clean != '' }}
+            type=raw,value=${{ steps.version.outputs.major_minor }},enable=${{ steps.version.outputs.major_minor != '' }}
+            type=ref,event=branch,enable=${{ steps.version.outputs.clean == '' }}
+            type=ref,event=pr,enable=${{ steps.version.outputs.clean == '' }}
+            type=semver,pattern={{version}},enable=${{ steps.version.outputs.clean == '' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.version.outputs.clean == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ steps.version.outputs.clean == '' }}
 
       - name: 'Log in to the Container registry'
         if: |-
-          ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true') }}
+          ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
         uses: 'docker/login-action@v3' # ratchet:exclude
         with:
           registry: '${{ env.REGISTRY }}'
@@ -60,8 +102,8 @@ jobs:
           context: '.'
           platforms: 'linux/amd64,linux/arm64'
           push: |-
-            ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish == 'true') }}
+            ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
           tags: '${{ steps.meta.outputs.tags }}'
           labels: '${{ steps.meta.outputs.labels }}'
           build-args: |
-            CLI_VERSION_ARG=${{ github.sha }}
+            CLI_VERSION_ARG=${{ steps.version.outputs.clean || github.sha }}

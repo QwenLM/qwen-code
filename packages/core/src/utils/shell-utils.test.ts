@@ -169,6 +169,121 @@ describe('isCommandAllowed', () => {
       const result = isCommandAllowed("echo '$(pwd)'", config);
       expect(result.allowed).toBe(true);
     });
+
+    describe('heredocs', () => {
+      it('should allow substitution-like content in a quoted heredoc delimiter', () => {
+        const cmd = [
+          "cat <<'EOF' > user_session.md",
+          '```',
+          '$(rm -rf /)',
+          '`not executed`',
+          '```',
+          'EOF',
+        ].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(true);
+      });
+
+      it('should block command substitution in an unquoted heredoc body', () => {
+        const cmd = [
+          'cat <<EOF > user_session.md',
+          "'$(rm -rf /)'",
+          'EOF',
+        ].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      });
+
+      it('should block backtick command substitution in an unquoted heredoc body', () => {
+        const cmd = ['cat <<EOF > user_session.md', '`rm -rf /`', 'EOF'].join(
+          '\n',
+        );
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      });
+
+      it('should allow escaped command substitution in an unquoted heredoc body', () => {
+        const cmd = [
+          'cat <<EOF > user_session.md',
+          '\\$(rm -rf /)',
+          'EOF',
+        ].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(true);
+      });
+
+      it('should support tab-stripping heredocs (<<-)', () => {
+        const cmd = [
+          "cat <<-'EOF' > user_session.md",
+          '\t$(rm -rf /)',
+          '\tEOF',
+        ].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(true);
+      });
+
+      it('should block command substitution split by line continuation in an unquoted heredoc body', () => {
+        const cmd = [
+          'cat <<EOF > user_session.md',
+          '$\\',
+          '(rm -rf /)',
+          'EOF',
+        ].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      });
+
+      it('should allow escaped command substitution split by line continuation in an unquoted heredoc body', () => {
+        const cmd = [
+          'cat <<EOF > user_session.md',
+          '\\$\\',
+          '(rm -rf /)',
+          'EOF',
+        ].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(true);
+      });
+    });
+
+    describe('comments', () => {
+      it('should ignore heredoc operators inside comments', () => {
+        const cmd = ["# Fake heredoc <<'EOF'", '$(rm -rf /)', 'EOF'].join('\n');
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      });
+
+      it('should allow command substitution patterns inside full-line comments', () => {
+        const cmd = ['# Note: $(rm -rf /) is dangerous', 'echo hello'].join(
+          '\n',
+        );
+
+        const result = isCommandAllowed(cmd, config);
+        expect(result.allowed).toBe(true);
+      });
+
+      it('should allow command substitution patterns inside inline comments', () => {
+        const result = isCommandAllowed('echo hello # $(rm -rf /)', config);
+        expect(result.allowed).toBe(true);
+      });
+
+      it('should not treat # inside a word as a comment starter', () => {
+        const result = isCommandAllowed('echo foo#$(rm -rf /)', config);
+        expect(result.allowed).toBe(false);
+        expect(result.reason).toContain('Command substitution');
+      });
+    });
   });
 });
 
@@ -293,6 +408,36 @@ describe('getCommandRoots', () => {
   it('should correctly parse a chained command with quotes', () => {
     const result = getCommandRoots('echo "hello" && git commit -m "feat"');
     expect(result).toEqual(['echo', 'git']);
+  });
+
+  it('should split on Unix newlines (\\n)', () => {
+    const result = getCommandRoots('grep pattern file\ncurl evil.com');
+    expect(result).toEqual(['grep', 'curl']);
+  });
+
+  it('should split on Windows newlines (\\r\\n)', () => {
+    const result = getCommandRoots('grep pattern file\r\ncurl evil.com');
+    expect(result).toEqual(['grep', 'curl']);
+  });
+
+  it('should handle mixed newlines and operators', () => {
+    const result = getCommandRoots('ls\necho hello && cat file\r\nrm -rf /');
+    expect(result).toEqual(['ls', 'echo', 'cat', 'rm']);
+  });
+
+  it('should not split on newlines inside quotes', () => {
+    const result = getCommandRoots('echo "line1\nline2"');
+    expect(result).toEqual(['echo']);
+  });
+
+  it('should treat escaped newline as line continuation (not a separator)', () => {
+    const result = getCommandRoots('grep pattern\\\nfile');
+    expect(result).toEqual(['grep']);
+  });
+
+  it('should filter out empty segments from consecutive newlines', () => {
+    const result = getCommandRoots('ls\n\ngrep foo');
+    expect(result).toEqual(['ls', 'grep']);
   });
 });
 

@@ -75,7 +75,9 @@ vi.mock('../tools/tool-registry', () => {
 });
 
 vi.mock('../utils/memoryDiscovery.js', () => ({
-  loadServerHierarchicalMemory: vi.fn(),
+  loadServerHierarchicalMemory: vi
+    .fn()
+    .mockResolvedValue({ memoryContent: '', fileCount: 0 }),
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
@@ -157,6 +159,28 @@ vi.mock('../services/gitService.js', () => {
   return { GitService: GitServiceMock };
 });
 
+vi.mock('../skills/skill-manager.js', () => {
+  const SkillManagerMock = vi.fn();
+  SkillManagerMock.prototype.startWatching = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.stopWatching = vi.fn();
+  SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
+  SkillManagerMock.prototype.addChangeListener = vi.fn();
+  SkillManagerMock.prototype.removeChangeListener = vi.fn();
+  return { SkillManager: SkillManagerMock };
+});
+
+vi.mock('../subagents/subagent-manager.js', () => {
+  const SubagentManagerMock = vi.fn();
+  SubagentManagerMock.prototype.loadSessionSubagents = vi.fn();
+  SubagentManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  return { SubagentManager: SubagentManagerMock };
+});
+
 vi.mock('../ide/ide-client.js', () => ({
   IdeClient: {
     getInstance: vi.fn().mockResolvedValue({
@@ -168,13 +192,8 @@ vi.mock('../ide/ide-client.js', () => ({
 }));
 
 import { BaseLlmClient } from '../core/baseLlmClient.js';
-import { tokenLimit } from '../core/tokenLimits.js';
-import { uiTelemetryService } from '../telemetry/index.js';
 
 vi.mock('../core/baseLlmClient.js');
-vi.mock('../core/tokenLimits.js', () => ({
-  tokenLimit: vi.fn(),
-}));
 
 describe('Server Config (config.ts)', () => {
   const MODEL = 'qwen3-coder-plus';
@@ -190,7 +209,6 @@ describe('Server Config (config.ts)', () => {
   const TARGET_DIR = '/path/to/target';
   const DEBUG_MODE = false;
   const QUESTION = 'test question';
-  const FULL_CONTEXT = false;
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
@@ -201,11 +219,11 @@ describe('Server Config (config.ts)', () => {
     targetDir: TARGET_DIR,
     debugMode: DEBUG_MODE,
     question: QUESTION,
-    fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
     usageStatisticsEnabled: false,
+    overrideExtensions: [],
   };
 
   beforeEach(() => {
@@ -1014,29 +1032,8 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('getTruncateToolOutputThreshold', () => {
-    beforeEach(() => {
-      vi.clearAllMocks();
-    });
-
-    it('should return the calculated threshold when it is smaller than the default', () => {
+    it('should return the default threshold', () => {
       const config = new Config(baseParams);
-      vi.mocked(tokenLimit).mockReturnValue(8000);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        2000,
-      );
-      // 4 * (8000 - 2000) = 4 * 6000 = 24000
-      // default is 25_000
-      expect(config.getTruncateToolOutputThreshold()).toBe(24000);
-    });
-
-    it('should return the default threshold when the calculated value is larger', () => {
-      const config = new Config(baseParams);
-      vi.mocked(tokenLimit).mockReturnValue(2_000_000);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        500_000,
-      );
-      // 4 * (2_000_000 - 500_000) = 4 * 1_500_000 = 6_000_000
-      // default is 25_000
       expect(config.getTruncateToolOutputThreshold()).toBe(25_000);
     });
 
@@ -1046,21 +1043,18 @@ describe('Server Config (config.ts)', () => {
         truncateToolOutputThreshold: 50000,
       };
       const config = new Config(customParams);
-      vi.mocked(tokenLimit).mockReturnValue(8000);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        2000,
-      );
-      // 4 * (8000 - 2000) = 4 * 6000 = 24000
-      // custom threshold is 50000
-      expect(config.getTruncateToolOutputThreshold()).toBe(24000);
-
-      vi.mocked(tokenLimit).mockReturnValue(32000);
-      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        1000,
-      );
-      // 4 * (32000 - 1000) = 124000
-      // custom threshold is 50000
       expect(config.getTruncateToolOutputThreshold()).toBe(50000);
+    });
+
+    it('should return infinity when truncation is disabled', () => {
+      const customParams = {
+        ...baseParams,
+        enableToolOutputTruncation: false,
+      };
+      const config = new Config(customParams);
+      expect(config.getTruncateToolOutputThreshold()).toBe(
+        Number.POSITIVE_INFINITY,
+      );
     });
   });
 });
@@ -1273,7 +1267,6 @@ describe('BaseLlmClient Lifecycle', () => {
   const TARGET_DIR = '/path/to/target';
   const DEBUG_MODE = false;
   const QUESTION = 'test question';
-  const FULL_CONTEXT = false;
   const USER_MEMORY = 'Test User Memory';
   const TELEMETRY_SETTINGS = { enabled: false };
   const EMBEDDING_MODEL = 'gemini-embedding';
@@ -1284,7 +1277,6 @@ describe('BaseLlmClient Lifecycle', () => {
     targetDir: TARGET_DIR,
     debugMode: DEBUG_MODE,
     question: QUESTION,
-    fullContext: FULL_CONTEXT,
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
@@ -1303,7 +1295,10 @@ describe('BaseLlmClient Lifecycle', () => {
     const authType = AuthType.USE_GEMINI;
     const mockContentConfig = { model: 'gemini-flash', apiKey: 'test-key' };
 
-    vi.mocked(createContentGeneratorConfig).mockReturnValue(mockContentConfig);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: mockContentConfig,
+      sources: {},
+    });
 
     await config.refreshAuth(authType);
 
@@ -1314,5 +1309,192 @@ describe('BaseLlmClient Lifecycle', () => {
       config.getContentGenerator(),
       config,
     );
+  });
+});
+
+describe('Model Switching and Config Updates', () => {
+  const baseParams: ConfigParameters = {
+    cwd: '/tmp',
+    targetDir: '/path/to/target',
+    debugMode: false,
+    model: 'qwen3-coder-plus',
+    usageStatisticsEnabled: false,
+    telemetry: { enabled: false },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should update contextWindowSize when switching models with hot-update', async () => {
+    const config = new Config(baseParams);
+
+    // Initialize with first model
+    const initialConfig: ContentGeneratorConfig = {
+      ['model']: 'qwen3-coder-plus',
+      ['authType']: AuthType.QWEN_OAUTH,
+      ['apiKey']: 'test-key',
+      ['contextWindowSize']: 1_000_000,
+      ['samplingParams']: { temperature: 0.7 },
+      ['enableCacheControl']: true,
+    };
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: initialConfig,
+      sources: {
+        model: { kind: 'settings' },
+        contextWindowSize: { kind: 'computed', detail: 'auto' },
+      },
+    });
+
+    await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+    // Verify initial config
+    const contentGenConfig = config.getContentGeneratorConfig();
+    expect(contentGenConfig['model']).toBe('qwen3-coder-plus');
+    expect(contentGenConfig['contextWindowSize']).toBe(1_000_000);
+
+    // Switch to a different model with different token limits
+    const newConfig: ContentGeneratorConfig = {
+      ['model']: 'qwen-max',
+      ['authType']: AuthType.QWEN_OAUTH,
+      ['apiKey']: 'test-key',
+      ['contextWindowSize']: 128_000,
+      ['samplingParams']: { temperature: 0.8 },
+      ['enableCacheControl']: false,
+    };
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: newConfig,
+      sources: {
+        model: { kind: 'programmatic', detail: 'user' },
+        contextWindowSize: { kind: 'computed', detail: 'auto' },
+        samplingParams: { kind: 'settings' },
+        enableCacheControl: { kind: 'settings' },
+      },
+    });
+
+    // Simulate model switch (this would be called by ModelsConfig.switchModel)
+    await (
+      config as unknown as {
+        handleModelChange: (
+          authType: AuthType,
+          requiresRefresh: boolean,
+        ) => Promise<void>;
+      }
+    ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+    // Verify all fields are updated
+    const updatedConfig = config.getContentGeneratorConfig();
+    expect(updatedConfig['model']).toBe('qwen-max');
+    expect(updatedConfig['contextWindowSize']).toBe(128_000);
+    expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
+    expect(updatedConfig['enableCacheControl']).toBe(false);
+
+    // Verify sources are also updated
+    const sources = config.getContentGeneratorConfigSources();
+    expect(sources['model']?.kind).toBe('programmatic');
+    expect(sources['model']?.detail).toBe('user');
+    expect(sources['contextWindowSize']?.kind).toBe('computed');
+    expect(sources['contextWindowSize']?.detail).toBe('auto');
+    expect(sources['samplingParams']?.kind).toBe('settings');
+    expect(sources['enableCacheControl']?.kind).toBe('settings');
+  });
+
+  it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
+    const config = new Config(baseParams);
+
+    // Initialize with qwen-oauth
+    const initialConfig: ContentGeneratorConfig = {
+      ['model']: 'qwen3-coder-plus',
+      ['authType']: AuthType.QWEN_OAUTH,
+      ['apiKey']: 'test-key',
+      ['contextWindowSize']: 1_000_000,
+    };
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: initialConfig,
+      sources: {},
+    });
+
+    await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+    // Switch to different auth type (should trigger full refresh)
+    const newConfig: ContentGeneratorConfig = {
+      ['model']: 'gemini-flash',
+      ['authType']: AuthType.USE_GEMINI,
+      ['apiKey']: 'gemini-key',
+      ['contextWindowSize']: 32_000,
+    };
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: newConfig,
+      sources: {},
+    });
+
+    const refreshAuthSpy = vi.spyOn(
+      config as unknown as {
+        refreshAuth: (authType: AuthType) => Promise<void>;
+      },
+      'refreshAuth',
+    );
+
+    // Simulate model switch with different auth type
+    await (
+      config as unknown as {
+        handleModelChange: (
+          authType: AuthType,
+          requiresRefresh: boolean,
+        ) => Promise<void>;
+      }
+    ).handleModelChange(AuthType.USE_GEMINI, true);
+
+    // Verify refreshAuth was called (full refresh path)
+    expect(refreshAuthSpy).toHaveBeenCalledWith(AuthType.USE_GEMINI);
+  });
+
+  it('should handle model switch when contextWindowSize is undefined', async () => {
+    const config = new Config(baseParams);
+
+    // Initialize with config that has undefined token limits
+    const initialConfig: ContentGeneratorConfig = {
+      ['model']: 'qwen3-coder-plus',
+      ['authType']: AuthType.QWEN_OAUTH,
+      ['apiKey']: 'test-key',
+      ['contextWindowSize']: undefined,
+    };
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: initialConfig,
+      sources: {},
+    });
+
+    await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+    // Switch to model with defined limits
+    const newConfig: ContentGeneratorConfig = {
+      ['model']: 'qwen-max',
+      ['authType']: AuthType.QWEN_OAUTH,
+      ['apiKey']: 'test-key',
+      ['contextWindowSize']: 128_000,
+    };
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: newConfig,
+      sources: {},
+    });
+
+    await (
+      config as unknown as {
+        handleModelChange: (
+          authType: AuthType,
+          requiresRefresh: boolean,
+        ) => Promise<void>;
+      }
+    ).handleModelChange(AuthType.QWEN_OAUTH, false);
+
+    // Verify limits are now defined
+    const updatedConfig = config.getContentGeneratorConfig();
+    expect(updatedConfig['contextWindowSize']).toBe(128_000);
   });
 });

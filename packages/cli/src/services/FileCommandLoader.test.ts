@@ -662,8 +662,8 @@ describe('FileCommandLoader', () => {
       const result2 = await commands[2].action?.(
         createMockCommandContext({
           invocation: {
-            raw: '/deploy',
-            name: 'deploy',
+            raw: '/test-ext.deploy',
+            name: 'test-ext.deploy',
             args: '',
           },
         }),
@@ -812,8 +812,8 @@ describe('FileCommandLoader', () => {
       const result = await nestedCmd!.action?.(
         createMockCommandContext({
           invocation: {
-            raw: '/b:c',
-            name: 'b:c',
+            raw: '/a.b:c',
+            name: 'a.b:c',
             args: '',
           },
         }),

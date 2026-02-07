@@ -156,16 +156,12 @@ describe('SkillTool', () => {
         new Error('Loading failed'),
       );
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-      new SkillTool(config);
+      const failedSkillTool = new SkillTool(config);
       await vi.runAllTimersAsync();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to load skills for Skills tool:',
-        expect.any(Error),
+      expect(failedSkillTool.description).toContain(
+        'No skills are currently configured',
       );
-      consoleSpy.mockRestore();
     });
   });
 
@@ -324,7 +320,9 @@ describe('SkillTool', () => {
         'Review code for quality and best practices.',
       );
 
-      expect(result.returnDisplay).toBe('Launching skill: code-review');
+      expect(result.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
     });
 
     it('should include allowedTools in result when present', async () => {
@@ -349,7 +347,7 @@ describe('SkillTool', () => {
       // Base description is omitted from llmContent; ensure body is present.
       expect(llmText).toContain('Help write comprehensive tests.');
 
-      expect(result.returnDisplay).toBe('Launching skill: testing');
+      expect(result.returnDisplay).toBe('Skill for writing and running tests');
     });
 
     it('should handle skill not found error', async () => {
@@ -373,10 +371,6 @@ describe('SkillTool', () => {
         new Error('Loading failed'),
       );
 
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-
       const params: SkillParams = {
         skill: 'code-review',
       };
@@ -389,8 +383,6 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Failed to load skill');
       expect(llmText).toContain('Loading failed');
-
-      consoleSpy.mockRestore();
     });
 
     it('should not require confirmation', async () => {
@@ -416,7 +408,7 @@ describe('SkillTool', () => {
       ).createInvocation(params);
       const description = invocation.getDescription();
 
-      expect(description).toBe('Launching skill: "code-review"');
+      expect(description).toBe('Use skill: "code-review"');
     });
 
     it('should handle skill without additional files', async () => {
@@ -436,7 +428,9 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).not.toContain('## Additional Files');
 
-      expect(result.returnDisplay).toBe('Launching skill: code-review');
+      expect(result.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
     });
   });
 });

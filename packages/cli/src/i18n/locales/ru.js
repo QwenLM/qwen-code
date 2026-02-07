@@ -23,6 +23,7 @@ export default {
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
   '(shift + tab to cycle)': '(shift + tab для переключения)',
+  '(tab to cycle)': '(Tab для переключения)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Выполняйте команды терминала через {{symbol}} (например, {{example1}}) или используйте естественный язык (например, {{example2}}).',
   '!': '!',
@@ -33,6 +34,13 @@ export default {
   'Model Context Protocol command (from external servers)':
     'Команда Model Context Protocol (из внешних серверов)',
   'Keyboard Shortcuts:': 'Горячие клавиши:',
+  'Toggle this help display': 'Показать/скрыть эту справку',
+  'Toggle shell mode': 'Переключить режим оболочки',
+  'Open command menu': 'Открыть меню команд',
+  'Add file context': 'Добавить файл в контекст',
+  'Accept suggestion / Autocomplete': 'Принять подсказку / Автодополнение',
+  'Reverse search history': 'Обратный поиск по истории',
+  'Press ? again to close': 'Нажмите ? ещё раз, чтобы закрыть',
   'Jump through words in the input': 'Переход по словам во вводе',
   'Close dialogs, cancel requests, or quit application':
     'Закрыть диалоги, отменить запросы или выйти из приложения',
@@ -46,6 +54,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     'Подключение к MCP-серверам... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
+  '? for shortcuts': '? — горячие клавиши',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -59,10 +68,28 @@ export default {
   'show version info': 'Просмотр информации о версии',
   'submit a bug report': 'Отправка отчёта об ошибке',
   'About Qwen Code': 'Об Qwen Code',
+  Status: 'Статус',
+
+  // Keyboard shortcuts panel descriptions
+  'for shell mode': 'режим оболочки',
+  'for commands': 'меню команд',
+  'for file paths': 'пути к файлам',
+  'to clear input': 'очистить ввод',
+  'to cycle approvals': 'переключить режим',
+  'to quit': 'выход',
+  'for newline': 'новая строка',
+  'to clear screen': 'очистить экран',
+  'to search history': 'поиск в истории',
+  'to paste images': 'вставить изображения',
+  'for external editor': 'внешний редактор',
 
   // ============================================================================
   // Поля системной информации
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: 'Среда выполнения',
+  OS: 'ОС',
+  Auth: 'Аутентификация',
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
@@ -75,6 +102,7 @@ export default {
   'Session ID': 'ID сессии',
   'Auth Method': 'Метод авторизации',
   'Base URL': 'Базовый URL',
+  Proxy: 'Прокси',
   'Memory Usage': 'Использование памяти',
   'IDE Client': 'Клиент IDE',
 
@@ -100,8 +128,8 @@ export default {
   Preview: 'Предпросмотр',
   '(Use Enter to select, Tab to configure scope)':
     '(Enter для выбора, Tab для настройки области)',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '(Enter для применения области, Tab для выбора темы)',
+  '(Use Enter to apply scope, Tab to go back)':
+    '(Enter для применения области, Tab для возврата)',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     'Настройка темы недоступна из-за переменной окружения NO_COLOR.',
   'Theme "{{themeName}}" not found.': 'Тема "{{themeName}}" не найдена.',
@@ -155,6 +183,7 @@ export default {
   'Project Level ({{path}})': 'Уровень проекта ({{path}})',
   'User Level ({{path}})': 'Уровень пользователя ({{path}})',
   'Built-in Agents': 'Встроенные агенты',
+  'Extension Agents': 'Агенты расширений',
   'Using: {{count}} agents': 'Используется: {{count}} агент(ов)',
   'View Agent': 'Просмотреть агента',
   'Edit Agent': 'Редактировать агента',
@@ -260,8 +289,6 @@ export default {
   // ============================================================================
   'View and edit Qwen Code settings': 'Просмотр и изменение настроек Qwen Code',
   Settings: 'Настройки',
-  '(Use Enter to select{{tabText}})': '(Enter для выбора{{tabText}})',
-  ', Tab to change focus': ', Tab для смены фокуса',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     'Для применения изменений необходимо перезапустить Qwen Code. Нажмите r для выхода и применения изменений.',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -271,24 +298,33 @@ export default {
   // ============================================================================
   'Vim Mode': 'Режим Vim',
   'Disable Auto Update': 'Отключить автообновление',
+  'Attribution: commit': 'Атрибуция: коммит',
+  'Terminal Bell Notification': 'Звуковое уведомление терминала',
+  'Enable Usage Statistics': 'Включить сбор статистики использования',
+  Theme: 'Тема',
+  'Preferred Editor': 'Предпочтительный редактор',
+  'Auto-connect to IDE': 'Автоподключение к IDE',
   'Enable Prompt Completion': 'Включить автодополнение промптов',
   'Debug Keystroke Logging': 'Логирование нажатий клавиш для отладки',
-  Language: 'Язык',
+  'Language: UI': 'Язык: интерфейс',
+  'Language: Model': 'Язык: модель',
   'Output Format': 'Формат вывода',
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
-  'Hide Banner': 'Скрыть баннер',
-  'Hide Context Summary': 'Скрыть сводку контекста',
-  'Hide CWD': 'Скрыть текущую директорию',
-  'Hide Sandbox Status': 'Скрыть статус песочницы',
-  'Hide Model Info': 'Скрыть информацию о модели',
-  'Hide Footer': 'Скрыть нижний колонтитул',
-  'Show Memory Usage': 'Показывать использование памяти',
-  'Show Line Numbers': 'Показывать номера строк',
+  'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
-  'Enable Welcome Back': 'Включить приветствие при возврате',
+  'Show Welcome Back Dialog': 'Показывать диалог приветствия',
+  'Enable User Feedback': 'Включить отзывы пользователей',
+  'How is Qwen doing this session? (optional)':
+    'Как дела у Qwen в этой сессии? (необязательно)',
+  Bad: 'Плохо',
+  Fine: 'Нормально',
+  Good: 'Хорошо',
+  Dismiss: 'Отклонить',
+  'Not Sure Yet': 'Пока не уверен',
+  'Any other key': 'Любая другая клавиша',
   'Disable Loading Phrases': 'Отключить фразы при загрузке',
   'Screen Reader Mode': 'Режим программы чтения с экрана',
   'IDE Mode': 'Режим IDE',
@@ -308,7 +344,7 @@ export default {
   'Respect .qwenignore': 'Учитывать .qwenignore',
   'Enable Recursive File Search': 'Включить рекурсивный поиск файлов',
   'Disable Fuzzy Search': 'Отключить нечеткий поиск',
-  'Enable Interactive Shell': 'Включить интерактивный терминал',
+  'Interactive Shell (PTY)': 'Интерактивный терминал (PTY)',
   'Show Color': 'Показывать цвета',
   'Auto Accept': 'Автоподтверждение',
   'Use Ripgrep': 'Использовать Ripgrep',
@@ -345,10 +381,172 @@ export default {
     'Показать все директории в рабочем пространстве',
   'set external editor preference':
     'Установка предпочитаемого внешнего редактора',
+  'Select Editor': 'Выбрать редактор',
+  'Editor Preference': 'Настройка редактора',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    'В настоящее время поддерживаются следующие редакторы. Обратите внимание, что некоторые редакторы нельзя использовать в режиме песочницы.',
+  'Your preferred editor is:': 'Ваш предпочитаемый редактор:',
   'Manage extensions': 'Управление расширениями',
   'List active extensions': 'Показать активные расширения',
   'Update extensions. Usage: update <extension-names>|--all':
     'Обновить расширения. Использование: update <extension-names>|--all',
+  'Disable an extension': 'Отключить расширение',
+  'Enable an extension': 'Включить расширение',
+  'Install an extension from a git repo or local path':
+    'Установить расширение из Git-репозитория или локального пути',
+  'Uninstall an extension': 'Удалить расширение',
+  'No extensions installed.': 'Расширения не установлены.',
+  'Usage: /extensions update <extension-names>|--all':
+    'Использование: /extensions update <имена-расширений>|--all',
+  'Extension "{{name}}" not found.': 'Расширение "{{name}}" не найдено.',
+  'No extensions to update.': 'Нет расширений для обновления.',
+  'Usage: /extensions install <source>':
+    'Использование: /extensions install <источник>',
+  'Installing extension from "{{source}}"...':
+    'Установка расширения из "{{source}}"...',
+  'Extension "{{name}}" installed successfully.':
+    'Расширение "{{name}}" успешно установлено.',
+  'Failed to install extension from "{{source}}": {{error}}':
+    'Не удалось установить расширение из "{{source}}": {{error}}',
+  'Usage: /extensions uninstall <extension-name>':
+    'Использование: /extensions uninstall <имя-расширения>',
+  'Uninstalling extension "{{name}}"...': 'Удаление расширения "{{name}}"...',
+  'Extension "{{name}}" uninstalled successfully.':
+    'Расширение "{{name}}" успешно удалено.',
+  'Failed to uninstall extension "{{name}}": {{error}}':
+    'Не удалось удалить расширение "{{name}}": {{error}}',
+  'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]':
+    'Использование: /extensions {{command}} <расширение> [--scope=<user|workspace>]',
+  'Unsupported scope "{{scope}}", should be one of "user" or "workspace"':
+    'Неподдерживаемая область "{{scope}}", должна быть "user" или "workspace"',
+  'Extension "{{name}}" disabled for scope "{{scope}}"':
+    'Расширение "{{name}}" отключено для области "{{scope}}"',
+  'Extension "{{name}}" enabled for scope "{{scope}}"':
+    'Расширение "{{name}}" включено для области "{{scope}}"',
+  'Do you want to continue? [Y/n]: ': 'Хотите продолжить? [Y/n]: ',
+  'Do you want to continue?': 'Хотите продолжить?',
+  'Installing extension "{{name}}".': 'Установка расширения "{{name}}".',
+  '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
+    '**Расширения могут вызывать неожиданное поведение. Убедитесь, что вы изучили источник расширения и доверяете автору.**',
+  'This extension will run the following MCP servers:':
+    'Это расширение запустит следующие MCP-серверы:',
+  local: 'локальный',
+  remote: 'удалённый',
+  'This extension will add the following commands: {{commands}}.':
+    'Это расширение добавит следующие команды: {{commands}}.',
+  'This extension will append info to your QWEN.md context using {{fileName}}':
+    'Это расширение добавит информацию в ваш контекст QWEN.md с помощью {{fileName}}',
+  'This extension will exclude the following core tools: {{tools}}':
+    'Это расширение исключит следующие основные инструменты: {{tools}}',
+  'This extension will install the following skills:':
+    'Это расширение установит следующие навыки:',
+  'This extension will install the following subagents:':
+    'Это расширение установит следующие подагенты:',
+  'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
+  '--ref and --auto-update are not applicable for marketplace extensions.':
+    '--ref и --auto-update неприменимы для расширений из маркетплейса.',
+  'Extension "{{name}}" installed successfully and enabled.':
+    'Расширение "{{name}}" успешно установлено и включено.',
+  'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
+    'Устанавливает расширение из URL Git-репозитория, локального пути или маркетплейса Claude (marketplace-url:plugin-name).',
+  'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
+    'URL GitHub, локальный путь или источник в маркетплейсе (marketplace-url:plugin-name) устанавливаемого расширения.',
+  'The git ref to install from.': 'Git-ссылка для установки.',
+  'Enable auto-update for this extension.':
+    'Включить автообновление для этого расширения.',
+  'Enable pre-release versions for this extension.':
+    'Включить пре-релизные версии для этого расширения.',
+  'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
+    'Подтвердить риски безопасности установки расширения и пропустить запрос подтверждения.',
+  'The source argument must be provided.':
+    'Необходимо указать аргумент источника.',
+  'Extension "{{name}}" successfully uninstalled.':
+    'Расширение "{{name}}" успешно удалено.',
+  'Uninstalls an extension.': 'Удаляет расширение.',
+  'The name or source path of the extension to uninstall.':
+    'Имя или путь к источнику удаляемого расширения.',
+  'Please include the name of the extension to uninstall as a positional argument.':
+    'Пожалуйста, укажите имя удаляемого расширения как позиционный аргумент.',
+  'Enables an extension.': 'Включает расширение.',
+  'The name of the extension to enable.': 'Имя включаемого расширения.',
+  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+    'Область для включения расширения. Если не задана, будет включено во всех областях.',
+  'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
+    'Расширение "{{name}}" успешно включено для области "{{scope}}".',
+  'Extension "{{name}}" successfully enabled in all scopes.':
+    'Расширение "{{name}}" успешно включено во всех областях.',
+  'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
+    'Недопустимая область: {{scope}}. Пожалуйста, используйте одну из {{scopes}}.',
+  'Disables an extension.': 'Отключает расширение.',
+  'The name of the extension to disable.': 'Имя отключаемого расширения.',
+  'The scope to disable the extenison in.':
+    'Область для отключения расширения.',
+  'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
+    'Расширение "{{name}}" успешно отключено для области "{{scope}}".',
+  'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
+    'Расширение "{{name}}" успешно обновлено: {{oldVersion}} → {{newVersion}}.',
+  'Unable to install extension "{{name}}" due to missing install metadata':
+    'Невозможно установить расширение "{{name}}" из-за отсутствия метаданных установки',
+  'Extension "{{name}}" is already up to date.':
+    'Расширение "{{name}}" уже актуально.',
+  'Updates all extensions or a named extension to the latest version.':
+    'Обновляет все расширения или указанное расширение до последней версии.',
+  'The name of the extension to update.': 'Имя обновляемого расширения.',
+  'Update all extensions.': 'Обновить все расширения.',
+  'Either an extension name or --all must be provided':
+    'Необходимо указать имя расширения или --all',
+  'Lists installed extensions.': 'Показывает установленные расширения.',
+  'Path:': 'Путь:',
+  'Source:': 'Источник:',
+  'Type:': 'Тип:',
+  'Ref:': 'Ссылка:',
+  'Release tag:': 'Тег релиза:',
+  'Enabled (User):': 'Включено (Пользователь):',
+  'Enabled (Workspace):': 'Включено (Рабочее пространство):',
+  'Context files:': 'Контекстные файлы:',
+  'Skills:': 'Навыки:',
+  'Agents:': 'Агенты:',
+  'MCP servers:': 'MCP-серверы:',
+  'Link extension failed to install.':
+    'Не удалось установить связанное расширение.',
+  'Extension "{{name}}" linked successfully and enabled.':
+    'Расширение "{{name}}" успешно связано и включено.',
+  'Links an extension from a local path. Updates made to the local path will always be reflected.':
+    'Связывает расширение из локального пути. Изменения в локальном пути будут всегда отражаться.',
+  'The name of the extension to link.': 'Имя связываемого расширения.',
+  'Set a specific setting for an extension.':
+    'Установить конкретную настройку для расширения.',
+  'Name of the extension to configure.': 'Имя настраиваемого расширения.',
+  'The setting to configure (name or env var).':
+    'Настройка для конфигурирования (имя или переменная окружения).',
+  'The scope to set the setting in.': 'Область для установки настройки.',
+  'List all settings for an extension.': 'Показать все настройки расширения.',
+  'Name of the extension.': 'Имя расширения.',
+  'Extension "{{name}}" has no settings to configure.':
+    'Расширение "{{name}}" не имеет настроек для конфигурирования.',
+  'Settings for "{{name}}":': 'Настройки для "{{name}}":',
+  '(workspace)': '(рабочее пространство)',
+  '(user)': '(пользователь)',
+  '[not set]': '[не задано]',
+  '[value stored in keychain]': '[значение хранится в связке ключей]',
+  'Manage extension settings.': 'Управление настройками расширений.',
+  'You need to specify a command (set or list).':
+    'Необходимо указать команду (set или list).',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.':
+    'В этом маркетплейсе нет доступных плагинов.',
+  'Select a plugin to install from marketplace "{{name}}":':
+    'Выберите плагин для установки из маркетплейса "{{name}}":',
+  'Plugin selection cancelled.': 'Выбор плагина отменён.',
+  'Select a plugin from "{{name}}"': 'Выберите плагин из "{{name}}"',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    'Используйте ↑↓ или j/k для навигации, Enter для выбора, Escape для отмены',
+  '{{count}} more above': 'ещё {{count}} выше',
+  '{{count}} more below': 'ещё {{count}} ниже',
   'manage IDE integration': 'Управление интеграцией с IDE',
   'check status of IDE integration': 'Проверить статус интеграции с IDE',
   'install required IDE companion for {{ideName}}':
@@ -395,8 +593,8 @@ export default {
   // ============================================================================
   // Команды - Язык
   // ============================================================================
-  'Invalid language. Available: en-US, zh-CN':
-    'Неверный язык. Доступны: en-US, zh-CN, ru-RU',
+  'Invalid language. Available: {{options}}':
+    'Недопустимый язык. Доступны: {{options}}',
   'Language subcommands do not accept additional arguments.':
     'Подкоманды языка не принимают дополнительных аргументов.',
   'Current UI language: {{lang}}': 'Текущий язык интерфейса: {{lang}}',
@@ -404,14 +602,17 @@ export default {
   'LLM output language not set': 'Язык вывода LLM не установлен',
   'Set UI language': 'Установка языка интерфейса',
   'Set LLM output language': 'Установка языка вывода LLM',
-  'Usage: /language ui [zh-CN|en-US]':
-    'Использование: /language ui [zh-CN|en-US|ru-RU]',
+  'Usage: /language ui [{{options}}]':
+    'Использование: /language ui [{{options}}]',
   'Usage: /language output <language>':
     'Использование: /language output <language>',
   'Example: /language output 中文': 'Пример: /language output 中文',
   'Example: /language output English': 'Пример: /language output English',
   'Example: /language output 日本語': 'Пример: /language output 日本語',
+  'Example: /language output Português': 'Пример: /language output Português',
   'UI language changed to {{lang}}': 'Язык интерфейса изменен на {{lang}}',
+  'LLM output language set to {{lang}}':
+    'Язык вывода LLM установлен на {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'Файл правил языка вывода LLM создан в {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -424,17 +625,12 @@ export default {
   'To request additional UI language packs, please open an issue on GitHub.':
     'Для запроса дополнительных языковых пакетов интерфейса, пожалуйста, создайте обращение на GitHub.',
   'Available options:': 'Доступные варианты:',
-  '  - zh-CN: Simplified Chinese': ' - zh-CN: Упрощенный китайский',
-  '  - en-US: English': ' - en-US: Английский',
-  'Set UI language to Simplified Chinese (zh-CN)':
-    'Установить язык интерфейса на упрощенный китайский (zh-CN)',
-  'Set UI language to English (en-US)':
-    'Установить язык интерфейса на английский (en-US)',
+  'Set UI language to {{name}}': 'Установить язык интерфейса на {{name}}',
 
   // ============================================================================
   // Команды - Режим подтверждения
   // ============================================================================
-  'Approval Mode': 'Режим подтверждения',
+  'Tool Approval Mode': 'Режим подтверждения инструментов',
   'Current approval mode: {{mode}}': 'Текущий режим подтверждения: {{mode}}',
   'Available approval modes:': 'Доступные режимы подтверждения:',
   'Approval mode changed to: {{mode}}':
@@ -476,8 +672,6 @@ export default {
     'Автоматически подтверждать все инструменты',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Режим подтверждения рабочего пространства существует и имеет приоритет. Изменение на уровне пользователя не будет иметь эффекта.',
-  '(Use Enter to select, Tab to change focus)':
-    '(Enter для выбора, Tab для смены фокуса)',
   'Apply To': 'Применить к',
   'User Settings': 'Настройки пользователя',
   'Workspace Settings': 'Настройки рабочего пространства',
@@ -976,6 +1170,19 @@ export default {
     'Время начала сессии недоступно, невозможно рассчитать статистику.',
 
   // ============================================================================
+  // Command Format Migration
+  // ============================================================================
+  'Command Format Migration': 'Миграция формата команд',
+  'Found {{count}} TOML command file:': 'Найден {{count}} файл команд TOML:',
+  'Found {{count}} TOML command files:':
+    'Найдено {{count}} файлов команд TOML:',
+  '... and {{count}} more': '... и ещё {{count}}',
+  'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
+    'Формат TOML устарел. Хотите перенести их в формат Markdown?',
+  '(Backups will be created and original files will be preserved)':
+    '(Будут созданы резервные копии, исходные файлы будут сохранены)',
+
+  // ============================================================================
   // Loading Phrases
   // ============================================================================
   'Waiting for user confirmation...':
@@ -1116,4 +1323,59 @@ export default {
     'Пробовали выключить и включить снова? (Экран загрузки, не меня!)',
     'Нужно построить больше пилонов...',
   ],
+
+  // ============================================================================
+  // Extension Settings Input
+  // ============================================================================
+  'Enter value...': 'Введите значение...',
+  'Enter sensitive value...': 'Введите секретное значение...',
+  'Press Enter to submit, Escape to cancel':
+    'Нажмите Enter для отправки, Escape для отмены',
+
+  // ============================================================================
+  // Command Migration Tool
+  // ============================================================================
+  'Markdown file already exists: {{filename}}':
+    'Markdown-файл уже существует: {{filename}}',
+  'TOML Command Format Deprecation Notice':
+    'Уведомление об устаревании формата TOML',
+  'Found {{count}} command file(s) in TOML format:':
+    'Найдено {{count}} файл(ов) команд в формате TOML:',
+  'The TOML format for commands is being deprecated in favor of Markdown format.':
+    'Формат TOML для команд устаревает в пользу формата Markdown.',
+  'Markdown format is more readable and easier to edit.':
+    'Формат Markdown более читаемый и простой для редактирования.',
+  'You can migrate these files automatically using:':
+    'Вы можете автоматически мигрировать эти файлы с помощью:',
+  'Or manually convert each file:': 'Или вручную конвертировать каждый файл:',
+  'TOML: prompt = "..." / description = "..."':
+    'TOML: prompt = "..." / description = "..."',
+  'Markdown: YAML frontmatter + content':
+    'Markdown: YAML frontmatter + содержимое',
+  'The migration tool will:': 'Инструмент миграции:',
+  'Convert TOML files to Markdown': 'Конвертирует TOML-файлы в Markdown',
+  'Create backups of original files': 'Создаёт резервные копии исходных файлов',
+  'Preserve all command functionality': 'Сохраняет всю функциональность команд',
+  'TOML format will continue to work for now, but migration is recommended.':
+    'Формат TOML пока продолжит работать, но миграция рекомендуется.',
+
+  // ============================================================================
+  // Extensions - Explore Command
+  // ============================================================================
+  'Open extensions page in your browser':
+    'Открыть страницу расширений в браузере',
+  'Unknown extensions source: {{source}}.':
+    'Неизвестный источник расширений: {{source}}.',
+  'Would open extensions page in your browser: {{url}} (skipped in test environment)':
+    'Страница расширений была бы открыта в браузере: {{url}} (пропущено в тестовой среде)',
+  'View available extensions at {{url}}':
+    'Посмотреть доступные расширения на {{url}}',
+  'Opening extensions page in your browser: {{url}}':
+    'Открываем страницу расширений в браузере: {{url}}',
+  'Failed to open browser. Check out the extensions gallery at {{url}}':
+    'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
 };

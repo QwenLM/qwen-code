@@ -7,17 +7,14 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useVSCode } from './useVSCode.js';
 import type { Conversation } from '../../services/conversationStore.js';
-import type {
-  PermissionOption,
-  ToolCall as PermissionToolCall,
-} from '../components/PermissionDrawer/PermissionRequest.js';
+import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type {
   ToolCallUpdate,
   UsageStatsPayload,
 } from '../../types/chatTypes.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
-import type { ModelInfo } from '../../types/acpTypes.js';
+import type { ModelInfo, AvailableCommand } from '../../types/acpTypes.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -57,13 +54,14 @@ interface UseWebViewMessagesProps {
     setActiveSelection: (
       selection: { startLine: number; endLine: number } | null,
     ) => void;
-    setWorkspaceFiles: (
+    setWorkspaceFilesFromResponse: (
       files: Array<{
         id: string;
         label: string;
         description: string;
         path: string;
       }>,
+      requestId?: number,
     ) => void;
     addFileReference: (name: string, path: string) => void;
   };
@@ -127,6 +125,10 @@ interface UseWebViewMessagesProps {
   setUsageStats?: (stats: UsageStatsPayload | undefined) => void;
   // Model info setter
   setModelInfo?: (info: ModelInfo | null) => void;
+  // Available commands setter
+  setAvailableCommands?: (commands: AvailableCommand[]) => void;
+  // Available models setter
+  setAvailableModels?: (models: ModelInfo[]) => void;
 }
 
 /**
@@ -147,6 +149,8 @@ export const useWebViewMessages = ({
   setIsAuthenticated,
   setUsageStats,
   setModelInfo,
+  setAvailableCommands,
+  setAvailableModels,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
@@ -166,6 +170,8 @@ export const useWebViewMessages = ({
     setIsAuthenticated,
     setUsageStats,
     setModelInfo,
+    setAvailableCommands,
+    setAvailableModels,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -213,6 +219,8 @@ export const useWebViewMessages = ({
       setIsAuthenticated,
       setUsageStats,
       setModelInfo,
+      setAvailableCommands,
+      setAvailableModels,
     };
   });
 
@@ -241,6 +249,56 @@ export const useWebViewMessages = ({
             setEditMode?.(modeId);
           } catch (_error) {
             // Ignore error when setting mode
+          }
+          break;
+        }
+
+        case 'modelChanged': {
+          try {
+            const model = message.data?.model as ModelInfo | undefined;
+            if (model) {
+              handlers.setModelInfo?.(model);
+            }
+          } catch (_error) {
+            // Ignore error when setting model
+          }
+          break;
+        }
+
+        case 'availableCommands': {
+          try {
+            const commands = message.data?.commands as
+              | AvailableCommand[]
+              | undefined;
+            if (commands) {
+              handlers.setAvailableCommands?.(commands);
+            }
+          } catch (_error) {
+            // Ignore error when setting available commands
+          }
+          break;
+        }
+
+        case 'availableModels': {
+          try {
+            const models = message.data?.models as ModelInfo[] | undefined;
+            console.log(
+              '[useWebViewMessages] availableModels message received:',
+              models,
+            );
+            if (models) {
+              handlers.setAvailableModels?.(models);
+              console.log(
+                '[useWebViewMessages] setAvailableModels called with:',
+                models,
+              );
+            }
+          } catch (_error) {
+            // Ignore error when setting available models
+            console.error(
+              '[useWebViewMessages] Error setting available models:',
+              _error,
+            );
           }
           break;
         }
@@ -451,12 +509,22 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'error':
+        case 'error': {
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
           activeExecToolCallsRef.current.clear();
           handlers.messageHandling.clearWaitingForResponse();
+          // Display error message to user so they know what went wrong
+          const errorMessage =
+            (message?.data?.message as string) ||
+            'An unexpected error occurred.';
+          handlers.messageHandling.addMessage({
+            role: 'assistant',
+            content: errorMessage,
+            timestamp: Date.now(),
+          });
           break;
+        }
 
         case 'permissionRequest': {
           handlers.handlePermissionRequest(message.data);
@@ -856,9 +924,13 @@ export const useWebViewMessages = ({
             description: string;
             path: string;
           }>;
+          const requestId = message.data?.requestId as number | undefined;
           if (files) {
             console.log('[WebView] Received workspaceFiles:', files.length);
-            handlers.fileContext.setWorkspaceFiles(files);
+            handlers.fileContext.setWorkspaceFilesFromResponse(
+              files,
+              requestId,
+            );
           }
           break;
         }
@@ -869,15 +941,12 @@ export const useWebViewMessages = ({
         }
 
         case 'cancelStreaming':
-          // Handle cancel streaming request from webview
+          // Handle cancel streaming response from extension
+          // Note: The "Interrupted" message is already added by handleCancel in App.tsx
+          // to provide immediate UI feedback. We only need to ensure streaming states
+          // are properly cleaned up here.
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearWaitingForResponse();
-          // Add interrupted message
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: 'Interrupted',
-            timestamp: Date.now(),
-          });
           break;
 
         default:
@@ -889,6 +958,8 @@ export const useWebViewMessages = ({
 
   useEffect(() => {
     window.addEventListener('message', handleMessage);
+    // Notify extension that the webview is ready to receive initialization state.
+    vscode.postMessage({ type: 'webviewReady', data: {} });
     return () => window.removeEventListener('message', handleMessage);
-  }, [handleMessage]);
+  }, [handleMessage, vscode]);
 };

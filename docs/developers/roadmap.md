@@ -40,7 +40,7 @@
 | Feedback                | `V0.1.0+` | Feedback mechanism (/bug command)                       | Administrative Capabilities     |
 | Stats                   | `V0.1.0+` | Usage statistics and quota display                      | Administrative Capabilities     |
 | Memory                  | `V0.0.9+` | Project-level and global memory management              | User Experience                 |
-| Cache Control           | `V0.0.9+` | DashScope cache control                                 | User Experience                 |
+| Cache Control           | `V0.0.9+` | Prompt caching control (Anthropic, DashScope)           | User Experience                 |
 | PlanMode                | `V0.0.14` | Task planning mode                                      | Coding Workflow                 |
 | Compress                | `V0.0.11` | Chat compression mechanism                              | User Experience                 |
 | SubAgent                | `V0.0.11` | Dedicated sub-agent system                              | Coding Workflow                 |

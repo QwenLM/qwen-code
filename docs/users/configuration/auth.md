@@ -5,14 +5,16 @@ Qwen Code supports two authentication methods. Pick the one that matches how you
 - **Qwen OAuth (recommended)**: sign in with your `qwen.ai` account in a browser.
 - **OpenAI-compatible API**: use an API key (OpenAI or any OpenAI-compatible provider / endpoint).
 
+![](https://img.alicdn.com/imgextra/i2/O1CN01IxI1bt1sNO543AVTT_!!6000000005754-0-tps-1958-822.jpg)
+
 ## Option 1: Qwen OAuth (recommended & free) 👍
 
-Use this if you want the simplest setup and you’re using Qwen models.
+Use this if you want the simplest setup and you're using Qwen models.
 
-- **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won’t need to log in again.
+- **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
 - **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
 - **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: free, with a quota of **60 requests/minute** and **2,000 requests/day**.
+- **Cost & quota**: free, with a quota of **60 requests/minute** and **1,000 requests/day**.
 
 Start the CLI and follow the browser flow:
 
@@ -24,15 +26,54 @@ qwen
 
 Use this if you want to use OpenAI models or any provider that exposes an OpenAI-compatible API (e.g. OpenAI, Azure OpenAI, OpenRouter, ModelScope, Alibaba Cloud Bailian, or a self-hosted compatible endpoint).
 
-### Quick start (interactive, recommended for local use)
+### Recommended: Coding Plan (subscription-based) 🚀
 
-When you choose the OpenAI-compatible option in the CLI, it will prompt you for:
+Use this if you want predictable costs with higher usage quotas for the qwen3-coder-plus model.
 
-- **API key**
-- **Base URL** (default: `https://api.openai.com/v1`)
-- **Model** (default: `gpt-4o`)
+> [!IMPORTANT]
+>
+> Coding Plan is only available for users in China mainland (Beijing region).
 
-> **Note:** the CLI may display the key in plain text for verification. Make sure your terminal is not being recorded or shared.
+- **How it works**: subscribe to the Coding Plan with a fixed monthly fee, then configure Qwen Code to use the dedicated endpoint and your subscription API key.
+- **Requirements**: an active Coding Plan subscription from [Alibaba Cloud Bailian](https://bailian.console.aliyun.com/cn-beijing/?tab=globalset#/efm/coding_plan).
+- **Benefits**: higher usage quotas, predictable monthly costs, access to latest qwen3-coder-plus model.
+- **Cost & quota**: varies by plan (see table below).
+
+#### Coding Plan Pricing & Quotas
+
+| Feature             | Lite Basic Plan       | Pro Advanced Plan     |
+| :------------------ | :-------------------- | :-------------------- |
+| **Price**           | ¥40/month             | ¥200/month            |
+| **5-Hour Limit**    | Up to 1,200 requests  | Up to 6,000 requests  |
+| **Weekly Limit**    | Up to 9,000 requests  | Up to 45,000 requests |
+| **Monthly Limit**   | Up to 18,000 requests | Up to 90,000 requests |
+| **Supported Model** | qwen3-coder-plus      | qwen3-coder-plus      |
+
+#### Quick Setup for Coding Plan
+
+When you select the OpenAI-compatible option in the CLI, enter these values:
+
+- **API key**: `sk-sp-xxxxx`
+- **Base URL**: `https://coding.dashscope.aliyuncs.com/v1`
+- **Model**: `qwen3-coder-plus`
+
+> **Note**: Coding Plan API keys have the format `sk-sp-xxxxx`, which is different from standard Alibaba Cloud API keys.
+
+#### Configure via Environment Variables
+
+Set these environment variables to use Coding Plan:
+
+```bash
+export OPENAI_API_KEY="your-coding-plan-api-key"  # Format: sk-sp-xxxxx
+export OPENAI_BASE_URL="https://coding.dashscope.aliyuncs.com/v1"
+export OPENAI_MODEL="qwen3-coder-plus"
+```
+
+For more details about Coding Plan, including subscription options and troubleshooting, see the [full Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
+
+### Other OpenAI-compatible Providers
+
+If you are using other providers (OpenAI, Azure, local LLMs, etc.), use the following configuration methods.
 
 ### Configure via command-line arguments
 

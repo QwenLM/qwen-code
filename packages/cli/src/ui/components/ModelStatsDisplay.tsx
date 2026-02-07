@@ -50,7 +50,13 @@ const StatRow: React.FC<StatRowProps> = ({
   </Box>
 );
 
-export const ModelStatsDisplay: React.FC = () => {
+interface ModelStatsDisplayProps {
+  width?: number;
+}
+
+export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
+  width,
+}) => {
   const { stats } = useSessionStats();
   const { models } = stats.metrics;
   const activeModels = Object.entries(models).filter(
@@ -64,6 +70,7 @@ export const ModelStatsDisplay: React.FC = () => {
         borderColor={theme.border.default}
         paddingY={1}
         paddingX={2}
+        width={width}
       >
         <Text color={theme.text.primary}>
           {t('No API calls have been made in this session.')}
@@ -93,6 +100,7 @@ export const ModelStatsDisplay: React.FC = () => {
       flexDirection="column"
       paddingY={1}
       paddingX={2}
+      width={width}
     >
       <Text bold color={theme.text.accent}>
         {t('Model Stats For Nerds')}

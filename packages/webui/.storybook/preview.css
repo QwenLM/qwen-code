@@ -1,0 +1,54 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Import CSS variables BEFORE Tailwind so they're available */
+@import '../src/styles/variables.css';
+/* Import component styles */
+@import '../src/styles/components.css';
+@import '../src/styles/timeline.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Ensure text color is inherited properly in Storybook */
+body {
+  color: var(--app-primary-foreground);
+  margin: 0;
+  padding: 0;
+}
+
+/* Storybook container styling */
+.storybook-container {
+  box-sizing: border-box;
+}
+
+/* Full height container for ChatViewer and similar components */
+.storybook-fullheight {
+  overflow: hidden; /* Container itself doesn't scroll */
+}
+
+/* Allow child components to handle their own scrolling */
+.storybook-fullheight > * {
+  flex: 1;
+  min-height: 0; /* Important: allows flex children to shrink and scroll */
+  overflow: auto;
+}
+
+/* Fix Storybook iframe height for full-height stories */
+#storybook-root {
+  height: 100%;
+}
+
+/* Ensure stories with large content don't overflow awkwardly */
+.sb-show-main.sb-main-padded {
+  padding: 0 !important;
+}
+
+/* Full height stories should fill the iframe */
+[data-story-block='true'] {
+  height: 100%;
+}

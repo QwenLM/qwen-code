@@ -51,7 +51,6 @@ import {
 import * as fs from 'node:fs'; // fs will be mocked separately
 import stripJsonComments from 'strip-json-comments'; // Will be mocked separately
 import { isWorkspaceTrusted } from './trustedFolders.js';
-import { disableExtension } from './extension.js';
 
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
@@ -65,8 +64,6 @@ import {
   needsMigration,
   type Settings,
   loadEnvironment,
-  migrateDeprecatedSettings,
-  SettingScope,
   SETTINGS_VERSION,
   SETTINGS_VERSION_KEY,
 } from './settings.js';
@@ -644,6 +641,105 @@ describe('Settings Loading and Merging', () => {
       expect(writtenContent.tools?.autoAccept).toBe(false);
       // Version field should be added
       expect(writtenContent[SETTINGS_VERSION_KEY]).toBe(SETTINGS_VERSION);
+    });
+
+    it('should consolidate disableAutoUpdate and disableUpdateNag - both false means enableAutoUpdate is true', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V1 settings with both disable* settings as false
+      const legacySettingsContent = {
+        disableAutoUpdate: false,
+        disableUpdateNag: false,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Both are false, so enableAutoUpdate should be true
+      expect(settings.merged.general?.enableAutoUpdate).toBe(true);
+    });
+
+    it('should consolidate disableAutoUpdate and disableUpdateNag - any true means enableAutoUpdate is false', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V1 settings with disableAutoUpdate=false but disableUpdateNag=true
+      const legacySettingsContent = {
+        disableAutoUpdate: false,
+        disableUpdateNag: true,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // disableUpdateNag is true, so enableAutoUpdate should be false
+      expect(settings.merged.general?.enableAutoUpdate).toBe(false);
+    });
+
+    it('should consolidate disableAutoUpdate and disableUpdateNag - disableAutoUpdate=true takes precedence', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V1 settings with disableAutoUpdate=true
+      const legacySettingsContent = {
+        disableAutoUpdate: true,
+        disableUpdateNag: false,
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(legacySettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // disableAutoUpdate is true, so enableAutoUpdate should be false
+      expect(settings.merged.general?.enableAutoUpdate).toBe(false);
+    });
+
+    it('should bump version to 3 even when V2 settings already have V3-compatible content', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      // V2 settings that already have V3-compatible keys (no migration needed)
+      const v2SettingsWithV3Content = {
+        $version: 2,
+        general: {
+          enableAutoUpdate: true,
+        },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(v2SettingsWithV3Content);
+          return '{}';
+        },
+      );
+
+      loadSettings(MOCK_WORKSPACE_DIR);
+
+      // Version should be bumped to 3 even though no keys needed migration
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) => call[0] === USER_SETTINGS_PATH,
+      );
+      expect(writeCall).toBeDefined();
+      const writtenContent = JSON.parse(writeCall[1] as string);
+      expect(writtenContent.$version).toBe(SETTINGS_VERSION);
     });
 
     it('should correctly merge and migrate legacy array properties from multiple scopes', () => {
@@ -2260,7 +2356,7 @@ describe('Settings Loading and Merging', () => {
           disableAutoUpdate: true,
         },
         ui: {
-          hideBanner: true,
+          hideTips: true,
           customThemes: {
             myTheme: {},
           },
@@ -2283,7 +2379,7 @@ describe('Settings Loading and Merging', () => {
       const v1Settings = migrateSettingsToV1(v2Settings);
       expect(v1Settings).toEqual({
         disableAutoUpdate: true,
-        hideBanner: true,
+        hideTips: true,
         customThemes: {
           myTheme: {},
         },
@@ -2728,124 +2824,6 @@ describe('Settings Loading and Merging', () => {
         };
         expect(needsMigration(partiallyMigratedWithVersion)).toBe(false);
       });
-    });
-  });
-
-  describe('migrateDeprecatedSettings', () => {
-    let mockFsExistsSync: Mocked<typeof fs.existsSync>;
-    let mockFsReadFileSync: Mocked<typeof fs.readFileSync>;
-    let mockDisableExtension: Mocked<typeof disableExtension>;
-
-    beforeEach(() => {
-      vi.resetAllMocks();
-
-      mockFsExistsSync = vi.mocked(fs.existsSync);
-      mockFsReadFileSync = vi.mocked(fs.readFileSync);
-      mockDisableExtension = vi.mocked(disableExtension);
-
-      (mockFsExistsSync as Mock).mockReturnValue(true);
-      vi.mocked(isWorkspaceTrusted).mockReturnValue(true);
-    });
-
-    afterEach(() => {
-      vi.restoreAllMocks();
-    });
-
-    it('should migrate disabled extensions from user and workspace settings', () => {
-      const userSettingsContent = {
-        extensions: {
-          disabled: ['user-ext-1', 'shared-ext'],
-        },
-      };
-      const workspaceSettingsContent = {
-        extensions: {
-          disabled: ['workspace-ext-1', 'shared-ext'],
-        },
-      };
-
-      (mockFsReadFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const loadedSettings = loadSettings(MOCK_WORKSPACE_DIR);
-      const setValueSpy = vi.spyOn(loadedSettings, 'setValue');
-
-      migrateDeprecatedSettings(loadedSettings, MOCK_WORKSPACE_DIR);
-
-      // Check user settings migration
-      expect(mockDisableExtension).toHaveBeenCalledWith(
-        'user-ext-1',
-        SettingScope.User,
-        MOCK_WORKSPACE_DIR,
-      );
-      expect(mockDisableExtension).toHaveBeenCalledWith(
-        'shared-ext',
-        SettingScope.User,
-        MOCK_WORKSPACE_DIR,
-      );
-
-      // Check workspace settings migration
-      expect(mockDisableExtension).toHaveBeenCalledWith(
-        'workspace-ext-1',
-        SettingScope.Workspace,
-        MOCK_WORKSPACE_DIR,
-      );
-      expect(mockDisableExtension).toHaveBeenCalledWith(
-        'shared-ext',
-        SettingScope.Workspace,
-        MOCK_WORKSPACE_DIR,
-      );
-
-      // Check that setValue was called to remove the deprecated setting
-      expect(setValueSpy).toHaveBeenCalledWith(
-        SettingScope.User,
-        'extensions',
-        {
-          disabled: undefined,
-        },
-      );
-      expect(setValueSpy).toHaveBeenCalledWith(
-        SettingScope.Workspace,
-        'extensions',
-        {
-          disabled: undefined,
-        },
-      );
-    });
-
-    it('should not do anything if there are no deprecated settings', () => {
-      const userSettingsContent = {
-        extensions: {
-          enabled: ['user-ext-1'],
-        },
-      };
-      const workspaceSettingsContent = {
-        someOtherSetting: 'value',
-      };
-
-      (mockFsReadFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
-            return JSON.stringify(workspaceSettingsContent);
-          return '{}';
-        },
-      );
-
-      const loadedSettings = loadSettings(MOCK_WORKSPACE_DIR);
-      const setValueSpy = vi.spyOn(loadedSettings, 'setValue');
-
-      migrateDeprecatedSettings(loadedSettings, MOCK_WORKSPACE_DIR);
-
-      expect(mockDisableExtension).not.toHaveBeenCalled();
-      expect(setValueSpy).not.toHaveBeenCalled();
     });
   });
 });

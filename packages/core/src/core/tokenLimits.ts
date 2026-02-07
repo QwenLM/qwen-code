@@ -161,6 +161,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^glm-4\.5-air(?:-.*)?$/, LIMITS['128k']],
   [/^glm-4\.5(?:-.*)?$/, LIMITS['128k']],
   [/^glm-4\.6(?:-.*)?$/, 202_752 as unknown as TokenCount], // exact limit from the model config file
+  [/^glm-4\.7(?:-.*)?$/, LIMITS['200k']],
 
   // -------------------
   // DeepSeek
@@ -170,10 +171,8 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k2-0905$/, LIMITS['256k']], // Kimi-k2-0905-preview: 256K context
-  [/^kimi-k2-turbo.*$/, LIMITS['256k']], // Kimi-k2-turbo-preview: 256K context
-  [/^kimi-k2-0711$/, LIMITS['128k']], // Kimi-k2-0711-preview: 128K context
-  [/^kimi-k2-instruct.*$/, LIMITS['128k']], // Kimi-k2-instruct: 128K context
+  [/^kimi-2\.5.*$/, LIMITS['256k']], // Kimi-2.5: 256K context
+  [/^kimi-k2.*$/, LIMITS['256k']], // Kimi-k2 variants: 256K context
 
   // -------------------
   // GPT-OSS / Llama & Mistral examples
@@ -181,6 +180,11 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^gpt-oss.*$/, LIMITS['128k']],
   [/^llama-4-scout.*$/, LIMITS['10m']],
   [/^mistral-large-2.*$/, LIMITS['128k']],
+
+  // -------------------
+  // MiniMax
+  // -------------------
+  [/^minimax-m2\.1.*$/i, LIMITS['200k']], // MiniMax-M2.1: 200K context
 ];
 
 /**
@@ -223,6 +227,10 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
  * This function determines the maximum number of tokens for either input context
  * or output generation based on the model and token type. It uses the same
  * normalization logic for consistency across both input and output limits.
+ *
+ * This function is primarily used during config initialization to auto-detect
+ * token limits. After initialization, code should use contentGeneratorConfig.contextWindowSize
+ * or contentGeneratorConfig.maxOutputTokens directly.
  *
  * @param model - The model name to get the token limit for
  * @param type - The type of token limit ('input' for context window, 'output' for generation)

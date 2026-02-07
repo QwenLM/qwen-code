@@ -5,6 +5,8 @@
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
+<a href="https://trendshift.io/repositories/15287" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15287" alt="QwenLM%2Fqwen-code | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+
 **An open-source AI agent that lives in your terminal.**
 
 <a href="https://qwenlm.github.io/qwen-code-docs/zh/users/overview">中文</a> |
@@ -22,12 +24,30 @@ Qwen Code is an open-source AI agent for the terminal, optimized for [Qwen3-Code
 
 ## Why Qwen Code?
 
-- **OpenAI-compatible, OAuth free tier**: use an OpenAI-compatible API, or sign in with Qwen OAuth to get 2,000 free requests/day.
+- **OpenAI-compatible, OAuth free tier**: use an OpenAI-compatible API, or sign in with Qwen OAuth to get 1,000 free requests/day.
 - **Open-source, co-evolving**: both the framework and the Qwen3-Coder model are open-source—and they ship and evolve together.
 - **Agentic workflow, feature-rich**: rich built-in tools (Skills, SubAgents, Plan Mode) for a full agentic workflow and a Claude Code-like experience.
-- **Terminal-first, IDE-friendly**: built for developers who live in the command line, with optional integration for VS Code and Zed.
+- **Terminal-first, IDE-friendly**: built for developers who live in the command line, with optional integration for VS Code, Zed, and JetBrains IDEs.
 
 ## Installation
+
+### Quick Install (Recommended)
+
+#### Linux / macOS
+
+```bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+```
+
+#### Windows (Run as Administrator CMD)
+
+```cmd
+curl -fsSL -o %TEMP%\install-qwen.bat https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat && %TEMP%\install-qwen.bat
+```
+
+> **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect.
+
+### Manual Installation
 
 #### Prerequisites
 
@@ -36,7 +56,7 @@ Qwen Code is an open-source AI agent for the terminal, optimized for [Qwen3-Code
 curl -qL https://www.npmjs.com/install.sh | sh
 ```
 
-#### NPM (recommended)
+#### NPM
 
 ```bash
 npm install -g @qwen-code/qwen-code@latest
@@ -137,10 +157,11 @@ Use `-p` to run Qwen Code without the interactive UI—ideal for scripts, automa
 
 #### IDE integration
 
-Use Qwen Code inside your editor (VS Code and Zed):
+Use Qwen Code inside your editor (VS Code, Zed, and JetBrains IDEs):
 
 - [Use in VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/)
 - [Use in Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/)
+- [Use in JetBrains IDEs](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/)
 
 #### TypeScript SDK
 
@@ -199,6 +220,11 @@ Looking for a graphical interface?
 If you encounter issues, check the [troubleshooting guide](https://qwenlm.github.io/qwen-code-docs/en/users/support/troubleshooting/).
 
 To report a bug from within the CLI, run `/bug` and include a short title and repro steps.
+
+## Connect with Us
+
+- Discord: https://discord.gg/ycKBjdNd
+- Dingtalk: https://qr.dingtalk.com/action/joingroup?code=v1,k1,+FX6Gf/ZDlTahTIRi8AEQhIaBlqykA0j+eBKKdhLeAE=&_dt_no_comment=1&origin=1
 
 ## Acknowledgments
 

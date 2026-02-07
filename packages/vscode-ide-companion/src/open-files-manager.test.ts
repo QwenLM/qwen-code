@@ -6,7 +6,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
-import { OpenFilesManager, MAX_FILES } from './open-files-manager.js';
+import { OpenFilesManager } from './open-files-manager.js';
+import { MAX_FILES } from './services/open-files-manager/constants.js';
 
 vi.mock('vscode', () => ({
   EventEmitter: vi.fn(() => {

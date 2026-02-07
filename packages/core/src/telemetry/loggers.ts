@@ -38,6 +38,8 @@ import {
   EVENT_INVALID_CHUNK,
   EVENT_AUTH,
   EVENT_SKILL_LAUNCH,
+  EVENT_EXTENSION_UPDATE,
+  EVENT_USER_FEEDBACK,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -79,6 +81,7 @@ import type {
   ExtensionDisableEvent,
   ExtensionEnableEvent,
   ExtensionUninstallEvent,
+  ExtensionUpdateEvent,
   ExtensionInstallEvent,
   ModelSlashCommandEvent,
   SubagentExecutionEvent,
@@ -86,6 +89,7 @@ import type {
   InvalidChunkEvent,
   AuthEvent,
   SkillLaunchEvent,
+  UserFeedbackEvent,
 } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
@@ -800,6 +804,32 @@ export function logExtensionUninstall(
   logger.emit(logRecord);
 }
 
+export async function logExtensionUpdateEvent(
+  config: Config,
+  event: ExtensionUpdateEvent,
+): Promise<void> {
+  QwenLogger.getInstance(config)?.logExtensionUpdateEvent(event);
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_EXTENSION_UPDATE,
+    'event.timestamp': new Date().toISOString(),
+    extension_name: event.extension_name,
+    extension_id: event.extension_id,
+    extension_previous_version: event.extension_previous_version,
+    extension_version: event.extension_version,
+    extension_source: event.extension_source,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Updated extension ${event.extension_name} from ${event.extension_previous_version} to ${event.extension_version}`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
 export function logExtensionEnable(
   config: Config,
   event: ExtensionEnableEvent,
@@ -883,6 +913,35 @@ export function logSkillLaunch(config: Config, event: SkillLaunchEvent): void {
   const logger = logs.getLogger(SERVICE_NAME);
   const logRecord: LogRecord = {
     body: `Skill launch: ${event.skill_name}. Success: ${event.success}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logUserFeedback(
+  config: Config,
+  event: UserFeedbackEvent,
+): void {
+  const uiEvent = {
+    ...event,
+    'event.name': EVENT_USER_FEEDBACK,
+    'event.timestamp': new Date().toISOString(),
+  } as UiEvent;
+  uiTelemetryService.addEvent(uiEvent);
+  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  QwenLogger.getInstance(config)?.logUserFeedbackEvent(event);
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    ...event,
+    'event.name': EVENT_USER_FEEDBACK,
+    'event.timestamp': new Date().toISOString(),
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `User feedback: Rating ${event.rating} for session ${event.session_id}.`,
     attributes,
   };
   logger.emit(logRecord);

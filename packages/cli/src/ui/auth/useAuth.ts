@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ModelProvidersConfig } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ContentGeneratorConfig,
+  ModelProvidersConfig,
+} from '@qwen-code/qwen-code-core';
 import {
   AuthEvent,
   AuthType,
@@ -26,6 +30,7 @@ export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  onAuthChange?: () => void,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;
 
@@ -83,11 +88,25 @@ export const useAuthCommand = (
     async (authType: AuthType, credentials?: OpenAICredentials) => {
       try {
         const authTypeScope = getPersistScopeForModelSelection(settings);
+
+        // Persist authType
         settings.setValue(
           authTypeScope,
           'security.auth.selectedType',
           authType,
         );
+
+        // Persist model from ContentGenerator config (handles fallback cases)
+        // This ensures that when syncAfterAuthRefresh falls back to default model,
+        // it gets persisted to settings.json
+        const contentGeneratorConfig = config.getContentGeneratorConfig();
+        if (contentGeneratorConfig?.model) {
+          settings.setValue(
+            authTypeScope,
+            'model.name',
+            contentGeneratorConfig.model,
+          );
+        }
 
         // Only update credentials if not switching to QWEN_OAUTH,
         // so that OpenAI credentials are preserved when switching to QWEN_OAUTH.
@@ -106,9 +125,6 @@ export const useAuthCommand = (
               credentials.baseUrl,
             );
           }
-          if (credentials?.model != null) {
-            settings.setValue(authTypeScope, 'model.name', credentials.model);
-          }
         }
       } catch (error) {
         handleAuthFailure(error);
@@ -121,11 +137,10 @@ export const useAuthCommand = (
       setIsAuthDialogOpen(false);
       setIsAuthenticating(false);
 
-      // Log authentication success
-      const authEvent = new AuthEvent(authType, 'manual', 'success');
-      logAuth(config, authEvent);
+      // Trigger UI refresh to update header information
+      onAuthChange?.();
 
-      // Show success message
+      // Add success message to history
       addItem(
         {
           type: MessageType.INFO,
@@ -135,8 +150,12 @@ export const useAuthCommand = (
         },
         Date.now(),
       );
+
+      // Log authentication success
+      const authEvent = new AuthEvent(authType, 'manual', 'success');
+      logAuth(config, authEvent);
     },
-    [settings, handleAuthFailure, config, addItem],
+    [settings, handleAuthFailure, config, addItem, onAuthChange],
   );
 
   const performAuth = useCallback(
@@ -203,11 +222,19 @@ export const useAuthCommand = (
 
       if (authType === AuthType.USE_OPENAI) {
         if (credentials) {
-          config.updateCredentials({
-            apiKey: credentials.apiKey,
-            baseUrl: credentials.baseUrl,
-            model: credentials.model,
-          });
+          // Pass settings.model.generationConfig to updateCredentials so it can be merged
+          // after clearing provider-sourced config. This ensures settings.json generationConfig
+          // fields (e.g., samplingParams, timeout) are preserved.
+          const settingsGenerationConfig = settings.merged.model
+            ?.generationConfig as Partial<ContentGeneratorConfig> | undefined;
+          config.updateCredentials(
+            {
+              apiKey: credentials.apiKey,
+              baseUrl: credentials.baseUrl,
+              model: credentials.model,
+            },
+            settingsGenerationConfig,
+          );
           await performAuth(authType, credentials);
         }
         return;
@@ -215,7 +242,13 @@ export const useAuthCommand = (
 
       await performAuth(authType);
     },
-    [config, performAuth, isProviderManagedModel, onAuthError],
+    [
+      config,
+      performAuth,
+      isProviderManagedModel,
+      onAuthError,
+      settings.merged.model?.generationConfig,
+    ],
   );
 
   const openAuthDialog = useCallback(() => {

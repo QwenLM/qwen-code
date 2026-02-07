@@ -6,30 +6,17 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -40,30 +27,17 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -74,30 +48,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             true*                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                 true* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -108,30 +69,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             false*                                    │
-│                                                                                                  │
-│   Disable Auto Update                                  false*                                    │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false*                                    │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false*                                    │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                false* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                     false* │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -142,30 +90,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode (Modified in System)                        false                                     │
-│                                                                                                  │
-│   Disable Auto Update (Modified in System)             false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode (Modified in System)                                                            false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -176,30 +111,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode (Modified in Workspace)                     false                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging (Modified in Workspace)      false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode (Modified in Workspace)                                                         false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -210,30 +132,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -244,30 +153,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             false*                                    │
-│                                                                                                  │
-│   Disable Auto Update                                  true*                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false*                                    │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                false* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -278,30 +174,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             false                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  false                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              false                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    false                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                 false │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;
@@ -312,30 +195,17 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │ > Settings                                                                                       │
 │                                                                                                  │
 │ ▲                                                                                                │
-│ ● Vim Mode                                             true*                                     │
-│                                                                                                  │
-│   Disable Auto Update                                  true*                                     │
-│                                                                                                  │
-│   Debug Keystroke Logging                              true*                                     │
-│                                                                                                  │
-│   Language                                             Auto (detect from system)                 │
-│                                                                                                  │
-│   Terminal Bell                                        true                                      │
-│                                                                                                  │
-│   Output Format                                        Text                                      │
-│                                                                                                  │
-│   Hide Window Title                                    true*                                     │
-│                                                                                                  │
-│   Show Status in Title                                 false                                     │
-│                                                                                                  │
+│ ● Tool Approval Mode                                                                     Default │
+│   Language: UI                                                         Auto (detect from system) │
+│   Language: Model                                                                           auto │
+│   Theme                                                                                Qwen Dark │
+│   Vim Mode                                                                                 true* │
+│   Interactive Shell (PTY)                                                                  false │
+│   Preferred Editor                                                                               │
+│   Auto-connect to IDE                                                                      true* │
 │ ▼                                                                                                │
 │                                                                                                  │
-│                                                                                                  │
-│   Apply To                                                                                       │
-│ ● User Settings                                                                                  │
-│   Workspace Settings                                                                             │
-│                                                                                                  │
-│ (Use Enter to select, Tab to change focus)                                                       │
+│ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
 `;

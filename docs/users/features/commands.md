@@ -59,6 +59,7 @@ Commands for managing AI tools and models.
 | ---------------- | --------------------------------------------- | --------------------------------------------- |
 | `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
 | `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
+| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
 | `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
 | →`plan`          | Analysis only, no execution                   | Secure review                                 |
 | →`default`       | Require approval for edits                    | Daily use                                     |
@@ -120,6 +121,8 @@ Environment Variables: Commands executed via `!` will set the `QWEN_CODE=1` envi
 
 Save frequently used prompts as shortcut commands to improve work efficiency and ensure consistency.
 
+> **Note:** Custom commands now use Markdown format with optional YAML frontmatter. TOML format is deprecated but still supported for backwards compatibility. When TOML files are detected, an automatic migration prompt will be displayed.
+
 ### Quick Overview
 
 | Function         | Description                                | Advantages                             | Priority | Applicable Scenarios                                 |
@@ -134,14 +137,34 @@ Priority Rules: Project commands > User commands (project command used when name
 
 #### File Path to Command Name Mapping Table
 
-| File Location                | Generated Command | Example Call          |
-| ---------------------------- | ----------------- | --------------------- |
-| `~/.qwen/commands/test.toml` | `/test`           | `/test Parameter`     |
-| `<project>/git/commit.toml`  | `/git:commit`     | `/git:commit Message` |
+| File Location              | Generated Command | Example Call          |
+| -------------------------- | ----------------- | --------------------- |
+| `~/.qwen/commands/test.md` | `/test`           | `/test Parameter`     |
+| `<project>/git/commit.md`  | `/git:commit`     | `/git:commit Message` |
 
 Naming Rules: Path separator (`/` or `\`) converted to colon (`:`)
 
-### TOML File Format Specification
+### Markdown File Format Specification (Recommended)
+
+Custom commands use Markdown files with optional YAML frontmatter:
+
+```markdown
+---
+description: Optional description (displayed in /help)
+---
+
+Your prompt content here.
+Use {{args}} for parameter injection.
+```
+
+| Field         | Required | Description                              | Example                                    |
+| ------------- | -------- | ---------------------------------------- | ------------------------------------------ |
+| `description` | Optional | Command description (displayed in /help) | `description: Code analysis tool`          |
+| Prompt body   | Required | Prompt content sent to model             | Any Markdown content after the frontmatter |
+
+### TOML File Format (Deprecated)
+
+> **Deprecated:** TOML format is still supported but will be removed in a future version. Please migrate to Markdown format.
 
 | Field         | Required | Description                              | Example                                    |
 | ------------- | -------- | ---------------------------------------- | ------------------------------------------ |
@@ -190,15 +213,19 @@ Naming Rules: Path separator (`/` or `\`) converted to colon (`:`)
 
 Example: Git Commit Message Generation
 
-```
-# git/commit.toml
-description = "Generate Commit message based on staged changes"
-prompt = """
+````markdown
+---
+description: Generate Commit message based on staged changes
+---
+
 Please generate a Commit message based on the following diff:
-diff
+
+```diff
 !{git diff --staged}
-"""
 ```
+````
+
+````
 
 #### 4. File Content Injection (`@{...}`)
 
@@ -211,36 +238,38 @@ diff
 
 Example: Code Review Command
 
-```
-# review.toml
-description = "Code review based on best practices"
-prompt = """
+```markdown
+---
+description: Code review based on best practices
+---
+
 Review {{args}}, reference standards:
 
 @{docs/code-standards.md}
-"""
-```
+````
 
 ### Practical Creation Example
 
 #### "Pure Function Refactoring" Command Creation Steps Table
 
-| Operation                     | Command/Code                                |
-| ----------------------------- | ------------------------------------------- |
-| 1. Create directory structure | `mkdir -p ~/.qwen/commands/refactor`        |
-| 2. Create command file        | `touch ~/.qwen/commands/refactor/pure.toml` |
-| 3. Edit command content       | Refer to the complete code below.           |
-| 4. Test command               | `@file.js` → `/refactor:pure`               |
+| Operation                     | Command/Code                              |
+| ----------------------------- | ----------------------------------------- |
+| 1. Create directory structure | `mkdir -p ~/.qwen/commands/refactor`      |
+| 2. Create command file        | `touch ~/.qwen/commands/refactor/pure.md` |
+| 3. Edit command content       | Refer to the complete code below.         |
+| 4. Test command               | `@file.js` → `/refactor:pure`             |
 
-```# ~/.qwen/commands/refactor/pure.toml
-description = "Refactor code to pure function"
-prompt = """
-	Please analyze code in current context, refactor to pure function.
-	Requirements:
-		1. Provide refactored code
-		2. Explain key changes and pure function characteristic implementation
-		3. Maintain function unchanged
-	"""
+```markdown
+---
+description: Refactor code to pure function
+---
+
+Please analyze code in current context, refactor to pure function.
+Requirements:
+
+1. Provide refactored code
+2. Explain key changes and pure function characteristic implementation
+3. Maintain function unchanged
 ```
 
 ### Custom Command Best Practices Summary

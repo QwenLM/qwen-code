@@ -6,9 +6,11 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { AsyncFzf } from 'fzf';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import {
   CommandKind,
+  type CommandCompletionItem,
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
@@ -28,13 +30,15 @@ interface FzfCommandCacheEntry {
   commandMap: Map<string, SlashCommand>;
 }
 
+const debugLogger = createDebugLogger('SLASH_COMPLETION');
+
 // Utility function to safely handle errors without information disclosure
 function logErrorSafely(error: unknown, context: string): void {
   if (error instanceof Error) {
     // Log full error details securely for debugging
-    console.error(`[${context}]`, error);
+    debugLogger.error(`[${context}]`, error);
   } else {
-    console.error(`[${context}] Non-error thrown:`, error);
+    debugLogger.error(`[${context}] Non-error thrown:`, error);
   }
 }
 
@@ -189,7 +193,7 @@ function useCommandSuggestions(
 
         // Safety check: ensure leafCommand and completion exist
         if (!leafCommand?.completion) {
-          console.warn(
+          debugLogger.warn(
             'Attempted argument completion without completion function',
           );
           return;
@@ -215,10 +219,9 @@ function useCommandSuggestions(
             )) || [];
 
           if (!signal.aborted) {
-            const finalSuggestions = results.map((s) => ({
-              label: s,
-              value: s,
-            }));
+            const finalSuggestions = results
+              .map((item) => toSuggestion(item))
+              .filter((suggestion): suggestion is Suggestion => !!suggestion);
             setSuggestions(finalSuggestions);
             setIsLoading(false);
           }
@@ -308,6 +311,20 @@ function useCommandSuggestions(
   }, [parserResult, commandContext, getFzfForCommands, getPrefixSuggestions]);
 
   return { suggestions, isLoading };
+}
+
+function toSuggestion(item: string | CommandCompletionItem): Suggestion | null {
+  if (typeof item === 'string') {
+    return { label: item, value: item };
+  }
+  if (!item.value) {
+    return null;
+  }
+  return {
+    label: item.label ?? item.value,
+    value: item.value,
+    description: item.description,
+  };
 }
 
 function useCompletionPositions(

@@ -12,8 +12,12 @@ import type {
 import type { PipelineConfig } from './pipeline.js';
 import { ContentGenerationPipeline } from './pipeline.js';
 import { EnhancedErrorHandler } from './errorHandler.js';
-import { getDefaultTokenizer } from '../../utils/request-tokenizer/index.js';
+import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import { isAbortError } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI');
 
 export class OpenAIContentGenerator implements ContentGenerator {
   protected pipeline: ContentGenerationPipeline;
@@ -44,10 +48,21 @@ export class OpenAIContentGenerator implements ContentGenerator {
    * @returns true if error logging should be suppressed, false otherwise
    */
   protected shouldSuppressErrorLogging(
-    _error: unknown,
-    _request: GenerateContentParameters,
+    error: unknown,
+    request: GenerateContentParameters,
   ): boolean {
-    return false; // Default behavior: never suppress error logging
+    // Only suppress error logging for user-initiated cancellations.
+    // We check that BOTH:
+    // 1. The error is an AbortError
+    // 2. AND our abort signal was explicitly aborted (user-initiated)
+    //
+    // This ensures we don't suppress network-related abort errors that
+    // the user should be aware of.
+    if (isAbortError(error) && request.config?.abortSignal?.aborted) {
+      return true;
+    }
+
+    return false;
   }
 
   async generateContent(
@@ -68,17 +83,15 @@ export class OpenAIContentGenerator implements ContentGenerator {
     request: CountTokensParameters,
   ): Promise<CountTokensResponse> {
     try {
-      // Use the new high-performance request tokenizer
-      const tokenizer = getDefaultTokenizer();
-      const result = await tokenizer.calculateTokens(request, {
-        textEncoding: 'cl100k_base', // Use GPT-4 encoding for consistency
-      });
+      // Use the request token estimator (character-based).
+      const estimator = new RequestTokenEstimator();
+      const result = await estimator.calculateTokens(request);
 
       return {
         totalTokens: result.totalTokens,
       };
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         'Failed to calculate tokens with new tokenizer, falling back to simple method:',
         error,
       );
@@ -142,7 +155,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ],
       };
     } catch (error) {
-      console.error('OpenAI API Embedding Error:', error);
+      debugLogger.error('OpenAI API Embedding Error:', error);
       throw new Error(
         `OpenAI API error: ${error instanceof Error ? error.message : String(error)}`,
       );

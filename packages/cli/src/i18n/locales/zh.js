@@ -22,6 +22,7 @@ export default {
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
   '(shift + tab to cycle)': '(shift + tab 切换)',
+  '(tab to cycle)': '(按 tab 切换)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     '通过 {{symbol}} 执行 shell 命令（例如，{{example1}}）或使用自然语言（例如，{{example2}}）',
   '!': '!',
@@ -32,6 +33,25 @@ export default {
   'Model Context Protocol command (from external servers)':
     '模型上下文协议命令（来自外部服务器）',
   'Keyboard Shortcuts:': '键盘快捷键：',
+  'Toggle this help display': '切换此帮助显示',
+  'Toggle shell mode': '切换命令行模式',
+  'Open command menu': '打开命令菜单',
+  'Add file context': '添加文件上下文',
+  'Accept suggestion / Autocomplete': '接受建议 / 自动补全',
+  'Reverse search history': '反向搜索历史',
+  'Press ? again to close': '再次按 ? 关闭',
+  // Keyboard shortcuts panel descriptions
+  'for shell mode': '命令行模式',
+  'for commands': '命令菜单',
+  'for file paths': '文件路径',
+  'to clear input': '清空输入',
+  'to cycle approvals': '切换审批模式',
+  'to quit': '退出',
+  'for newline': '换行',
+  'to clear screen': '清屏',
+  'to search history': '搜索历史',
+  'to paste images': '粘贴图片',
+  'for external editor': '外部编辑器',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -45,6 +65,7 @@ export default {
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
+  '? for shortcuts': '按 ? 查看快捷键',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
   'Cancel operation / Clear input (double press)':
@@ -58,10 +79,15 @@ export default {
   'show version info': '显示版本信息',
   'submit a bug report': '提交错误报告',
   'About Qwen Code': '关于 Qwen Code',
+  Status: '状态',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
+  'Qwen Code': 'Qwen Code',
+  Runtime: '运行环境',
+  OS: '操作系统',
+  Auth: '认证',
   'CLI Version': 'CLI 版本',
   'Git Commit': 'Git 提交',
   Model: '模型',
@@ -74,6 +100,7 @@ export default {
   'Session ID': '会话 ID',
   'Auth Method': '认证方式',
   'Base URL': '基础 URL',
+  Proxy: '代理',
   'Memory Usage': '内存使用',
   'IDE Client': 'IDE 客户端',
 
@@ -97,8 +124,8 @@ export default {
   Preview: '预览',
   '(Use Enter to select, Tab to configure scope)':
     '（使用 Enter 选择，Tab 配置作用域）',
-  '(Use Enter to apply scope, Tab to select theme)':
-    '（使用 Enter 应用作用域，Tab 选择主题）',
+  '(Use Enter to apply scope, Tab to go back)':
+    '（使用 Enter 应用作用域，Tab 返回）',
   'Theme configuration unavailable due to NO_COLOR env variable.':
     '由于 NO_COLOR 环境变量，主题配置不可用。',
   'Theme "{{themeName}}" not found.': '未找到主题 "{{themeName}}"。',
@@ -118,15 +145,15 @@ export default {
   // Commands - Agents
   // ============================================================================
   'Manage subagents for specialized task delegation.':
-    '管理用于专门任务委派的子代理',
+    '管理用于专门任务委派的子智能体',
   'Manage existing subagents (view, edit, delete).':
-    '管理现有子代理（查看、编辑、删除）',
-  'Create a new subagent with guided setup.': '通过引导式设置创建新的子代理',
+    '管理现有子智能体（查看、编辑、删除）',
+  'Create a new subagent with guided setup.': '通过引导式设置创建新的子智能体',
 
   // ============================================================================
   // Agents - Management Dialog
   // ============================================================================
-  Agents: '代理',
+  Agents: '智能体',
   'Choose Action': '选择操作',
   'Edit {{name}}': '编辑 {{name}}',
   'Edit Tools: {{name}}': '编辑工具: {{name}}',
@@ -141,20 +168,21 @@ export default {
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter 选择，↑↓ 导航，Esc 返回',
   'Invalid step: {{step}}': '无效步骤: {{step}}',
-  'No subagents found.': '未找到子代理。',
+  'No subagents found.': '未找到子智能体。',
   "Use '/agents create' to create your first subagent.":
-    "使用 '/agents create' 创建您的第一个子代理。",
+    "使用 '/agents create' 创建您的第一个子智能体。",
   '(built-in)': '（内置）',
-  '(overridden by project level agent)': '（已被项目级代理覆盖）',
+  '(overridden by project level agent)': '（已被项目级智能体覆盖）',
   'Project Level ({{path}})': '项目级 ({{path}})',
   'User Level ({{path}})': '用户级 ({{path}})',
-  'Built-in Agents': '内置代理',
-  'Using: {{count}} agents': '使用中: {{count}} 个代理',
-  'View Agent': '查看代理',
-  'Edit Agent': '编辑代理',
-  'Delete Agent': '删除代理',
+  'Built-in Agents': '内置智能体',
+  'Extension Agents': '扩展智能体',
+  'Using: {{count}} agents': '使用中: {{count}} 个智能体',
+  'View Agent': '查看智能体',
+  'Edit Agent': '编辑智能体',
+  'Delete Agent': '删除智能体',
   Back: '返回',
-  'No agent selected': '未选择代理',
+  'No agent selected': '未选择智能体',
   'File Path: ': '文件路径: ',
   'Tools: ': '工具: ',
   'Color: ': '颜色: ',
@@ -165,25 +193,25 @@ export default {
   'Edit color': '编辑颜色',
   '❌ Error:': '❌ 错误:',
   'Are you sure you want to delete agent "{{name}}"?':
-    '您确定要删除代理 "{{name}}" 吗？',
+    '您确定要删除智能体 "{{name}}" 吗？',
   // ============================================================================
   // Agents - Creation Wizard
   // ============================================================================
   'Project Level (.qwen/agents/)': '项目级 (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': '用户级 (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ 子代理创建成功！',
+  '✅ Subagent Created Successfully!': '✅ 子智能体创建成功！',
   'Subagent "{{name}}" has been saved to {{level}} level.':
-    '子代理 "{{name}}" 已保存到 {{level}} 级别。',
+    '子智能体 "{{name}}" 已保存到 {{level}} 级别。',
   'Name: ': '名称: ',
   'Location: ': '位置: ',
-  '❌ Error saving subagent:': '❌ 保存子代理时出错:',
+  '❌ Error saving subagent:': '❌ 保存子智能体时出错:',
   'Warnings:': '警告:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
-    '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有子代理',
+    '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有子智能体',
   'Name "{{name}}" exists at user level - project level will take precedence':
     '名称 "{{name}}" 在用户级别存在 - 项目级别将优先',
   'Name "{{name}}" exists at project level - existing subagent will take precedence':
-    '名称 "{{name}}" 在项目级别存在 - 现有子代理将优先',
+    '名称 "{{name}}" 在项目级别存在 - 现有子智能体将优先',
   'Description is over {{length}} characters': '描述超过 {{length}} 个字符',
   'System prompt is over {{length}} characters':
     '系统提示超过 {{length}} 个字符',
@@ -193,13 +221,13 @@ export default {
   'Generate with Qwen Code (Recommended)': '使用 Qwen Code 生成（推荐）',
   'Manual Creation': '手动创建',
   'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
-    '描述此子代理应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
+    '描述此子智能体应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
   'e.g., Expert code reviewer that reviews code based on best practices...':
     '例如：专业的代码审查员，根据最佳实践审查代码...',
-  'Generating subagent configuration...': '正在生成子代理配置...',
-  'Failed to generate subagent: {{error}}': '生成子代理失败: {{error}}',
-  'Step {{n}}: Describe Your Subagent': '步骤 {{n}}: 描述您的子代理',
-  'Step {{n}}: Enter Subagent Name': '步骤 {{n}}: 输入子代理名称',
+  'Generating subagent configuration...': '正在生成子智能体配置...',
+  'Failed to generate subagent: {{error}}': '生成子智能体失败: {{error}}',
+  'Step {{n}}: Describe Your Subagent': '步骤 {{n}}: 描述您的子智能体',
+  'Step {{n}}: Enter Subagent Name': '步骤 {{n}}: 输入子智能体名称',
   'Step {{n}}: Enter System Prompt': '步骤 {{n}}: 输入系统提示',
   'Step {{n}}: Enter Description': '步骤 {{n}}: 输入描述',
   // Agents - Tool Selection
@@ -226,30 +254,28 @@ export default {
   'go back': '返回',
   '↑↓ to navigate, ': '↑↓ 导航，',
   'Enter a clear, unique name for this subagent.':
-    '为此子代理输入一个清晰、唯一的名称。',
+    '为此子智能体输入一个清晰、唯一的名称。',
   'e.g., Code Reviewer': '例如：代码审查员',
   'Name cannot be empty.': '名称不能为空。',
   "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
-    '编写定义此子代理行为的系统提示。为了获得最佳效果，请全面描述。',
+    '编写定义此子智能体行为的系统提示。为了获得最佳效果，请全面描述。',
   'e.g., You are an expert code reviewer...':
     '例如：您是一位专业的代码审查员...',
   'System prompt cannot be empty.': '系统提示不能为空。',
   'Describe when and how this subagent should be used.':
-    '描述何时以及如何使用此子代理。',
+    '描述何时以及如何使用此子智能体。',
   'e.g., Reviews code for best practices and potential bugs.':
     '例如：审查代码以查找最佳实践和潜在错误。',
   'Description cannot be empty.': '描述不能为空。',
   'Failed to launch editor: {{error}}': '启动编辑器失败: {{error}}',
   'Failed to save and edit subagent: {{error}}':
-    '保存并编辑子代理失败: {{error}}',
+    '保存并编辑子智能体失败: {{error}}',
 
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
-  '(Use Enter to select{{tabText}})': '（使用 Enter 选择{{tabText}}）',
-  ', Tab to change focus': '，Tab 切换焦点',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必须重启 Qwen Code。按 r 退出并立即应用更改。',
   'The command "/{{command}}" is not supported in non-interactive mode.':
@@ -259,24 +285,32 @@ export default {
   // ============================================================================
   'Vim Mode': 'Vim 模式',
   'Disable Auto Update': '禁用自动更新',
+  'Attribution: commit': '署名：提交',
+  'Terminal Bell Notification': '终端响铃通知',
+  'Enable Usage Statistics': '启用使用统计',
+  Theme: '主题',
+  'Preferred Editor': '首选编辑器',
+  'Auto-connect to IDE': '自动连接到 IDE',
   'Enable Prompt Completion': '启用提示补全',
   'Debug Keystroke Logging': '调试按键记录',
-  Language: '语言',
+  'Language: UI': '语言：界面',
+  'Language: Model': '语言：模型',
   'Output Format': '输出格式',
   'Hide Window Title': '隐藏窗口标题',
   'Show Status in Title': '在标题中显示状态',
   'Hide Tips': '隐藏提示',
-  'Hide Banner': '隐藏横幅',
-  'Hide Context Summary': '隐藏上下文摘要',
-  'Hide CWD': '隐藏当前工作目录',
-  'Hide Sandbox Status': '隐藏沙箱状态',
-  'Hide Model Info': '隐藏模型信息',
-  'Hide Footer': '隐藏页脚',
-  'Show Memory Usage': '显示内存使用',
-  'Show Line Numbers': '显示行号',
+  'Show Line Numbers in Code': '在代码中显示行号',
   'Show Citations': '显示引用',
   'Custom Witty Phrases': '自定义诙谐短语',
-  'Enable Welcome Back': '启用欢迎回来',
+  'Show Welcome Back Dialog': '显示欢迎回来对话框',
+  'Enable User Feedback': '启用用户反馈',
+  'How is Qwen doing this session? (optional)': 'Qwen 这次表现如何？（可选）',
+  Bad: '不满意',
+  Fine: '还行',
+  Good: '满意',
+  Dismiss: '忽略',
+  'Not Sure Yet': '暂不评价',
+  'Any other key': '任意其他键',
   'Disable Loading Phrases': '禁用加载短语',
   'Screen Reader Mode': '屏幕阅读器模式',
   'IDE Mode': 'IDE 模式',
@@ -295,7 +329,7 @@ export default {
   'Respect .qwenignore': '遵守 .qwenignore',
   'Enable Recursive File Search': '启用递归文件搜索',
   'Disable Fuzzy Search': '禁用模糊搜索',
-  'Enable Interactive Shell': '启用交互式 Shell',
+  'Interactive Shell (PTY)': '交互式 Shell (PTY)',
   'Show Color': '显示颜色',
   'Auto Accept': '自动接受',
   'Use Ripgrep': '使用 Ripgrep',
@@ -327,10 +361,162 @@ export default {
     '将目录添加到工作区。使用逗号分隔多个路径',
   'Show all directories in the workspace': '显示工作区中的所有目录',
   'set external editor preference': '设置外部编辑器首选项',
+  'Select Editor': '选择编辑器',
+  'Editor Preference': '编辑器首选项',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    '当前支持以下编辑器。请注意，某些编辑器无法在沙箱模式下使用。',
+  'Your preferred editor is:': '您的首选编辑器是：',
   'Manage extensions': '管理扩展',
   'List active extensions': '列出活动扩展',
   'Update extensions. Usage: update <extension-names>|--all':
     '更新扩展。用法：update <extension-names>|--all',
+  'Disable an extension': '禁用扩展',
+  'Enable an extension': '启用扩展',
+  'Install an extension from a git repo or local path':
+    '从 Git 仓库或本地路径安装扩展',
+  'Uninstall an extension': '卸载扩展',
+  'No extensions installed.': '未安装扩展。',
+  'Usage: /extensions update <extension-names>|--all':
+    '用法：/extensions update <扩展名>|--all',
+  'Extension "{{name}}" not found.': '未找到扩展 "{{name}}"。',
+  'No extensions to update.': '没有可更新的扩展。',
+  'Usage: /extensions install <source>': '用法：/extensions install <来源>',
+  'Installing extension from "{{source}}"...':
+    '正在从 "{{source}}" 安装扩展...',
+  'Extension "{{name}}" installed successfully.': '扩展 "{{name}}" 安装成功。',
+  'Failed to install extension from "{{source}}": {{error}}':
+    '从 "{{source}}" 安装扩展失败：{{error}}',
+  'Usage: /extensions uninstall <extension-name>':
+    '用法：/extensions uninstall <扩展名>',
+  'Uninstalling extension "{{name}}"...': '正在卸载扩展 "{{name}}"...',
+  'Extension "{{name}}" uninstalled successfully.':
+    '扩展 "{{name}}" 卸载成功。',
+  'Failed to uninstall extension "{{name}}": {{error}}':
+    '卸载扩展 "{{name}}" 失败：{{error}}',
+  'Usage: /extensions {{command}} <extension> [--scope=<user|workspace>]':
+    '用法：/extensions {{command}} <扩展> [--scope=<user|workspace>]',
+  'Unsupported scope "{{scope}}", should be one of "user" or "workspace"':
+    '不支持的作用域 "{{scope}}"，应为 "user" 或 "workspace"',
+  'Extension "{{name}}" disabled for scope "{{scope}}"':
+    '扩展 "{{name}}" 已在作用域 "{{scope}}" 中禁用',
+  'Extension "{{name}}" enabled for scope "{{scope}}"':
+    '扩展 "{{name}}" 已在作用域 "{{scope}}" 中启用',
+  'Do you want to continue? [Y/n]: ': '是否继续？[Y/n]：',
+  'Do you want to continue?': '是否继续？',
+  'Installing extension "{{name}}".': '正在安装扩展 "{{name}}"。',
+  '**Extensions may introduce unexpected behavior. Ensure you have investigated the extension source and trust the author.**':
+    '**扩展可能会引入意外行为。请确保您已调查过扩展源并信任作者。**',
+  'This extension will run the following MCP servers:':
+    '此扩展将运行以下 MCP 服务器：',
+  local: '本地',
+  remote: '远程',
+  'This extension will add the following commands: {{commands}}.':
+    '此扩展将添加以下命令：{{commands}}。',
+  'This extension will append info to your QWEN.md context using {{fileName}}':
+    '此扩展将使用 {{fileName}} 向您的 QWEN.md 上下文追加信息',
+  'This extension will exclude the following core tools: {{tools}}':
+    '此扩展将排除以下核心工具：{{tools}}',
+  'This extension will install the following skills:': '此扩展将安装以下技能：',
+  'This extension will install the following subagents:':
+    '此扩展将安装以下子智能体：',
+  'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
+  '--ref and --auto-update are not applicable for marketplace extensions.':
+    '--ref 和 --auto-update 不适用于市场扩展。',
+  'Extension "{{name}}" installed successfully and enabled.':
+    '扩展 "{{name}}" 安装成功并已启用。',
+  'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).':
+    '从 Git 仓库 URL、本地路径或 Claude 市场（marketplace-url:plugin-name）安装扩展。',
+  'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.':
+    '要安装的扩展的 GitHub URL、本地路径或市场源（marketplace-url:plugin-name）。',
+  'The git ref to install from.': '要安装的 Git 引用。',
+  'Enable auto-update for this extension.': '为此扩展启用自动更新。',
+  'Enable pre-release versions for this extension.': '为此扩展启用预发布版本。',
+  'Acknowledge the security risks of installing an extension and skip the confirmation prompt.':
+    '确认安装扩展的安全风险并跳过确认提示。',
+  'The source argument must be provided.': '必须提供来源参数。',
+  'Extension "{{name}}" successfully uninstalled.':
+    '扩展 "{{name}}" 卸载成功。',
+  'Uninstalls an extension.': '卸载扩展。',
+  'The name or source path of the extension to uninstall.':
+    '要卸载的扩展的名称或源路径。',
+  'Please include the name of the extension to uninstall as a positional argument.':
+    '请将要卸载的扩展名称作为位置参数。',
+  'Enables an extension.': '启用扩展。',
+  'The name of the extension to enable.': '要启用的扩展名称。',
+  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+    '启用扩展的作用域。如果未设置，将在所有作用域中启用。',
+  'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
+    '扩展 "{{name}}" 已在作用域 "{{scope}}" 中启用。',
+  'Extension "{{name}}" successfully enabled in all scopes.':
+    '扩展 "{{name}}" 已在所有作用域中启用。',
+  'Invalid scope: {{scope}}. Please use one of {{scopes}}.':
+    '无效的作用域：{{scope}}。请使用 {{scopes}} 之一。',
+  'Disables an extension.': '禁用扩展。',
+  'The name of the extension to disable.': '要禁用的扩展名称。',
+  'The scope to disable the extenison in.': '禁用扩展的作用域。',
+  'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
+    '扩展 "{{name}}" 已在作用域 "{{scope}}" 中禁用。',
+  'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
+    '扩展 "{{name}}" 更新成功：{{oldVersion}} → {{newVersion}}。',
+  'Unable to install extension "{{name}}" due to missing install metadata':
+    '由于缺少安装元数据，无法安装扩展 "{{name}}"',
+  'Extension "{{name}}" is already up to date.':
+    '扩展 "{{name}}" 已是最新版本。',
+  'Updates all extensions or a named extension to the latest version.':
+    '将所有扩展或指定扩展更新到最新版本。',
+  'The name of the extension to update.': '要更新的扩展名称。',
+  'Update all extensions.': '更新所有扩展。',
+  'Either an extension name or --all must be provided':
+    '必须提供扩展名称或 --all',
+  'Lists installed extensions.': '列出已安装的扩展。',
+  'Path:': '路径：',
+  'Source:': '来源：',
+  'Type:': '类型：',
+  'Ref:': '引用：',
+  'Release tag:': '发布标签：',
+  'Enabled (User):': '已启用（用户）：',
+  'Enabled (Workspace):': '已启用（工作区）：',
+  'Context files:': '上下文文件：',
+  'Skills:': '技能：',
+  'Agents:': '智能体：',
+  'MCP servers:': 'MCP 服务器：',
+  'Link extension failed to install.': '链接扩展安装失败。',
+  'Extension "{{name}}" linked successfully and enabled.':
+    '扩展 "{{name}}" 链接成功并已启用。',
+  'Links an extension from a local path. Updates made to the local path will always be reflected.':
+    '从本地路径链接扩展。对本地路径的更新将始终反映。',
+  'The name of the extension to link.': '要链接的扩展名称。',
+  'Set a specific setting for an extension.': '为扩展设置特定配置。',
+  'Name of the extension to configure.': '要配置的扩展名称。',
+  'The setting to configure (name or env var).':
+    '要配置的设置（名称或环境变量）。',
+  'The scope to set the setting in.': '设置配置的作用域。',
+  'List all settings for an extension.': '列出扩展的所有设置。',
+  'Name of the extension.': '扩展名称。',
+  'Extension "{{name}}" has no settings to configure.':
+    '扩展 "{{name}}" 没有可配置的设置。',
+  'Settings for "{{name}}":': '"{{name}}" 的设置：',
+  '(workspace)': '（工作区）',
+  '(user)': '（用户）',
+  '[not set]': '［未设置］',
+  '[value stored in keychain]': '［值存储在钥匙串中］',
+  'Manage extension settings.': '管理扩展设置。',
+  'You need to specify a command (set or list).':
+    '您需要指定命令（set 或 list）。',
+  // ============================================================================
+  // Plugin Choice / Marketplace
+  // ============================================================================
+  'No plugins available in this marketplace.': '此市场中没有可用的插件。',
+  'Select a plugin to install from marketplace "{{name}}":':
+    '从市场 "{{name}}" 中选择要安装的插件：',
+  'Plugin selection cancelled.': '插件选择已取消。',
+  'Select a plugin from "{{name}}"': '从 "{{name}}" 中选择插件',
+  'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
+    '使用 ↑↓ 或 j/k 导航，回车选择，Esc 取消',
+  '{{count}} more above': '上方还有 {{count}} 项',
+  '{{count}} more below': '下方还有 {{count}} 项',
   'manage IDE integration': '管理 IDE 集成',
   'check status of IDE integration': '检查 IDE 集成状态',
   'install required IDE companion for {{ideName}}':
@@ -375,8 +561,8 @@ export default {
   // ============================================================================
   // Commands - Language
   // ============================================================================
-  'Invalid language. Available: en-US, zh-CN':
-    '无效的语言。可用选项：en-US, zh-CN',
+  'Invalid language. Available: {{options}}':
+    '无效的语言。可用选项：{{options}}',
   'Language subcommands do not accept additional arguments.':
     '语言子命令不接受额外参数',
   'Current UI language: {{lang}}': '当前 UI 语言：{{lang}}',
@@ -384,12 +570,14 @@ export default {
   'LLM output language not set': '未设置 LLM 输出语言',
   'Set UI language': '设置 UI 语言',
   'Set LLM output language': '设置 LLM 输出语言',
-  'Usage: /language ui [zh-CN|en-US]': '用法：/language ui [zh-CN|en-US]',
+  'Usage: /language ui [{{options}}]': '用法：/language ui [{{options}}]',
   'Usage: /language output <language>': '用法：/language output <语言>',
   'Example: /language output 中文': '示例：/language output 中文',
   'Example: /language output English': '示例：/language output English',
   'Example: /language output 日本語': '示例：/language output 日本語',
+  'Example: /language output Português': '示例：/language output Português',
   'UI language changed to {{lang}}': 'UI 语言已更改为 {{lang}}',
+  'LLM output language set to {{lang}}': 'LLM 输出语言已设置为 {{lang}}',
   'LLM output language rule file generated at {{path}}':
     'LLM 输出语言规则文件已生成于 {{path}}',
   'Please restart the application for the changes to take effect.':
@@ -401,16 +589,12 @@ export default {
   'To request additional UI language packs, please open an issue on GitHub.':
     '如需请求其他 UI 语言包，请在 GitHub 上提交 issue',
   'Available options:': '可用选项：',
-  '  - zh-CN: Simplified Chinese': '  - zh-CN: 简体中文',
-  '  - en-US: English': '  - en-US: English',
-  'Set UI language to Simplified Chinese (zh-CN)':
-    '将 UI 语言设置为简体中文 (zh-CN)',
-  'Set UI language to English (en-US)': '将 UI 语言设置为英语 (en-US)',
+  'Set UI language to {{name}}': '将 UI 语言设置为 {{name}}',
 
   // ============================================================================
   // Commands - Approval Mode
   // ============================================================================
-  'Approval Mode': '审批模式',
+  'Tool Approval Mode': '工具审批模式',
   'Current approval mode: {{mode}}': '当前审批模式：{{mode}}',
   'Available approval modes:': '可用的审批模式：',
   'Approval mode changed to: {{mode}}': '审批模式已更改为：{{mode}}',
@@ -444,8 +628,6 @@ export default {
   'Automatically approve all tools': '自动批准所有工具',
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
-  '(Use Enter to select, Tab to change focus)':
-    '（使用 Enter 选择，Tab 切换焦点）',
   'Apply To': '应用于',
   'User Settings': '用户设置',
   'Workspace Settings': '工作区设置',
@@ -845,13 +1027,24 @@ export default {
   // ============================================================================
   // Startup Tips
   // ============================================================================
-  'Tips for getting started:': '入门提示：',
-  '1. Ask questions, edit files, or run commands.':
-    '1. 提问、编辑文件或运行命令',
-  '2. Be specific for the best results.': '2. 具体描述以获得最佳结果',
-  'files to customize your interactions with Qwen Code.':
-    '文件以自定义您与 Qwen Code 的交互',
-  'for more information.': '获取更多信息',
+  'Tips:': '提示：',
+  'Use /compress when the conversation gets long to summarize history and free up context.':
+    '对话变长时用 /compress，总结历史并释放上下文。',
+  'Start a fresh idea with /clear or /new; the previous session stays available in history.':
+    '用 /clear 或 /new 开启新思路；之前的会话会保留在历史记录中。',
+  'Use /bug to submit issues to the maintainers when something goes off.':
+    '遇到问题时，用 /bug 将问题提交给维护者。',
+  'Switch auth type quickly with /auth.': '用 /auth 快速切换认证方式。',
+  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
+    '在 Qwen Code 中使用 ! 可运行任意 shell 命令（例如 !ls）。',
+  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
+    '输入 / 打开命令弹窗；按 Tab 自动补全斜杠命令和保存的提示词。',
+  'You can resume a previous conversation by running qwen --continue or qwen --resume.':
+    '运行 qwen --continue 或 qwen --resume 可继续之前的会话。',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    '按 Shift+Tab 或输入 /approval-mode 可快速切换权限模式。',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -867,17 +1060,17 @@ export default {
   'Code Changes:': '代码变更：',
   Performance: '性能',
   'Wall Time:': '总耗时：',
-  'Agent Active:': '代理活跃时间：',
+  'Agent Active:': '智能体活跃时间：',
   'API Time:': 'API 时间：',
   'Tool Time:': '工具时间：',
   'Session Stats': '会话统计',
   'Model Usage': '模型使用情况',
   Reqs: '请求数',
-  'Input Tokens': '输入令牌',
-  'Output Tokens': '输出令牌',
+  'Input Tokens': '输入 token 数',
+  'Output Tokens': '输出 token 数',
   'Savings Highlight:': '节省亮点：',
   'of input tokens were served from the cache, reducing costs.':
-    '的输入令牌来自缓存，降低了成本',
+    '从缓存载入 token ，降低了成本',
   'Tip: For a full token breakdown, run `/stats model`.':
     '提示：要查看完整的令牌明细，请运行 `/stats model`',
   'Model Stats For Nerds': '模型统计（技术细节）',
@@ -910,6 +1103,18 @@ export default {
     '本次会话中未进行任何工具调用',
   'Session start time is unavailable, cannot calculate stats.':
     '会话开始时间不可用，无法计算统计信息',
+
+  // ============================================================================
+  // Command Format Migration
+  // ============================================================================
+  'Command Format Migration': '命令格式迁移',
+  'Found {{count}} TOML command file:': '发现 {{count}} 个 TOML 命令文件：',
+  'Found {{count}} TOML command files:': '发现 {{count}} 个 TOML 命令文件：',
+  '... and {{count}} more': '... 以及其他 {{count}} 个',
+  'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
+    'TOML 格式已弃用。是否将它们迁移到 Markdown 格式？',
+  '(Backups will be created and original files will be preserved)':
+    '（将创建备份，原始文件将保留）',
 
   // ============================================================================
   // Loading Phrases
@@ -951,4 +1156,49 @@ export default {
     '哪怕只有 0.1% 的进度，也是在向目标靠近...',
     '加载的是字节，承载的是对技术的热爱...',
   ],
+
+  // ============================================================================
+  // Extension Settings Input
+  // ============================================================================
+  'Enter value...': '请输入值...',
+  'Enter sensitive value...': '请输入敏感值...',
+  'Press Enter to submit, Escape to cancel': '按 Enter 提交，Escape 取消',
+
+  // ============================================================================
+  // Command Migration Tool
+  // ============================================================================
+  'Markdown file already exists: {{filename}}':
+    'Markdown 文件已存在：{{filename}}',
+  'TOML Command Format Deprecation Notice': 'TOML 命令格式弃用通知',
+  'Found {{count}} command file(s) in TOML format:':
+    '发现 {{count}} 个 TOML 格式的命令文件：',
+  'The TOML format for commands is being deprecated in favor of Markdown format.':
+    '命令的 TOML 格式正在被弃用，推荐使用 Markdown 格式。',
+  'Markdown format is more readable and easier to edit.':
+    'Markdown 格式更易读、更易编辑。',
+  'You can migrate these files automatically using:':
+    '您可以使用以下命令自动迁移这些文件：',
+  'Or manually convert each file:': '或手动转换每个文件：',
+  'TOML: prompt = "..." / description = "..."':
+    'TOML：prompt = "..." / description = "..."',
+  'Markdown: YAML frontmatter + content': 'Markdown：YAML frontmatter + 内容',
+  'The migration tool will:': '迁移工具将：',
+  'Convert TOML files to Markdown': '将 TOML 文件转换为 Markdown',
+  'Create backups of original files': '创建原始文件的备份',
+  'Preserve all command functionality': '保留所有命令功能',
+  'TOML format will continue to work for now, but migration is recommended.':
+    'TOML 格式目前仍可使用，但建议迁移。',
+
+  // ============================================================================
+  // Extensions - Explore Command
+  // ============================================================================
+  'Open extensions page in your browser': '在浏览器中打开扩展市场页面',
+  'Unknown extensions source: {{source}}.': '未知的扩展来源：{{source}}。',
+  'Would open extensions page in your browser: {{url}} (skipped in test environment)':
+    '将在浏览器中打开扩展页面：{{url}}（测试环境中已跳过）',
+  'View available extensions at {{url}}': '在 {{url}} 查看可用扩展',
+  'Opening extensions page in your browser: {{url}}':
+    '正在浏览器中打开扩展页面：{{url}}',
+  'Failed to open browser. Check out the extensions gallery at {{url}}':
+    '打开浏览器失败。请访问扩展市场：{{url}}',
 };

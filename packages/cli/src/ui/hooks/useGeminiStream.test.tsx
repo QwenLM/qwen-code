@@ -212,7 +212,6 @@ describe('useGeminiStream', () => {
       geminiMdFileCount: 0,
       alwaysSkipModificationConfirmation: false,
       vertexai: false,
-      showMemoryUsage: false,
       contextFileName: undefined,
       getToolRegistry: vi.fn(
         () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
@@ -234,7 +233,6 @@ describe('useGeminiStream', () => {
         .fn()
         .mockReturnValue(contentGeneratorConfig),
       getMaxSessionTurns: vi.fn(() => 50),
-      getUseSmartEdit: () => false,
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -1603,9 +1601,6 @@ describe('useGeminiStream', () => {
     });
 
     it('should handle errors gracefully when auto-approving tool calls', async () => {
-      const consoleSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
       const mockOnConfirmSuccess = vi.fn().mockResolvedValue(undefined);
       const mockOnConfirmError = vi
         .fn()
@@ -1675,14 +1670,6 @@ describe('useGeminiStream', () => {
       // Both confirmation methods should be called
       expect(mockOnConfirmSuccess).toHaveBeenCalledTimes(1);
       expect(mockOnConfirmError).toHaveBeenCalledTimes(1);
-
-      // Error should be logged
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to auto-approve tool call call2:',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
     });
 
     it('should skip tool calls without confirmationDetails', async () => {

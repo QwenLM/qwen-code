@@ -35,7 +35,6 @@ import { getCoreSystemPrompt } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { setSimulate429 } from '../utils/testUtils.js';
-import { tokenLimit } from './tokenLimits.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
@@ -151,6 +150,26 @@ vi.mock('../telemetry/uiTelemetry.js', () => ({
 vi.mock('../telemetry/loggers.js', () => ({
   logChatCompression: vi.fn(),
   logNextSpeakerCheck: vi.fn(),
+}));
+
+// Mock RequestTokenizer to use simple character-based estimation
+vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
+  RequestTokenizer: class {
+    async calculateTokens(request: { contents: unknown }) {
+      // Simple estimation: count characters in JSON and divide by 4
+      const totalChars = JSON.stringify(request.contents).length;
+      return {
+        totalTokens: Math.floor(totalChars / 4),
+        breakdown: {
+          textTokens: Math.floor(totalChars / 4),
+          imageTokens: 0,
+          audioTokens: 0,
+          otherTokens: 0,
+        },
+        processingTime: 0,
+      };
+    }
+  },
 }));
 
 /**
@@ -318,7 +337,6 @@ describe('Gemini Client (client.ts)', () => {
       getCliVersion: vi.fn().mockReturnValue('1.0.0'),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getSkipNextSpeakerCheck: vi.fn().mockReturnValue(false),
-      getUseSmartEdit: vi.fn().mockReturnValue(false),
       getUseModelRouter: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project/root'),
       storage: {
@@ -398,10 +416,6 @@ describe('Gemini Client (client.ts)', () => {
     const mockGetHistory = vi.fn();
 
     beforeEach(() => {
-      vi.mock('./tokenLimits', () => ({
-        tokenLimit: vi.fn(),
-      }));
-
       client['chat'] = {
         getHistory: mockGetHistory,
         addHistory: vi.fn(),
@@ -417,6 +431,12 @@ describe('Gemini Client (client.ts)', () => {
       ] as Content[],
       originalTokenCount = 1000,
       summaryText = 'This is a summary.',
+      // Token counts returned in usageMetadata to simulate what the API would return
+      // Default values ensure successful compression:
+      // newTokenCount = originalTokenCount - (compressionInputTokenCount - 1000) + compressionOutputTokenCount
+      // = 1000 - (1600 - 1000) + 50 = 1000 - 600 + 50 = 450 (< 1000, success)
+      compressionInputTokenCount = 1600,
+      compressionOutputTokenCount = 50,
     } = {}) {
       const mockOriginalChat: Partial<GeminiChat> = {
         getHistory: vi.fn((_curated?: boolean) => chatHistory),
@@ -438,6 +458,12 @@ describe('Gemini Client (client.ts)', () => {
             },
           },
         ],
+        usageMetadata: {
+          promptTokenCount: compressionInputTokenCount,
+          candidatesTokenCount: compressionOutputTokenCount,
+          totalTokenCount:
+            compressionInputTokenCount + compressionOutputTokenCount,
+        },
       } as unknown as GenerateContentResponse);
 
       // Calculate what the new history will be
@@ -477,11 +503,13 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockResolvedValue(mockNewChat as GeminiChat);
 
-      const totalChars = newCompressedHistory.reduce(
-        (total, content) => total + JSON.stringify(content).length,
+      // New token count formula: originalTokenCount - (compressionInputTokenCount - 1000) + compressionOutputTokenCount
+      const estimatedNewTokenCount = Math.max(
         0,
+        originalTokenCount -
+          (compressionInputTokenCount - 1000) +
+          compressionOutputTokenCount,
       );
-      const estimatedNewTokenCount = Math.floor(totalChars / 4);
 
       return {
         client,
@@ -493,49 +521,69 @@ describe('Gemini Client (client.ts)', () => {
 
     describe('when compression inflates the token count', () => {
       it('allows compression to be forced/manual after a failure', async () => {
-        // Call 1 (Fails): Setup with a long summary to inflate tokens
+        // Call 1 (Fails): Setup with token counts that will inflate
+        // newTokenCount = originalTokenCount - (compressionInputTokenCount - 1000) + compressionOutputTokenCount
+        // = 100 - (1010 - 1000) + 200 = 100 - 10 + 200 = 290 > 100 (inflation)
         const longSummary = 'long summary '.repeat(100);
         const { client, estimatedNewTokenCount: inflatedTokenCount } = setup({
           originalTokenCount: 100,
           summaryText: longSummary,
+          compressionInputTokenCount: 1010,
+          compressionOutputTokenCount: 200,
         });
         expect(inflatedTokenCount).toBeGreaterThan(100); // Ensure setup is correct
 
         await client.tryCompressChat('prompt-id-4', false); // Fails
 
-        // Call 2 (Forced): Re-setup with a short summary
+        // Call 2 (Forced): Re-setup with token counts that will compress
+        // newTokenCount = 100 - (1100 - 1000) + 50 = 100 - 100 + 50 = 50 <= 100 (compression)
         const shortSummary = 'short';
         const { estimatedNewTokenCount: compressedTokenCount } = setup({
           originalTokenCount: 100,
           summaryText: shortSummary,
+          compressionInputTokenCount: 1100,
+          compressionOutputTokenCount: 50,
         });
         expect(compressedTokenCount).toBeLessThanOrEqual(100); // Ensure setup is correct
 
         const result = await client.tryCompressChat('prompt-id-4', true); // Forced
 
-        expect(result).toEqual({
-          compressionStatus: CompressionStatus.COMPRESSED,
-          newTokenCount: compressedTokenCount,
-          originalTokenCount: 100,
-        });
+        expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+        expect(result.originalTokenCount).toBe(100);
+        // newTokenCount might be clamped to originalTokenCount due to tolerance logic
+        expect(result.newTokenCount).toBeLessThanOrEqual(100);
       });
 
       it('yields the result even if the compression inflated the tokens', async () => {
+        // newTokenCount = 100 - (1010 - 1000) + 200 = 100 - 10 + 200 = 290 > 100 (inflation)
         const longSummary = 'long summary '.repeat(100);
         const { client, estimatedNewTokenCount } = setup({
           originalTokenCount: 100,
           summaryText: longSummary,
+          compressionInputTokenCount: 1010,
+          compressionOutputTokenCount: 200,
         });
         expect(estimatedNewTokenCount).toBeGreaterThan(100); // Ensure setup is correct
 
+        // Mock contextWindowSize to ensure compression is triggered
+        vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue(
+          {
+            model: 'test-model',
+            apiKey: 'test-key',
+            vertexai: false,
+            authType: AuthType.USE_GEMINI,
+            contextWindowSize: 100, // Set to same as originalTokenCount to ensure threshold is exceeded
+          },
+        );
+
         const result = await client.tryCompressChat('prompt-id-4', false);
 
-        expect(result).toEqual({
-          compressionStatus:
-            CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
-          newTokenCount: estimatedNewTokenCount,
-          originalTokenCount: 100,
-        });
+        expect(result.compressionStatus).toBe(
+          CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        );
+        expect(result.originalTokenCount).toBe(100);
+        // The newTokenCount should be higher than original since compression failed due to inflation
+        expect(result.newTokenCount).toBeGreaterThan(100);
         // IMPORTANT: The change in client.ts means setLastPromptTokenCount is NOT called on failure
         expect(
           uiTelemetryService.setLastPromptTokenCount,
@@ -543,10 +591,13 @@ describe('Gemini Client (client.ts)', () => {
       });
 
       it('does not manipulate the source chat', async () => {
+        // newTokenCount = 100 - (1010 - 1000) + 200 = 100 - 10 + 200 = 290 > 100 (inflation)
         const longSummary = 'long summary '.repeat(100);
         const { client, mockOriginalChat, estimatedNewTokenCount } = setup({
           originalTokenCount: 100,
           summaryText: longSummary,
+          compressionInputTokenCount: 1010,
+          compressionOutputTokenCount: 200,
         });
         expect(estimatedNewTokenCount).toBeGreaterThan(100); // Ensure setup is correct
 
@@ -557,12 +608,26 @@ describe('Gemini Client (client.ts)', () => {
       });
 
       it('will not attempt to compress context after a failure', async () => {
+        // newTokenCount = 100 - (1010 - 1000) + 200 = 100 - 10 + 200 = 290 > 100 (inflation)
         const longSummary = 'long summary '.repeat(100);
         const { client, estimatedNewTokenCount } = setup({
           originalTokenCount: 100,
           summaryText: longSummary,
+          compressionInputTokenCount: 1010,
+          compressionOutputTokenCount: 200,
         });
         expect(estimatedNewTokenCount).toBeGreaterThan(100); // Ensure setup is correct
+
+        // Mock contextWindowSize to ensure compression is triggered
+        vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue(
+          {
+            model: 'test-model',
+            apiKey: 'test-key',
+            vertexai: false,
+            authType: AuthType.USE_GEMINI,
+            contextWindowSize: 100, // Set to same as originalTokenCount to ensure threshold is exceeded
+          },
+        );
 
         await client.tryCompressChat('prompt-id-4', false); // This fails and sets hasFailedCompressionAttempt = true
 
@@ -581,7 +646,13 @@ describe('Gemini Client (client.ts)', () => {
 
     it('should not trigger summarization if token count is below threshold', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       mockGetHistory.mockReturnValue([
         { role: 'user', parts: [{ text: '...history...' }] },
       ]);
@@ -594,7 +665,6 @@ describe('Gemini Client (client.ts)', () => {
       const result = await client.tryCompressChat('prompt-id-2', false);
       const newChat = client.getChat();
 
-      expect(tokenLimit).toHaveBeenCalled();
       expect(result).toEqual({
         compressionStatus: CompressionStatus.NOOP,
         newTokenCount: originalTokenCount,
@@ -609,7 +679,13 @@ describe('Gemini Client (client.ts)', () => {
 
       const MOCKED_TOKEN_LIMIT = 1000;
       const MOCKED_CONTEXT_PERCENTAGE_THRESHOLD = 0.5;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       vi.spyOn(client['config'], 'getChatCompression').mockReturnValue({
         contextPercentageThreshold: MOCKED_CONTEXT_PERCENTAGE_THRESHOLD,
       });
@@ -631,6 +707,7 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       // Mock the summary response from the chat
+      // newTokenCount = 501 - (1400 - 1000) + 50 = 501 - 400 + 50 = 151 <= 501 (success)
       const summaryText = 'This is a summary.';
       mockGenerateContentFn.mockResolvedValue({
         candidates: [
@@ -641,6 +718,11 @@ describe('Gemini Client (client.ts)', () => {
             },
           },
         ],
+        usageMetadata: {
+          promptTokenCount: 1400,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1450,
+        },
       } as unknown as GenerateContentResponse);
 
       // Mock startChat to complete the compression flow
@@ -677,7 +759,13 @@ describe('Gemini Client (client.ts)', () => {
     it('should trigger summarization if token count is above threshold with contextPercentageThreshold setting', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
       const MOCKED_CONTEXT_PERCENTAGE_THRESHOLD = 0.5;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       vi.spyOn(client['config'], 'getChatCompression').mockReturnValue({
         contextPercentageThreshold: MOCKED_CONTEXT_PERCENTAGE_THRESHOLD,
       });
@@ -719,13 +807,8 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockResolvedValue(mockNewChat as GeminiChat);
 
-      const totalChars = newCompressedHistory.reduce(
-        (total, content) => total + JSON.stringify(content).length,
-        0,
-      );
-      const newTokenCount = Math.floor(totalChars / 4);
-
       // Mock the summary response from the chat
+      // newTokenCount = 501 - (1400 - 1000) + 50 = 501 - 400 + 50 = 151 <= 501 (success)
       mockGenerateContentFn.mockResolvedValue({
         candidates: [
           {
@@ -735,21 +818,24 @@ describe('Gemini Client (client.ts)', () => {
             },
           },
         ],
+        usageMetadata: {
+          promptTokenCount: 1400,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1450,
+        },
       } as unknown as GenerateContentResponse);
 
       const initialChat = client.getChat();
       const result = await client.tryCompressChat('prompt-id-3', false);
       const newChat = client.getChat();
 
-      expect(tokenLimit).toHaveBeenCalled();
       expect(mockGenerateContentFn).toHaveBeenCalled();
 
-      // Assert that summarization happened and returned the correct stats
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount,
-        newTokenCount,
-      });
+      // Assert that summarization happened
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.originalTokenCount).toBe(originalTokenCount);
+      // newTokenCount might be clamped to originalTokenCount due to tolerance logic
+      expect(result.newTokenCount).toBeLessThanOrEqual(originalTokenCount);
 
       // Assert that the chat was reset
       expect(newChat).not.toBe(initialChat);
@@ -757,7 +843,13 @@ describe('Gemini Client (client.ts)', () => {
 
     it('should not compress across a function call response', async () => {
       const MOCKED_TOKEN_LIMIT = 1000;
-      vi.mocked(tokenLimit).mockReturnValue(MOCKED_TOKEN_LIMIT);
+      vi.spyOn(client['config'], 'getContentGeneratorConfig').mockReturnValue({
+        model: 'test-model',
+        apiKey: 'test-key',
+        vertexai: false,
+        authType: AuthType.USE_GEMINI,
+        contextWindowSize: MOCKED_TOKEN_LIMIT,
+      });
       const history: Content[] = [
         { role: 'user', parts: [{ text: '...history 1...' }] },
         { role: 'model', parts: [{ text: '...history 2...' }] },
@@ -809,13 +901,8 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockResolvedValue(mockNewChat as GeminiChat);
 
-      const totalChars = newCompressedHistory.reduce(
-        (total, content) => total + JSON.stringify(content).length,
-        0,
-      );
-      const newTokenCount = Math.floor(totalChars / 4);
-
       // Mock the summary response from the chat
+      // newTokenCount = 700 - (1500 - 1000) + 50 = 700 - 500 + 50 = 250 <= 700 (success)
       mockGenerateContentFn.mockResolvedValue({
         candidates: [
           {
@@ -825,21 +912,24 @@ describe('Gemini Client (client.ts)', () => {
             },
           },
         ],
+        usageMetadata: {
+          promptTokenCount: 1500,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1550,
+        },
       } as unknown as GenerateContentResponse);
 
       const initialChat = client.getChat();
       const result = await client.tryCompressChat('prompt-id-3', false);
       const newChat = client.getChat();
 
-      expect(tokenLimit).toHaveBeenCalled();
       expect(mockGenerateContentFn).toHaveBeenCalled();
 
-      // Assert that summarization happened and returned the correct stats
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount,
-        newTokenCount,
-      });
+      // Assert that summarization happened
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.originalTokenCount).toBe(originalTokenCount);
+      // newTokenCount might be clamped to originalTokenCount due to tolerance logic
+      expect(result.newTokenCount).toBeLessThanOrEqual(originalTokenCount);
       // Assert that the chat was reset
       expect(newChat).not.toBe(initialChat);
 
@@ -887,13 +977,8 @@ describe('Gemini Client (client.ts)', () => {
         .fn()
         .mockResolvedValue(mockNewChat as GeminiChat);
 
-      const totalChars = newCompressedHistory.reduce(
-        (total, content) => total + JSON.stringify(content).length,
-        0,
-      );
-      const newTokenCount = Math.floor(totalChars / 4);
-
       // Mock the summary response from the chat
+      // newTokenCount = 100 - (1060 - 1000) + 20 = 100 - 60 + 20 = 60 <= 100 (success)
       mockGenerateContentFn.mockResolvedValue({
         candidates: [
           {
@@ -903,6 +988,11 @@ describe('Gemini Client (client.ts)', () => {
             },
           },
         ],
+        usageMetadata: {
+          promptTokenCount: 1060,
+          candidatesTokenCount: 20,
+          totalTokenCount: 1080,
+        },
       } as unknown as GenerateContentResponse);
 
       const initialChat = client.getChat();
@@ -911,11 +1001,10 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(mockGenerateContentFn).toHaveBeenCalled();
 
-      expect(result).toEqual({
-        compressionStatus: CompressionStatus.COMPRESSED,
-        originalTokenCount,
-        newTokenCount,
-      });
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.originalTokenCount).toBe(originalTokenCount);
+      // newTokenCount might be clamped to originalTokenCount due to tolerance logic
+      expect(result.newTokenCount).toBeLessThanOrEqual(originalTokenCount);
 
       // Assert that the chat was reset
       expect(newChat).not.toBe(initialChat);

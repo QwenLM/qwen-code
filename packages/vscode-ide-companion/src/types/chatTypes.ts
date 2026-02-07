@@ -3,7 +3,11 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
-import type { AcpPermissionRequest, ModelInfo } from './acpTypes.js';
+import type {
+  AcpPermissionRequest,
+  ModelInfo,
+  AvailableCommand,
+} from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -26,6 +30,7 @@ export interface ToolCallUpdateData {
   rawInput?: unknown;
   content?: Array<Record<string, unknown>>;
   locations?: Array<{ path: string; line?: number | null }>;
+  timestamp?: number;
 }
 
 export interface UsageStatsPayload {
@@ -59,6 +64,9 @@ export interface QwenAgentCallbacks {
   onModeChanged?: (modeId: ApprovalModeValue) => void;
   onUsageUpdate?: (stats: UsageStatsPayload) => void;
   onModelInfo?: (info: ModelInfo) => void;
+  onModelChanged?: (model: ModelInfo) => void;
+  onAvailableCommands?: (commands: AvailableCommand[]) => void;
+  onAvailableModels?: (models: ModelInfo[]) => void;
 }
 
 export interface ToolCallUpdate {
@@ -85,4 +93,10 @@ export interface ToolCallUpdate {
     line?: number | null;
   }>;
   timestamp?: number; // Add timestamp field for message ordering
+  /** Server-side metadata including timestamp for correct ordering */
+  _meta?: {
+    timestamp?: number;
+    toolName?: string;
+    [key: string]: unknown;
+  };
 }

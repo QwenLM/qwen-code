@@ -11,6 +11,7 @@ import { colorizeCode, colorizeLine } from '../../utils/CodeColorizer.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { theme as semanticTheme } from '../../semantic-colors.js';
 import type { Theme } from '../../themes/theme.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 
 interface DiffLine {
   type: 'add' | 'del' | 'context' | 'hunk' | 'other';
@@ -84,8 +85,9 @@ interface DiffRendererProps {
   filename?: string;
   tabWidth?: number;
   availableTerminalHeight?: number;
-  terminalWidth: number;
+  contentWidth: number;
   theme?: Theme;
+  settings?: LoadedSettings;
 }
 
 const DEFAULT_TAB_WIDTH = 4; // Spaces per tab for normalization
@@ -95,8 +97,9 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
   filename,
   tabWidth = DEFAULT_TAB_WIDTH,
   availableTerminalHeight,
-  terminalWidth,
+  contentWidth,
   theme,
+  settings,
 }) => {
   const screenReaderEnabled = useIsScreenReaderEnabled();
   if (!diffContent || typeof diffContent !== 'string') {
@@ -155,8 +158,9 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
       addedContent,
       language,
       availableTerminalHeight,
-      terminalWidth,
+      contentWidth,
       theme,
+      settings,
     );
   } else {
     renderedOutput = renderDiffContent(
@@ -164,7 +168,8 @@ export const DiffRenderer: React.FC<DiffRendererProps> = ({
       filename,
       tabWidth,
       availableTerminalHeight,
-      terminalWidth,
+      contentWidth,
+      settings,
     );
   }
 
@@ -176,7 +181,8 @@ const renderDiffContent = (
   filename: string | undefined,
   tabWidth = DEFAULT_TAB_WIDTH,
   availableTerminalHeight: number | undefined,
-  terminalWidth: number,
+  contentWidth: number,
+  settings?: LoadedSettings,
 ) => {
   // 1. Normalize whitespace (replace tabs with spaces) *before* further processing
   const normalizedLines = parsedLines.map((line) => ({
@@ -200,6 +206,8 @@ const renderDiffContent = (
       </Box>
     );
   }
+
+  const showLineNumbers = settings?.merged.ui?.showLineNumbers ?? true;
 
   const maxLineNumber = Math.max(
     0,
@@ -238,7 +246,7 @@ const renderDiffContent = (
   return (
     <MaxSizedBox
       maxHeight={availableTerminalHeight}
-      maxWidth={terminalWidth}
+      maxWidth={contentWidth}
       key={key}
     >
       {displayableLines.reduce<React.ReactNode[]>((acc, line, index) => {
@@ -260,7 +268,7 @@ const renderDiffContent = (
           acc.push(
             <Box key={`gap-${index}`}>
               <Text wrap="truncate" color={semanticTheme.text.secondary}>
-                {'═'.repeat(terminalWidth)}
+                {'═'.repeat(contentWidth)}
               </Text>
             </Box>,
           );
@@ -299,18 +307,20 @@ const renderDiffContent = (
 
         acc.push(
           <Box key={lineKey} flexDirection="row">
-            <Text
-              color={semanticTheme.text.secondary}
-              backgroundColor={
-                line.type === 'add'
-                  ? semanticTheme.background.diff.added
-                  : line.type === 'del'
-                    ? semanticTheme.background.diff.removed
-                    : undefined
-              }
-            >
-              {gutterNumStr.padStart(gutterWidth)}{' '}
-            </Text>
+            {showLineNumbers && (
+              <Text
+                color={semanticTheme.text.secondary}
+                backgroundColor={
+                  line.type === 'add'
+                    ? semanticTheme.background.diff.added
+                    : line.type === 'del'
+                      ? semanticTheme.background.diff.removed
+                      : undefined
+                }
+              >
+                {gutterNumStr.padStart(gutterWidth)}{' '}
+              </Text>
+            )}
             {line.type === 'context' ? (
               <>
                 <Text>{prefixSymbol} </Text>

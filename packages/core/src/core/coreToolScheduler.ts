@@ -18,6 +18,9 @@ import type {
   AnyToolInvocation,
   ChatRecordingService,
 } from '../index.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -29,8 +32,15 @@ import {
   logToolOutputTruncated,
   ToolOutputTruncatedEvent,
   InputFormat,
+  SkillTool,
 } from '../index.js';
-import type { Part, PartListUnion } from '@google/genai';
+import type {
+  FunctionResponse,
+  FunctionResponsePart,
+  Part,
+  PartListUnion,
+} from '@google/genai';
+import { ToolNames } from '../tools/tool-names.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -151,13 +161,17 @@ function createFunctionResponsePart(
   callId: string,
   toolName: string,
   output: string,
+  mediaParts?: FunctionResponsePart[],
 ): Part {
+  const functionResponse: FunctionResponse = {
+    id: callId,
+    name: toolName,
+    response: { output },
+    ...(mediaParts && mediaParts.length > 0 ? { parts: mediaParts } : {}),
+  };
+
   return {
-    functionResponse: {
-      id: callId,
-      name: toolName,
-      response: { output },
-    },
+    functionResponse,
   };
 }
 
@@ -198,16 +212,21 @@ export function convertToFunctionResponse(
   }
 
   if (contentToProcess.inlineData || contentToProcess.fileData) {
-    const mimeType =
-      contentToProcess.inlineData?.mimeType ||
-      contentToProcess.fileData?.mimeType ||
-      'unknown';
+    const mediaParts: FunctionResponsePart[] = [];
+    if (contentToProcess.inlineData) {
+      mediaParts.push({ inlineData: contentToProcess.inlineData });
+    }
+    if (contentToProcess.fileData) {
+      mediaParts.push({ fileData: contentToProcess.fileData });
+    }
+
     const functionResponse = createFunctionResponsePart(
       callId,
       toolName,
-      `Binary content of type ${mimeType} was processed.`,
+      '',
+      mediaParts,
     );
-    return [functionResponse, contentToProcess];
+    return [functionResponse];
   }
 
   if (contentToProcess.text !== undefined) {
@@ -594,17 +613,28 @@ export class CoreToolScheduler {
   }
 
   /**
-   * Generates a suggestion string for a tool name that was not found in the registry.
-   * Uses Levenshtein distance to suggest similar tool names for hallucinated or misspelled tools.
-   * Note: Excluded tools are handled separately before calling this method, so this only
-   * handles the case where a tool is truly not found (hallucinated or typo).
-   * @param unknownToolName The tool name that was not found.
-   * @param topN The number of suggestions to return. Defaults to 3.
-   * @returns A suggestion string like " Did you mean 'tool'?" or " Did you mean one of: 'tool1', 'tool2'?",
-   *          or an empty string if no suggestions are found.
+   * Generates error message for unknown tool. Returns early with skill-specific
+   * message if the name matches a skill, otherwise uses Levenshtein suggestions.
    */
+  private getToolNotFoundMessage(unknownToolName: string, topN = 3): string {
+    // Check if the unknown tool name matches an available skill name.
+    // This handles the case where the model tries to invoke a skill as a tool
+    // (e.g., Tool: "pdf" instead of Tool: "Skill" with skill: "pdf")
+    const skillTool = this.toolRegistry.getTool(ToolNames.SKILL);
+    if (skillTool instanceof SkillTool) {
+      const availableSkillNames = skillTool.getAvailableSkillNames();
+      if (availableSkillNames.includes(unknownToolName)) {
+        return `"${unknownToolName}" is a skill name, not a tool name. To use this skill, invoke the "${ToolNames.SKILL}" tool with parameter: skill: "${unknownToolName}"`;
+      }
+    }
+
+    // Standard "not found" message with Levenshtein suggestions
+    const suggestion = this.getToolSuggestion(unknownToolName, topN);
+    return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
+  }
+
+  /** Suggests similar tool names using Levenshtein distance. */
   private getToolSuggestion(unknownToolName: string, topN = 3): string {
-    // Use Levenshtein distance to find similar tool names from the registry.
     const allToolNames = this.toolRegistry.getAllToolNames();
 
     const matches = allToolNames.map((toolName) => ({
@@ -711,8 +741,7 @@ export class CoreToolScheduler {
           const toolInstance = this.toolRegistry.getTool(reqInfo.name);
           if (!toolInstance) {
             // Tool is not in registry and not excluded - likely hallucinated or typo
-            const suggestion = this.getToolSuggestion(reqInfo.name);
-            const errorMessage = `Tool "${reqInfo.name}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
+            const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
             return {
               status: 'error',
               request: reqInfo,
@@ -1301,7 +1330,7 @@ export class CoreToolScheduler {
           this.setStatusInternal(pendingTool.request.callId, 'scheduled');
         }
       } catch (error) {
-        console.error(
+        debugLogger.error(
           `Error checking confirmation for tool ${pendingTool.request.callId}:`,
           error,
         );

@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import { parse, stringify } from 'comment-json';
+import { writeStderrLine } from './stdioHelpers.js';
 
 /**
  * Updates a JSON file while preserving comments and formatting.
@@ -25,8 +26,9 @@ export function updateSettingsFilePreservingFormat(
   try {
     parsed = parse(originalContent) as Record<string, unknown>;
   } catch (error) {
-    console.error('Error parsing settings file:', error);
-    console.error(
+    writeStderrLine('Error parsing settings file.');
+    writeStderrLine(error instanceof Error ? error.message : String(error));
+    writeStderrLine(
       'Settings file may be corrupted. Please check the JSON syntax.',
     );
     return;
@@ -38,7 +40,7 @@ export function updateSettingsFilePreservingFormat(
   fs.writeFileSync(filePath, updatedContent, 'utf-8');
 }
 
-function applyUpdates(
+export function applyUpdates(
   current: Record<string, unknown>,
   updates: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -50,6 +52,7 @@ function applyUpdates(
       typeof value === 'object' &&
       value !== null &&
       !Array.isArray(value) &&
+      Object.keys(value).length > 0 &&
       typeof result[key] === 'object' &&
       result[key] !== null &&
       !Array.isArray(result[key])

@@ -12,12 +12,39 @@ import {
   FatalTurnLimitedError,
   FatalCancellationError,
   ToolErrorType,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from './stdioHelpers.js';
+
+const debugLogger = createDebugLogger('CLI_ERRORS');
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
+
+  // Handle objects with message property (error-like objects)
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'message' in error &&
+    typeof (error as { message: unknown }).message === 'string'
+  ) {
+    return (error as { message: string }).message;
+  }
+
+  // Handle plain objects by stringifying them
+  if (error !== null && typeof error === 'object') {
+    try {
+      const stringified = JSON.stringify(error);
+      // JSON.stringify can return undefined for objects with toJSON() returning undefined
+      return stringified ?? String(error);
+    } catch {
+      // If JSON.stringify fails (circular reference, etc.), fall back to String
+      return String(error);
+    }
+  }
+
   return String(error);
 }
 
@@ -78,10 +105,10 @@ export function handleError(
       errorCode,
     );
 
-    console.error(formattedError);
+    writeStderrLine(formattedError);
     process.exit(getNumericExitCode(errorCode));
   } else {
-    console.error(errorMessage);
+    writeStderrLine(errorMessage);
     throw error;
   }
 }
@@ -120,12 +147,9 @@ export function handleToolError(
     process.stderr.write(warningMessage);
   }
 
-  // Always log detailed error in debug mode
-  if (config.getDebugMode()) {
-    console.error(
-      `Error executing tool ${toolName}: ${resultDisplay || toolError.message}`,
-    );
-  }
+  debugLogger.error(
+    `Error executing tool ${toolName}: ${resultDisplay || toolError.message}`,
+  );
 }
 
 /**
@@ -141,10 +165,10 @@ export function handleCancellationError(config: Config): never {
       cancellationError.exitCode,
     );
 
-    console.error(formattedError);
+    writeStderrLine(formattedError);
     process.exit(cancellationError.exitCode);
   } else {
-    console.error(cancellationError.message);
+    writeStderrLine(cancellationError.message);
     process.exit(cancellationError.exitCode);
   }
 }
@@ -164,10 +188,10 @@ export function handleMaxTurnsExceededError(config: Config): never {
       maxTurnsError.exitCode,
     );
 
-    console.error(formattedError);
+    writeStderrLine(formattedError);
     process.exit(maxTurnsError.exitCode);
   } else {
-    console.error(maxTurnsError.message);
+    writeStderrLine(maxTurnsError.message);
     process.exit(maxTurnsError.exitCode);
   }
 }

@@ -34,6 +34,13 @@ import { executeToolCall } from '../core/nonInteractiveToolExecutor.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../tools/tools.js';
 import { ContextState, SubAgentScope } from './subagent.js';
+import {
+  SubAgentEventEmitter,
+  SubAgentEventType,
+  type SubAgentStreamTextEvent,
+  type SubAgentToolCallEvent,
+  type SubAgentToolResultEvent,
+} from './subagent-events.js';
 import type {
   ModelConfig,
   PromptConfig,
@@ -87,6 +94,28 @@ vi.mock('../utils/environmentContext.js', () => ({
 vi.mock('../core/nonInteractiveToolExecutor.js');
 vi.mock('../ide/ide-client.js');
 vi.mock('../core/client.js');
+
+vi.mock('../skills/skill-manager.js', () => {
+  const SkillManagerMock = vi.fn();
+  SkillManagerMock.prototype.startWatching = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.stopWatching = vi.fn();
+  SkillManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  return { SkillManager: SkillManagerMock };
+});
+
+vi.mock('./subagent-manager.js', () => {
+  const SubagentManagerMock = vi.fn();
+  SubagentManagerMock.prototype.loadSessionSubagents = vi.fn();
+  SubagentManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  return { SubagentManager: SubagentManagerMock };
+});
 
 async function createMockConfig(
   toolRegistryMocks = {},
@@ -750,6 +779,320 @@ describe('subagent.ts', () => {
           scope.runNonInteractive(new ContextState()),
         ).rejects.toThrow('API Failure');
         expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.ERROR);
+      });
+    });
+
+    describe('runNonInteractive - Streaming and Thought Handling', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      // Helper to create a mock stream that yields specific parts
+      const createMockStreamWithParts = (parts: Part[]) =>
+        vi.fn().mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: { parts },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+      it('should emit STREAM_TEXT events with thought flag', async () => {
+        const { config } = await createMockConfig();
+
+        mockSendMessageStream = createMockStreamWithParts([
+          { text: 'Let me think...' as string, thought: true },
+          { text: 'Here is the answer.' as string },
+        ]);
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const eventEmitter = new SubAgentEventEmitter();
+        const events: SubAgentStreamTextEvent[] = [];
+        eventEmitter.on(SubAgentEventType.STREAM_TEXT, (...args: unknown[]) => {
+          events.push(args[0] as SubAgentStreamTextEvent);
+        });
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          undefined,
+          eventEmitter,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        expect(events).toHaveLength(2);
+        expect(events[0]!.text).toBe('Let me think...');
+        expect(events[0]!.thought).toBe(true);
+        expect(events[1]!.text).toBe('Here is the answer.');
+        expect(events[1]!.thought).toBe(false);
+      });
+
+      it('should exclude thought text from finalText', async () => {
+        const { config } = await createMockConfig();
+
+        mockSendMessageStream = createMockStreamWithParts([
+          { text: 'Internal reasoning here.' as string, thought: true },
+          { text: 'The final answer.' as string },
+        ]);
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('The final answer.');
+      });
+
+      it('should not set finalText from thought-only response', async () => {
+        const { config } = await createMockConfig();
+
+        // First call: only thought text (no regular text → nudge)
+        // Second call: regular text response
+        let callIndex = 0;
+        mockSendMessageStream = vi.fn().mockImplementation(async () => {
+          const idx = callIndex++;
+          return (async function* () {
+            if (idx === 0) {
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: 'Just thinking...' as string,
+                            thought: true,
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              };
+            } else {
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Actual output.' as string }],
+                      },
+                    },
+                  ],
+                },
+              };
+            }
+          })();
+        });
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(SubagentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Actual output.');
+        // Should have been called twice: first with thought-only, then nudged
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('runNonInteractive - Tool Restriction Enforcement (Issue #1121)', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      it('should NOT execute tools that are not in the allowed tools list', async () => {
+        // Define two tools: one allowed (read_file), one not allowed (edit_file)
+        const readFileToolDef: FunctionDeclaration = {
+          name: 'read_file',
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const editFileToolDef: FunctionDeclaration = {
+          name: 'edit_file',
+          description: 'Edits a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        // Track which tools were executed
+        const executedTools: string[] = [];
+
+        const readFileInvocation = {
+          params: { path: 'test.txt' },
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          execute: vi.fn().mockImplementation(async () => {
+            executedTools.push('read_file');
+            return {
+              llmContent: 'file contents',
+              returnDisplay: 'Read file contents',
+            };
+          }),
+        };
+
+        const editFileInvocation = {
+          params: { path: 'test.txt', content: 'malicious content' },
+          getDescription: vi.fn().mockReturnValue('Edit file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          execute: vi.fn().mockImplementation(async () => {
+            executedTools.push('edit_file');
+            return {
+              llmContent: 'file edited',
+              returnDisplay: 'Edited file',
+            };
+          }),
+        };
+
+        const readFileTool = {
+          name: 'read_file',
+          displayName: 'Read File',
+          description: 'Read file contents',
+          kind: 'READ' as const,
+          schema: readFileToolDef,
+          build: vi.fn().mockImplementation(() => readFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+
+        const editFileTool = {
+          name: 'edit_file',
+          displayName: 'Edit File',
+          description: 'Edit file contents',
+          kind: 'WRITE' as const,
+          schema: editFileToolDef,
+          build: vi.fn().mockImplementation(() => editFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+
+        const { config } = await createMockConfig({
+          // Only return read_file in the filtered list (this is what the subagent should see)
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([readFileToolDef]),
+          // But the full registry has both tools (simulating the bug)
+          getFunctionDeclarations: vi
+            .fn()
+            .mockReturnValue([readFileToolDef, editFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === 'read_file') return readFileTool;
+            if (name === 'edit_file') return editFileTool;
+            return undefined;
+          }),
+        });
+
+        // Only allow read_file in the subagent's tool config
+        const toolConfig: ToolConfig = { tools: ['read_file'] };
+
+        // Model calls BOTH read_file (allowed) AND edit_file (NOT allowed)
+        // This simulates the bug where the model hallucinates an unauthorized tool call
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: 'read_file',
+                args: { path: 'test.txt' },
+              },
+              {
+                id: 'call_edit',
+                name: 'edit_file', // This tool is NOT in the allowed list!
+                args: { path: 'test.txt', content: 'malicious content' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        // Track emitted events
+        const toolCallEvents: SubAgentToolCallEvent[] = [];
+        const toolResultEvents: SubAgentToolResultEvent[] = [];
+
+        // Create event emitter BEFORE the scope and subscribe to events
+        const eventEmitter = new SubAgentEventEmitter();
+        eventEmitter.on(SubAgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as SubAgentToolCallEvent);
+        });
+        eventEmitter.on(SubAgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as SubAgentToolResultEvent);
+        });
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        // 1. Only allowed tool should be executed
+        expect(executedTools).toContain('read_file');
+        expect(executedTools).not.toContain('edit_file');
+        expect(editFileInvocation.execute).not.toHaveBeenCalled();
+
+        // 2. TOOL_CALL events should be emitted for BOTH tools (for visibility)
+        expect(toolCallEvents).toHaveLength(2);
+        expect(toolCallEvents.map((e) => e.name)).toContain('read_file');
+        expect(toolCallEvents.map((e) => e.name)).toContain('edit_file');
+
+        // 3. TOOL_RESULT events should be emitted for both
+        expect(toolResultEvents).toHaveLength(2);
+
+        // 4. Verify blocked tool result has success=false and error message
+        const editResult = toolResultEvents.find((e) => e.name === 'edit_file');
+        expect(editResult).toBeDefined();
+        expect(editResult!.success).toBe(false);
+        expect(editResult!.error).toContain('not found');
+        expect(editResult!.callId).toBe('call_edit');
+
+        // 5. Verify allowed tool result has success=true
+        const readResult = toolResultEvents.find((e) => e.name === 'read_file');
+        expect(readResult).toBeDefined();
+        expect(readResult!.success).toBe(true);
       });
     });
   });

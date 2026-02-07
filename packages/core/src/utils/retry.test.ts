@@ -7,7 +7,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { HttpError } from './retry.js';
-import { retryWithBackoff } from './retry.js';
+import { getErrorStatus, retryWithBackoff } from './retry.js';
 import { setSimulate429 } from './testUtils.js';
 import { AuthType } from '../core/contentGenerator.js';
 
@@ -100,38 +100,38 @@ describe('retryWithBackoff', () => {
     expect(mockFn).toHaveBeenCalledTimes(3);
   });
 
-  it('should default to 5 maxAttempts if no options are provided', async () => {
-    // This function will fail more than 5 times to ensure all retries are used.
+  it('should default to 7 maxAttempts if no options are provided', async () => {
+    // This function will fail more than 7 times to ensure all retries are used.
     const mockFn = createFailingFunction(10);
 
     const promise = retryWithBackoff(mockFn);
 
-    // Expect it to fail with the error from the 5th attempt.
+    // Expect it to fail with the error from the 7th attempt.
     // eslint-disable-next-line vitest/valid-expect
     const assertionPromise = expect(promise).rejects.toThrow(
-      'Simulated error attempt 5',
+      'Simulated error attempt 7',
     );
     await vi.runAllTimersAsync();
     await assertionPromise;
 
-    expect(mockFn).toHaveBeenCalledTimes(5);
+    expect(mockFn).toHaveBeenCalledTimes(7);
   });
 
-  it('should default to 5 maxAttempts if options.maxAttempts is undefined', async () => {
-    // This function will fail more than 5 times to ensure all retries are used.
+  it('should default to 7 maxAttempts if options.maxAttempts is undefined', async () => {
+    // This function will fail more than 7 times to ensure all retries are used.
     const mockFn = createFailingFunction(10);
 
     const promise = retryWithBackoff(mockFn, { maxAttempts: undefined });
 
-    // Expect it to fail with the error from the 5th attempt.
+    // Expect it to fail with the error from the 7th attempt.
     // eslint-disable-next-line vitest/valid-expect
     const assertionPromise = expect(promise).rejects.toThrow(
-      'Simulated error attempt 5',
+      'Simulated error attempt 7',
     );
     await vi.runAllTimersAsync();
     await assertionPromise;
 
-    expect(mockFn).toHaveBeenCalledTimes(5);
+    expect(mockFn).toHaveBeenCalledTimes(7);
   });
 
   it('should not retry if shouldRetry returns false', async () => {
@@ -445,5 +445,90 @@ describe('retryWithBackoff', () => {
       // Should be called 3 times (2 failures + 1 success)
       expect(fn).toHaveBeenCalledTimes(3);
     });
+  });
+});
+
+describe('getErrorStatus', () => {
+  it('should extract status from error.status (OpenAI/Anthropic/Gemini style)', () => {
+    expect(getErrorStatus({ status: 429 })).toBe(429);
+    expect(getErrorStatus({ status: 500 })).toBe(500);
+    expect(getErrorStatus({ status: 503 })).toBe(503);
+    expect(getErrorStatus({ status: 400 })).toBe(400);
+  });
+
+  it('should extract status from error.statusCode', () => {
+    expect(getErrorStatus({ statusCode: 429 })).toBe(429);
+    expect(getErrorStatus({ statusCode: 502 })).toBe(502);
+  });
+
+  it('should extract status from error.response.status (axios style)', () => {
+    expect(getErrorStatus({ response: { status: 429 } })).toBe(429);
+    expect(getErrorStatus({ response: { status: 503 } })).toBe(503);
+  });
+
+  it('should extract status from error.error.code (nested error style)', () => {
+    expect(getErrorStatus({ error: { code: 429 } })).toBe(429);
+    expect(getErrorStatus({ error: { code: 500 } })).toBe(500);
+  });
+
+  it('should prefer status over statusCode over response.status over error.code', () => {
+    expect(
+      getErrorStatus({
+        status: 429,
+        statusCode: 500,
+        response: { status: 502 },
+        error: { code: 503 },
+      }),
+    ).toBe(429);
+
+    expect(
+      getErrorStatus({
+        statusCode: 500,
+        response: { status: 502 },
+        error: { code: 503 },
+      }),
+    ).toBe(500);
+
+    expect(
+      getErrorStatus({ response: { status: 502 }, error: { code: 503 } }),
+    ).toBe(502);
+  });
+
+  it('should return undefined for out-of-range status codes', () => {
+    expect(getErrorStatus({ status: 0 })).toBeUndefined();
+    expect(getErrorStatus({ status: 99 })).toBeUndefined();
+    expect(getErrorStatus({ status: 600 })).toBeUndefined();
+    expect(getErrorStatus({ status: -1 })).toBeUndefined();
+  });
+
+  it('should return undefined for non-numeric status values', () => {
+    expect(getErrorStatus({ status: 'not_a_number' })).toBeUndefined();
+    expect(
+      getErrorStatus({ error: { code: 'invalid_api_key' } }),
+    ).toBeUndefined();
+  });
+
+  it('should return undefined for null, undefined, and non-object values', () => {
+    expect(getErrorStatus(null)).toBeUndefined();
+    expect(getErrorStatus(undefined)).toBeUndefined();
+    expect(getErrorStatus(true)).toBeUndefined();
+    expect(getErrorStatus(429)).toBeUndefined();
+    expect(getErrorStatus('500')).toBeUndefined();
+  });
+
+  it('should handle Error instances with a status property', () => {
+    const error: HttpError = new Error('Too Many Requests');
+    error.status = 429;
+    expect(getErrorStatus(error)).toBe(429);
+  });
+
+  it('should return undefined for Error instances without a status', () => {
+    expect(getErrorStatus(new Error('generic error'))).toBeUndefined();
+  });
+
+  it('should return undefined for empty objects', () => {
+    expect(getErrorStatus({})).toBeUndefined();
+    expect(getErrorStatus({ response: {} })).toBeUndefined();
+    expect(getErrorStatus({ error: {} })).toBeUndefined();
   });
 });

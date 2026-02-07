@@ -34,18 +34,24 @@ import type {
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
+import { isSubpath } from '../utils/paths.js';
 import {
   getCommandRoots,
   isCommandAllowed,
   isCommandNeedsPermission,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
+const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
 export interface ShellToolParams {
   command: string;
   is_background: boolean;
+  timeout?: number;
   description?: string;
   directory?: string;
 }
@@ -72,6 +78,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // append background indicator
     if (this.params.is_background) {
       description += ` [background]`;
+    } else if (this.params.timeout) {
+      // append timeout for foreground commands
+      description += ` [timeout: ${this.params.timeout}ms]`;
     }
     // append optional (description), replacing any line breaks with spaces
     if (this.params.description) {
@@ -128,6 +137,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
         llmContent: 'Command was cancelled by user before it could start.',
         returnDisplay: 'Command cancelled by user.',
       };
+    }
+
+    const effectiveTimeout = this.params.is_background
+      ? undefined
+      : (this.params.timeout ?? DEFAULT_FOREGROUND_TIMEOUT_MS);
+
+    // Create combined signal with timeout for foreground execution
+    let combinedSignal = signal;
+    if (effectiveTimeout) {
+      const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
+      combinedSignal = AbortSignal.any([signal, timeoutSignal]);
     }
 
     const isWindows = os.platform() === 'win32';
@@ -219,7 +239,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               lastUpdateTime = Date.now();
             }
           },
-          signal,
+          combinedSignal,
           this.config.getShouldUseNodePtyShell(),
           shellExecutionConfig ?? {},
         );
@@ -254,7 +274,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             .filter(Boolean);
           for (const line of pgrepLines) {
             if (!/^\d+$/.test(line)) {
-              console.error(`pgrep: ${line}`);
+              debugLogger.warn(`pgrep: ${line}`);
             }
             const pid = Number(line);
             if (pid !== result.pid) {
@@ -263,18 +283,35 @@ export class ShellToolInvocation extends BaseToolInvocation<
           }
         } else {
           if (!signal.aborted) {
-            console.error('missing pgrep output');
+            debugLogger.warn('missing pgrep output');
           }
         }
       }
 
       let llmContent = '';
       if (result.aborted) {
-        llmContent = 'Command was cancelled by user before it could complete.';
-        if (result.output.trim()) {
-          llmContent += ` Below is the output before it was cancelled:\n${result.output}`;
+        // Check if it was a timeout or user cancellation
+        const wasTimeout =
+          !this.params.is_background &&
+          effectiveTimeout &&
+          combinedSignal.aborted &&
+          !signal.aborted;
+
+        if (wasTimeout) {
+          llmContent = `Command timed out after ${effectiveTimeout}ms before it could complete.`;
+          if (result.output.trim()) {
+            llmContent += ` Below is the output before it timed out:\n${result.output}`;
+          } else {
+            llmContent += ' There was no output before it timed out.';
+          }
         } else {
-          llmContent += ' There was no output before it was cancelled.';
+          llmContent =
+            'Command was cancelled by user before it could complete.';
+          if (result.output.trim()) {
+            llmContent += ` Below is the output before it was cancelled:\n${result.output}`;
+          } else {
+            llmContent += ' There was no output before it was cancelled.';
+          }
         }
       } else {
         // Create a formatted error string for display, replacing the wrapper command
@@ -305,7 +342,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
           returnDisplayMessage = result.output;
         } else {
           if (result.aborted) {
-            returnDisplayMessage = 'Command cancelled by user.';
+            // Check if it was a timeout or user cancellation
+            const wasTimeout =
+              !this.params.is_background &&
+              effectiveTimeout &&
+              combinedSignal.aborted &&
+              !signal.aborted;
+
+            returnDisplayMessage = wasTimeout
+              ? `Command timed out after ${effectiveTimeout}ms.`
+              : 'Command cancelled by user.';
           } else if (result.signal) {
             returnDisplayMessage = `Command terminated by signal: ${result.signal}`;
           } else if (result.error) {
@@ -329,6 +375,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             },
           }
         : {};
+
       if (summarizeConfig && summarizeConfig[ShellTool.Name]) {
         const summary = await summarizeToolOutput(
           llmContent,
@@ -406,42 +453,59 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
 }
 
 function getShellToolDescription(): string {
-  const toolDescription = `
+  const isWindows = os.platform() === 'win32';
+  const executionWrapper = isWindows
+    ? 'cmd.exe /c <command>'
+    : 'bash -c <command>';
+  const processGroupNote = isWindows
+    ? ''
+    : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
 
-      **Background vs Foreground Execution:**
-      You should decide whether commands should run in background or foreground based on their nature:
-      
-      **Use background execution (is_background: true) for:**
-      - Long-running development servers: \`npm run start\`, \`npm run dev\`, \`yarn dev\`, \`bun run start\`
-      - Build watchers: \`npm run watch\`, \`webpack --watch\`
-      - Database servers: \`mongod\`, \`mysql\`, \`redis-server\`
-      - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
-      - Any command expected to run indefinitely until manually stopped
-      
-      **Use foreground execution (is_background: false) for:**
-      - One-time commands: \`ls\`, \`cat\`, \`grep\`
-      - Build commands: \`npm run build\`, \`make\`
-      - Installation commands: \`npm install\`, \`pip install\`
-      - Git operations: \`git commit\`, \`git push\`
-      - Test runs: \`npm test\`, \`pytest\`
-      
-      The following information is returned:
+  return `Executes a given shell command (as \`${executionWrapper}\`) in a persistent shell session with optional timeout, ensuring proper handling and security measures.
 
-      Command: Executed command.
-      Directory: Directory where command was executed, or \`(root)\`.
-      Stdout: Output on stdout stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
-      Stderr: Output on stderr stream. Can be \`(empty)\` or partial on error and for any unwaited background processes.
-      Error: Error or \`(none)\` if no error was reported for the subprocess.
-      Exit Code: Exit code or \`(none)\` if terminated by signal.
-      Signal: Signal number or \`(none)\` if no signal was received.
-      Background PIDs: List of background processes started or \`(none)\`.
-      Process Group PGID: Process group started or \`(none)\``;
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
-  if (os.platform() === 'win32') {
-    return `This tool executes a given shell command as \`cmd.exe /c <command>\`. Command can start background processes using \`start /b\`.${toolDescription}`;
-  } else {
-    return `This tool executes a given shell command as \`bash -c <command>\`. Command can start background processes using \`&\`. Command is executed as a subprocess that leads its own process group. Command process group can be terminated as \`kill -- -PGID\` or signaled as \`kill -s SIGNAL -- -PGID\`.${toolDescription}`;
-  }
+**Usage notes**:
+- The command argument is required.
+- You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
+- It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
+
+- Avoid using run_shell_command with the \`find\`, \`grep\`, \`cat\`, \`head\`, \`tail\`, \`sed\`, \`awk\`, or \`echo\` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
+  - File search: Use ${ToolNames.GLOB} (NOT find or ls)
+  - Content search: Use ${ToolNames.GREP} (NOT grep or rg)
+  - Read files: Use ${ToolNames.READ_FILE} (NOT cat/head/tail)
+  - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
+  - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
+  - Communication: Output text directly (NOT echo/printf)
+- When issuing multiple commands:
+  - If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+- Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of \`cd\`. You may use \`cd\` if the User explicitly requests it.
+  <good-example>
+  pytest /foo/bar/tests
+  </good-example>
+  <bad-example>
+  cd /foo/bar && pytest tests
+  </bad-example>
+
+**Background vs Foreground Execution:**
+- You should decide whether commands should run in background or foreground based on their nature:
+- Use background execution (is_background: true) for:
+  - Long-running development servers: \`npm run start\`, \`npm run dev\`, \`yarn dev\`, \`bun run start\`
+  - Build watchers: \`npm run watch\`, \`webpack --watch\`
+  - Database servers: \`mongod\`, \`mysql\`, \`redis-server\`
+  - Web servers: \`python -m http.server\`, \`php -S localhost:8000\`
+  - Any command expected to run indefinitely until manually stopped
+${processGroupNote}
+- Use foreground execution (is_background: false) for:
+  - One-time commands: \`ls\`, \`cat\`, \`grep\`
+  - Build commands: \`npm run build\`, \`make\`
+  - Installation commands: \`npm install\`, \`pip install\`
+  - Git operations: \`git commit\`, \`git push\`
+  - Test runs: \`npm test\`, \`pytest\`
+`;
 }
 
 function getCommandDescription(): string {
@@ -483,7 +547,11 @@ export class ShellTool extends BaseDeclarativeTool<
           is_background: {
             type: 'boolean',
             description:
-              'Whether to run the command in background. Default is false. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
+              'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
+          },
+          timeout: {
+            type: 'number',
+            description: 'Optional timeout in milliseconds (max 600000)',
           },
           description: {
             type: 'string',
@@ -496,7 +564,7 @@ export class ShellTool extends BaseDeclarativeTool<
               '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
           },
         },
-        required: ['command', 'is_background'],
+        required: ['command'],
       },
       false, // output is not markdown
       true, // output can be updated
@@ -509,7 +577,7 @@ export class ShellTool extends BaseDeclarativeTool<
     const commandCheck = isCommandAllowed(params.command, this.config);
     if (!commandCheck.allowed) {
       if (!commandCheck.reason) {
-        console.error(
+        debugLogger.error(
           'Unexpected: isCommandAllowed returned false without a reason',
         );
         return `Command is not allowed: ${params.command}`;
@@ -522,10 +590,35 @@ export class ShellTool extends BaseDeclarativeTool<
     if (getCommandRoots(params.command).length === 0) {
       return 'Could not identify command root to obtain permission from user.';
     }
+    if (params.timeout !== undefined) {
+      if (
+        typeof params.timeout !== 'number' ||
+        !Number.isInteger(params.timeout)
+      ) {
+        return 'Timeout must be an integer number of milliseconds.';
+      }
+      if (params.timeout <= 0) {
+        return 'Timeout must be a positive number.';
+      }
+      if (params.timeout > 600000) {
+        return 'Timeout cannot exceed 600000ms (10 minutes).';
+      }
+    }
     if (params.directory) {
       if (!path.isAbsolute(params.directory)) {
         return 'Directory must be an absolute path.';
       }
+
+      const userSkillsDir = this.config.storage.getUserSkillsDir();
+      const resolvedDirectoryPath = path.resolve(params.directory);
+      const isWithinUserSkills = isSubpath(
+        userSkillsDir,
+        resolvedDirectoryPath,
+      );
+      if (isWithinUserSkills) {
+        return `Explicitly running shell commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.`;
+      }
+
       const workspaceDirs = this.config.getWorkspaceContext().getDirectories();
       const isWithinWorkspace = workspaceDirs.some((wsDir) =>
         params.directory!.startsWith(wsDir),

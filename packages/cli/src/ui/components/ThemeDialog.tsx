@@ -258,8 +258,9 @@ def fibonacci(n):
 + print(f"Hello, {name}!")
 `}
                     availableTerminalHeight={diffHeight}
-                    terminalWidth={colorizeCodeWidth}
+                    contentWidth={colorizeCodeWidth}
                     theme={previewTheme}
+                    settings={settings}
                   />
                 </Box>
               );
@@ -278,7 +279,7 @@ def fibonacci(n):
         <Text color={theme.text.secondary} wrap="truncate">
           {mode === 'theme'
             ? t('(Use Enter to select, Tab to configure scope)')
-            : t('(Use Enter to apply scope, Tab to select theme)')}
+            : t('(Use Enter to apply scope, Tab to go back)')}
         </Text>
       </Box>
     </Box>

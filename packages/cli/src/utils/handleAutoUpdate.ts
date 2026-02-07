@@ -12,6 +12,7 @@ import type { HistoryItem } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
 import type { spawn } from 'node:child_process';
+import os from 'node:os';
 
 export function handleAutoUpdate(
   info: UpdateObject | null,
@@ -23,13 +24,14 @@ export function handleAutoUpdate(
     return;
   }
 
-  if (settings.merged.general?.disableUpdateNag) {
-    return;
-  }
+  // enableAutoUpdate is checked in gemini.tsx before calling this function,
+  // so if we get here, auto-update is enabled (or undefined, which defaults to enabled).
+  const isAutoUpdateEnabled =
+    settings.merged.general?.enableAutoUpdate !== false;
 
   const installationInfo = getInstallationInfo(
     projectRoot,
-    settings.merged.general?.disableAutoUpdate ?? false,
+    isAutoUpdateEnabled,
   );
 
   let combinedMessage = info.message;
@@ -41,10 +43,8 @@ export function handleAutoUpdate(
     message: combinedMessage,
   });
 
-  if (
-    !installationInfo.updateCommand ||
-    settings.merged.general?.disableAutoUpdate
-  ) {
+  // Don't automatically run the update if auto-update is disabled or no update command
+  if (!installationInfo.updateCommand || !isAutoUpdateEnabled) {
     return;
   }
   const isNightly = info.update.latest.includes('nightly');
@@ -53,7 +53,10 @@ export function handleAutoUpdate(
     '@latest',
     isNightly ? '@nightly' : `@${info.update.latest}`,
   );
-  const updateProcess = spawnFn(updateCommand, { stdio: 'pipe', shell: true });
+  const isWindows = os.platform() === 'win32';
+  const shell = isWindows ? 'cmd.exe' : 'bash';
+  const shellArgs = isWindows ? ['/c', updateCommand] : ['-c', updateCommand];
+  const updateProcess = spawnFn(shell, shellArgs, { stdio: 'pipe' });
   let errorOutput = '';
   updateProcess.stderr.on('data', (data) => {
     errorOutput += data.toString();

@@ -23,6 +23,7 @@ import {
   ToolConfirmationOutcome,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  SkillTool,
 } from '../index.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
@@ -253,7 +254,6 @@ describe('CoreToolScheduler', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -331,7 +331,6 @@ describe('CoreToolScheduler', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -368,17 +367,17 @@ describe('CoreToolScheduler', () => {
   describe('getToolSuggestion', () => {
     it('should suggest the top N closest tool names for a typo', () => {
       // Create mocked tool registry
+      const mockToolRegistry = {
+        getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
+        getTool: () => undefined, // No SkillTool in this test
+      } as unknown as ToolRegistry;
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null, // No client needed for these tests
         getExcludeTools: () => undefined,
         isInteractive: () => true,
       } as unknown as Config;
-      const mockToolRegistry = {
-        getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
-      } as unknown as ToolRegistry;
 
       // Create scheduler
       const scheduler = new CoreToolScheduler({
@@ -409,12 +408,12 @@ describe('CoreToolScheduler', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file'],
+        getTool: () => undefined, // No SkillTool in this test
       } as unknown as ToolRegistry;
 
       // Create mocked config with excluded tools
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit', 'run_shell_command'],
@@ -439,12 +438,12 @@ describe('CoreToolScheduler', () => {
       // Create mocked tool registry
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file'],
+        getTool: () => undefined, // No SkillTool in this test
       } as unknown as ToolRegistry;
 
       // Create mocked config with excluded tools
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getExcludeTools: () => ['write_file', 'edit'],
@@ -465,6 +464,61 @@ describe('CoreToolScheduler', () => {
       expect(hallucinatedTool).not.toContain(
         'not available in the current environment',
       );
+    });
+
+    it('should suggest using Skill tool when unknown tool name matches a skill name', () => {
+      // Create a mock that passes instanceof SkillTool check
+      const mockSkillTool = Object.create(SkillTool.prototype);
+      mockSkillTool.getAvailableSkillNames = () => [
+        'pdf',
+        'xlsx',
+        'frontend-design',
+      ];
+
+      // Create mocked tool registry that returns the mock SkillTool
+      const mockToolRegistry = {
+        getAllToolNames: () => ['skill', 'list_files', 'read_file'],
+        getTool: (name: string) =>
+          name === 'skill' ? mockSkillTool : undefined,
+      } as unknown as ToolRegistry;
+
+      // Create mocked config
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getExcludeTools: () => undefined,
+        isInteractive: () => true,
+      } as unknown as Config;
+
+      // Create scheduler
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // Test that when unknown tool name matches a skill name, we get skill-specific message
+      // @ts-expect-error accessing private method
+      const skillMessage = scheduler.getToolNotFoundMessage('pdf');
+      expect(skillMessage).toContain('is a skill name, not a tool name');
+      expect(skillMessage).toContain('skill');
+      expect(skillMessage).toContain('skill: "pdf"');
+      // Should NOT contain the standard "not found in registry" prefix
+      expect(skillMessage).not.toContain('not found in registry');
+
+      // Test another skill name
+      // @ts-expect-error accessing private method
+      const xlsxMessage = scheduler.getToolNotFoundMessage('xlsx');
+      expect(xlsxMessage).toContain('is a skill name, not a tool name');
+      expect(xlsxMessage).toContain('skill: "xlsx"');
+
+      // Test that non-skill names still use standard message with Levenshtein suggestions
+      // @ts-expect-error accessing private method
+      const nonSkillMessage = scheduler.getToolNotFoundMessage('list_fils');
+      expect(nonSkillMessage).toContain('not found in registry');
+      expect(nonSkillMessage).toContain('Did you mean');
+      expect(nonSkillMessage).not.toContain('is a skill name');
     });
   });
 
@@ -510,7 +564,6 @@ describe('CoreToolScheduler', () => {
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
@@ -597,7 +650,6 @@ describe('CoreToolScheduler', () => {
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
         getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolRegistry: () => mockToolRegistry,
-        getUseSmartEdit: () => false,
         getUseModelRouter: () => false,
         getGeminiClient: () => null,
         getChatRecordingService: () => undefined,
@@ -687,7 +739,6 @@ describe('CoreToolScheduler with payload', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -800,11 +851,11 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: {
-            output: 'Binary content of type image/png was processed.',
+            output: '',
           },
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'base64...' } }],
         },
       },
-      llmContent,
     ]);
   });
 
@@ -819,11 +870,15 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: {
-            output: 'Binary content of type application/pdf was processed.',
+            output: '',
           },
+          parts: [
+            {
+              fileData: { mimeType: 'application/pdf', fileUri: 'gs://...' },
+            },
+          ],
         },
       },
-      llmContent,
     ]);
   });
 
@@ -857,11 +912,13 @@ describe('convertToFunctionResponse', () => {
           name: toolName,
           id: callId,
           response: {
-            output: 'Binary content of type image/gif was processed.',
+            output: '',
           },
+          parts: [
+            { inlineData: { mimeType: 'image/gif', data: 'gifdata...' } },
+          ],
         },
       },
-      ...llmContent,
     ]);
   });
 
@@ -1011,7 +1068,6 @@ describe('CoreToolScheduler edit cancellation', () => {
         getProjectTempDir: () => '/tmp',
       },
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1121,7 +1177,6 @@ describe('CoreToolScheduler YOLO mode', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1363,7 +1418,6 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1496,7 +1550,6 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1599,7 +1652,6 @@ describe('CoreToolScheduler request queueing', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
@@ -1672,7 +1724,6 @@ describe('CoreToolScheduler request queueing', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null, // No client needed for these tests
       isInteractive: () => true, // Required to prevent auto-denial of tool calls
@@ -1867,7 +1918,6 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,
@@ -1988,7 +2038,6 @@ describe('CoreToolScheduler Sequential Execution', () => {
       getTruncateToolOutputThreshold: () =>
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-      getUseSmartEdit: () => false,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       getChatRecordingService: () => undefined,

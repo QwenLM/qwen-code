@@ -112,11 +112,9 @@ describe('modelConfigResolver', () => {
           modelProvider: {
             id: 'provider-model',
             name: 'Provider Model',
-            authType: AuthType.USE_OPENAI,
             envKey: 'MY_CUSTOM_KEY',
             baseUrl: 'https://provider.example.com',
             generationConfig: {},
-            capabilities: {},
           },
         });
 
@@ -249,13 +247,11 @@ describe('modelConfigResolver', () => {
           modelProvider: {
             id: 'model',
             name: 'Model',
-            authType: AuthType.USE_OPENAI,
             envKey: 'MY_KEY',
             baseUrl: 'https://api.example.com',
             generationConfig: {
               timeout: 60000,
             },
-            capabilities: {},
           },
         });
 

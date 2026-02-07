@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
 // Mapping from common CSS color names (lowercase) to hex codes (lowercase)
 // Excludes names directly supported by Ink
 export const CSS_NAME_TO_HEX_MAP: Readonly<Record<string, string>> = {
@@ -147,6 +149,8 @@ export const CSS_NAME_TO_HEX_MAP: Readonly<Record<string, string>> = {
   yellowgreen: '#9acd32',
 };
 
+const debugLogger = createDebugLogger('COLOR_UTILS');
+
 // Define the set of Ink's named colors for quick lookup
 export const INK_SUPPORTED_NAMES = new Set([
   'black',
@@ -224,7 +228,7 @@ export function resolveColor(colorValue: string): string | undefined {
   }
 
   // 4. Could not resolve
-  console.warn(
+  debugLogger.warn(
     `[ColorUtils] Could not resolve color "${colorValue}" to an Ink-compatible format.`,
   );
   return undefined;

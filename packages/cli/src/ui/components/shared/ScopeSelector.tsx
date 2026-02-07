@@ -45,6 +45,7 @@ export function ScopeSelector({
         {isFocused ? '> ' : '  '}
         {t('Apply To')}
       </Text>
+      <Box height={1} />
       <RadioButtonSelect
         items={scopeItems}
         initialIndex={safeInitialIndex}

@@ -15,7 +15,6 @@ import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
 import type { Config } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { connectAndDiscover } from './mcp-client.js';
 import type { SendSdkMcpMessage } from './mcp-client.js';
 import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -23,8 +22,12 @@ import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 type ToolParams = Record<string, unknown>;
+
+const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
   ToolParams,
@@ -181,12 +184,8 @@ export class ToolRegistry {
   ) {
     this.config = config;
     this.mcpClientManager = new McpClientManager(
-      this.config.getMcpServers() ?? {},
-      this.config.getMcpServerCommand(),
+      this.config,
       this,
-      this.config.getPromptRegistry(),
-      this.config.getDebugMode(),
-      this.config.getWorkspaceContext(),
       eventEmitter,
       sendSdkMcpMessage,
     );
@@ -202,7 +201,7 @@ export class ToolRegistry {
         tool = tool.asFullyQualifiedTool();
       } else {
         // Decide on behavior: throw error, log warning, or allow overwrite
-        console.warn(
+        debugLogger.warn(
           `Tool with name "${tool.name}" is already registered. Overwriting.`,
         );
       }
@@ -283,19 +282,10 @@ export class ToolRegistry {
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
-    const mcpServers = this.config.getMcpServers() ?? {};
-    const serverConfig = mcpServers[serverName];
-    if (serverConfig) {
-      await connectAndDiscover(
-        serverName,
-        serverConfig,
-        this,
-        this.config.getPromptRegistry(),
-        this.config.getDebugMode(),
-        this.config.getWorkspaceContext(),
-        this.config,
-      );
-    }
+    await this.mcpClientManager.discoverMcpToolsForServer(
+      serverName,
+      this.config,
+    );
   }
 
   private async discoverAndRegisterToolsFromCommand(): Promise<void> {
@@ -360,8 +350,10 @@ export class ToolRegistry {
           }
 
           if (code !== 0) {
-            console.error(`Command failed with code ${code}`);
-            console.error(stderr);
+            debugLogger.error(
+              `Tool discovery command failed with code ${code}`,
+            );
+            debugLogger.error(stderr);
             return reject(
               new Error(`Tool discovery command failed with exit code ${code}`),
             );
@@ -394,7 +386,7 @@ export class ToolRegistry {
       // register each function as a tool
       for (const func of functions) {
         if (!func.name) {
-          console.warn('Discovered a tool with no name. Skipping.');
+          debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
         }
         const parameters =
@@ -413,7 +405,7 @@ export class ToolRegistry {
         );
       }
     } catch (e) {
-      console.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
+      debugLogger.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
       throw e;
     }
   }
@@ -482,5 +474,30 @@ export class ToolRegistry {
    */
   getTool(name: string): AnyDeclarativeTool | undefined {
     return this.tools.get(name);
+  }
+
+  async readMcpResource(
+    serverName: string,
+    uri: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<ReadResourceResult> {
+    if (!this.config.isTrustedFolder()) {
+      throw new Error('MCP resources are unavailable in untrusted folders.');
+    }
+
+    return this.mcpClientManager.readResource(serverName, uri, options);
+  }
+
+  /**
+   * Stops all MCP clients and cleans up resources.
+   * This method is idempotent and safe to call multiple times.
+   */
+  async stop(): Promise<void> {
+    try {
+      await this.mcpClientManager.stop();
+    } catch (error) {
+      // Log but don't throw - cleanup should be best-effort
+      debugLogger.error('Error stopping MCP clients:', error);
+    }
   }
 }

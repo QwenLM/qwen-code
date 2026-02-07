@@ -7,11 +7,15 @@
 /* ACP defines a schema for a simple (experimental) JSON-RPC protocol that allows GUI applications to interact with agents. */
 
 import { z } from 'zod';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import * as schema from './schema.js';
+import { ACP_ERROR_CODES } from './errorCodes.js';
+import { pickAuthMethodsForDetails } from './authMethods.js';
 export * from './schema.js';
 
 import type { WritableStream, ReadableStream } from 'node:stream/web';
 
+const debugLogger = createDebugLogger('ACP_PROTOCOL');
 export class AgentSideConnection implements Client {
   #connection: Connection;
 
@@ -69,6 +73,13 @@ export class AgentSideConnection implements Client {
           }
           const validatedParams = schema.setModeRequestSchema.parse(params);
           return agent.setMode(validatedParams);
+        }
+        case schema.AGENT_METHODS.session_set_model: {
+          if (!agent.setModel) {
+            throw RequestError.methodNotFound();
+          }
+          const validatedParams = schema.setModelRequestSchema.parse(params);
+          return agent.setModel(validatedParams);
         }
         default:
           throw RequestError.methodNotFound(method);
@@ -172,6 +183,7 @@ type ErrorResponse = {
   code: number;
   message: string;
   data?: unknown;
+  authMethods?: schema.AuthMethod[];
 };
 
 type PendingResponse = {
@@ -212,8 +224,16 @@ class Connection {
         const trimmedLine = line.trim();
 
         if (trimmedLine) {
-          const message = JSON.parse(trimmedLine);
-          this.#processMessage(message);
+          try {
+            const message = JSON.parse(trimmedLine);
+            this.#processMessage(message);
+          } catch (error) {
+            debugLogger.error('ACP parse error for inbound message.', {
+              code: ACP_ERROR_CODES.PARSE_ERROR,
+              line: trimmedLine,
+              error,
+            });
+          }
         }
       }
     }
@@ -250,13 +270,23 @@ class Connection {
       return { result: result ?? null };
     } catch (error: unknown) {
       if (error instanceof RequestError) {
+        debugLogger.debug('ACP handler returned request error.', {
+          method,
+          code: error.code,
+          message: error.message,
+          details: error.data?.details,
+        });
         return error.toResult();
       }
 
       if (error instanceof z.ZodError) {
-        return RequestError.invalidParams(
-          JSON.stringify(error.format(), undefined, 2),
-        ).toResult();
+        const formattedDetails = JSON.stringify(error.format(), undefined, 2);
+        debugLogger.debug('ACP handler validation error.', {
+          method,
+          code: ACP_ERROR_CODES.INVALID_PARAMS,
+          details: formattedDetails,
+        });
+        return RequestError.invalidParams(formattedDetails).toResult();
       }
 
       let errorName;
@@ -274,10 +304,18 @@ class Connection {
         details = error.message;
       }
 
-      if (errorName === 'TokenManagerError') {
-        return RequestError.authRequired(details).toResult();
+      if (errorName === 'TokenManagerError' || details?.includes('/auth')) {
+        return RequestError.authRequired(
+          details,
+          pickAuthMethodsForDetails(details),
+        ).toResult();
       }
 
+      debugLogger.error(
+        'ACP handler failed with internal error.',
+        { method, errorName, details },
+        error,
+      );
       return RequestError.internalError(details).toResult();
     }
   }
@@ -288,7 +326,14 @@ class Connection {
       if ('result' in response) {
         pendingResponse.resolve(response.result);
       } else if ('error' in response) {
-        pendingResponse.reject(response.error);
+        const { error } = response;
+        debugLogger.warn('ACP response error received.', {
+          id: response.id,
+          code: error.code,
+          message: error.message,
+          data: error.data,
+        });
+        pendingResponse.reject(error);
       }
       this.#pendingResponses.delete(response.id);
     }
@@ -320,49 +365,84 @@ class Connection {
       })
       .catch((error) => {
         // Continue processing writes on error
-        console.error('ACP write error:', error);
+        debugLogger.error('ACP write error:', error);
       });
     return this.#writeQueue;
   }
 }
 
 export class RequestError extends Error {
-  data?: { details?: string };
+  data?: { details?: string; authMethods?: schema.AuthMethod[] };
 
   constructor(
     public code: number,
     message: string,
     details?: string,
+    authMethods?: schema.AuthMethod[],
   ) {
     super(message);
     this.name = 'RequestError';
-    if (details) {
-      this.data = { details };
+    if (details || authMethods) {
+      this.data = {};
+      if (details) {
+        this.data.details = details;
+      }
+      if (authMethods) {
+        this.data.authMethods = authMethods;
+      }
     }
   }
 
   static parseError(details?: string): RequestError {
-    return new RequestError(-32700, 'Parse error', details);
+    return new RequestError(
+      ACP_ERROR_CODES.PARSE_ERROR,
+      'Parse error',
+      details,
+    );
   }
 
   static invalidRequest(details?: string): RequestError {
-    return new RequestError(-32600, 'Invalid request', details);
+    return new RequestError(
+      ACP_ERROR_CODES.INVALID_REQUEST,
+      'Invalid request',
+      details,
+    );
   }
 
   static methodNotFound(details?: string): RequestError {
-    return new RequestError(-32601, 'Method not found', details);
+    return new RequestError(
+      ACP_ERROR_CODES.METHOD_NOT_FOUND,
+      'Method not found',
+      details,
+    );
   }
 
   static invalidParams(details?: string): RequestError {
-    return new RequestError(-32602, 'Invalid params', details);
+    return new RequestError(
+      ACP_ERROR_CODES.INVALID_PARAMS,
+      'Invalid params',
+      details,
+    );
   }
 
   static internalError(details?: string): RequestError {
-    return new RequestError(-32603, 'Internal error', details);
+    return new RequestError(
+      ACP_ERROR_CODES.INTERNAL_ERROR,
+      'Internal error',
+      details,
+    );
   }
 
-  static authRequired(details?: string): RequestError {
-    return new RequestError(-32000, 'Authentication required', details);
+  static authRequired(
+    details?: string,
+    authMethods?: schema.AuthMethod[],
+  ): RequestError {
+    return new RequestError(
+      ACP_ERROR_CODES.AUTH_REQUIRED,
+      'Authentication required',
+      details,
+      authMethods,
+    );
   }
 
   toResult<T>(): Result<T> {
@@ -408,4 +488,5 @@ export interface Agent {
   prompt(params: schema.PromptRequest): Promise<schema.PromptResponse>;
   cancel(params: schema.CancelNotification): Promise<void>;
   setMode?(params: schema.SetModeRequest): Promise<schema.SetModeResponse>;
+  setModel?(params: schema.SetModelRequest): Promise<schema.SetModelResponse>;
 }

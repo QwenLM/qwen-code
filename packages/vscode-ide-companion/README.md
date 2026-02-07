@@ -1,6 +1,11 @@
 # Qwen Code Companion
 
-Seamlessly integrate [Qwen Code](https://github.com/QwenLM/qwen-code) into Visual Studio Code with native IDE features and an intuitive interface. This extension bundles everything you need to get started immediately.
+[![Version](https://img.shields.io/visual-studio-marketplace/v/qwenlm.qwen-code-vscode-ide-companion)](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion)
+[![VS Code Installs](https://img.shields.io/visual-studio-marketplace/i/qwenlm.qwen-code-vscode-ide-companion)](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion)
+[![Open VSX Downloads](https://img.shields.io/open-vsx/dt/qwenlm/qwen-code-vscode-ide-companion)](https://open-vsx.org/extension/qwenlm/qwen-code-vscode-ide-companion)
+[![Rating](https://img.shields.io/visual-studio-marketplace/r/qwenlm.qwen-code-vscode-ide-companion)](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion)
+
+Seamlessly integrate [Qwen Code](https://github.com/QwenLM/qwen-code) into Visual Studio Code with native IDE features and an intuitive chat interface. This extension bundles everything you need — no additional installation required.
 
 ## Demo
 
@@ -11,7 +16,7 @@ Seamlessly integrate [Qwen Code](https://github.com/QwenLM/qwen-code) into Visua
 
 ## Features
 
-- **Native IDE experience**: Dedicated Qwen Code sidebar panel accessed via the Qwen icon
+- **Native IDE experience**: Dedicated Qwen Code Chat panel accessed via the Qwen icon in the editor title bar
 - **Native diffing**: Review, edit, and accept changes in VS Code's diff view
 - **Auto-accept edits mode**: Automatically apply Qwen's changes as they're made
 - **File management**: @-mention files or attach files and images using the system file picker
@@ -20,73 +25,46 @@ Seamlessly integrate [Qwen Code](https://github.com/QwenLM/qwen-code) into Visua
 
 ## Requirements
 
-- Visual Studio Code 1.85.0 or newer
+- Visual Studio Code 1.85.0 or newer (also works with Cursor, Windsurf, and other VS Code-based editors)
 
-## Installation
+## Quick Start
 
-1. Install from the VS Code Marketplace: https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion
+1. **Install** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=qwenlm.qwen-code-vscode-ide-companion) or [Open VSX Registry](https://open-vsx.org/extension/qwenlm/qwen-code-vscode-ide-companion)
 
-2. Two ways to use
-   - Chat panel: Click the Qwen icon in the Activity Bar, or run `Qwen Code: Open` from the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`).
-   - Terminal session (classic): Run `Qwen Code: Run` to launch a session in the integrated terminal (bundled CLI).
+2. **Open the Chat panel** using one of these methods:
+   - Click the **Qwen icon** in the top-right corner of the editor
+   - Run `Qwen Code: Open` from the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`)
 
-## Development and Debugging
+3. **Start chatting** — Ask Qwen to help with coding tasks, explain code, fix bugs, or write new features
 
-To debug and develop this extension locally:
+## Commands
 
-1. **Clone the repository**
+| Command                          | Description                                            |
+| -------------------------------- | ------------------------------------------------------ |
+| `Qwen Code: Open`                | Open the Qwen Code Chat panel                          |
+| `Qwen Code: Run`                 | Launch a classic terminal session with the bundled CLI |
+| `Qwen Code: Accept Current Diff` | Accept the currently displayed diff                    |
+| `Qwen Code: Close Diff Editor`   | Close/reject the current diff                          |
 
-   ```bash
-   git clone https://github.com/QwenLM/qwen-code.git
-   cd qwen-code
-   ```
+## Feedback & Issues
 
-2. **Install dependencies**
+- 🐛 [Report bugs](https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&labels=bug,vscode-ide-companion)
+- 💡 [Request features](https://github.com/QwenLM/qwen-code/issues/new?template=feature_request.yml&labels=enhancement,vscode-ide-companion)
+- 📖 [Documentation](https://qwenlm.github.io/qwen-code-docs/)
+- 📋 [Changelog](https://github.com/QwenLM/qwen-code/releases)
 
-   ```bash
-   npm install
-   # or if using pnpm
-   pnpm install
-   ```
+## Contributing
 
-3. **Start debugging**
+We welcome contributions! See our [Contributing Guide](https://github.com/QwenLM/qwen-code/blob/main/CONTRIBUTING.md) for details on:
 
-   ```bash
-   code .  # Open the project root in VS Code
-   ```
-   - Open the `packages/vscode-ide-companion/src/extension.ts` file
-   - Open Debug panel (`Ctrl+Shift+D` or `Cmd+Shift+D`)
-   - Select **"Launch Companion VS Code Extension"** from the debug dropdown
-   - Press `F5` to launch Extension Development Host
-
-4. **Make changes and reload**
-   - Edit the source code in the original VS Code window
-   - To see your changes, reload the Extension Development Host window by:
-     - Pressing `Ctrl+R` (Windows/Linux) or `Cmd+R` (macOS)
-     - Or clicking the "Reload" button in the debug toolbar
-
-5. **View logs and debug output**
-   - Open the Debug Console in the original VS Code window to see extension logs
-   - In the Extension Development Host window, open Developer Tools with `Help > Toggle Developer Tools` to see webview logs
-
-## Build for Production
-
-To build the extension for distribution:
-
-```bash
-npm run compile
-# or
-pnpm run compile
-```
-
-To package the extension as a VSIX file:
-
-```bash
-npx vsce package
-# or
-pnpm vsce package
-```
+- Setting up the development environment
+- Building and debugging the extension locally
+- Submitting pull requests
 
 ## Terms of Service and Privacy Notice
 
 By installing this extension, you agree to the [Terms of Service](https://github.com/QwenLM/qwen-code/blob/main/docs/tos-privacy.md).
+
+## License
+
+[Apache-2.0](https://github.com/QwenLM/qwen-code/blob/main/LICENSE)

@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
-import { InputFormat, logUserPrompt } from '@qwen-code/qwen-code-core';
+import {
+  InputFormat,
+  isDebugLoggingDegraded,
+  logUserPrompt,
+  Storage,
+  type Config,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
@@ -15,13 +21,8 @@ import React from 'react';
 import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
-import { ExtensionStorage, loadExtensions } from './config/extension.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import {
-  getSettingsWarnings,
-  loadSettings,
-  migrateDeprecatedSettings,
-} from './config/settings.js';
+import { getSettingsWarnings, loadSettings } from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -36,7 +37,6 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager } from './ui/themes/theme-manager.js';
-import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
@@ -55,9 +55,13 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
+import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
+import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+
+const debugLogger = createDebugLogger('STARTUP');
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -70,7 +74,7 @@ export function validateDnsResolutionOrder(
     return order;
   }
   // We don't want to throw here, just warn and use the default.
-  console.warn(
+  writeStderrLine(
     `Invalid value for dnsResolutionOrder in settings: "${order}". Using default "${defaultValue}".`,
   );
   return defaultValue;
@@ -86,7 +90,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   // Set target to 50% of total memory
   const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.5);
   if (isDebugMode) {
-    console.debug(
+    writeStderrLine(
       `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB`,
     );
   }
@@ -97,7 +101,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 
   if (targetMaxOldSpaceSizeInMB > currentMaxOldSpaceSizeMb) {
     if (isDebugMode) {
-      console.debug(
+      writeStderrLine(
         `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB`,
       );
     }
@@ -107,7 +111,6 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   return [];
 }
 
-import { ExtensionEnablementManager } from './config/extensions/extensionEnablement.js';
 import { loadSandboxConfig } from './config/sandboxConfig.js';
 import { runAcpAgent } from './acp-integration/acpAgent.js';
 
@@ -187,16 +190,16 @@ export async function startInteractiveUI(
     },
   );
 
-  if (!settings.merged.general?.disableUpdateNag) {
+  // Check for updates only if enableAutoUpdate is not explicitly disabled.
+  // Using !== false ensures updates are enabled by default when undefined.
+  if (settings.merged.general?.enableAutoUpdate !== false) {
     checkForUpdates()
       .then((info) => {
         handleAutoUpdate(info, settings, config.getProjectRoot());
       })
       .catch((err) => {
         // Silently ignore update check errors.
-        if (config.getDebugMode()) {
-          console.error('Update check failed:', err);
-        }
+        debugLogger.warn(`Update check failed: ${err}`);
       });
   }
 
@@ -206,14 +209,13 @@ export async function startInteractiveUI(
 export async function main() {
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
-  migrateDeprecatedSettings(settings);
   await cleanupCheckpoints();
 
-  let argv = await parseArguments(settings.merged);
+  let argv = await parseArguments();
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
-    console.error(
+    writeStderrLine(
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
     process.exit(1);
@@ -232,7 +234,9 @@ export async function main() {
     if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      console.warn(`Warning: Theme "${settings.merged.ui?.theme}" not found.`);
+      writeStderrLine(
+        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
+      );
     }
   }
 
@@ -251,15 +255,15 @@ export async function main() {
     if (sandboxConfig) {
       const partialConfig = await loadCliConfig(
         settings.merged,
-        [],
-        new ExtensionEnablementManager(ExtensionStorage.getUserExtensionsDir()),
         argv,
+        undefined,
+        [],
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
         // Validate authentication here because the sandbox will interfere with the Oauth2 web redirect.
         try {
-          const authType = partialConfig.modelsConfig.getCurrentAuthType();
+          const authType = partialConfig.getModelsConfig().getCurrentAuthType();
           // Fresh users may not have selected/persisted an authType yet.
           // In that case, defer auth prompting/selection to the main interactive flow.
           if (authType) {
@@ -271,7 +275,7 @@ export async function main() {
             await partialConfig.refreshAuth(authType);
           }
         } catch (err) {
-          console.error('Error authenticating:', err);
+          writeStderrLine(`Error authenticating: ${err}`);
           process.exit(1);
         }
       }
@@ -334,35 +338,30 @@ export async function main() {
   // We are now past the logic handling potentially launching a child process
   // to run Gemini CLI. It is now safe to perform expensive initialization that
   // may have side effects.
+
+  // Initialize output language file before config loads to ensure it's included in context
+  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+
   {
-    const extensionEnablementManager = new ExtensionEnablementManager(
-      ExtensionStorage.getUserExtensionsDir(),
-      argv.extensions,
-    );
-    const extensions = loadExtensions(extensionEnablementManager);
     const config = await loadCliConfig(
       settings.merged,
-      extensions,
-      extensionEnablementManager,
       argv,
+      process.cwd(),
+      argv.extensions,
     );
 
-    if (config.getListExtensions()) {
-      console.log('Installed extensions:');
-      for (const extension of extensions) {
-        console.log(`- ${extension.config.name}`);
-      }
-      process.exit(0);
-    }
+    // Register cleanup for MCP clients as early as possible
+    // This ensures MCP server subprocesses are properly terminated on exit
+    registerCleanup(() => config.shutdown());
 
-    // Setup unified ConsolePatcher based on interactive mode
-    const isInteractive = config.isInteractive();
-    const consolePatcher = new ConsolePatcher({
-      stderr: isInteractive,
-      debugMode: isDebugMode,
-    });
-    consolePatcher.patch();
-    registerCleanup(consolePatcher.cleanup);
+    // FIXME: list extensions after the config initialize
+    // if (config.getListExtensions()) {
+    //   console.log('Installed extensions:');
+    //   for (const extension of extensions) {
+    //     console.log(`- ${extension.config.name}`);
+    //   }
+    //   process.exit(0);
+    // }
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
@@ -399,7 +398,7 @@ export async function main() {
     }
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, extensions, argv);
+      return runAcpAgent(config, settings, argv);
     }
 
     let input = config.getQuestion();
@@ -427,6 +426,19 @@ export async function main() {
         initializationResult!,
       );
       return;
+    }
+
+    // Print debug mode notice to stderr for non-interactive mode
+    if (config.getDebugMode()) {
+      writeStderrLine('Debug mode enabled');
+      writeStderrLine(
+        `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
+      );
+      if (isDebugLoggingDegraded()) {
+        writeStderrLine(
+          'Warning: Debug logging is degraded (write failures occurred)',
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here
@@ -464,7 +476,7 @@ export async function main() {
     }
 
     if (!input) {
-      console.error(
+      writeStderrLine(
         `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
       );
       process.exit(1);
@@ -479,9 +491,7 @@ export async function main() {
       prompt_length: input.length,
     });
 
-    if (config.getDebugMode()) {
-      console.log('Session ID: %s', config.getSessionId());
-    }
+    debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run

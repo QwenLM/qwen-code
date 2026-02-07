@@ -33,6 +33,14 @@ vi.mock('../hooks/useCommandCompletion.js');
 vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../utils/clipboardUtils.js');
+vi.mock('../contexts/UIStateContext.js', () => ({
+  useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false })),
+}));
+vi.mock('../contexts/UIActionsContext.js', () => ({
+  useUIActions: vi.fn(() => ({
+    temporaryCloseFeedbackDialog: vi.fn(),
+  })),
+}));
 
 const mockSlashCommands: SlashCommand[] = [
   {
@@ -278,7 +286,7 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('should call completion.navigateUp for both up arrow and Ctrl+P when suggestions are showing', async () => {
+  it('should call completion.navigateUp for up arrow when suggestions are showing', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
@@ -293,19 +301,22 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    // Test up arrow
+    // Test up arrow for completion navigation
     stdin.write('\u001B[A'); // Up arrow
     await wait();
+    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
+    expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
 
+    // Ctrl+P should navigate history, not completion
     stdin.write('\u0010'); // Ctrl+P
     await wait();
-    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(2);
-    expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
+    expect(mockInputHistory.navigateUp).toHaveBeenCalled();
 
     unmount();
   });
 
-  it('should call completion.navigateDown for both down arrow and Ctrl+N when suggestions are showing', async () => {
+  it('should call completion.navigateDown for down arrow when suggestions are showing', async () => {
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
@@ -319,14 +330,17 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    // Test down arrow
+    // Test down arrow for completion navigation
     stdin.write('\u001B[B'); // Down arrow
     await wait();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
+    expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
 
+    // Ctrl+N should navigate history, not completion
     stdin.write('\u000E'); // Ctrl+N
     await wait();
-    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(2);
-    expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
+    expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
+    expect(mockInputHistory.navigateDown).toHaveBeenCalled();
 
     unmount();
   });
@@ -367,7 +381,7 @@ describe('InputPrompt', () => {
     it('should handle Ctrl+V when clipboard has an image', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
       vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(
-        '/test/.gemini-clipboard/clipboard-123.png',
+        '/test/.qwen-clipboard/clipboard-123.png',
       );
 
       const { stdin, unmount } = renderWithProviders(
@@ -427,7 +441,7 @@ describe('InputPrompt', () => {
     it('should insert image path at cursor position with proper spacing', async () => {
       const imagePath = path.join(
         'test',
-        '.gemini-clipboard',
+        '.qwen-clipboard',
         'clipboard-456.png',
       );
       vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -461,10 +475,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('should handle errors during clipboard operations', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
+    it('should handle errors during clipboard operations gracefully', async () => {
       vi.mocked(clipboardUtils.clipboardHasImage).mockRejectedValue(
         new Error('Clipboard error'),
       );
@@ -477,13 +488,9 @@ describe('InputPrompt', () => {
       stdin.write('\x16'); // Ctrl+V
       await wait();
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Error handling clipboard image:',
-        expect.any(Error),
-      );
+      // Should not throw and should not set buffer text on error
       expect(mockBuffer.setText).not.toHaveBeenCalled();
 
-      consoleErrorSpy.mockRestore();
       unmount();
     });
   });
@@ -764,6 +771,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -791,6 +800,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -818,6 +829,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -845,6 +858,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -872,6 +887,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -900,6 +917,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -927,6 +946,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -955,6 +976,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -983,6 +1006,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -1011,6 +1036,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -1039,6 +1066,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -1069,6 +1098,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -1097,6 +1128,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -1127,6 +1160,8 @@ describe('InputPrompt', () => {
         mockCommandContext,
         false,
         expect.any(Object),
+        // active parameter: completion enabled when not just navigated history
+        true,
       );
 
       unmount();
@@ -2097,6 +2132,291 @@ describe('InputPrompt', () => {
 
     expect(mockBuffer.handleInput).toHaveBeenCalled();
     unmount();
+  });
+
+  describe('large paste placeholder', () => {
+    it('should create placeholder for paste > 1000 characters', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // Create a paste with 1001 characters
+      const largeContent = 'x'.repeat(1001);
+
+      // Simulate bracketed paste
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Verify placeholder was inserted, not the full content
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1001 chars]',
+        { paste: false },
+      );
+      expect(mockBuffer.insert).toHaveBeenCalledTimes(1);
+
+      unmount();
+    });
+
+    it('should create placeholder for paste > 10 lines', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // Create a paste with 11 lines (each line is short)
+      const multiLineContent = Array(11).fill('line').join('\n');
+
+      // Simulate bracketed paste
+      stdin.write(`\x1b[200~${multiLineContent}\x1b[201~`);
+      await wait();
+
+      // Verify placeholder was inserted
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        expect.stringMatching(/\[Pasted Content \d+ chars\]/),
+        { paste: false },
+      );
+
+      unmount();
+    });
+
+    it('should use sequential IDs for multiple pastes of same size', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      const largeContent = 'x'.repeat(1001);
+
+      // First paste
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Second paste
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Verify both placeholders were created with correct IDs
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1001 chars]',
+        { paste: false },
+      );
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1001 chars] #2',
+        { paste: false },
+      );
+
+      unmount();
+    });
+
+    it('should expand placeholder to full content on submit', async () => {
+      const largeContent = 'x'.repeat(1001);
+      mockBuffer.text = '[Pasted Content 1001 chars]';
+      mockBuffer.lines = [mockBuffer.text];
+      mockBuffer.cursor = [0, mockBuffer.text.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // First paste to set up the placeholder
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Wait for paste protection to expire
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      // Submit the input
+      stdin.write('\r');
+      await wait();
+
+      // Verify onSubmit was called with expanded content
+      expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+
+      unmount();
+    });
+
+    it('should expand same-size placeholders correctly when #2 appears first', async () => {
+      const firstPaste = 'x'.repeat(1001);
+      const secondPaste = 'y'.repeat(1001);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(`\x1b[200~${firstPaste}\x1b[201~`);
+      await wait();
+      stdin.write(`\x1b[200~${secondPaste}\x1b[201~`);
+      await wait();
+
+      mockBuffer.text =
+        '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]';
+      mockBuffer.lines = mockBuffer.text.split('\n');
+      mockBuffer.cursor = [1, '[Pasted Content 1001 chars]'.length];
+
+      // Wait for paste protection to expire
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      stdin.write('\r');
+      await wait();
+
+      expect(props.onSubmit).toHaveBeenCalledWith(
+        `${secondPaste}\n${firstPaste}`,
+      );
+
+      unmount();
+    });
+
+    it('should write expanded placeholder content to shell history', async () => {
+      props.shellModeActive = true;
+      const largeContent = 'x'.repeat(1001);
+      mockBuffer.text = '[Pasted Content 1001 chars]';
+      mockBuffer.lines = [mockBuffer.text];
+      mockBuffer.cursor = [0, mockBuffer.text.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Wait for paste protection to expire
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      stdin.write('\r');
+      await wait();
+
+      expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith(
+        largeContent,
+      );
+      expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+
+      unmount();
+    });
+
+    it('should delete entire placeholder on backspace', async () => {
+      const placeholderText = '[Pasted Content 1001 chars]';
+      mockBuffer.text = placeholderText;
+      mockBuffer.lines = [placeholderText];
+      mockBuffer.cursor = [0, placeholderText.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      // First set up a placeholder via paste
+      const largeContent = 'x'.repeat(1001);
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Press backspace to delete the placeholder
+      stdin.write('\x7f'); // backspace character
+      await wait();
+
+      // Verify replaceRangeByOffset was called to delete entire placeholder
+      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalledWith(
+        0,
+        placeholderText.length,
+        '',
+      );
+
+      unmount();
+    });
+
+    it('should reuse placeholder ID after deletion', async () => {
+      // Set up mocks that actually update buffer state
+      vi.mocked(mockBuffer.insert).mockImplementation((text: string) => {
+        mockBuffer.text += text;
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
+      });
+
+      vi.mocked(mockBuffer.replaceRangeByOffset).mockImplementation(
+        (start: number, end: number, replacement: string) => {
+          mockBuffer.text =
+            mockBuffer.text.slice(0, start) +
+            replacement +
+            mockBuffer.text.slice(end);
+          mockBuffer.lines = [mockBuffer.text];
+          mockBuffer.cursor = [0, start];
+        },
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      const largeContent = 'x'.repeat(1001);
+
+      // First paste - gets ID 1
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Verify first placeholder was inserted
+      expect(mockBuffer.text).toBe('[Pasted Content 1001 chars]');
+
+      // Press backspace to delete the placeholder (cursor is at end of placeholder)
+      stdin.write('\x7f');
+      await wait();
+
+      // Verify the placeholder was deleted (buffer is now empty)
+      expect(mockBuffer.text).toBe('');
+
+      // Second paste - should reuse ID 1 since the first was deleted
+      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
+      await wait();
+
+      // Verify the ID was reused (no #2 suffix)
+      const insertCalls = vi.mocked(mockBuffer.insert).mock.calls;
+      const lastCall = insertCalls[insertCalls.length - 1];
+      expect(lastCall[0]).toBe('[Pasted Content 1001 chars]');
+
+      unmount();
+    });
+
+    it('should handle mixed pastes with different character counts', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      const content1001 = 'x'.repeat(1001);
+      const content1500 = 'y'.repeat(1500);
+
+      // Paste 1001 chars
+      stdin.write(`\x1b[200~${content1001}\x1b[201~`);
+      await wait();
+
+      // Paste 1500 chars
+      stdin.write(`\x1b[200~${content1500}\x1b[201~`);
+      await wait();
+
+      // Paste 1001 chars again (should get ID #2 for 1001)
+      stdin.write(`\x1b[200~${content1001}\x1b[201~`);
+      await wait();
+
+      // Verify placeholders with correct IDs
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1001 chars]',
+        { paste: false },
+      );
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1500 chars]',
+        { paste: false },
+      );
+      expect(mockBuffer.insert).toHaveBeenCalledWith(
+        '[Pasted Content 1001 chars] #2',
+        { paste: false },
+      );
+
+      unmount();
+    });
   });
 });
 function clean(str: string | undefined): string {

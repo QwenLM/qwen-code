@@ -10,18 +10,17 @@ import type {
   Part,
   PartUnion,
 } from '@google/genai';
-import type {
-  RequestTokenizer,
-  TokenizerConfig,
-  TokenCalculationResult,
-} from './types.js';
+import type { TokenCalculationResult } from './types.js';
 import { TextTokenizer } from './textTokenizer.js';
 import { ImageTokenizer } from './imageTokenizer.js';
+import { createDebugLogger } from '../debugLogger.js';
+
+const debugLogger = createDebugLogger('TOKENIZER');
 
 /**
- * Simple request tokenizer that handles text and image content serially
+ * Simple request token estimator that handles text and image content serially
  */
-export class DefaultRequestTokenizer implements RequestTokenizer {
+export class RequestTokenizer {
   private textTokenizer: TextTokenizer;
   private imageTokenizer: ImageTokenizer;
 
@@ -35,14 +34,8 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
    */
   async calculateTokens(
     request: CountTokensParameters,
-    config: TokenizerConfig = {},
   ): Promise<TokenCalculationResult> {
     const startTime = performance.now();
-
-    // Apply configuration
-    if (config.textEncoding) {
-      this.textTokenizer = new TextTokenizer(config.textEncoding);
-    }
 
     try {
       // Process request content and group by type
@@ -87,7 +80,7 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
         processingTime,
       };
     } catch (error) {
-      console.error('Error calculating tokens:', error);
+      debugLogger.error('Error calculating tokens:', error);
 
       // Fallback calculation
       const fallbackTokens = this.calculateFallbackTokens(request);
@@ -112,11 +105,10 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
     if (textContents.length === 0) return 0;
 
     try {
-      const tokenCounts =
-        await this.textTokenizer.calculateTokensBatch(textContents);
-      return tokenCounts.reduce((sum, count) => sum + count, 0);
+      // Avoid per-part rounding inflation by estimating once on the combined text.
+      return await this.textTokenizer.calculateTokens(textContents.join(''));
     } catch (error) {
-      console.warn('Error calculating text tokens:', error);
+      debugLogger.warn('Error calculating text tokens:', error);
       // Fallback: character-based estimation
       const totalChars = textContents.join('').length;
       return Math.ceil(totalChars / 4);
@@ -136,7 +128,7 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
         await this.imageTokenizer.calculateTokensBatch(imageContents);
       return tokenCounts.reduce((sum, count) => sum + count, 0);
     } catch (error) {
-      console.warn('Error calculating image tokens:', error);
+      debugLogger.warn('Error calculating image tokens:', error);
       // Fallback: minimum tokens per image
       return imageContents.length * 6; // 4 image tokens + 2 special tokens as minimum
     }
@@ -162,7 +154,7 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
         // Rough estimate: 1 token per 100 bytes of audio data
         totalTokens += Math.max(Math.ceil(dataSize / 100), 10); // Minimum 10 tokens per audio
       } catch (error) {
-        console.warn('Error calculating audio tokens:', error);
+        debugLogger.warn('Error calculating audio tokens:', error);
         totalTokens += 10; // Fallback minimum
       }
     }
@@ -177,12 +169,10 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
     if (otherContents.length === 0) return 0;
 
     try {
-      // Treat other content as text for token calculation
-      const tokenCounts =
-        await this.textTokenizer.calculateTokensBatch(otherContents);
-      return tokenCounts.reduce((sum, count) => sum + count, 0);
+      // Treat other content as text, and avoid per-item rounding inflation.
+      return await this.textTokenizer.calculateTokens(otherContents.join(''));
     } catch (error) {
-      console.warn('Error calculating other content tokens:', error);
+      debugLogger.warn('Error calculating other content tokens:', error);
       // Fallback: character-based estimation
       const totalChars = otherContents.join('').length;
       return Math.ceil(totalChars / 4);
@@ -197,7 +187,7 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
       const content = JSON.stringify(request.contents);
       return Math.ceil(content.length / 4); // Rough estimate: 1 token ≈ 4 characters
     } catch (error) {
-      console.warn('Error in fallback token calculation:', error);
+      debugLogger.warn('Error in fallback token calculation:', error);
       return 100; // Conservative fallback
     }
   }
@@ -264,7 +254,18 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
           otherContents,
         );
       }
+      return;
     }
+
+    // Some request shapes (e.g. CountTokensParameters) allow passing parts directly
+    // instead of wrapping them in a { parts: [...] } Content object.
+    this.processPart(
+      content as Part | string,
+      textContents,
+      imageContents,
+      audioContents,
+      otherContents,
+    );
   }
 
   /**
@@ -323,19 +324,7 @@ export class DefaultRequestTokenizer implements RequestTokenizer {
         otherContents.push(serialized);
       }
     } catch (error) {
-      console.warn('Failed to serialize unknown part type:', error);
-    }
-  }
-
-  /**
-   * Dispose of resources
-   */
-  async dispose(): Promise<void> {
-    try {
-      // Dispose of tokenizers
-      this.textTokenizer.dispose();
-    } catch (error) {
-      console.warn('Error disposing request tokenizer:', error);
+      debugLogger.warn('Failed to serialize unknown part type:', error);
     }
   }
 }

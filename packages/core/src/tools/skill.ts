@@ -12,6 +12,9 @@ import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
 import path from 'path';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
 
 export interface SkillParams {
   skill: string;
@@ -49,11 +52,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       'Execute a skill within the main conversation. Loading available skills...', // Initial description
       Kind.Read,
       initialSchema,
-      true, // isOutputMarkdown
+      false, // isOutputMarkdown
       false, // canUpdateOutput
     );
 
-    this.skillManager = config.getSkillManager();
+    const skillManager = config.getSkillManager();
+    if (!skillManager) {
+      throw new Error('SkillManager not available');
+    }
+    this.skillManager = skillManager;
     this.skillManager.addChangeListener(() => {
       void this.refreshSkills();
     });
@@ -71,7 +78,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.availableSkills = await this.skillManager.listSkills();
       this.updateDescriptionAndSchema();
     } catch (error) {
-      console.warn('Failed to load skills for Skills tool:', error);
+      debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
       this.updateDescriptionAndSchema();
     } finally {
@@ -128,6 +135,10 @@ Important:
 - Only use skills listed in <available_skills> below
 - Do not invoke a skill that is already running
 - Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
+- When executing scripts or loading referenced files, ALWAYS resolve absolute paths from skill's base directory. Examples:
+  - \`bash scripts/init.sh\` -> \`bash /path/to/skill/scripts/init.sh\`
+  - \`python scripts/helper.py\` -> \`python /path/to/skill/scripts/helper.py\`
+  - \`reference.md\` -> \`/path/to/skill/reference.md\`
 </skills_instructions>
 
 <available_skills>
@@ -183,7 +194,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
   }
 
   getDescription(): string {
-    return `Launching skill: "${this.params.skill}"`;
+    return `Use skill: "${this.params.skill}"`;
   }
 
   override async shouldConfirmExecute(): Promise<false> {
@@ -238,16 +249,16 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       const baseDir = path.dirname(skill.filePath);
 
       // Build markdown content for LLM (show base dir, then body)
-      const llmContent = `Base directory for this skill: ${baseDir}\n\n${skill.body}\n`;
+      const llmContent = `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${skill.body}\n`;
 
       return {
         llmContent: [{ text: llmContent }],
-        returnDisplay: `Launching skill: ${skill.name}`,
+        returnDisplay: skill.description,
       };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(`[SkillsTool] Error launching skill: ${errorMessage}`);
+      debugLogger.error(`[SkillsTool] Error using skill: ${errorMessage}`);
 
       // Log failed skill launch
       logSkillLaunch(
