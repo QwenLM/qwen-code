@@ -7,6 +7,9 @@
 import type { GenerateContentResponse } from '@google/genai';
 import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('RETRY');
 
 export interface HttpError extends Error {
   status?: number;
@@ -121,7 +124,7 @@ export async function retryWithBackoff<T>(
 
       if (retryAfterMs > 0) {
         // Respect Retry-After header if present and parsed
-        console.warn(
+        debugLogger.warn(
           `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
           error,
         );
@@ -230,10 +233,10 @@ function logRetryAttempt(
     : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
-    console.warn(message, error);
+    debugLogger.warn(message, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    console.error(message, error);
+    debugLogger.error(message, error);
   } else {
-    console.warn(message, error);
+    debugLogger.warn(message, error);
   }
 }

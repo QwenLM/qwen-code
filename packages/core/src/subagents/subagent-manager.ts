@@ -28,6 +28,9 @@ import { SubagentError, SubagentErrorCode } from './types.js';
 import { SubagentValidator } from './validation.js';
 import { SubAgentScope } from './subagent.js';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
 
@@ -59,7 +62,7 @@ export class SubagentManager {
       try {
         listener();
       } catch (error) {
-        console.warn('Subagent change listener threw an error:', error);
+        debugLogger.warn('Subagent change listener threw an error:', error);
       }
     }
   }
@@ -699,7 +702,7 @@ export class SubagentManager {
       // If no match found, preserve the original identifier as-is
       // This allows for tools that might not be registered yet or custom tools
       result.push(toolIdentifier);
-      console.warn(
+      debugLogger.warn(
         `Tool "${toolIdentifier}" not found in tool registry, preserving as-is`,
       );
     }

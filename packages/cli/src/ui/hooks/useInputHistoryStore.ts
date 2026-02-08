@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 interface Logger {
   getPreviousUserMessages(): Promise<string[]>;
@@ -15,6 +16,8 @@ export interface UseInputHistoryStoreReturn {
   addInput: (input: string) => void;
   initializeFromLogger: (logger: Logger | null) => Promise<void>;
 }
+
+const debugLogger = createDebugLogger('INPUT_HISTORY_STORE');
 
 /**
  * Hook for independently managing input history.
@@ -69,7 +72,10 @@ export function useInputHistoryStore(): UseInputHistoryStoreReturn {
         setIsInitialized(true);
       } catch (error) {
         // Start with empty history even if logger initialization fails
-        console.warn('Failed to initialize input history from logger:', error);
+        debugLogger.warn(
+          'Failed to initialize input history from logger:',
+          error,
+        );
         setPastSessionMessages([]);
         recalculateHistory([], []);
         setIsInitialized(true);

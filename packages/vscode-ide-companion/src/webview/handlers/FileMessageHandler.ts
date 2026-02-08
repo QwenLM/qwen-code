@@ -13,12 +13,32 @@ import {
   ensureLeftGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
+import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
 
 /**
  * File message handler
  * Handles all file-related messages
  */
 export class FileMessageHandler extends BaseMessageHandler {
+  private readonly fileDiscoveryServices = new Map<
+    string,
+    FileDiscoveryService
+  >();
+  private readonly globSpecialChars = new Set([
+    '\\',
+    '*',
+    '?',
+    '[',
+    ']',
+    '{',
+    '}',
+    '(',
+    ')',
+    '!',
+    '+',
+    '@',
+  ]);
+
   canHandle(messageType: string): boolean {
     return [
       'attachFile',
@@ -43,7 +63,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         break;
 
       case 'getWorkspaceFiles':
-        await this.handleGetWorkspaceFiles(data?.query as string | undefined);
+        await this.handleGetWorkspaceFiles(
+          data?.query as string | undefined,
+          data?.requestId as number | undefined,
+        );
         break;
 
       case 'openFile':
@@ -190,10 +213,14 @@ export class FileMessageHandler extends BaseMessageHandler {
   /**
    * Get workspace files
    */
-  private async handleGetWorkspaceFiles(query?: string): Promise<void> {
+  private async handleGetWorkspaceFiles(
+    query?: string,
+    requestId?: number,
+  ): Promise<void> {
     try {
       console.log('[FileMessageHandler] handleGetWorkspaceFiles start', {
         query,
+        requestId,
       });
       const files: Array<{
         id: string;
@@ -208,8 +235,26 @@ export class FileMessageHandler extends BaseMessageHandler {
           return;
         }
 
-        const fileName = getFileName(uri.fsPath);
         const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+        if (workspaceFolder) {
+          const rootPath = workspaceFolder.uri.fsPath;
+          let discovery = this.fileDiscoveryServices.get(rootPath);
+          if (!discovery) {
+            discovery = new FileDiscoveryService(rootPath);
+            this.fileDiscoveryServices.set(rootPath, discovery);
+          }
+          // Apply gitignore filtering so ignored paths don't appear in @ results.
+          if (
+            discovery.shouldIgnoreFile(uri.fsPath, {
+              respectGitIgnore: true,
+              respectQwenIgnore: false,
+            })
+          ) {
+            return;
+          }
+        }
+
+        const fileName = getFileName(uri.fsPath);
         const relativePath = workspaceFolder
           ? vscode.workspace.asRelativePath(uri, false)
           : uri.fsPath;
@@ -234,14 +279,15 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       // Search or show recent files
       if (query) {
+        const includePattern = `**/*${this.buildCaseInsensitiveGlob(query)}*`;
         // Query mode: perform filesystem search (may take longer on large workspaces)
         console.log(
           '[FileMessageHandler] Searching workspace files for query',
           query,
         );
         const uris = await vscode.workspace.findFiles(
-          `**/*${query}*`,
-          '**/node_modules/**',
+          includePattern,
+          '**/{.git,node_modules}/**',
           50,
         );
 
@@ -269,7 +315,10 @@ export class FileMessageHandler extends BaseMessageHandler {
 
         // Send an initial quick response so UI can render immediately
         try {
-          this.sendToWebView({ type: 'workspaceFiles', data: { files } });
+          this.sendToWebView({
+            type: 'workspaceFiles',
+            data: { files, query, requestId },
+          });
           console.log(
             '[FileMessageHandler] Sent initial workspaceFiles (open tabs/active)',
             files.length,
@@ -285,7 +334,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         if (files.length < 10) {
           const recentUris = await vscode.workspace.findFiles(
             '**/*',
-            '**/node_modules/**',
+            '**/{.git,node_modules}/**',
             20,
           );
 
@@ -298,7 +347,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
       }
 
-      this.sendToWebView({ type: 'workspaceFiles', data: { files } });
+      this.sendToWebView({
+        type: 'workspaceFiles',
+        data: { files, query, requestId },
+      });
       console.log(
         '[FileMessageHandler] Sent final workspaceFiles',
         files.length,
@@ -495,5 +547,19 @@ export class FileMessageHandler extends BaseMessageHandler {
         `Failed to create and open temporary file: ${error}`,
       );
     }
+  }
+
+  private buildCaseInsensitiveGlob(query: string): string {
+    let pattern = '';
+    for (const char of query) {
+      if (/[a-zA-Z]/.test(char)) {
+        pattern += `[${char.toLowerCase()}${char.toUpperCase()}]`;
+      } else if (this.globSpecialChars.has(char)) {
+        pattern += `\\${char}`;
+      } else {
+        pattern += char;
+      }
+    }
+    return pattern;
   }
 }

@@ -22,6 +22,7 @@ export default {
   'auto-accept edits': '自动接受编辑',
   'Accepting edits': '接受编辑',
   '(shift + tab to cycle)': '(shift + tab 切换)',
+  '(tab to cycle)': '(按 tab 切换)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     '通过 {{symbol}} 执行 shell 命令（例如，{{example1}}）或使用自然语言（例如，{{example2}}）',
   '!': '!',
@@ -144,15 +145,15 @@ export default {
   // Commands - Agents
   // ============================================================================
   'Manage subagents for specialized task delegation.':
-    '管理用于专门任务委派的子代理',
+    '管理用于专门任务委派的子智能体',
   'Manage existing subagents (view, edit, delete).':
-    '管理现有子代理（查看、编辑、删除）',
-  'Create a new subagent with guided setup.': '通过引导式设置创建新的子代理',
+    '管理现有子智能体（查看、编辑、删除）',
+  'Create a new subagent with guided setup.': '通过引导式设置创建新的子智能体',
 
   // ============================================================================
   // Agents - Management Dialog
   // ============================================================================
-  Agents: '代理',
+  Agents: '智能体',
   'Choose Action': '选择操作',
   'Edit {{name}}': '编辑 {{name}}',
   'Edit Tools: {{name}}': '编辑工具: {{name}}',
@@ -167,21 +168,21 @@ export default {
   'Enter to select, ↑↓ to navigate, Esc to go back':
     'Enter 选择，↑↓ 导航，Esc 返回',
   'Invalid step: {{step}}': '无效步骤: {{step}}',
-  'No subagents found.': '未找到子代理。',
+  'No subagents found.': '未找到子智能体。',
   "Use '/agents create' to create your first subagent.":
-    "使用 '/agents create' 创建您的第一个子代理。",
+    "使用 '/agents create' 创建您的第一个子智能体。",
   '(built-in)': '（内置）',
-  '(overridden by project level agent)': '（已被项目级代理覆盖）',
+  '(overridden by project level agent)': '（已被项目级智能体覆盖）',
   'Project Level ({{path}})': '项目级 ({{path}})',
   'User Level ({{path}})': '用户级 ({{path}})',
-  'Built-in Agents': '内置代理',
-  'Extension Agents': '扩展代理',
-  'Using: {{count}} agents': '使用中: {{count}} 个代理',
-  'View Agent': '查看代理',
-  'Edit Agent': '编辑代理',
-  'Delete Agent': '删除代理',
+  'Built-in Agents': '内置智能体',
+  'Extension Agents': '扩展智能体',
+  'Using: {{count}} agents': '使用中: {{count}} 个智能体',
+  'View Agent': '查看智能体',
+  'Edit Agent': '编辑智能体',
+  'Delete Agent': '删除智能体',
   Back: '返回',
-  'No agent selected': '未选择代理',
+  'No agent selected': '未选择智能体',
   'File Path: ': '文件路径: ',
   'Tools: ': '工具: ',
   'Color: ': '颜色: ',
@@ -192,25 +193,25 @@ export default {
   'Edit color': '编辑颜色',
   '❌ Error:': '❌ 错误:',
   'Are you sure you want to delete agent "{{name}}"?':
-    '您确定要删除代理 "{{name}}" 吗？',
+    '您确定要删除智能体 "{{name}}" 吗？',
   // ============================================================================
   // Agents - Creation Wizard
   // ============================================================================
   'Project Level (.qwen/agents/)': '项目级 (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': '用户级 (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ 子代理创建成功！',
+  '✅ Subagent Created Successfully!': '✅ 子智能体创建成功！',
   'Subagent "{{name}}" has been saved to {{level}} level.':
-    '子代理 "{{name}}" 已保存到 {{level}} 级别。',
+    '子智能体 "{{name}}" 已保存到 {{level}} 级别。',
   'Name: ': '名称: ',
   'Location: ': '位置: ',
-  '❌ Error saving subagent:': '❌ 保存子代理时出错:',
+  '❌ Error saving subagent:': '❌ 保存子智能体时出错:',
   'Warnings:': '警告:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
-    '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有子代理',
+    '名称 "{{name}}" 在 {{level}} 级别已存在 - 将覆盖现有子智能体',
   'Name "{{name}}" exists at user level - project level will take precedence':
     '名称 "{{name}}" 在用户级别存在 - 项目级别将优先',
   'Name "{{name}}" exists at project level - existing subagent will take precedence':
-    '名称 "{{name}}" 在项目级别存在 - 现有子代理将优先',
+    '名称 "{{name}}" 在项目级别存在 - 现有子智能体将优先',
   'Description is over {{length}} characters': '描述超过 {{length}} 个字符',
   'System prompt is over {{length}} characters':
     '系统提示超过 {{length}} 个字符',
@@ -220,13 +221,13 @@ export default {
   'Generate with Qwen Code (Recommended)': '使用 Qwen Code 生成（推荐）',
   'Manual Creation': '手动创建',
   'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
-    '描述此子代理应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
+    '描述此子智能体应该做什么以及何时使用它。（为了获得最佳效果，请全面描述）',
   'e.g., Expert code reviewer that reviews code based on best practices...':
     '例如：专业的代码审查员，根据最佳实践审查代码...',
-  'Generating subagent configuration...': '正在生成子代理配置...',
-  'Failed to generate subagent: {{error}}': '生成子代理失败: {{error}}',
-  'Step {{n}}: Describe Your Subagent': '步骤 {{n}}: 描述您的子代理',
-  'Step {{n}}: Enter Subagent Name': '步骤 {{n}}: 输入子代理名称',
+  'Generating subagent configuration...': '正在生成子智能体配置...',
+  'Failed to generate subagent: {{error}}': '生成子智能体失败: {{error}}',
+  'Step {{n}}: Describe Your Subagent': '步骤 {{n}}: 描述您的子智能体',
+  'Step {{n}}: Enter Subagent Name': '步骤 {{n}}: 输入子智能体名称',
   'Step {{n}}: Enter System Prompt': '步骤 {{n}}: 输入系统提示',
   'Step {{n}}: Enter Description': '步骤 {{n}}: 输入描述',
   // Agents - Tool Selection
@@ -253,22 +254,22 @@ export default {
   'go back': '返回',
   '↑↓ to navigate, ': '↑↓ 导航，',
   'Enter a clear, unique name for this subagent.':
-    '为此子代理输入一个清晰、唯一的名称。',
+    '为此子智能体输入一个清晰、唯一的名称。',
   'e.g., Code Reviewer': '例如：代码审查员',
   'Name cannot be empty.': '名称不能为空。',
   "Write the system prompt that defines this subagent's behavior. Be comprehensive for best results.":
-    '编写定义此子代理行为的系统提示。为了获得最佳效果，请全面描述。',
+    '编写定义此子智能体行为的系统提示。为了获得最佳效果，请全面描述。',
   'e.g., You are an expert code reviewer...':
     '例如：您是一位专业的代码审查员...',
   'System prompt cannot be empty.': '系统提示不能为空。',
   'Describe when and how this subagent should be used.':
-    '描述何时以及如何使用此子代理。',
+    '描述何时以及如何使用此子智能体。',
   'e.g., Reviews code for best practices and potential bugs.':
     '例如：审查代码以查找最佳实践和潜在错误。',
   'Description cannot be empty.': '描述不能为空。',
   'Failed to launch editor: {{error}}': '启动编辑器失败: {{error}}',
   'Failed to save and edit subagent: {{error}}':
-    '保存并编辑子代理失败: {{error}}',
+    '保存并编辑子智能体失败: {{error}}',
 
   // ============================================================================
   // Commands - General (continued)
@@ -339,7 +340,6 @@ export default {
   'Folder Trust': '文件夹信任',
   'Vision Model Preview': '视觉模型预览',
   'Tool Schema Compliance': '工具 Schema 兼容性',
-  'Experimental: Skills': '实验性: 技能',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   Text: '文本',
@@ -418,8 +418,10 @@ export default {
     '此扩展将排除以下核心工具：{{tools}}',
   'This extension will install the following skills:': '此扩展将安装以下技能：',
   'This extension will install the following subagents:':
-    '此扩展将安装以下子代理：',
+    '此扩展将安装以下子智能体：',
   'Installation cancelled for "{{name}}".': '已取消安装 "{{name}}"。',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    '您正在安装来自 {{originSource}} 的扩展。某些功能可能无法完美兼容 Qwen Code。',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref 和 --auto-update 不适用于市场扩展。',
   'Extension "{{name}}" installed successfully and enabled.':
@@ -478,7 +480,7 @@ export default {
   'Enabled (Workspace):': '已启用（工作区）：',
   'Context files:': '上下文文件：',
   'Skills:': '技能：',
-  'Agents:': '代理：',
+  'Agents:': '智能体：',
   'MCP servers:': 'MCP 服务器：',
   'Link extension failed to install.': '链接扩展安装失败。',
   'Extension "{{name}}" linked successfully and enabled.':
@@ -1041,6 +1043,8 @@ export default {
     '运行 qwen --continue 或 qwen --resume 可继续之前的会话。',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     '按 Shift+Tab 或输入 /approval-mode 可快速切换权限模式。',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1056,7 +1060,7 @@ export default {
   'Code Changes:': '代码变更：',
   Performance: '性能',
   'Wall Time:': '总耗时：',
-  'Agent Active:': '代理活跃时间：',
+  'Agent Active:': '智能体活跃时间：',
   'API Time:': 'API 时间：',
   'Tool Time:': '工具时间：',
   'Session Stats': '会话统计',

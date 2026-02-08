@@ -23,6 +23,7 @@ export default {
   'auto-accept edits': 'Änderungen automatisch akzeptieren',
   'Accepting edits': 'Änderungen werden akzeptiert',
   '(shift + tab to cycle)': '(Umschalt + Tab zum Wechseln)',
+  '(tab to cycle)': '(Tab zum Wechseln)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Shell-Befehle über {{symbol}} ausführen (z.B. {{example1}}) oder natürliche Sprache verwenden (z.B. {{example2}}).',
   '!': '!',
@@ -334,7 +335,6 @@ export default {
   'Folder Trust': 'Ordnervertrauen',
   'Vision Model Preview': 'Vision-Modell-Vorschau',
   'Tool Schema Compliance': 'Werkzeug-Schema-Konformität',
-  'Experimental: Skills': 'Experimentell: Fähigkeiten',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   Text: 'Text',
@@ -424,6 +424,8 @@ export default {
     'Diese Erweiterung wird folgende Unteragenten installieren:',
   'Installation cancelled for "{{name}}".':
     'Installation von "{{name}}" abgebrochen.',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    'Sie installieren eine Erweiterung von {{originSource}}. Einige Funktionen funktionieren möglicherweise nicht perfekt mit Qwen Code.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref und --auto-update sind nicht anwendbar für Marketplace-Erweiterungen.',
   'Extension "{{name}}" installed successfully and enabled.':
@@ -1368,4 +1370,8 @@ export default {
     'Erweiterungsseite wird im Browser geöffnet: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Browser konnte nicht geöffnet werden. Besuchen Sie die Erweiterungsgalerie unter {{url}}',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Sie können den Berechtigungsmodus schnell mit Shift+Tab oder /approval-mode wechseln.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
 };

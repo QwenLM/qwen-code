@@ -19,10 +19,6 @@ export const Notifications = () => {
   const showInitError =
     initError && streamingState !== StreamingState.Responding;
 
-  if (!showStartupWarnings && !showInitError && !updateInfo) {
-    return null;
-  }
-
   return (
     <>
       {updateInfo && <UpdateNotification message={updateInfo.message} />}

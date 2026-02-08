@@ -264,16 +264,11 @@ export const App: React.FC = () => {
     [fileContext.workspaceFiles],
   );
 
-  // When workspace files update while menu open for @, refresh items so the first @ shows the list
+  // When workspace files update while menu open for @, refresh items to reflect latest search results.
   // Note: Avoid depending on the entire `completion` object here, since its identity
   // changes on every render which would retrigger this effect and can cause a refresh loop.
   useEffect(() => {
-    // Only auto-refresh when there's no query (first @ popup) to avoid repeated refreshes during search
-    if (
-      completion.isOpen &&
-      completion.triggerChar === '@' &&
-      !completion.query
-    ) {
+    if (completion.isOpen && completion.triggerChar === '@') {
       // Only refresh items; do not change other completion state to avoid re-renders loops
       completion.refreshCompletion();
     }
@@ -761,7 +756,7 @@ export const App: React.FC = () => {
     const inProgressTools = inProgressToolCalls.map((toolCall) => ({
       type: 'in-progress-tool-call' as const,
       data: toolCall,
-      timestamp: toolCall.timestamp || Date.now(),
+      timestamp: toolCall.timestamp ?? 0,
     }));
 
     // Completed tool calls
@@ -770,7 +765,7 @@ export const App: React.FC = () => {
       .map((toolCall) => ({
         type: 'completed-tool-call' as const,
         data: toolCall,
-        timestamp: toolCall.timestamp || Date.now(),
+        timestamp: toolCall.timestamp ?? 0,
       }));
 
     // Merge and sort by timestamp to ensure messages and tool calls are interleaved

@@ -55,7 +55,10 @@ import type {
   ExtensionSetting,
   ResolvedExtensionSetting,
 } from './extensionSettings.js';
-import type { TelemetrySettings } from '../config/config.js';
+import type {
+  ExtensionOriginSource,
+  TelemetrySettings,
+} from '../config/config.js';
 import { logExtensionUpdateEvent } from '../telemetry/loggers.js';
 import {
   ExtensionDisableEvent,
@@ -66,6 +69,9 @@ import {
 } from '../telemetry/types.js';
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('EXTENSIONS');
 
 // ============================================================================
 // Types and Interfaces
@@ -133,6 +139,7 @@ export enum ExtensionUpdateState {
 
 export type ExtensionRequestOptions = {
   extensionConfig: ExtensionConfig;
+  originSource: ExtensionOriginSource;
   commands?: string[];
   skills?: SkillConfig[];
   subagents?: SubagentConfig[];
@@ -234,7 +241,7 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
     const isEnoent = (error as NodeJS.ErrnoException).code === 'ENOENT';
     const isAbortError = error instanceof Error && error.name === 'AbortError';
     if (!isEnoent && !isAbortError) {
-      console.error(`Error loading commands from ${dir}:`, error);
+      debugLogger.error(`Error loading commands from ${dir}:`, error);
     }
     return [];
   }
@@ -243,21 +250,24 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
 async function convertGeminiOrClaudeExtension(
   extensionDir: string,
   pluginName?: string,
-) {
+): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
   let newExtensionDir = extensionDir;
+  let originSource: ExtensionOriginSource = 'QwenCode';
   const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
   if (fs.existsSync(configFilePath)) {
     newExtensionDir = extensionDir;
   } else if (isGeminiExtensionConfig(extensionDir)) {
     newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
       .convertedDir;
+    originSource = 'Gemini';
   } else if (pluginName) {
     newExtensionDir = (
       await convertClaudePluginPackage(extensionDir, pluginName)
     ).convertedDir;
+    originSource = 'Claude';
   }
   // Claude plugin conversion not yet implemented
-  return newExtensionDir;
+  return { extensionDir: newExtensionDir, originSource };
 }
 
 // ============================================================================
@@ -340,7 +350,7 @@ export class ExtensionManager {
           (ext) => ext.config.name.toLowerCase() === name.toLowerCase(),
         )
       ) {
-        console.error(`Extension not found: ${name}`);
+        debugLogger.error(`Extension not found: ${name}`);
       }
     }
   }
@@ -496,7 +506,7 @@ export class ExtensionManager {
       ) {
         return {};
       }
-      console.error('Error reading extension enablement config:', error);
+      debugLogger.error('Error reading extension enablement config:', error);
       return {};
     }
   }
@@ -651,7 +661,7 @@ export class ExtensionManager {
 
       return extension;
     } catch (e) {
-      console.error(
+      debugLogger.warn(
         `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
           e,
         )}`,
@@ -801,10 +811,15 @@ export class ExtensionManager {
       }
 
       try {
-        localSourcePath = await convertGeminiOrClaudeExtension(
-          localSourcePath,
-          installMetadata.pluginName,
-        );
+        const { extensionDir, originSource } =
+          await convertGeminiOrClaudeExtension(
+            localSourcePath,
+            installMetadata.pluginName,
+          );
+
+        localSourcePath = extensionDir;
+        installMetadata.originSource = originSource;
+
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
@@ -866,6 +881,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            originSource: installMetadata.originSource,
           });
         } else {
           await this.requestConsent({
@@ -877,6 +893,7 @@ export class ExtensionManager {
             previousCommands,
             previousSkills,
             previousSubagents,
+            originSource: installMetadata.originSource,
           });
         }
 
@@ -1074,6 +1091,7 @@ export class ExtensionManager {
         const installMetadata: ExtensionInstallMetadata = {
           source: extension.path,
           type: 'local',
+          originSource: extension.installMetadata?.originSource || 'QwenCode',
         };
         await this.installExtension(
           installMetadata,
@@ -1164,7 +1182,7 @@ export class ExtensionManager {
         updatedVersion,
       };
     } catch (e) {
-      console.error(
+      debugLogger.error(
         `Error updating extension, rolling back. ${getErrorMessage(e)}`,
       );
       callback(extension.name, ExtensionUpdateState.ERROR);

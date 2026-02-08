@@ -18,6 +18,7 @@ import {
   type ResolvedModelConfig,
   type AvailableModel,
   type ModelSwitchMetadata,
+  type RuntimeModelSnapshot,
 } from './types.js';
 import {
   MODEL_GENERATION_CONFIG_FIELDS,
@@ -99,6 +100,31 @@ export class ModelsConfig {
   // Flag indicating whether authType was explicitly provided (not defaulted)
   private readonly authTypeWasExplicitlyProvided: boolean;
 
+  /**
+   * Runtime model snapshot storage.
+   *
+   * These snapshots store runtime-resolved model configurations that are NOT from
+   * modelProviders registry (e.g., models with manually set credentials).
+   *
+   * Key: snapshotId (format: `$runtime|${authType}|${modelId}`)
+   *   Uses `$runtime|` prefix since `$` and `|` are unlikely to appear in real model IDs.
+   *   This prevents conflicts with model IDs containing `-` or `:` characters.
+   * Value: RuntimeModelSnapshot containing the model's configuration
+   *
+   * Note: This is different from state snapshots used for rollback during model switching.
+   * RuntimeModelSnapshot stores persistent model configurations, while state snapshots
+   * are temporary and used only for error recovery.
+   */
+  private runtimeModelSnapshots: Map<string, RuntimeModelSnapshot> = new Map();
+
+  /**
+   * Currently active RuntimeModelSnapshot ID.
+   *
+   * When set, indicates that the current model is a runtime model (not from registry).
+   * This ID is included in state snapshots for rollback purposes.
+   */
+  private activeRuntimeModelSnapshotId: string | undefined;
+
   private static deepClone<T>(value: T): T {
     if (value === null || typeof value !== 'object') {
       return value;
@@ -113,38 +139,6 @@ export class ModelsConfig {
       );
     }
     return out as T;
-  }
-
-  private snapshotState(): {
-    currentAuthType: AuthType | undefined;
-    generationConfig: Partial<ContentGeneratorConfig>;
-    generationConfigSources: ContentGeneratorConfigSources;
-    strictModelProviderSelection: boolean;
-    requireCachedQwenCredentialsOnce: boolean;
-    hasManualCredentials: boolean;
-  } {
-    return {
-      currentAuthType: this.currentAuthType,
-      generationConfig: ModelsConfig.deepClone(this._generationConfig),
-      generationConfigSources: ModelsConfig.deepClone(
-        this.generationConfigSources,
-      ),
-      strictModelProviderSelection: this.strictModelProviderSelection,
-      requireCachedQwenCredentialsOnce: this.requireCachedQwenCredentialsOnce,
-      hasManualCredentials: this.hasManualCredentials,
-    };
-  }
-
-  private restoreState(
-    snapshot: ReturnType<ModelsConfig['snapshotState']>,
-  ): void {
-    this.currentAuthType = snapshot.currentAuthType;
-    this._generationConfig = snapshot.generationConfig;
-    this.generationConfigSources = snapshot.generationConfigSources;
-    this.strictModelProviderSelection = snapshot.strictModelProviderSelection;
-    this.requireCachedQwenCredentialsOnce =
-      snapshot.requireCachedQwenCredentialsOnce;
-    this.hasManualCredentials = snapshot.hasManualCredentials;
   }
 
   constructor(options: ModelsConfigOptions = {}) {
@@ -164,6 +158,53 @@ export class ModelsConfig {
 
     // Initialize selection state
     this.currentAuthType = options.initialAuthType;
+  }
+
+  /**
+   * Create a snapshot of the current ModelsConfig state for rollback purposes.
+   * Used before model switching operations to enable recovery on errors.
+   *
+   * Note: This is different from RuntimeModelSnapshot which stores runtime model configs.
+   */
+  private createStateSnapshotForRollback(): {
+    currentAuthType: AuthType | undefined;
+    generationConfig: Partial<ContentGeneratorConfig>;
+    generationConfigSources: ContentGeneratorConfigSources;
+    strictModelProviderSelection: boolean;
+    requireCachedQwenCredentialsOnce: boolean;
+    hasManualCredentials: boolean;
+    activeRuntimeModelSnapshotId: string | undefined;
+  } {
+    return {
+      currentAuthType: this.currentAuthType,
+      generationConfig: ModelsConfig.deepClone(this._generationConfig),
+      generationConfigSources: ModelsConfig.deepClone(
+        this.generationConfigSources,
+      ),
+      strictModelProviderSelection: this.strictModelProviderSelection,
+      requireCachedQwenCredentialsOnce: this.requireCachedQwenCredentialsOnce,
+      hasManualCredentials: this.hasManualCredentials,
+      activeRuntimeModelSnapshotId: this.activeRuntimeModelSnapshotId,
+    };
+  }
+
+  /**
+   * Restore ModelsConfig state from a previously created state snapshot.
+   * Used for rollback when model switching operations fail.
+   *
+   * @param snapshot - The state snapshot to restore
+   */
+  private rollbackToStateSnapshot(
+    snapshot: ReturnType<ModelsConfig['createStateSnapshotForRollback']>,
+  ): void {
+    this.currentAuthType = snapshot.currentAuthType;
+    this._generationConfig = snapshot.generationConfig;
+    this.generationConfigSources = snapshot.generationConfigSources;
+    this.strictModelProviderSelection = snapshot.strictModelProviderSelection;
+    this.requireCachedQwenCredentialsOnce =
+      snapshot.requireCachedQwenCredentialsOnce;
+    this.hasManualCredentials = snapshot.hasManualCredentials;
+    this.activeRuntimeModelSnapshotId = snapshot.activeRuntimeModelSnapshotId;
   }
 
   /**
@@ -205,13 +246,49 @@ export class ModelsConfig {
   }
 
   /**
-   * Get all available models across all authTypes
+   * Get all configured models across authTypes.
+   *
+   * Notes:
+   * - By default, returns models across all authTypes.
+   * - qwen-oauth models are always ordered first.
+   * - Runtime model option (if active) is included before registry models of the same authType.
    */
-  getAllAvailableModels(): AvailableModel[] {
+  getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
+    const inputAuthTypes =
+      authTypes && authTypes.length > 0 ? authTypes : Object.values(AuthType);
+
+    // De-duplicate while preserving the original order.
+    const seen = new Set<AuthType>();
+    const uniqueAuthTypes: AuthType[] = [];
+    for (const authType of inputAuthTypes) {
+      if (!seen.has(authType)) {
+        seen.add(authType);
+        uniqueAuthTypes.push(authType);
+      }
+    }
+
+    // Force qwen-oauth to the front (if requested / defaulted in).
+    const orderedAuthTypes: AuthType[] = [];
+    if (uniqueAuthTypes.includes(AuthType.QWEN_OAUTH)) {
+      orderedAuthTypes.push(AuthType.QWEN_OAUTH);
+    }
+    for (const authType of uniqueAuthTypes) {
+      if (authType !== AuthType.QWEN_OAUTH) {
+        orderedAuthTypes.push(authType);
+      }
+    }
+
+    // Get runtime model option
+    const runtimeOption = this.getRuntimeModelOption();
+
     const allModels: AvailableModel[] = [];
-    for (const authType of Object.values(AuthType)) {
-      const models = this.modelRegistry.getModelsForAuthType(authType);
-      allModels.push(...models);
+    for (const authType of orderedAuthTypes) {
+      // Add runtime option first if it matches this authType
+      if (runtimeOption && runtimeOption.authType === authType) {
+        allModels.push(runtimeOption);
+      }
+      // Add registry models
+      allModels.push(...this.modelRegistry.getModelsForAuthType(authType));
     }
     return allModels;
   }
@@ -269,16 +346,29 @@ export class ModelsConfig {
   }
 
   /**
-   * Switch model (and optionally authType) via registry-backed selection.
-   * This is a superset of the previous split APIs for model-only vs authType+model switching.
+   * Switch model (and optionally authType).
+   * Supports both registry-backed models and RuntimeModelSnapshots.
+   *
+   * For runtime models, the modelId can be:
+   * - A RuntimeModelSnapshot ID (format: `$runtime|${authType}|${modelId}`)
+   * - With explicit `$runtime|` prefix (format: `$runtime|${authType}|${modelId}`)
+   *
+   * When called from ACP integration, the modelId has already been parsed
+   * by parseAcpModelOption, which strips any (${authType}) suffix.
    */
   async switchModel(
     authType: AuthType,
     modelId: string,
     options?: { requireCachedCredentials?: boolean },
-    _metadata?: ModelSwitchMetadata,
   ): Promise<void> {
-    const snapshot = this.snapshotState();
+    // Check if this is a RuntimeModelSnapshot reference
+    const runtimeModelSnapshotId = this.extractRuntimeModelSnapshotId(modelId);
+    if (runtimeModelSnapshotId) {
+      await this.switchToRuntimeModel(runtimeModelSnapshotId);
+      return;
+    }
+
+    const rollbackSnapshot = this.createStateSnapshotForRollback();
     if (authType === AuthType.QWEN_OAUTH && options?.requireCachedCredentials) {
       this.requireCachedQwenCredentialsOnce = true;
     }
@@ -297,18 +387,80 @@ export class ModelsConfig {
       // Apply model defaults
       this.applyResolvedModelDefaults(model);
 
+      // Clear active runtime model snapshot since we're now using a registry model
+      this.activeRuntimeModelSnapshotId = undefined;
+
       const requiresRefresh = isAuthTypeChange
         ? true
-        : this.checkRequiresRefresh(snapshot.generationConfig.model || '');
+        : this.checkRequiresRefresh(
+            rollbackSnapshot.generationConfig.model || '',
+          );
 
       if (this.onModelChange) {
         await this.onModelChange(authType, requiresRefresh);
       }
     } catch (error) {
       // Rollback on error
-      this.restoreState(snapshot);
+      this.rollbackToStateSnapshot(rollbackSnapshot);
       throw error;
     }
+  }
+
+  /**
+   * Prefix used to identify RuntimeModelSnapshot IDs.
+   * Chosen to avoid conflicts with real model IDs which may contain `-` or `:`.
+   */
+  private static readonly RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
+
+  /**
+   * Build a RuntimeModelSnapshot ID from authType and modelId.
+   * The format is: `$runtime|${authType}|${modelId}`
+   *
+   * This is the canonical way to construct snapshot IDs, ensuring
+   * consistency across creation and lookup.
+   *
+   * @param authType - The authentication type
+   * @param modelId - The model ID
+   * @returns The snapshot ID in format `$runtime|${authType}|${modelId}`
+   */
+  private buildRuntimeModelSnapshotId(
+    authType: AuthType,
+    modelId: string,
+  ): string {
+    return `${ModelsConfig.RUNTIME_SNAPSHOT_PREFIX}${authType}|${modelId}`;
+  }
+
+  /**
+   * Extract RuntimeModelSnapshot ID from modelId if it's a runtime model reference.
+   *
+   * Supports the following formats:
+   * - Direct snapshot ID: `$runtime|${authType}|${modelId}` → returns as-is if exists in Map
+   * - Direct snapshot ID match: returns if exists in Map
+   *
+   * Note: When called from ACP integration via setModel, the modelId has already
+   * been parsed by parseAcpModelOption which strips any (${authType}) suffix.
+   * So we don't need to handle ACP format here - the ACP layer handles that.
+   *
+   * @param modelId - The model ID to parse
+   * @returns The RuntimeModelSnapshot ID if found, undefined otherwise
+   */
+  private extractRuntimeModelSnapshotId(modelId: string): string | undefined {
+    // Check if modelId starts with the runtime snapshot prefix
+    if (modelId.startsWith(ModelsConfig.RUNTIME_SNAPSHOT_PREFIX)) {
+      // Verify the snapshot exists
+      if (this.runtimeModelSnapshots.has(modelId)) {
+        return modelId;
+      }
+      // Even with prefix, if it doesn't exist, don't return it
+      return undefined;
+    }
+
+    // Check if modelId itself is a valid snapshot ID (exists in Map)
+    if (this.runtimeModelSnapshots.has(modelId)) {
+      return modelId;
+    }
+
+    return undefined;
   }
 
   /**
@@ -359,6 +511,9 @@ export class ModelsConfig {
    * When credentials are manually set, we clear all provider-sourced configuration
    * to maintain provider atomicity (either fully applied or not at all).
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
+   *
+   * Also updates or creates a RuntimeModelSnapshot when credentials form a complete config
+   * for a model not in the registry. This allows the runtime model to be reused later.
    *
    * @param settingsGenerationConfig Optional generation config from settings.json
    *                                  to merge after clearing provider-sourced config.
@@ -419,6 +574,66 @@ export class ModelsConfig {
     // has lower priority than programmatic overrides but should still be applied.
     if (settingsGenerationConfig) {
       this.mergeSettingsGenerationConfig(settingsGenerationConfig);
+    }
+
+    // Sync with runtime model snapshot if we have a complete configuration
+    this.syncRuntimeModelSnapshotWithCredentials();
+  }
+
+  /**
+   * Sync RuntimeModelSnapshot with current credentials.
+   *
+   * Creates or updates a RuntimeModelSnapshot when current credentials form a complete
+   * configuration for a model not in the registry. This enables:
+   * - Reusing the runtime model configuration later
+   * - Showing the runtime model as an available option in model lists
+   *
+   * Only creates snapshots for models NOT in the registry (to avoid duplication).
+   */
+  private syncRuntimeModelSnapshotWithCredentials(): void {
+    const currentAuthType = this.currentAuthType;
+    const { model, apiKey, baseUrl } = this._generationConfig;
+
+    // Early return if missing required fields
+    if (!model || !currentAuthType || !apiKey || !baseUrl) {
+      return;
+    }
+
+    // Check if model exists in registry - if so, don't create RuntimeModelSnapshot
+    if (this.modelRegistry.hasModel(currentAuthType, model)) {
+      return;
+    }
+
+    // If we have an active snapshot, update it
+    if (
+      this.activeRuntimeModelSnapshotId &&
+      this.runtimeModelSnapshots.has(this.activeRuntimeModelSnapshotId)
+    ) {
+      const snapshot = this.runtimeModelSnapshots.get(
+        this.activeRuntimeModelSnapshotId,
+      )!;
+
+      // Update snapshot with current values (already verified to exist above)
+      snapshot.apiKey = apiKey;
+      snapshot.baseUrl = baseUrl;
+      snapshot.modelId = model;
+
+      // Update ID if model changed
+      const newSnapshotId = this.buildRuntimeModelSnapshotId(
+        snapshot.authType,
+        snapshot.modelId,
+      );
+      if (newSnapshotId !== snapshot.id) {
+        this.runtimeModelSnapshots.delete(snapshot.id);
+        snapshot.id = newSnapshotId;
+        this.runtimeModelSnapshots.set(newSnapshotId, snapshot);
+        this.activeRuntimeModelSnapshotId = newSnapshotId;
+      }
+
+      snapshot.createdAt = Date.now();
+    } else {
+      // Create new snapshot
+      this.detectAndCaptureRuntimeModel();
     }
   }
 
@@ -559,12 +774,12 @@ export class ModelsConfig {
       detail: 'generationConfig.maxRetries',
     };
 
-    this._generationConfig.disableCacheControl = gc.disableCacheControl;
-    this.generationConfigSources['disableCacheControl'] = {
+    this._generationConfig.enableCacheControl = gc.enableCacheControl;
+    this.generationConfigSources['enableCacheControl'] = {
       kind: 'modelProviders',
       authType: model.authType,
       modelId: model.id,
-      detail: 'generationConfig.disableCacheControl',
+      detail: 'generationConfig.enableCacheControl',
     };
 
     this._generationConfig.schemaCompliance = gc.schemaCompliance;
@@ -687,6 +902,8 @@ export class ModelsConfig {
       if (resolved) {
         this.applyResolvedModelDefaults(resolved);
         this.strictModelProviderSelection = true;
+        // Clear active runtime model snapshot since we're now using a registry model
+        this.activeRuntimeModelSnapshotId = undefined;
         return;
       }
     }
@@ -735,6 +952,8 @@ export class ModelsConfig {
       this.modelRegistry.getDefaultModelForAuthType(authType);
     if (defaultModel) {
       this.applyResolvedModelDefaults(defaultModel);
+      // Clear active runtime model snapshot since we're now using a registry model
+      this.activeRuntimeModelSnapshotId = undefined;
       return;
     }
 
@@ -756,5 +975,249 @@ export class ModelsConfig {
    */
   setOnModelChange(callback: OnModelChangeCallback): void {
     this.onModelChange = callback;
+  }
+
+  /**
+   * Detect and capture RuntimeModelSnapshot during initialization.
+   *
+   * Checks if the current configuration represents a runtime model (not from
+   * modelProviders registry) and captures it as a RuntimeModelSnapshot.
+   *
+   * This enables runtime models to persist across sessions and appear in model lists.
+   *
+   * @returns Created snapshot ID, or undefined if current config is a registry model
+   */
+  detectAndCaptureRuntimeModel(): string | undefined {
+    const {
+      model: currentModel,
+      apiKey,
+      baseUrl,
+      apiKeyEnvKey,
+      ...generationConfig
+    } = this._generationConfig;
+    const currentAuthType = this.currentAuthType;
+
+    if (!currentModel || !currentAuthType) {
+      return undefined;
+    }
+
+    // Check if model exists in registry - if so, it's not a runtime model
+    if (this.modelRegistry.hasModel(currentAuthType, currentModel)) {
+      // Current is a registry model, clear any previous RuntimeModelSnapshot for this authType
+      this.clearRuntimeModelSnapshotForAuthType(currentAuthType);
+      return undefined;
+    }
+
+    // Check if we have valid credentials (apiKey + baseUrl)
+    const hasValidCredentials =
+      this._generationConfig.apiKey && this._generationConfig.baseUrl;
+
+    if (!hasValidCredentials) {
+      return undefined;
+    }
+
+    // Create or update RuntimeModelSnapshot
+    const snapshotId = this.buildRuntimeModelSnapshotId(
+      currentAuthType,
+      currentModel,
+    );
+    const snapshot: RuntimeModelSnapshot = {
+      id: snapshotId,
+      authType: currentAuthType,
+      modelId: currentModel,
+      apiKey,
+      baseUrl,
+      apiKeyEnvKey,
+      generationConfig,
+      sources: { ...this.generationConfigSources },
+      createdAt: Date.now(),
+    };
+
+    this.runtimeModelSnapshots.set(snapshotId, snapshot);
+    this.activeRuntimeModelSnapshotId = snapshotId;
+
+    // Enforce per-authType limit
+    this.cleanupOldRuntimeModelSnapshots();
+
+    return snapshotId;
+  }
+
+  /**
+   * Get the currently active RuntimeModelSnapshot.
+   *
+   * @returns The active RuntimeModelSnapshot, or undefined if no runtime model is active
+   */
+  getActiveRuntimeModelSnapshot(): RuntimeModelSnapshot | undefined {
+    if (!this.activeRuntimeModelSnapshotId) {
+      return undefined;
+    }
+    return this.runtimeModelSnapshots.get(this.activeRuntimeModelSnapshotId);
+  }
+
+  /**
+   * Get the ID of the currently active RuntimeModelSnapshot.
+   *
+   * @returns The active snapshot ID, or undefined if no runtime model is active
+   */
+  getActiveRuntimeModelSnapshotId(): string | undefined {
+    return this.activeRuntimeModelSnapshotId;
+  }
+
+  /**
+   * Switch to a RuntimeModelSnapshot.
+   *
+   * Applies the configuration from a previously captured RuntimeModelSnapshot.
+   * Uses state rollback pattern: creates a state snapshot before switching and
+   * restores it on error.
+   *
+   * @param snapshotId - The ID of the RuntimeModelSnapshot to switch to
+   */
+  async switchToRuntimeModel(snapshotId: string): Promise<void> {
+    const runtimeModelSnapshot = this.runtimeModelSnapshots.get(snapshotId);
+    if (!runtimeModelSnapshot) {
+      throw new Error(`Runtime model snapshot '${snapshotId}' not found`);
+    }
+
+    const rollbackSnapshot = this.createStateSnapshotForRollback();
+
+    try {
+      const isAuthTypeChange =
+        runtimeModelSnapshot.authType !== this.currentAuthType;
+      this.currentAuthType = runtimeModelSnapshot.authType;
+      this.activeRuntimeModelSnapshotId = snapshotId;
+
+      // Apply runtime configuration
+      this.strictModelProviderSelection = false;
+      this.hasManualCredentials = true; // Mark as manual to prevent provider override
+
+      this._generationConfig.model = runtimeModelSnapshot.modelId;
+      this.generationConfigSources['model'] = {
+        kind: 'programmatic',
+        detail: 'runtimeModelSwitch',
+      };
+
+      if (runtimeModelSnapshot.apiKey) {
+        this._generationConfig.apiKey = runtimeModelSnapshot.apiKey;
+        this.generationConfigSources['apiKey'] = runtimeModelSnapshot.sources[
+          'apiKey'
+        ] || {
+          kind: 'programmatic',
+          detail: 'runtimeModelSwitch',
+        };
+      }
+
+      if (runtimeModelSnapshot.baseUrl) {
+        this._generationConfig.baseUrl = runtimeModelSnapshot.baseUrl;
+        this.generationConfigSources['baseUrl'] = runtimeModelSnapshot.sources[
+          'baseUrl'
+        ] || {
+          kind: 'programmatic',
+          detail: 'runtimeModelSwitch',
+        };
+      }
+
+      if (runtimeModelSnapshot.apiKeyEnvKey) {
+        this._generationConfig.apiKeyEnvKey = runtimeModelSnapshot.apiKeyEnvKey;
+      }
+
+      // Apply generation config
+      if (runtimeModelSnapshot.generationConfig) {
+        Object.assign(
+          this._generationConfig,
+          runtimeModelSnapshot.generationConfig,
+        );
+      }
+
+      const requiresRefresh = isAuthTypeChange;
+
+      if (this.onModelChange) {
+        await this.onModelChange(
+          runtimeModelSnapshot.authType,
+          requiresRefresh,
+        );
+      }
+    } catch (error) {
+      this.rollbackToStateSnapshot(rollbackSnapshot);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the active RuntimeModelSnapshot as an AvailableModel option.
+   *
+   * Converts the active RuntimeModelSnapshot to an AvailableModel format for display
+   * in model lists. Returns undefined if no runtime model is active.
+   *
+   * @returns The runtime model as an AvailableModel option, or undefined
+   */
+  private getRuntimeModelOption(): AvailableModel | undefined {
+    const snapshot = this.getActiveRuntimeModelSnapshot();
+    if (!snapshot) {
+      return undefined;
+    }
+
+    return {
+      id: snapshot.modelId,
+      label: snapshot.modelId,
+      authType: snapshot.authType,
+      /**
+       * `isVision` is for automatic switching of qwen-oauth vision model.
+       * Runtime models are basically specified via CLI arguments, env variables,
+       * or settings for other auth types.
+       */
+      isVision: false,
+      contextWindowSize: snapshot.generationConfig?.contextWindowSize,
+      isRuntimeModel: true,
+      runtimeSnapshotId: snapshot.id,
+    };
+  }
+
+  /**
+   * Clear all RuntimeModelSnapshots for a specific authType.
+   *
+   * Removes all RuntimeModelSnapshots associated with the given authType.
+   * Called when switching to a registry model to avoid stale RuntimeModelSnapshots.
+   *
+   * @param authType - The authType whose snapshots should be cleared
+   */
+  private clearRuntimeModelSnapshotForAuthType(authType: AuthType): void {
+    for (const [id, snapshot] of this.runtimeModelSnapshots.entries()) {
+      if (snapshot.authType === authType) {
+        this.runtimeModelSnapshots.delete(id);
+        if (this.activeRuntimeModelSnapshotId === id) {
+          this.activeRuntimeModelSnapshotId = undefined;
+        }
+      }
+    }
+  }
+
+  /**
+   * Cleanup old RuntimeModelSnapshots to enforce per-authType limit.
+   *
+   * Keeps only the latest RuntimeModelSnapshot for each authType.
+   * Older snapshots are removed to prevent unbounded growth.
+   */
+  private cleanupOldRuntimeModelSnapshots(): void {
+    const snapshotsByAuthType = new Map<AuthType, RuntimeModelSnapshot>();
+
+    for (const snapshot of this.runtimeModelSnapshots.values()) {
+      const existing = snapshotsByAuthType.get(snapshot.authType);
+      if (!existing || snapshot.createdAt > existing.createdAt) {
+        snapshotsByAuthType.set(snapshot.authType, snapshot);
+      }
+    }
+
+    this.runtimeModelSnapshots.clear();
+    for (const snapshot of snapshotsByAuthType.values()) {
+      this.runtimeModelSnapshots.set(snapshot.id, snapshot);
+    }
+
+    // Update active snapshot ID if it was removed
+    if (
+      this.activeRuntimeModelSnapshotId &&
+      !this.runtimeModelSnapshots.has(this.activeRuntimeModelSnapshotId)
+    ) {
+      this.activeRuntimeModelSnapshotId = undefined;
+    }
   }
 }

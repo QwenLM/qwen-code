@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TestRig } from './test-helper.js';
 
@@ -120,5 +120,99 @@ d('BOM end-to-end integration', () => {
       utf32BE('BOM_OK UTF-32BE'),
       'BOM_OK UTF-32BE',
     );
+  });
+
+  it('should preserve UTF-8 BOM when editing existing file', async () => {
+    // Create a file with UTF-8 BOM and Chinese content
+    const originalContent =
+      '// 这是一个测试文件\n// 包含中文注释\nfunction test() {\n  return "hello";\n}\n';
+    const fileWithBOM = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(originalContent, 'utf8'),
+    ]);
+
+    const filename = 'bom-test.js';
+    writeFileSync(join(dir, filename), fileWithBOM);
+
+    // Ask Qwen Code to edit the file
+    const prompt = `edit the file ${filename} to change the return value from "hello" to "world"`;
+    await rig.run(prompt);
+    await rig.waitForToolCall('edit_file');
+
+    // Read the modified file as raw bytes
+    const modifiedBuffer = readFileSync(join(dir, filename));
+
+    // Verify BOM is preserved (first 3 bytes should be EF BB BF)
+    expect(modifiedBuffer[0]).toBe(0xef);
+    expect(modifiedBuffer[1]).toBe(0xbb);
+    expect(modifiedBuffer[2]).toBe(0xbf);
+
+    // Verify the content was actually changed to include 'world'
+    const modifiedContent = modifiedBuffer.toString('utf8');
+    expect(modifiedContent).toContain('world');
+  });
+
+  it('should preserve UTF-8 BOM when overwriting file with write_file', async () => {
+    // Create a file with UTF-8 BOM
+    const originalContent = '// Original BOM file\nconst x = 1;\n';
+    const fileWithBOM = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(originalContent, 'utf8'),
+    ]);
+
+    const filename = 'bom-overwrite.js';
+    writeFileSync(join(dir, filename), fileWithBOM);
+
+    // Ask Qwen Code to overwrite the file with new content
+    const prompt = `overwrite the file ${filename} with: const y = 2;\n// new content`;
+    await rig.run(prompt);
+    await rig.waitForToolCall('write_file');
+
+    // Read the modified file as raw bytes
+    const modifiedBuffer = readFileSync(join(dir, filename));
+
+    // Verify BOM is preserved (first 3 bytes should be EF BB BF)
+    expect(modifiedBuffer[0]).toBe(0xef);
+    expect(modifiedBuffer[1]).toBe(0xbb);
+    expect(modifiedBuffer[2]).toBe(0xbf);
+
+    // Verify the new content includes 'const y = 2'
+    const modifiedContent = modifiedBuffer.toString('utf8');
+    expect(modifiedContent).toContain('const y = 2');
+  });
+});
+
+describe('BOM with defaultFileEncoding configuration', () => {
+  it('should create new file with BOM when defaultFileEncoding is utf-8-bom', async () => {
+    const rigWithBOM = new TestRig();
+    await rigWithBOM.setup('bom-default-encoding', {
+      settings: {
+        general: {
+          defaultFileEncoding: 'utf-8-bom',
+        },
+      },
+    });
+
+    const filename = 'new-file-with-bom.js';
+
+    // Ask Qwen Code to create a new file
+    const prompt = `create a new file called ${filename} with content: const greeting = "hello";`;
+    await rigWithBOM.run(prompt);
+    await rigWithBOM.waitForToolCall('write_file');
+
+    // Read the created file as raw bytes
+    const filePath = join(rigWithBOM.testDir!, filename);
+    const fileBuffer = readFileSync(filePath);
+
+    // Verify BOM is present (first 3 bytes should be EF BB BF)
+    expect(fileBuffer[0]).toBe(0xef);
+    expect(fileBuffer[1]).toBe(0xbb);
+    expect(fileBuffer[2]).toBe(0xbf);
+
+    // Verify the content includes the expected string
+    const fileContent = fileBuffer.toString('utf8');
+    expect(fileContent).toContain('const greeting');
+
+    await rigWithBOM.cleanup();
   });
 });

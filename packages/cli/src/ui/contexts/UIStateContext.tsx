@@ -8,7 +8,6 @@ import { createContext, useContext } from 'react';
 import type {
   HistoryItem,
   ThoughtSummary,
-  ConsoleMessageItem,
   ShellConfirmationRequest,
   ConfirmationRequest,
   LoopDetectionConfirmationRequest,
@@ -81,8 +80,6 @@ export interface UIState {
   isFolderTrustDialogOpen: boolean;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
-  showErrorDetails: boolean;
-  filteredConsoleMessages: ConsoleMessageItem[];
   ideContextState: IdeContext | undefined;
   showToolDescriptions: boolean;
   ctrlCPressedOnce: boolean;
@@ -96,7 +93,6 @@ export interface UIState {
   // Quota-related state
   currentModel: string;
   contextFileNames: string[];
-  errorCount: number;
   availableTerminalHeight: number | undefined;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;

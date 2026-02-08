@@ -38,6 +38,8 @@ import {
   SubAgentEventEmitter,
   SubAgentEventType,
   type SubAgentStreamTextEvent,
+  type SubAgentToolCallEvent,
+  type SubAgentToolResultEvent,
 } from './subagent-events.js';
 import type {
   ModelConfig,
@@ -931,6 +933,166 @@ describe('subagent.ts', () => {
         expect(scope.getFinalText()).toBe('Actual output.');
         // Should have been called twice: first with thought-only, then nudged
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('runNonInteractive - Tool Restriction Enforcement (Issue #1121)', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      it('should NOT execute tools that are not in the allowed tools list', async () => {
+        // Define two tools: one allowed (read_file), one not allowed (edit_file)
+        const readFileToolDef: FunctionDeclaration = {
+          name: 'read_file',
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const editFileToolDef: FunctionDeclaration = {
+          name: 'edit_file',
+          description: 'Edits a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        // Track which tools were executed
+        const executedTools: string[] = [];
+
+        const readFileInvocation = {
+          params: { path: 'test.txt' },
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          execute: vi.fn().mockImplementation(async () => {
+            executedTools.push('read_file');
+            return {
+              llmContent: 'file contents',
+              returnDisplay: 'Read file contents',
+            };
+          }),
+        };
+
+        const editFileInvocation = {
+          params: { path: 'test.txt', content: 'malicious content' },
+          getDescription: vi.fn().mockReturnValue('Edit file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          shouldConfirmExecute: vi.fn().mockResolvedValue(false),
+          execute: vi.fn().mockImplementation(async () => {
+            executedTools.push('edit_file');
+            return {
+              llmContent: 'file edited',
+              returnDisplay: 'Edited file',
+            };
+          }),
+        };
+
+        const readFileTool = {
+          name: 'read_file',
+          displayName: 'Read File',
+          description: 'Read file contents',
+          kind: 'READ' as const,
+          schema: readFileToolDef,
+          build: vi.fn().mockImplementation(() => readFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+
+        const editFileTool = {
+          name: 'edit_file',
+          displayName: 'Edit File',
+          description: 'Edit file contents',
+          kind: 'WRITE' as const,
+          schema: editFileToolDef,
+          build: vi.fn().mockImplementation(() => editFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+
+        const { config } = await createMockConfig({
+          // Only return read_file in the filtered list (this is what the subagent should see)
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([readFileToolDef]),
+          // But the full registry has both tools (simulating the bug)
+          getFunctionDeclarations: vi
+            .fn()
+            .mockReturnValue([readFileToolDef, editFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === 'read_file') return readFileTool;
+            if (name === 'edit_file') return editFileTool;
+            return undefined;
+          }),
+        });
+
+        // Only allow read_file in the subagent's tool config
+        const toolConfig: ToolConfig = { tools: ['read_file'] };
+
+        // Model calls BOTH read_file (allowed) AND edit_file (NOT allowed)
+        // This simulates the bug where the model hallucinates an unauthorized tool call
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: 'read_file',
+                args: { path: 'test.txt' },
+              },
+              {
+                id: 'call_edit',
+                name: 'edit_file', // This tool is NOT in the allowed list!
+                args: { path: 'test.txt', content: 'malicious content' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        // Track emitted events
+        const toolCallEvents: SubAgentToolCallEvent[] = [];
+        const toolResultEvents: SubAgentToolResultEvent[] = [];
+
+        // Create event emitter BEFORE the scope and subscribe to events
+        const eventEmitter = new SubAgentEventEmitter();
+        eventEmitter.on(SubAgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as SubAgentToolCallEvent);
+        });
+        eventEmitter.on(SubAgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as SubAgentToolResultEvent);
+        });
+
+        const scope = await SubAgentScope.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.runNonInteractive(new ContextState());
+
+        // 1. Only allowed tool should be executed
+        expect(executedTools).toContain('read_file');
+        expect(executedTools).not.toContain('edit_file');
+        expect(editFileInvocation.execute).not.toHaveBeenCalled();
+
+        // 2. TOOL_CALL events should be emitted for BOTH tools (for visibility)
+        expect(toolCallEvents).toHaveLength(2);
+        expect(toolCallEvents.map((e) => e.name)).toContain('read_file');
+        expect(toolCallEvents.map((e) => e.name)).toContain('edit_file');
+
+        // 3. TOOL_RESULT events should be emitted for both
+        expect(toolResultEvents).toHaveLength(2);
+
+        // 4. Verify blocked tool result has success=false and error message
+        const editResult = toolResultEvents.find((e) => e.name === 'edit_file');
+        expect(editResult).toBeDefined();
+        expect(editResult!.success).toBe(false);
+        expect(editResult!.error).toContain('not found');
+        expect(editResult!.callId).toBe('call_edit');
+
+        // 5. Verify allowed tool result has success=true
+        const readResult = toolResultEvents.find((e) => e.name === 'read_file');
+        expect(readResult).toBeDefined();
+        expect(readResult!.success).toBe(true);
       });
     });
   });

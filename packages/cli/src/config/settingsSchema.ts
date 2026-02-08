@@ -143,23 +143,15 @@ const SETTINGS_SCHEMA = {
         description: 'Enable Vim keybindings',
         showInDialog: true,
       },
-      disableAutoUpdate: {
+      enableAutoUpdate: {
         type: 'boolean',
-        label: 'Disable Auto Update',
+        label: 'Enable Auto Update',
         category: 'General',
         requiresRestart: false,
-        default: false,
-        description: 'Disable automatic updates',
+        default: true,
+        description:
+          'Enable automatic update checks and installations on startup.',
         showInDialog: true,
-      },
-      disableUpdateNag: {
-        type: 'boolean',
-        label: 'Disable Update Nag',
-        category: 'General',
-        requiresRestart: false,
-        default: false,
-        description: 'Disable update notification prompts.',
-        showInDialog: false,
       },
       gitCoAuthor: {
         type: 'boolean',
@@ -243,6 +235,20 @@ const SETTINGS_SCHEMA = {
         description:
           'Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.',
         showInDialog: false,
+      },
+      defaultFileEncoding: {
+        type: 'enum',
+        label: 'Default File Encoding',
+        category: 'General',
+        requiresRestart: false,
+        default: 'utf-8',
+        description:
+          'Default encoding for new files. Use "utf-8" (default) for UTF-8 without BOM, or "utf-8-bom" for UTF-8 with BOM. Only change this if your project specifically requires BOM.',
+        showInDialog: false,
+        options: [
+          { value: 'utf-8', label: 'UTF-8 (without BOM)' },
+          { value: 'utf-8-bom', label: 'UTF-8 with BOM' },
+        ],
       },
     },
   },
@@ -382,14 +388,14 @@ const SETTINGS_SCHEMA = {
         description: 'Accessibility settings.',
         showInDialog: false,
         properties: {
-          disableLoadingPhrases: {
+          enableLoadingPhrases: {
             type: 'boolean',
-            label: 'Disable Loading Phrases',
+            label: 'Enable Loading Phrases',
             category: 'UI',
             requiresRestart: true,
-            default: false,
-            description: 'Disable loading phrases for accessibility',
-            showInDialog: false,
+            default: true,
+            description: 'Enable loading phrases (disable for accessibility)',
+            showInDialog: true,
           },
           screenReader: {
             type: 'boolean',
@@ -609,13 +615,13 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
-          disableCacheControl: {
+          enableCacheControl: {
             type: 'boolean',
-            label: 'Disable Cache Control',
+            label: 'Enable Cache Control',
             category: 'Generation Configuration',
             requiresRestart: false,
-            default: false,
-            description: 'Disable cache control for DashScope providers.',
+            default: true,
+            description: 'Enable cache control for DashScope providers.',
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -733,14 +739,14 @@ const SETTINGS_SCHEMA = {
             description: 'Enable recursive file search functionality',
             showInDialog: false,
           },
-          disableFuzzySearch: {
+          enableFuzzySearch: {
             type: 'boolean',
-            label: 'Disable Fuzzy Search',
+            label: 'Enable Fuzzy Search',
             category: 'Context',
             requiresRestart: true,
-            default: false,
-            description: 'Disable fuzzy search when searching for files.',
-            showInDialog: false,
+            default: true,
+            description: 'Enable fuzzy search when searching for files.',
+            showInDialog: true,
           },
         },
       },
@@ -968,15 +974,6 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
-  useSmartEdit: {
-    type: 'boolean',
-    label: 'Use Smart Edit',
-    category: 'Advanced',
-    requiresRestart: false,
-    default: false,
-    description: 'Enable the smart-edit tool instead of the replace tool.',
-    showInDialog: false,
-  },
   security: {
     type: 'object',
     label: 'Security',
@@ -1153,16 +1150,6 @@ const SETTINGS_SCHEMA = {
     description: 'Setting to enable experimental features',
     showInDialog: false,
     properties: {
-      skills: {
-        type: 'boolean',
-        label: 'Experimental: Skills',
-        category: 'Experimental',
-        requiresRestart: true,
-        default: false,
-        description:
-          'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
-        showInDialog: true,
-      },
       visionModelPreview: {
         type: 'boolean',
         label: 'Vision Model Preview',

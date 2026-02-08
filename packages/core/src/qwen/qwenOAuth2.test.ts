@@ -840,7 +840,9 @@ describe('getQwenOAuthClient', () => {
           requireCachedCredentials: true,
         }),
       ),
-    ).rejects.toThrow('Please use /auth to re-authenticate.');
+    ).rejects.toThrow(
+      'Qwen OAuth credentials expired. Please use /auth to re-authenticate with qwen-oauth.',
+    );
 
     expect(global.fetch).not.toHaveBeenCalled();
 
@@ -1680,20 +1682,11 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('Manager failed')),
       };
 
-      // Mock console.warn to avoid test noise
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       // With our race condition fix, we no longer fall back to local credentials
       // to ensure single source of truth
       expect(result.token).toBeUndefined();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        'Failed to get access token from shared manager:',
-        expect.any(Error),
-      );
-
-      consoleSpy.mockRestore();
     });
 
     it('should return undefined when both manager and cache fail', async () => {
@@ -1716,13 +1709,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('Manager failed')),
       };
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       expect(result.token).toBeUndefined();
-
-      consoleSpy.mockRestore();
     });
 
     it('should handle missing credentials gracefully', async () => {
@@ -1742,13 +1731,9 @@ describe('Enhanced Error Handling and Edge Cases', () => {
           .mockRejectedValue(new Error('No credentials')),
       };
 
-      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-
       const result = await client.getAccessToken();
 
       expect(result.token).toBeUndefined();
-
-      consoleSpy.mockRestore();
     });
   });
 

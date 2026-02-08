@@ -14,6 +14,9 @@ import { GoogleAuth } from 'google-auth-library';
 import type { MCPServerConfig } from '../config/config.js';
 import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
 import { MCP_SA_IMPERSONATION_CLIENT_NAME } from './constants.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MCP_SA_IMPERSONATION');
 
 const fiveMinBufferMs = 5 * 60 * 1000;
 
@@ -21,9 +24,7 @@ function createIamApiUrl(targetSA: string): string {
   return `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(targetSA)}:generateIdToken`;
 }
 
-export class ServiceAccountImpersonationProvider
-  implements OAuthClientProvider
-{
+export class ServiceAccountImpersonationProvider implements OAuthClientProvider {
   private readonly targetServiceAccount: string;
   private readonly targetAudience: string; // OAuth Client Id
   private readonly auth: GoogleAuth;
@@ -105,11 +106,11 @@ export class ServiceAccountImpersonationProvider
       idToken = res.data.token;
 
       if (!idToken || idToken.length === 0) {
-        console.error('Failed to get ID token from Google');
+        debugLogger.error('Failed to get ID token from Google');
         return undefined;
       }
     } catch (e) {
-      console.error('Failed to fetch ID token from Google:', e);
+      debugLogger.error(`Failed to fetch ID token from Google: ${e}`);
       return undefined;
     }
 
@@ -163,7 +164,9 @@ export class ServiceAccountImpersonationProvider
         return payload.exp * 1000; // Convert seconds to milliseconds
       }
     } catch (e) {
-      console.error('Failed to parse ID token for expiry time with error:', e);
+      debugLogger.error(
+        `Failed to parse ID token for expiry time with error: ${e}`,
+      );
     }
 
     // Return undefined if try block fails or 'exp' is missing/invalid

@@ -15,6 +15,9 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
 export interface ExitPlanModeParams {
   plan: string;
@@ -102,7 +105,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(
+      debugLogger.error(
         `[ExitPlanModeTool] Failed to set approval mode to "${mode}": ${errorMessage}`,
       );
     }
@@ -135,7 +138,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(
+      debugLogger.error(
         `[ExitPlanModeTool] Error executing exit_plan_mode: ${errorMessage}`,
       );
 

@@ -15,6 +15,9 @@ import * as process from 'process';
 import { QWEN_DIR } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('TODO_WRITE');
 
 export interface TodoItem {
   id: string;
@@ -370,7 +373,7 @@ ${todosJson}. Continue on with the tasks at hand if applicable.
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(
+      debugLogger.error(
         `[TodoWriteTool] Error executing todo_write: ${errorMessage}`,
       );
 

@@ -8,6 +8,7 @@ import type {
   AuthType,
   ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import type { ConfigSources } from '../utils/configResolver.js';
 
 /**
  * Model capabilities configuration
@@ -28,7 +29,7 @@ export type ModelGenerationConfig = Pick<
   | 'samplingParams'
   | 'timeout'
   | 'maxRetries'
-  | 'disableCacheControl'
+  | 'enableCacheControl'
   | 'schemaCompliance'
   | 'reasoning'
   | 'customHeaders'
@@ -92,6 +93,12 @@ export interface AvailableModel {
   authType: AuthType;
   isVision?: boolean;
   contextWindowSize?: number;
+
+  /** Whether this is a runtime model (not from modelProviders) */
+  isRuntimeModel?: boolean;
+
+  /** Runtime model snapshot ID (if isRuntimeModel is true) */
+  runtimeSnapshotId?: string;
 }
 
 /**
@@ -102,4 +109,36 @@ export interface ModelSwitchMetadata {
   reason?: string;
   /** Additional context */
   context?: string;
+}
+
+/**
+ * Runtime model snapshot - captures complete model configuration from non-modelProviders sources
+ */
+export interface RuntimeModelSnapshot {
+  /** Snapshot unique identifier */
+  id: string;
+
+  /** Associated AuthType */
+  authType: AuthType;
+
+  /** Model ID */
+  modelId: string;
+
+  /** API Key (may come from env/cli/manual input) */
+  apiKey?: string;
+
+  /** Base URL (may come from env/cli/settings/credentials) */
+  baseUrl?: string;
+
+  /** Environment variable name (if apiKey comes from env) */
+  apiKeyEnvKey?: string;
+
+  /** Generation config (sampling parameters, etc.) */
+  generationConfig?: ModelGenerationConfig;
+
+  /** Configuration source tracking */
+  sources: ConfigSources;
+
+  /** Snapshot creation timestamp */
+  createdAt: number;
 }

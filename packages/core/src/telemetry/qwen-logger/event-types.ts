@@ -4,6 +4,7 @@ export interface RumApp {
   env: string;
   version: string;
   type: 'cli' | 'extension';
+  channel?: string;
 }
 
 export interface RumUser {

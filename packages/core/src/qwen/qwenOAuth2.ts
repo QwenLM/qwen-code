@@ -14,11 +14,14 @@ import { EventEmitter } from 'events';
 import type { Config } from '../config/config.js';
 import { randomUUID } from 'node:crypto';
 import { formatFetchErrorForUser } from '../utils/fetch.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   SharedTokenManager,
   TokenManagerError,
   TokenError,
 } from './sharedTokenManager.js';
+
+const debugLogger = createDebugLogger('QWEN_OAUTH');
 
 // OAuth Endpoints
 const QWEN_OAUTH_BASE_URL = 'https://chat.qwen.ai';
@@ -273,7 +276,10 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
       const credentials = await this.sharedManager.getValidCredentials(this);
       return { token: credentials.access_token };
     } catch (error) {
-      console.warn('Failed to get access token from shared manager:', error);
+      debugLogger.warn(
+        'Failed to get access token from shared manager:',
+        error,
+      );
 
       // Don't use fallback to local credentials to prevent race conditions
       // All token management should go through SharedTokenManager for consistency
@@ -312,7 +318,7 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
     }
 
     const result = (await response.json()) as DeviceAuthorizationResponse;
-    console.debug('Device authorization result:', result);
+    debugLogger.debug('Device authorization result:', result);
 
     // Check if the response indicates success
     if (!isDeviceAuthorizationSuccess(result)) {
@@ -498,25 +504,29 @@ export async function getQwenOAuthClient(
     if (error instanceof TokenManagerError) {
       switch (error.type) {
         case TokenError.NO_REFRESH_TOKEN:
-          console.debug(
+          debugLogger.debug(
             'No refresh token available, proceeding with device flow',
           );
           break;
         case TokenError.REFRESH_FAILED:
-          console.debug('Token refresh failed, proceeding with device flow');
+          debugLogger.debug(
+            'Token refresh failed, proceeding with device flow',
+          );
           break;
         case TokenError.NETWORK_ERROR:
-          console.warn(
+          debugLogger.warn(
             'Network error during token refresh, trying device flow',
           );
           break;
         default:
-          console.warn('Token manager error:', (error as Error).message);
+          debugLogger.warn('Token manager error:', (error as Error).message);
       }
     }
 
     if (options?.requireCachedCredentials) {
-      throw new Error('Please use /auth to re-authenticate.');
+      throw new Error(
+        'Qwen OAuth credentials expired. Please use /auth to re-authenticate with qwen-oauth.',
+      );
     }
 
     // If we couldn't obtain valid credentials via SharedTokenManager, fall back to
@@ -559,10 +569,10 @@ export async function getQwenOAuthClient(
 
 /**
  * Displays a formatted box with OAuth device authorization URL.
- * Uses process.stderr.write() to bypass ConsolePatcher and ensure the auth URL
- * is always visible to users, especially in non-interactive mode.
- * Using stderr prevents corruption of structured JSON output (which goes to stdout)
- * and follows the standard Unix convention of user-facing messages to stderr.
+ * Uses process.stderr.write() to ensure the auth URL is always visible to users,
+ * especially in non-interactive mode. Using stderr prevents corruption of
+ * structured JSON output (which goes to stdout) and follows the standard Unix
+ * convention of user-facing messages to stderr.
  */
 function showFallbackMessage(verificationUriComplete: string): void {
   const title = 'Qwen OAuth Device Authorization';
@@ -678,7 +688,7 @@ async function authWithQwenDeviceFlow(
       return null;
     }
     const message = 'Authentication cancelled by user.';
-    console.debug('\n' + message);
+    debugLogger.debug('\n' + message);
     qwenOAuth2Events.emit(QwenOAuth2Event.AuthProgress, 'error', message);
     return { success: false, reason: 'cancelled', message };
   };
@@ -702,14 +712,11 @@ async function authWithQwenDeviceFlow(
       // causing the entire Node.js process to crash.
       if (childProcess) {
         childProcess.on('error', (err) => {
-          console.debug(
-            'Browser launch failed:',
-            err.message || 'Unknown error',
-          );
+          debugLogger.debug('Browser launch failed:', err.message || err);
         });
       }
     } catch (err) {
-      console.debug(
+      debugLogger.debug(
         'Failed to open browser:',
         err instanceof Error ? err.message : 'Unknown error',
       );
@@ -748,7 +755,7 @@ async function authWithQwenDeviceFlow(
     }
 
     emitAuthProgress('polling', 'Waiting for authorization...');
-    console.debug('Waiting for authorization...\n');
+    debugLogger.debug('Waiting for authorization...\n');
 
     // Poll for the token
     let pollInterval = 2000; // 2 seconds, can be increased if slow_down is received
@@ -764,7 +771,7 @@ async function authWithQwenDeviceFlow(
       }
 
       try {
-        console.debug('polling for token...');
+        debugLogger.debug('polling for token...');
         const tokenResponse = await client.pollDeviceToken({
           device_code: deviceAuth.device_code,
           code_verifier,
@@ -808,7 +815,9 @@ async function authWithQwenDeviceFlow(
             'Authentication successful! Access token obtained.',
           );
 
-          console.debug('Authentication successful! Access token obtained.');
+          debugLogger.debug(
+            'Authentication successful! Access token obtained.',
+          );
           return { success: true };
         }
 
@@ -819,7 +828,7 @@ async function authWithQwenDeviceFlow(
           // Handle slow_down error by increasing poll interval
           if (pendingData.slowDown) {
             pollInterval = Math.min(pollInterval * 1.5, 10000); // Increase by 50%, max 10 seconds
-            console.debug(
+            debugLogger.debug(
               `\nServer requested to slow down, increasing poll interval to ${pollInterval}ms'`,
             );
           } else {
@@ -887,7 +896,6 @@ async function authWithQwenDeviceFlow(
           eventType: 'error' | 'rate_limit' = 'error',
         ): AuthResult => {
           emitAuthProgress(eventType, message);
-          console.error('\n' + message);
           return { success: false, reason, message };
         };
 
@@ -928,7 +936,6 @@ async function authWithQwenDeviceFlow(
 
     const timeoutMessage = 'Authorization timeout, please restart the process.';
     emitAuthProgress('timeout', timeoutMessage);
-    console.error('\n' + timeoutMessage);
     return { success: false, reason: 'timeout', message: timeoutMessage };
   } catch (error: unknown) {
     const fullErrorMessage = formatFetchErrorForUser(error, {
@@ -937,7 +944,6 @@ async function authWithQwenDeviceFlow(
     const message = `Device authorization flow failed: ${fullErrorMessage}`;
 
     emitAuthProgress('error', message);
-    console.error(message);
     return { success: false, reason: 'error', message };
   } finally {
     // Clean up event listener
@@ -981,7 +987,7 @@ export async function clearQwenCredentials(): Promise<void> {
   try {
     const filePath = getQwenCachedCredentialPath();
     await fs.unlink(filePath);
-    console.debug('Cached Qwen credentials cleared successfully.');
+    debugLogger.debug('Cached Qwen credentials cleared successfully.');
   } catch (error: unknown) {
     // If file doesn't exist or can't be deleted, we consider it cleared
     if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
@@ -989,7 +995,10 @@ export async function clearQwenCredentials(): Promise<void> {
       return;
     }
     // Log other errors but don't throw - clearing credentials should be non-critical
-    console.warn('Warning: Failed to clear cached Qwen credentials:', error);
+    debugLogger.warn(
+      'Warning: Failed to clear cached Qwen credentials:',
+      error,
+    );
   } finally {
     // Also clear SharedTokenManager in-memory cache to prevent stale credentials
     // from being reused within the same process after the file is removed.

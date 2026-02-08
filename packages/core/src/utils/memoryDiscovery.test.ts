@@ -85,7 +85,6 @@ describe('loadServerHierarchicalMemory', () => {
       const { fileCount } = await loadServerHierarchicalMemory(
         cwd,
         [],
-        false,
         new FileDiscoveryService(projectRoot),
         [],
         false, // untrusted
@@ -109,7 +108,6 @@ describe('loadServerHierarchicalMemory', () => {
       const { fileCount, memoryContent } = await loadServerHierarchicalMemory(
         cwd,
         [],
-        false,
         new FileDiscoveryService(projectRoot),
         [],
         false, // untrusted
@@ -124,7 +122,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -145,7 +142,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -169,7 +165,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -197,7 +192,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -222,7 +216,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -248,7 +241,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -273,7 +265,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -311,7 +302,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -333,7 +323,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [],
-      false,
       new FileDiscoveryService(projectRoot),
       [extensionFilePath],
       DEFAULT_FOLDER_TRUST,
@@ -357,7 +346,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       [includedDir],
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -389,7 +377,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       cwd,
       createdFiles.map((f) => path.dirname(f)),
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,
@@ -422,7 +409,6 @@ describe('loadServerHierarchicalMemory', () => {
     const result = await loadServerHierarchicalMemory(
       parentDir,
       [childDir, parentDir], // Deliberately include duplicates
-      false,
       new FileDiscoveryService(projectRoot),
       [],
       DEFAULT_FOLDER_TRUST,

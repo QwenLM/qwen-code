@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { ModelRegistry, QWEN_OAUTH_MODELS } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from './types.js';
@@ -270,25 +270,11 @@ describe('ModelRegistry', () => {
       expect(geminiModels[0].id).toBe('gemini-pro');
     });
 
-    it('should skip invalid authType keys with warning', () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => undefined);
-
+    it('should skip invalid authType keys', () => {
       const registry = new ModelRegistry({
         openai: [{ id: 'gpt-4', name: 'GPT-4' }],
         'invalid-key': [{ id: 'some-model', name: 'Some Model' }],
       } as unknown as ModelProvidersConfig);
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[ModelRegistry] Invalid authType key'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('invalid-key'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Expected one of:'),
-      );
 
       // Valid key should be registered
       expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
@@ -296,30 +282,15 @@ describe('ModelRegistry', () => {
       // Invalid key should be skipped (no crash)
       const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
       expect(openaiModels.length).toBe(1);
-
-      consoleWarnSpy.mockRestore();
     });
 
     it('should handle mixed valid and invalid keys', () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => undefined);
-
       const registry = new ModelRegistry({
         openai: [{ id: 'gpt-4', name: 'GPT-4' }],
         'bad-key-1': [{ id: 'model-1', name: 'Model 1' }],
         gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
         'bad-key-2': [{ id: 'model-2', name: 'Model 2' }],
       } as unknown as ModelProvidersConfig);
-
-      // Should warn twice for the two invalid keys
-      expect(consoleWarnSpy).toHaveBeenCalledTimes(2);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('bad-key-1'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('bad-key-2'),
-      );
 
       // Valid keys should be registered
       expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
@@ -331,43 +302,9 @@ describe('ModelRegistry', () => {
 
       const geminiModels = registry.getModelsForAuthType(AuthType.USE_GEMINI);
       expect(geminiModels.length).toBe(1);
-
-      consoleWarnSpy.mockRestore();
-    });
-
-    it('should list all valid AuthType values in warning message', () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => undefined);
-
-      new ModelRegistry({
-        'invalid-auth': [{ id: 'model', name: 'Model' }],
-      } as unknown as ModelProvidersConfig);
-
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('openai'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('qwen-oauth'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('gemini'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('vertex-ai'),
-      );
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('anthropic'),
-      );
-
-      consoleWarnSpy.mockRestore();
     });
 
     it('should work correctly with getModelsForAuthType after validation', () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => undefined);
-
       const registry = new ModelRegistry({
         openai: [
           { id: 'gpt-4', name: 'GPT-4' },
@@ -381,8 +318,6 @@ describe('ModelRegistry', () => {
       expect(models.find((m) => m.id === 'gpt-4')).toBeDefined();
       expect(models.find((m) => m.id === 'gpt-3.5')).toBeDefined();
       expect(models.find((m) => m.id === 'invalid-model')).toBeUndefined();
-
-      consoleWarnSpy.mockRestore();
     });
   });
 });

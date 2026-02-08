@@ -66,7 +66,6 @@ describe('App', () => {
     );
 
     expect(lastFrame()).toContain('MainContent');
-    expect(lastFrame()).toContain('Notifications');
     expect(lastFrame()).toContain('Composer');
   });
 
@@ -98,7 +97,6 @@ describe('App', () => {
     );
 
     expect(lastFrame()).toContain('MainContent');
-    expect(lastFrame()).toContain('Notifications');
     expect(lastFrame()).toContain('DialogManager');
   });
 
@@ -157,6 +155,6 @@ describe('App', () => {
       </UIStateContext.Provider>,
     );
 
-    expect(lastFrame()).toContain('MainContent\nNotifications\nComposer');
+    expect(lastFrame()).toContain('MainContent\nComposer');
   });
 });

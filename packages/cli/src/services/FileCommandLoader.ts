@@ -11,7 +11,11 @@ import toml from '@iarna/toml';
 import { glob } from 'glob';
 import { z } from 'zod';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { EXTENSIONS_CONFIG_FILENAME, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  EXTENSIONS_CONFIG_FILENAME,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import type { ICommandLoader } from './types.js';
 import {
   parseMarkdownCommand,
@@ -27,6 +31,8 @@ interface CommandDirectory {
   path: string;
   extensionName?: string;
 }
+
+const debugLogger = createDebugLogger('FILE_COMMAND_LOADER');
 
 /**
  * Defines the Zod schema for a command definition file. This serves as the
@@ -129,7 +135,7 @@ export class FileCommandLoader implements ICommandLoader {
         const isAbortError =
           error instanceof Error && error.name === 'AbortError';
         if (!isEnoent && !isAbortError) {
-          console.error(
+          debugLogger.error(
             `[FileCommandLoader] Error loading commands from ${dirInfo.path}:`,
             error,
           );
@@ -214,7 +220,10 @@ export class FileCommandLoader implements ICommandLoader {
         }
       }
     } catch (error) {
-      console.warn(`Failed to read extension config for ${ext.name}:`, error);
+      debugLogger.warn(
+        `Failed to read extension config for ${ext.name}:`,
+        error,
+      );
     }
 
     // Default fallback: use 'commands' directory
@@ -246,7 +255,7 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       fileContent = await fs.readFile(filePath, 'utf-8');
     } catch (error: unknown) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Failed to read file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -257,7 +266,7 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       parsed = toml.parse(fileContent);
     } catch (error: unknown) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Failed to parse TOML file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -267,7 +276,7 @@ export class FileCommandLoader implements ICommandLoader {
     const validationResult = TomlCommandDefSchema.safeParse(parsed);
 
     if (!validationResult.success) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Skipping invalid command file: ${filePath}. Validation errors:`,
         validationResult.error.flatten(),
       );
@@ -302,7 +311,7 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       fileContent = await fs.readFile(filePath, 'utf-8');
     } catch (error: unknown) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Failed to read file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -313,7 +322,7 @@ export class FileCommandLoader implements ICommandLoader {
     try {
       parsed = parseMarkdownCommand(fileContent);
     } catch (error: unknown) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Failed to parse Markdown file ${filePath}:`,
         error instanceof Error ? error.message : String(error),
       );
@@ -323,7 +332,7 @@ export class FileCommandLoader implements ICommandLoader {
     const validationResult = MarkdownCommandDefSchema.safeParse(parsed);
 
     if (!validationResult.success) {
-      console.error(
+      debugLogger.error(
         `[FileCommandLoader] Skipping invalid command file: ${filePath}. Validation errors:`,
         validationResult.error.flatten(),
       );

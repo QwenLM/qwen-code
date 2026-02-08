@@ -15,6 +15,9 @@ import { EnhancedErrorHandler } from './errorHandler.js';
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { isAbortError } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI');
 
 export class OpenAIContentGenerator implements ContentGenerator {
   protected pipeline: ContentGenerationPipeline;
@@ -88,7 +91,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         totalTokens: result.totalTokens,
       };
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         'Failed to calculate tokens with new tokenizer, falling back to simple method:',
         error,
       );
@@ -152,7 +155,7 @@ export class OpenAIContentGenerator implements ContentGenerator {
         ],
       };
     } catch (error) {
-      console.error('OpenAI API Embedding Error:', error);
+      debugLogger.error('OpenAI API Embedding Error:', error);
       throw new Error(
         `OpenAI API error: ${error instanceof Error ? error.message : String(error)}`,
       );

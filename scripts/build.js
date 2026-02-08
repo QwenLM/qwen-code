@@ -30,9 +30,31 @@ if (!existsSync(join(root, 'node_modules'))) {
   execSync('npm install', { stdio: 'inherit', cwd: root });
 }
 
-// build all workspaces/packages
+// build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
-execSync('npm run build --workspaces', { stdio: 'inherit', cwd: root });
+
+// Build in dependency order:
+// 1. test-utils (no internal dependencies)
+// 2. core (foundation package)
+// 3. cli (depends on core, test-utils)
+// 4. webui (shared UI components - used by vscode companion)
+// 5. sdk (no internal dependencies)
+// 6. vscode-ide-companion (depends on webui)
+const buildOrder = [
+  'packages/test-utils',
+  'packages/core',
+  'packages/cli',
+  'packages/webui',
+  'packages/sdk-typescript',
+  'packages/vscode-ide-companion',
+];
+
+for (const workspace of buildOrder) {
+  execSync(`npm run build --workspace=${workspace}`, {
+    stdio: 'inherit',
+    cwd: root,
+  });
+}
 
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above

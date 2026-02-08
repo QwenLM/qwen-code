@@ -4,19 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { enableCommand, handleEnable } from './enable.js';
 import yargs from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 
 const mockEnableExtension = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 
 vi.mock('./utils.js', () => ({
   getExtensionManager: vi.fn().mockResolvedValue({
@@ -38,6 +32,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     getErrorMessage: (error: Error) => error.message,
   };
 });
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: vi.fn(),
+  clearScreen: vi.fn(),
+}));
 
 describe('extensions enable command', () => {
   it('should fail if no name is provided', () => {
@@ -70,10 +70,7 @@ describe('extensions enable command', () => {
 });
 
 describe('handleEnable', () => {
-  let consoleLogSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 
@@ -87,7 +84,7 @@ describe('handleEnable', () => {
       'test-extension',
       SettingScope.User,
     );
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "test-extension" successfully enabled for scope "user".',
     );
   });
@@ -102,7 +99,7 @@ describe('handleEnable', () => {
       'test-extension',
       SettingScope.Workspace,
     );
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "test-extension" successfully enabled for scope "workspace".',
     );
   });
@@ -116,7 +113,7 @@ describe('handleEnable', () => {
       'test-extension',
       SettingScope.User,
     );
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "test-extension" successfully enabled in all scopes.',
     );
   });

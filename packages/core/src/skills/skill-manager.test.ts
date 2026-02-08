@@ -61,6 +61,18 @@ describe('SkillManager', () => {
       if (yamlString.includes('name: skill3')) {
         return { name: 'skill3', description: 'Third skill' };
       }
+      if (yamlString.includes('name: symlink-skill')) {
+        return {
+          name: 'symlink-skill',
+          description: 'A skill loaded from symlink',
+        };
+      }
+      if (yamlString.includes('A symlinked skill')) {
+        return { name: 'symlink-skill', description: 'A symlinked skill' };
+      }
+      if (yamlString.includes('name: regular-skill')) {
+        return { name: 'regular-skill', description: 'A regular skill' };
+      }
       if (!yamlString.includes('name:')) {
         return { description: 'A test skill' }; // Missing name case
       }
@@ -303,7 +315,12 @@ You are a helpful assistant.
   describe('loadSkill', () => {
     it('should load skill from project level first', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
-        { name: 'test-skill', isDirectory: () => true, isFile: () => false },
+        {
+          name: 'test-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
       vi.mocked(fs.access).mockResolvedValue(undefined);
       vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
@@ -318,7 +335,12 @@ You are a helpful assistant.
       vi.mocked(fs.readdir)
         .mockRejectedValueOnce(new Error('Project dir not found')) // project level fails
         .mockResolvedValueOnce([
-          { name: 'test-skill', isDirectory: () => true, isFile: () => false },
+          {
+            name: 'test-skill',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
         ] as unknown as Awaited<ReturnType<typeof fs.readdir>>); // user level succeeds
       vi.mocked(fs.access).mockResolvedValue(undefined);
       vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
@@ -341,7 +363,12 @@ You are a helpful assistant.
   describe('loadSkillForRuntime', () => {
     it('should load skill for runtime', async () => {
       vi.mocked(fs.readdir).mockResolvedValueOnce([
-        { name: 'test-skill', isDirectory: () => true, isFile: () => false },
+        {
+          name: 'test-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
@@ -367,17 +394,38 @@ You are a helpful assistant.
       // Mock directory listing for skills directories (with Dirent objects)
       vi.mocked(fs.readdir)
         .mockResolvedValueOnce([
-          { name: 'skill1', isDirectory: () => true, isFile: () => false },
-          { name: 'skill2', isDirectory: () => true, isFile: () => false },
+          {
+            name: 'skill1',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'skill2',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
           {
             name: 'not-a-dir.txt',
             isDirectory: () => false,
             isFile: () => true,
+            isSymbolicLink: () => false,
           },
         ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
         .mockResolvedValueOnce([
-          { name: 'skill3', isDirectory: () => true, isFile: () => false },
-          { name: 'skill1', isDirectory: () => true, isFile: () => false },
+          {
+            name: 'skill3',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
+          {
+            name: 'skill1',
+            isDirectory: () => true,
+            isFile: () => false,
+            isSymbolicLink: () => false,
+          },
         ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
@@ -503,7 +551,12 @@ Skill 3 content`);
   describe('parse errors', () => {
     it('should track parse errors', async () => {
       vi.mocked(fs.readdir).mockResolvedValue([
-        { name: 'bad-skill', isDirectory: () => true, isFile: () => false },
+        {
+          name: 'bad-skill',
+          isDirectory: () => true,
+          isFile: () => false,
+          isSymbolicLink: () => false,
+        },
       ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
       vi.mocked(fs.access).mockResolvedValue(undefined);
       vi.mocked(fs.readFile).mockResolvedValue(
@@ -514,6 +567,126 @@ Skill 3 content`);
 
       const errors = manager.getParseErrors();
       expect(errors.size).toBeGreaterThan(0);
+    });
+  });
+
+  describe('symlink support', () => {
+    it('should load skills from symlinked directories', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'symlink-skill',
+          isDirectory: () => false,
+          isSymbolicLink: () => true,
+          isFile: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to return directory stats for the symlink target
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as Awaited<ReturnType<typeof fs.stat>>);
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: symlink-skill
+description: A skill loaded from symlink
+---
+Symlink skill content`);
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(1);
+      expect(skills[0].name).toBe('symlink-skill');
+      expect(skills[0].description).toBe('A skill loaded from symlink');
+    });
+
+    it('should skip symlinks that point to non-directory targets', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'bad-symlink',
+          isDirectory: () => false,
+          isSymbolicLink: () => true,
+          isFile: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to return file stats (not a directory)
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => false,
+      } as Awaited<ReturnType<typeof fs.stat>>);
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(0);
+    });
+
+    it('should skip broken/invalid symlinks', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'broken-symlink',
+          isDirectory: () => false,
+          isSymbolicLink: () => true,
+          isFile: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to throw error (symlink target doesn't exist)
+      vi.mocked(fs.stat).mockRejectedValue(
+        new Error('ENOENT: no such file or directory'),
+      );
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(0);
+    });
+
+    it('should load skills from both regular directories and symlinks', async () => {
+      vi.mocked(fs.readdir).mockResolvedValue([
+        {
+          name: 'regular-skill',
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+          isFile: () => false,
+        },
+        {
+          name: 'symlink-skill',
+          isDirectory: () => false,
+          isSymbolicLink: () => true,
+          isFile: () => false,
+        },
+      ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+
+      // Mock fs.stat to return directory stats for the symlink
+      vi.mocked(fs.stat).mockResolvedValue({
+        isDirectory: () => true,
+      } as Awaited<ReturnType<typeof fs.stat>>);
+
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes('regular-skill')) {
+          return Promise.resolve(`---
+name: regular-skill
+description: A regular skill
+---
+Regular skill content`);
+        } else if (pathStr.includes('symlink-skill')) {
+          return Promise.resolve(`---
+name: symlink-skill
+description: A symlinked skill
+---
+Symlinked skill content`);
+        }
+        return Promise.reject(new Error('File not found'));
+      });
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toHaveLength(2);
+      expect(skills.map((s) => s.name).sort()).toEqual([
+        'regular-skill',
+        'symlink-skill',
+      ]);
     });
   });
 });

@@ -365,7 +365,6 @@ export default {
   'Folder Trust': 'Confiança de Pasta',
   'Vision Model Preview': 'Visualização de Modelo de Visão',
   'Tool Schema Compliance': 'Conformidade de Esquema de Ferramenta',
-  'Experimental: Skills': 'Experimental: Habilidades',
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
@@ -454,6 +453,8 @@ export default {
     'Esta extensão instalará os seguintes subagentes:',
   'Installation cancelled for "{{name}}".':
     'Instalação cancelada para "{{name}}".',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    'Você está instalando uma extensão de {{originSource}}. Alguns recursos podem não funcionar perfeitamente com o Qwen Code.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref e --auto-update não são aplicáveis para extensões de marketplace.',
   'Extension "{{name}}" installed successfully and enabled.':

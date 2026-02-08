@@ -8,6 +8,7 @@ import type {
   Config,
   ConfigInitializeOptions,
 } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { StreamJsonInputReader } from './io/StreamJsonInputReader.js';
 import { StreamJsonOutputAdapter } from './io/StreamJsonOutputAdapter.js';
 import { ControlContext } from './control/ControlContext.js';
@@ -32,7 +33,8 @@ import {
 } from './types.js';
 import { createMinimalSettings } from '../config/settings.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
-import { ConsolePatcher } from '../ui/utils/ConsolePatcher.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
 class Session {
   private userMessageQueue: CLIUserMessage[] = [];
@@ -46,7 +48,6 @@ class Session {
   private dispatcher: ControlDispatcher | null = null;
   private controlService: ControlService | null = null;
   private controlSystemEnabled: boolean | null = null;
-  private debugMode: boolean;
   private shutdownHandler: (() => void) | null = null;
   private initialPrompt: CLIUserMessage | null = null;
   private processingPromise: Promise<void> | null = null;
@@ -62,7 +63,6 @@ class Session {
   constructor(config: Config, initialPrompt?: CLIUserMessage) {
     this.config = config;
     this.sessionId = config.getSessionId();
-    this.debugMode = config.getDebugMode();
     this.abortController = new AbortController();
     this.initialPrompt = initialPrompt ?? null;
 
@@ -105,17 +105,13 @@ class Session {
       return;
     }
 
-    if (this.debugMode) {
-      console.error('[Session] Initializing config');
-    }
+    debugLogger.debug('[Session] Initializing config');
 
     try {
       await this.config.initialize(options);
       this.configInitialized = true;
     } catch (error) {
-      if (this.debugMode) {
-        console.error('[Session] Failed to initialize config:', error);
-      }
+      debugLogger.error('[Session] Failed to initialize config:', error);
       throw error;
     }
   }
@@ -125,9 +121,7 @@ class Session {
    */
   private completeInitialization(): void {
     if (this.initializationResolve) {
-      if (this.debugMode) {
-        console.error('[Session] Initialization complete');
-      }
+      debugLogger.debug('[Session] Initialization complete');
       this.initializationResolve();
       this.initializationResolve = null;
       this.initializationReject = null;
@@ -139,9 +133,7 @@ class Session {
    */
   private failInitialization(error: Error): void {
     if (this.initializationReject) {
-      if (this.debugMode) {
-        console.error('[Session] Initialization failed:', error);
-      }
+      debugLogger.error('[Session] Initialization failed:', error);
       this.initializationReject(error);
       this.initializationResolve = null;
       this.initializationReject = null;
@@ -213,11 +205,9 @@ class Session {
         return;
       }
 
-      if (this.debugMode) {
-        console.error(
-          '[Session] Ignoring non-initialize control request during initialization',
-        );
-      }
+      debugLogger.debug(
+        '[Session] Ignoring non-initialize control request during initialization',
+      );
       return;
     }
 
@@ -254,9 +244,7 @@ class Session {
       // Initialization complete!
       this.completeInitialization();
     } catch (error) {
-      if (this.debugMode) {
-        console.error('[Session] SDK mode initialization failed:', error);
-      }
+      debugLogger.error('[Session] SDK mode initialization failed:', error);
       this.failInitialization(
         error instanceof Error ? error : new Error(String(error)),
       );
@@ -281,9 +269,7 @@ class Session {
       // Enqueue the first user message for processing
       this.enqueueUserMessage(userMessage);
     } catch (error) {
-      if (this.debugMode) {
-        console.error('[Session] Direct mode initialization failed:', error);
-      }
+      debugLogger.error('[Session] Direct mode initialization failed:', error);
       this.failInitialization(
         error instanceof Error ? error : new Error(String(error)),
       );
@@ -297,18 +283,14 @@ class Session {
   private handleControlRequestAsync(request: CLIControlRequest): void {
     const dispatcher = this.getDispatcher();
     if (!dispatcher) {
-      if (this.debugMode) {
-        console.error('[Session] Control system not enabled');
-      }
+      debugLogger.warn('[Session] Control system not enabled');
       return;
     }
 
     // Fire-and-forget: dispatch runs concurrently
     // The dispatcher's pendingIncomingRequests tracks completion
     void dispatcher.dispatch(request).catch((error) => {
-      if (this.debugMode) {
-        console.error('[Session] Control request dispatch error:', error);
-      }
+      debugLogger.error('[Session] Control request dispatch error:', error);
       // Error response is already sent by dispatcher.dispatch()
     });
   }
@@ -338,9 +320,7 @@ class Session {
   private async processUserMessage(userMessage: CLIUserMessage): Promise<void> {
     const input = extractUserMessageText(userMessage);
     if (!input) {
-      if (this.debugMode) {
-        console.error('[Session] No text content in user message');
-      }
+      debugLogger.debug('[Session] No text content in user message');
       return;
     }
 
@@ -362,9 +342,7 @@ class Session {
         },
       );
     } catch (error) {
-      if (this.debugMode) {
-        console.error('[Session] Query execution error:', error);
-      }
+      debugLogger.error('[Session] Query execution error:', error);
     }
   }
 
@@ -382,9 +360,7 @@ class Session {
       try {
         await this.processUserMessage(userMessage);
       } catch (error) {
-        if (this.debugMode) {
-          console.error('[Session] Error processing user message:', error);
-        }
+        debugLogger.error('[Session] Error processing user message:', error);
         this.emitErrorResult(error);
       }
     }
@@ -430,18 +406,14 @@ class Session {
   }
 
   private handleInterrupt(): void {
-    if (this.debugMode) {
-      console.error('[Session] Interrupt requested');
-    }
+    debugLogger.info('[Session] Interrupt requested');
     this.abortController.abort();
     this.abortController = new AbortController();
   }
 
   private setupSignalHandlers(): void {
     this.shutdownHandler = () => {
-      if (this.debugMode) {
-        console.error('[Session] Shutdown signal received');
-      }
+      debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
       this.abortController.abort();
     };
@@ -458,16 +430,17 @@ class Session {
     try {
       await this.waitForInitialization();
     } catch (error) {
-      if (this.debugMode) {
-        console.error('[Session] Initialization error during shutdown:', error);
-      }
+      debugLogger.error(
+        '[Session] Initialization error during shutdown:',
+        error,
+      );
     }
 
     // 2. Wait for all control request handlers using dispatcher's tracking
     if (this.dispatcher) {
       const pendingCount = this.dispatcher.getPendingIncomingRequestCount();
-      if (pendingCount > 0 && this.debugMode) {
-        console.error(
+      if (pendingCount > 0) {
+        debugLogger.debug(
           `[Session] Waiting for ${pendingCount} pending control request handlers`,
         );
       }
@@ -476,23 +449,17 @@ class Session {
 
     // 3. Wait for user message processing queue
     while (this.processingPromise) {
-      if (this.debugMode) {
-        console.error('[Session] Waiting for user message processing');
-      }
+      debugLogger.debug('[Session] Waiting for user message processing');
       try {
         await this.processingPromise;
       } catch (error) {
-        if (this.debugMode) {
-          console.error('[Session] Error in user message processing:', error);
-        }
+        debugLogger.error('[Session] Error in user message processing:', error);
       }
     }
   }
 
   private async shutdown(): Promise<void> {
-    if (this.debugMode) {
-      console.error('[Session] Shutting down');
-    }
+    debugLogger.debug('[Session] Shutting down');
 
     this.isShuttingDown = true;
 
@@ -528,9 +495,7 @@ class Session {
    */
   async run(): Promise<void> {
     try {
-      if (this.debugMode) {
-        console.error('[Session] Starting session', this.sessionId);
-      }
+      debugLogger.info('[Session] Starting session', this.sessionId);
 
       // Handle initial prompt if provided (fire-and-forget)
       if (this.initialPrompt !== null) {
@@ -571,18 +536,16 @@ class Session {
           } else if (isCLIUserMessage(message)) {
             // User messages are enqueued, processing runs separately
             this.enqueueUserMessage(message as CLIUserMessage);
-          } else if (this.debugMode) {
-            if (
-              !isCLIAssistantMessage(message) &&
-              !isCLISystemMessage(message) &&
-              !isCLIResultMessage(message) &&
-              !isCLIPartialAssistantMessage(message)
-            ) {
-              console.error(
-                '[Session] Unknown message type:',
-                JSON.stringify(message, null, 2),
-              );
-            }
+          } else if (
+            !isCLIAssistantMessage(message) &&
+            !isCLISystemMessage(message) &&
+            !isCLIResultMessage(message) &&
+            !isCLIPartialAssistantMessage(message)
+          ) {
+            debugLogger.warn(
+              '[Session] Unknown message type:',
+              JSON.stringify(message, null, 2),
+            );
           }
 
           if (this.isShuttingDown) {
@@ -590,9 +553,7 @@ class Session {
           }
         }
       } catch (streamError) {
-        if (this.debugMode) {
-          console.error('[Session] Stream reading error:', streamError);
-        }
+        debugLogger.error('[Session] Stream reading error:', streamError);
         throw streamError;
       }
 
@@ -607,9 +568,7 @@ class Session {
       await this.waitForAllPendingWork();
       await this.shutdown();
     } catch (error) {
-      if (this.debugMode) {
-        console.error('[Session] Error:', error);
-      }
+      debugLogger.error('[Session] Error:', error);
       await this.shutdown();
       throw error;
     } finally {
@@ -647,29 +606,20 @@ export async function runNonInteractiveStreamJson(
   config: Config,
   input: string,
 ): Promise<void> {
-  const consolePatcher = new ConsolePatcher({
-    debugMode: config.getDebugMode(),
-  });
-  consolePatcher.patch();
-
-  try {
-    let initialPrompt: CLIUserMessage | undefined = undefined;
-    if (input && input.trim().length > 0) {
-      const sessionId = config.getSessionId();
-      initialPrompt = {
-        type: 'user',
-        session_id: sessionId,
-        message: {
-          role: 'user',
-          content: input.trim(),
-        },
-        parent_tool_use_id: null,
-      };
-    }
-
-    const manager = new Session(config, initialPrompt);
-    await manager.run();
-  } finally {
-    consolePatcher.cleanup();
+  let initialPrompt: CLIUserMessage | undefined = undefined;
+  if (input && input.trim().length > 0) {
+    const sessionId = config.getSessionId();
+    initialPrompt = {
+      type: 'user',
+      session_id: sessionId,
+      message: {
+        role: 'user',
+        content: input.trim(),
+      },
+      parent_tool_use_id: null,
+    };
   }
+
+  const manager = new Session(config, initialPrompt);
+  await manager.run();
 }

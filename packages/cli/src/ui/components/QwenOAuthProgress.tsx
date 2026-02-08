@@ -12,6 +12,7 @@ import Link from 'ink-link';
 import qrcode from 'qrcode-terminal';
 import { Colors } from '../colors.js';
 import type { DeviceAuthorizationData } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
 
@@ -28,6 +29,8 @@ interface QwenOAuthProgressProps {
     | 'rate_limit';
   authMessage?: string | null;
 }
+
+const debugLogger = createDebugLogger('QWEN_OAUTH_PROGRESS');
 
 /**
  * Static QR Code Display Component
@@ -161,7 +164,7 @@ export function QwenOAuthProgress({
           },
         );
       } catch (error) {
-        console.error('Failed to generate QR code:', error);
+        debugLogger.error('Failed to generate QR code:', error);
         setQrCodeData(null);
       }
     };

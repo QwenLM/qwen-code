@@ -43,10 +43,6 @@ vi.mock('./ShellModeIndicator.js', () => ({
   ShellModeIndicator: () => <Text>ShellModeIndicator</Text>,
 }));
 
-vi.mock('./DetailedMessagesDisplay.js', () => ({
-  DetailedMessagesDisplay: () => <Text>DetailedMessagesDisplay</Text>,
-}));
-
 vi.mock('./InputPrompt.js', () => ({
   InputPrompt: () => <Text>InputPrompt</Text>,
   calculatePromptWidths: vi.fn(() => ({
@@ -58,10 +54,6 @@ vi.mock('./InputPrompt.js', () => ({
 
 vi.mock('./Footer.js', () => ({
   Footer: () => <Text>Footer</Text>,
-}));
-
-vi.mock('./ShowMoreLines.js', () => ({
-  ShowMoreLines: () => <Text>ShowMoreLines</Text>,
 }));
 
 vi.mock('./QueuedMessageDisplay.js', () => ({
@@ -91,7 +83,6 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showAutoAcceptIndicator: ApprovalMode.DEFAULT,
     messageQueue: [],
-    showErrorDetails: false,
     constrainHeight: false,
     isInputActive: true,
     buffer: '',
@@ -111,7 +102,6 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     ideContextState: null,
     geminiMdFileCount: 0,
     showToolDescriptions: false,
-    filteredConsoleMessages: [],
     sessionStats: {
       lastPromptTokenCount: 0,
       sessionTokenCount: 0,
@@ -119,7 +109,6 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     },
     branchName: 'main',
     debugMessage: '',
-    errorCount: 0,
     nightly: false,
     isTrustedFolder: true,
     ...overrides,
@@ -352,33 +341,6 @@ describe('Composer', () => {
 
       // ShellModeIndicator is now inside Footer, verify Footer renders
       expect(lastFrame()).toContain('Footer');
-    });
-  });
-
-  describe('Error Details Display', () => {
-    it('shows DetailedMessagesDisplay when showErrorDetails is true', () => {
-      const uiState = createMockUIState({
-        showErrorDetails: true,
-        filteredConsoleMessages: [
-          { level: 'error', message: 'Test error', timestamp: new Date() },
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ] as any,
-      });
-
-      const { lastFrame } = renderComposer(uiState);
-
-      expect(lastFrame()).toContain('DetailedMessagesDisplay');
-      expect(lastFrame()).toContain('ShowMoreLines');
-    });
-
-    it('does not show error details when showErrorDetails is false', () => {
-      const uiState = createMockUIState({
-        showErrorDetails: false,
-      });
-
-      const { lastFrame } = renderComposer(uiState);
-
-      expect(lastFrame()).not.toContain('DetailedMessagesDisplay');
     });
   });
 });

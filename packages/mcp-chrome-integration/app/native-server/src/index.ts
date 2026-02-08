@@ -6,11 +6,11 @@ try {
   serverInstance.setNativeHost(nativeMessagingHostInstance); // Server needs setNativeHost method
   nativeMessagingHostInstance.setServer(serverInstance); // NativeHost needs setServer method
   nativeMessagingHostInstance.start();
-} catch (error) {
+} catch {
   process.exit(1);
 }
 
-process.on('error', (error) => {
+process.on('error', () => {
   process.exit(1);
 });
 
@@ -23,10 +23,10 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-process.on('exit', (code) => {
+process.on('exit', () => {
 });
 
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', () => {
   process.exit(1);
 });
 

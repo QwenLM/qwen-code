@@ -21,21 +21,26 @@ export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
   let textContent = '';
   let subText = '';
 
+  const cycleText =
+    process.platform === 'win32'
+      ? ` ${t('(tab to cycle)')}`
+      : ` ${t('(shift + tab to cycle)')}`;
+
   switch (approvalMode) {
     case ApprovalMode.PLAN:
       textColor = theme.status.success;
       textContent = t('plan mode');
-      subText = ` ${t('(shift + tab to cycle)')}`;
+      subText = cycleText;
       break;
     case ApprovalMode.AUTO_EDIT:
       textColor = theme.status.warning;
       textContent = t('auto-accept edits');
-      subText = ` ${t('(shift + tab to cycle)')}`;
+      subText = cycleText;
       break;
     case ApprovalMode.YOLO:
       textColor = theme.status.error;
       textContent = t('YOLO mode');
-      subText = ` ${t('(shift + tab to cycle)')}`;
+      subText = cycleText;
       break;
     case ApprovalMode.DEFAULT:
     default:

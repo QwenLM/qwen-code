@@ -104,8 +104,8 @@ export class DashScopeOpenAICompatibleProvider implements OpenAICompatibleProvid
     let messages = request.messages;
     let tools = request.tools;
 
-    // Apply DashScope cache control only if not disabled
-    if (!this.shouldDisableCacheControl()) {
+    // Apply DashScope cache control if enabled (default is enabled).
+    if (this.shouldEnableCacheControl()) {
       const { messages: updatedMessages, tools: updatedTools } =
         this.addDashScopeCacheControl(
           request,
@@ -337,11 +337,12 @@ export class DashScopeOpenAICompatibleProvider implements OpenAICompatibleProvid
   /**
    * Check if cache control should be disabled based on configuration.
    *
-   * @returns true if cache control should be disabled, false otherwise
+   * @returns true if cache control should be enabled, false otherwise
    */
-  private shouldDisableCacheControl(): boolean {
+  private shouldEnableCacheControl(): boolean {
+    // Cache control is enabled by default (when enableCacheControl is undefined or true).
     return (
-      this.cliConfig.getContentGeneratorConfig()?.disableCacheControl === true
+      this.cliConfig.getContentGeneratorConfig()?.enableCacheControl !== false
     );
   }
 }

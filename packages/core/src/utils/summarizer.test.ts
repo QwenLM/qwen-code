@@ -41,13 +41,10 @@ describe('summarizers', () => {
 
     mockGeminiClient = new GeminiClient(mockConfigInstance);
     (mockGeminiClient.generateContent as Mock) = vi.fn();
-
-    vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
     vi.clearAllMocks();
-    (console.error as Mock).mockRestore();
   });
 
   describe('summarizeToolOutput', () => {
@@ -107,10 +104,6 @@ describe('summarizers', () => {
 
       expect(mockGeminiClient.generateContent).toHaveBeenCalledTimes(1);
       expect(result).toBe(longText);
-      expect(console.error).toHaveBeenCalledWith(
-        'Failed to summarize tool output.',
-        error,
-      );
     });
 
     it('should construct the correct prompt for summarization', async () => {

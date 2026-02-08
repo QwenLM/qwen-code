@@ -10,6 +10,7 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
+  FileEncoding,
   getCurrentGeminiMdFilename,
   loadServerHierarchicalMemory,
   setGeminiMdFilename as setServerGeminiMdFilename,
@@ -28,6 +29,7 @@ import {
   ShellTool,
   WriteFileTool,
   NativeLspClient,
+  createDebugLogger,
   NativeLspService,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -50,16 +52,9 @@ import { mcpCommand } from '../commands/mcp.js';
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { buildWebSearchConfig } from './webSearch.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
-// Simple console logger for now - replace with actual logger if available
-const logger = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any[]) => console.debug('[DEBUG]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  warn: (...args: any[]) => console.warn('[WARN]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any[]) => console.error('[ERROR]', ...args),
-};
+const debugLogger = createDebugLogger('CONFIG');
 
 const VALID_APPROVAL_MODE_VALUES = [
   'plan',
@@ -102,7 +97,6 @@ export interface CliArgs {
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
-  allFiles: boolean | undefined;
   yolo: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
@@ -116,7 +110,6 @@ export interface CliArgs {
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
-  experimentalSkills: boolean | undefined;
   experimentalLsp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
@@ -132,7 +125,6 @@ export interface CliArgs {
   webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
   vlmSwitchMode: string | undefined;
-  useSmartEdit: boolean | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
@@ -167,7 +159,7 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-export async function parseArguments(settings: Settings): Promise<CliArgs> {
+export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
 
   // hack: if the first argument is the CLI entry point, remove it
@@ -290,12 +282,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'string',
           description: 'Sandbox image URI.',
         })
-        .option('all-files', {
-          alias: ['a'],
-          type: 'boolean',
-          description: 'Include ALL files in context?',
-          default: false,
-        })
         .option('yolo', {
           alias: 'y',
           type: 'boolean',
@@ -326,15 +312,9 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('experimental-skills', {
           type: 'boolean',
-          description: 'Enable experimental Skills feature',
-          default: (() => {
-            const legacySkills = (
-              settings as Settings & {
-                tools?: { experimental?: { skills?: boolean } };
-              }
-            ).tools?.experimental?.skills;
-            return settings.experimental?.skills ?? legacySkills ?? false;
-          })(),
+          description:
+            'Deprecated: Skills are now enabled by default. This flag is ignored.',
+          hidden: true,
         })
         .option('experimental-lsp', {
           type: 'boolean',
@@ -513,16 +493,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
-          'all-files',
-          'Use @ includes in the application instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
           'prompt',
           'Use the positional prompt instead. This flag will be removed in a future version.',
         )
         // Ensure validation flows through .fail() for clean UX
         .fail((msg: string, err: Error | undefined, yargs: Argv) => {
-          console.error(msg || err?.message || 'Unknown error');
+          writeStderrLine(msg || err?.message || 'Unknown error');
           yargs.showHelp();
           process.exit(1);
         })
@@ -614,7 +590,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
 
   // Handle deprecated --experimental-acp flag
   if (result['experimentalAcp']) {
-    console.warn(
+    writeStderrLine(
       '\x1b[33m⚠ Warning: --experimental-acp is deprecated and will be removed in a future release. Please use --acp instead.\x1b[0m',
     );
     // Map experimental-acp to acp if acp is not explicitly set
@@ -637,7 +613,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
 export async function loadHierarchicalGeminiMemory(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[] = [],
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
@@ -652,17 +627,10 @@ export async function loadHierarchicalGeminiMemory(
   // function to signal that it should skip the workspace search.
   const effectiveCwd = isHomeDirectory ? '' : currentWorkingDirectory;
 
-  if (debugMode) {
-    logger.debug(
-      `CLI: Delegating hierarchical memory load to server for CWD: ${currentWorkingDirectory} (memoryImportFormat: ${memoryImportFormat})`,
-    );
-  }
-
   // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
     effectiveCwd,
     includeDirectoriesToReadGemini,
-    debugMode,
     fileService,
     extensionContextFilePaths,
     folderTrust,
@@ -709,11 +677,7 @@ export async function loadCliConfig(
     'output-language.md',
   );
   if (fs.existsSync(outputLanguageFilePath)) {
-    if (debugMode) {
-      logger.debug(
-        `Found output-language.md, adding to context files: ${outputLanguageFilePath}`,
-      );
-    }
+    // output-language.md found - will be added to context files
   } else {
     outputLanguageFilePath = undefined;
   }
@@ -763,7 +727,7 @@ export async function loadCliConfig(
     approvalMode !== ApprovalMode.DEFAULT &&
     approvalMode !== ApprovalMode.PLAN
   ) {
-    logger.warn(
+    writeStderrLine(
       `Approval mode overridden to "default" because the current folder is not trusted.`,
     );
     approvalMode = ApprovalMode.DEFAULT;
@@ -930,7 +894,7 @@ export async function loadCliConfig(
       sessionData = await sessionService.loadSession(argv.resume);
       if (!sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
-        console.log(message);
+        writeStderrLine(message);
         process.exit(1);
       }
     }
@@ -950,7 +914,6 @@ export async function loadCliConfig(
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
-    fullContext: argv.allFiles || false,
     coreTools: argv.coreTools || settings.tools?.core || undefined,
     allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools,
@@ -989,7 +952,6 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    experimentalSkills: argv.experimentalSkills || false,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1019,7 +981,6 @@ export async function loadCliConfig(
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
     enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,
     eventEmitter: appEvents,
-    useSmartEdit: argv.useSmartEdit ?? settings.useSmartEdit,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {
       format: outputSettingsFormat,
@@ -1030,6 +991,8 @@ export async function loadCliConfig(
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
+    defaultFileEncoding:
+      settings.general?.defaultFileEncoding ?? FileEncoding.UTF8,
     lsp: {
       enabled: lspEnabled,
     },
@@ -1053,7 +1016,7 @@ export async function loadCliConfig(
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
     } catch (err) {
-      logger.warn('Failed to initialize native LSP service:', err);
+      debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }
 

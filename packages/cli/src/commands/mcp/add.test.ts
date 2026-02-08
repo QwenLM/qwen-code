@@ -9,6 +9,15 @@ import { addCommand } from './add.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
+}));
+
 vi.mock('fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs/promises')>();
   return {
@@ -41,15 +50,13 @@ const mockedLoadSettings = loadSettings as vi.Mock;
 describe('mcp add command', () => {
   let parser: yargs.Argv;
   let mockSetValue: vi.Mock;
-  let mockConsoleError: vi.Mock;
 
   beforeEach(() => {
     vi.resetAllMocks();
     const yargsInstance = yargs([]).command(addCommand);
     parser = yargsInstance;
     mockSetValue = vi.fn();
-    mockConsoleError = vi.fn();
-    vi.spyOn(console, 'error').mockImplementation(mockConsoleError);
+    mockWriteStderrLine.mockClear();
     mockedLoadSettings.mockReturnValue({
       forScope: () => ({ settings: {} }),
       setValue: mockSetValue,
@@ -218,7 +225,7 @@ describe('mcp add command', () => {
           parser.parseAsync(`add ${serverName} ${command}`),
         ).rejects.toThrow('process.exit called');
 
-        expect(mockConsoleError).toHaveBeenCalledWith(
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
           'Error: Please use --scope user to edit settings in the home directory.',
         );
         expect(mockProcessExit).toHaveBeenCalledWith(1);
@@ -236,7 +243,7 @@ describe('mcp add command', () => {
           parser.parseAsync(`add --scope project ${serverName} ${command}`),
         ).rejects.toThrow('process.exit called');
 
-        expect(mockConsoleError).toHaveBeenCalledWith(
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
           'Error: Please use --scope user to edit settings in the home directory.',
         );
         expect(mockProcessExit).toHaveBeenCalledWith(1);
@@ -250,7 +257,7 @@ describe('mcp add command', () => {
           'mcpServers',
           expect.any(Object),
         );
-        expect(mockConsoleError).not.toHaveBeenCalled();
+        expect(mockWriteStderrLine).not.toHaveBeenCalled();
       });
     });
 

@@ -85,9 +85,25 @@ if (!image.length) {
   );
 }
 
+// Build in dependency order to ensure packages are built before their dependents
+// This is the same order as defined in build.js
+const buildOrder = [
+  'packages/test-utils',
+  'packages/core',
+  'packages/cli',
+  'packages/webui',
+  'packages/sdk-typescript',
+  'packages/vscode-ide-companion',
+];
+
 if (!argv.s) {
   execSync('npm install', { stdio: 'inherit' });
-  execSync('npm run build --workspaces', { stdio: 'inherit' });
+  // Build in dependency order instead of using --workspaces
+  for (const workspace of buildOrder) {
+    execSync(`npm run build --workspace=${workspace}`, {
+      stdio: 'inherit',
+    });
+  }
 }
 
 console.log('packing @qwen-code/qwen-code ...');
