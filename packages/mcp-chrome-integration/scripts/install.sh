@@ -56,8 +56,8 @@ echo ""
 
 # 2. 构建所有组件
 echo "🔨 [步骤 2/4] 构建所有组件..."
-chmod +x scripts/build-all.sh
-./scripts/build-all.sh
+pnpm run build
+echo -e "${GREEN}✅ 组件构建完成${NC}"
 echo ""
 
 # 3. 注册 Native Messaging
@@ -108,7 +108,7 @@ echo '     }'
 echo '   }'
 echo ""
 echo "🎯 提示："
-echo "   - 如需重新构建: ./scripts/build-all.sh"
-echo "   - 查看详细文档: docs/status/implementation-plan.md"
+echo "   - 如需重新构建: pnpm run build"
+echo "   - 查看详细文档: docs/01-installation-guide.md"
 echo ""
 echo -e "${GREEN}✨ 享受更强大的浏览器自动化能力！${NC}"

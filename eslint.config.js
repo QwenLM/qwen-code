@@ -28,7 +28,6 @@ export default tseslint.config(
       'dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
-      'packages/**/archive/**', // Archived old code
     ],
   },
   eslint.configs.recommended,
