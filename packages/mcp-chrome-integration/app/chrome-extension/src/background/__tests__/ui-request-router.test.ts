@@ -8,19 +8,28 @@ test('isUiRequest identifies supported types', () => {
   assert.equal(isUiRequest({ type: 'CONNECT' }), true);
   assert.equal(isUiRequest({ type: 'sendMessage' }), true);
   assert.equal(isUiRequest({ type: 'cancelStreaming' }), true);
+  assert.equal(isUiRequest({ type: 'permissionResponse' }), true);
+  assert.equal(isUiRequest({ type: 'EXIT' }), true);
   assert.equal(isUiRequest({ type: 'unknown' }), false);
 });
 
 test('routeUiRequest GET_STATUS maps connection state', async () => {
   const result = await routeUiRequest(
     { type: 'GET_STATUS' },
-    { getStatus: () => ({ connected: true }) },
+    {
+      getStatus: () => ({ connected: true }),
+      sendMessageWithResponse: async () => ({
+        connected: true,
+        sessionId: 's1',
+      }),
+    },
   );
 
   assert.equal(result.handled, true);
   assert.deepEqual(result.response, {
     status: 'connected',
     connected: true,
+    acpStatus: { connected: true, sessionId: 's1' },
     permissions: [],
   });
 });
@@ -40,15 +49,21 @@ test('routeUiRequest CONNECT returns success when connected', async () => {
 });
 
 test('routeUiRequest sendMessage triggers migration action', async () => {
-  const result = await routeUiRequest({ type: 'sendMessage' }, {});
+  const result = await routeUiRequest(
+    { type: 'sendMessage' },
+    { sendMessageWithResponse: async () => ({}) },
+  );
   assert.equal(result.handled, true);
-  assert.equal(result.action, 'sendMigrationNotice');
+  assert.equal(result.action, null);
   assert.deepEqual(result.response, { success: true });
 });
 
 test('routeUiRequest cancelStreaming triggers cancel action', async () => {
-  const result = await routeUiRequest({ type: 'cancelStreaming' }, {});
+  const result = await routeUiRequest(
+    { type: 'cancelStreaming' },
+    { sendMessageWithResponse: async () => ({}) },
+  );
   assert.equal(result.handled, true);
-  assert.equal(result.action, 'cancelStreaming');
+  assert.equal(result.action, null);
   assert.deepEqual(result.response, { success: true, cancelled: true });
 });

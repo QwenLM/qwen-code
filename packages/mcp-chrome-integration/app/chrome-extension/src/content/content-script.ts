@@ -1,6 +1,4 @@
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-nocheck
-/* global window, document, console, chrome, setTimeout, NodeFilter, Node, URL, MouseEvent, InputEvent, Event, module */
+/* global window, document, console, chrome, setTimeout, NodeFilter, Node, URL, MouseEvent, InputEvent, Event */
 
 /**
  * Content Script for Qwen CLI Chrome Extension
@@ -1033,9 +1031,11 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
       // Ignore errors if background script is not ready
     });
 
-  // Export for testing
-  if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {
+  // Export for debugging (avoid CommonJS in ESM package)
+  try {
+    (
+      globalThis as { __QWEN_CONTENT_SCRIPT_EXPORTS__?: unknown }
+    ).__QWEN_CONTENT_SCRIPT_EXPORTS__ = {
       extractPageData,
       extractTextContent,
       htmlToMarkdown,
@@ -1043,5 +1043,7 @@ if (window.__QWEN_BRIDGE_CONTENT_SCRIPT_LOADED__) {
       highlightElement,
       fillInput,
     };
+  } catch {
+    // Ignore if globalThis is unavailable
   }
 }

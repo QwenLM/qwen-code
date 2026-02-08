@@ -19,6 +19,7 @@
 在 Service Worker 控制台中，应该看到这些初始化日志：
 
 **✅ 正常情况**:
+
 ```
 [ServiceWorker] Initializing Native Messaging...
 [NativeMessaging] Initializing...
@@ -28,15 +29,19 @@
 ```
 
 **❌ 异常情况 1**: Service Worker 崩溃
+
 ```
 Uncaught Error: ...
 ```
+
 → 检查 extension/background/ 目录下文件是否完整
 
 **❌ 异常情况 2**: Native Messaging 连接失败
+
 ```
 [NativeMessaging] Disconnected from native host: ...
 ```
+
 → 检查 Native Host 注册
 
 **❌ 异常情况 3**: 没有任何日志
@@ -75,6 +80,7 @@ cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chrome
 ```
 
 如果不匹配，运行：
+
 ```bash
 cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration
 ./scripts/update-extension-id.sh <实际的Extension ID>
@@ -116,6 +122,7 @@ cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration
 **原因**: manifest.json 损坏或语法错误
 
 **解决**:
+
 ```bash
 cd app/chrome-extension
 cat dist/extension/manifest.json | jq .
@@ -128,6 +135,7 @@ pnpm build
 **原因**: service-worker.js 语法错误
 
 **解决**:
+
 ```bash
 cd app/chrome-extension
 node -c dist/extension/background/service-worker.js
@@ -139,6 +147,7 @@ node -c dist/extension/background/service-worker.js
 **原因**: native-messaging.js 未正确加载
 
 **解决**:
+
 ```bash
 # 检查文件是否存在
 ls -la dist/extension/background/native-messaging.js
@@ -152,6 +161,7 @@ pnpm build
 **原因**: Extension ID 与配置不匹配
 
 **解决**:
+
 ```bash
 # 1. 获取实际 Extension ID
 # 在 chrome://extensions/ 复制
@@ -167,6 +177,7 @@ pnpm build
 **原因**: Native Server 未注册或路径错误
 
 **解决**:
+
 ```bash
 cd app/native-server
 node dist/cli.js register
@@ -181,25 +192,25 @@ node dist/cli.js doctor
 
 ```javascript
 // 1. 检查 NativeMessaging 是否可用
-typeof self.NativeMessaging
+typeof self.NativeMessaging;
 // 应该返回: "object"
 
 // 2. 检查连接状态
-self.NativeMessaging.getStatus()
+self.NativeMessaging.getStatus();
 // 应该返回: {connected: true, reconnecting: false, attempts: 0}
 
 // 3. 测试发送消息
 await self.NativeMessaging.sendMessageWithResponse({
   type: 'PING',
-  payload: { test: 123 }
-})
+  payload: { test: 123 },
+});
 
 // 4. 检查 connectToNativeHost 函数
-typeof connectToNativeHost
+typeof connectToNativeHost;
 // 应该返回: "function"
 
 // 5. 手动触发连接
-await connectToNativeHost()
+await connectToNativeHost();
 ```
 
 ---

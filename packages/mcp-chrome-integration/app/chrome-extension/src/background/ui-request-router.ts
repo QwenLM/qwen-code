@@ -1,29 +1,45 @@
-export const MIGRATION_NOTICE =
-  '⚠️ **Migration Notice**\n\nThe Qwen Code architecture has been upgraded to MCP (Model Context Protocol).\n\nPlease use the **Qwen CLI** to interact with the agent:\n\n`$ qwen`\n\nThis SidePanel now serves as a status and tool visualization dashboard.';
-
 const UI_REQUEST_TYPES = new Set([
   'GET_STATUS',
   'CONNECT',
   'sendMessage',
   'cancelStreaming',
+  'permissionResponse',
+  'EXIT',
 ]);
 
 export function isUiRequest(request) {
-  return !!request && typeof request.type === 'string' && UI_REQUEST_TYPES.has(request.type);
+  return (
+    !!request &&
+    typeof request.type === 'string' &&
+    UI_REQUEST_TYPES.has(request.type)
+  );
 }
 
 export async function routeUiRequest(request, deps) {
-  const { connect, getStatus } = deps || {};
+  const { connect, getStatus, sendMessageWithResponse } = deps || {};
 
   switch (request.type) {
     case 'GET_STATUS': {
       const nativeStatus = (getStatus && getStatus()) || { connected: false };
-      const connected = !!nativeStatus.connected;
+      let acpStatus = { connected: false };
+      if (nativeStatus.connected && sendMessageWithResponse) {
+        try {
+          const resp = await sendMessageWithResponse({
+            type: 'acp_status',
+            payload: {},
+          });
+          acpStatus = resp || acpStatus;
+        } catch {
+          acpStatus = { connected: false };
+        }
+      }
+      const connected = !!nativeStatus.connected && !!acpStatus.connected;
       return {
         handled: true,
         response: {
           status: connected ? 'connected' : 'disconnected',
           connected,
+          acpStatus,
           permissions: [],
         },
         action: null,
@@ -34,28 +50,69 @@ export async function routeUiRequest(request, deps) {
       if (connect) {
         connected = await connect();
       }
+      if (!connected) {
+        return {
+          handled: true,
+          response: {
+            success: false,
+            connected: false,
+            status: 'disconnected',
+          },
+          action: null,
+        };
+      }
+      if (sendMessageWithResponse) {
+        await sendMessageWithResponse({
+          type: 'acp_connect',
+          payload: request.data || {},
+        });
+      }
       return {
         handled: true,
         response: {
-          success: !!connected,
-          connected: !!connected,
-          status: connected ? 'connected' : 'disconnected',
+          success: true,
+          connected: true,
+          status: 'connected',
         },
         action: null,
       };
     }
     case 'sendMessage':
-      return {
-        handled: true,
-        response: { success: true },
-        action: 'sendMigrationNotice',
-      };
+      if (sendMessageWithResponse) {
+        await sendMessageWithResponse({
+          type: 'acp_prompt',
+          payload: request.data || {},
+        });
+      }
+      return { handled: true, response: { success: true }, action: null };
     case 'cancelStreaming':
+      if (sendMessageWithResponse) {
+        await sendMessageWithResponse({
+          type: 'acp_cancel',
+          payload: request.data || {},
+        });
+      }
       return {
         handled: true,
         response: { success: true, cancelled: true },
-        action: 'cancelStreaming',
+        action: null,
       };
+    case 'permissionResponse':
+      if (sendMessageWithResponse) {
+        await sendMessageWithResponse({
+          type: 'acp_permission_response',
+          payload: request.data || {},
+        });
+      }
+      return { handled: true, response: { success: true }, action: null };
+    case 'EXIT':
+      if (sendMessageWithResponse) {
+        await sendMessageWithResponse({
+          type: 'acp_stop',
+          payload: request.data || {},
+        });
+      }
+      return { handled: true, response: { success: true }, action: null };
     default:
       return { handled: false, response: null, action: null };
   }

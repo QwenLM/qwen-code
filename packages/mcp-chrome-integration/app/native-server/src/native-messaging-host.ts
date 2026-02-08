@@ -1,10 +1,17 @@
-// @ts-nocheck
 import { stdin, stdout } from 'process';
 import { Server } from './server';
 import { v4 as uuidv4 } from 'uuid';
 import { NativeMessageType } from './shared';
 import { TIMEOUTS } from './constant';
 import fileHandler from './file-handler';
+import {
+  AcpClient,
+  type AcpPermissionRequest,
+  type AcpSessionUpdate,
+} from './acp/client';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 interface MessagePayload {
   [key: string]: unknown;
@@ -27,6 +34,31 @@ interface PendingRequest {
 export class NativeMessagingHost {
   private associatedServer: Server | null = null;
   private pendingRequests: Map<string, PendingRequest> = new Map();
+  private acpClient: AcpClient;
+  private acpConnecting: Promise<{ sessionId: string | null }> | null = null;
+  private permissionRequests: Map<
+    number,
+    {
+      resolve: (value: { optionId: string }) => void;
+      reject: (reason?: unknown) => void;
+    }
+  > = new Map();
+  private streamActive = false;
+  private thinkingActive = false;
+
+  constructor() {
+    this.acpClient = new AcpClient({
+      onSessionUpdate: (update) => this.handleAcpSessionUpdate(update),
+      onAuthenticateUpdate: (update) =>
+        this.handleAcpAuthenticateUpdate(update),
+      onPermissionRequest: (request, requestId) =>
+        this.handleAcpPermissionRequest(request, requestId),
+      onInitialized: (init) => this.handleAcpInitialized(init),
+      onEndTurn: (reason) => this.handleAcpEndTurn(reason),
+      onProcessExit: (code, signal) => this.handleAcpProcessExit(code, signal),
+      onStderr: (line) => this.handleAcpStderr(line),
+    });
+  }
 
   public setServer(serverInstance: Server): void {
     this.associatedServer = serverInstance;
@@ -140,10 +172,93 @@ export class NativeMessagingHost {
         case NativeMessageType.STOP:
           await this.stopServer();
           break;
-        
-        // --- Added for React UI Compatibility ---
-        
-        // Support legacy start_qwen message from React Extension
+
+        // ACP chat: connect / prompt / cancel / permission response / stop
+        case 'acp_connect': {
+          const result = await this.handleAcpConnect(message.payload);
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true, data: result },
+            });
+          }
+          break;
+        }
+        case 'acp_status': {
+          const status = this.acpClient.getStatus();
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true, data: status },
+            });
+          }
+          break;
+        }
+        case 'acp_prompt': {
+          const text =
+            typeof message.payload?.text === 'string'
+              ? message.payload.text
+              : '';
+          if (!text) {
+            throw new Error('Missing prompt text');
+          }
+          await this.handleAcpConnect(message.payload);
+          await this.acpClient.prompt(text);
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true },
+            });
+          }
+          break;
+        }
+        case 'acp_cancel': {
+          await this.acpClient.cancel();
+          if (this.thinkingActive) {
+            this.sendThinkingEnd();
+          }
+          this.sendStreamEnd('cancelled');
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true },
+            });
+          }
+          break;
+        }
+        case 'acp_stop': {
+          await this.acpClient.stop();
+          this.streamActive = false;
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true },
+            });
+          }
+          break;
+        }
+        case 'acp_permission_response': {
+          const requestId = Number(message.payload?.requestId);
+          const optionId = message.payload?.optionId;
+          if (!Number.isNaN(requestId) && typeof optionId === 'string') {
+            const pending = this.permissionRequests.get(requestId);
+            if (pending) {
+              pending.resolve({ optionId });
+              this.permissionRequests.delete(requestId);
+            }
+          }
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true },
+            });
+          }
+          break;
+        }
+
+        // --- Deprecated: React UI legacy compatibility (do not use for new work) ---
+
+        // Deprecated: legacy start_qwen message from React Extension
         case 'start_qwen':
           await this.startServer(message.payload?.port || 12306);
           // Send response back for the request
@@ -159,21 +274,21 @@ export class NativeMessagingHost {
             });
           }
           break;
-          
-        // Support CONNECT message from React Extension
+
+        // Deprecated: support CONNECT message from React Extension
         case 'CONNECT': {
           // Ensure the HTTP server is running so MCP stdio can reach /mcp.
-           if (this.associatedServer && !this.associatedServer.isRunning) {
-             // Auto-start server on connect if likely needed
-             await this.startServer(message.payload?.port || 12306);
-           }
-          
+          if (this.associatedServer && !this.associatedServer.isRunning) {
+            // Auto-start server on connect if likely needed
+            await this.startServer(message.payload?.port || 12306);
+          }
+
           const payload = {
-              success: true,
-              connected: true,
-              serverRunning: this.associatedServer?.isRunning ?? false,
+            success: true,
+            connected: true,
+            serverRunning: this.associatedServer?.isRunning ?? false,
           };
-          
+
           if (message.requestId) {
             this.sendMessage({
               responseToRequestId: message.requestId,
@@ -187,36 +302,37 @@ export class NativeMessagingHost {
           }
           break;
         }
-        
-        // Support qwen_prompt (Chat) - return migration message
+
+        // Deprecated: qwen_prompt (legacy chat) - return migration message
         case 'qwen_prompt': {
-            const response = {
-                success: true,
-                data: {
-                    content: "⚠️ **Migration Notice**\n\nThe Qwen Code architecture has been upgraded to MCP (Model Context Protocol). \n\nPlease use the **Qwen CLI** to interact with the agent:\n\n`$ qwen`\n\nThis SidePanel now serves as a status and tool visualization dashboard.",
-                    stopReason: "stop"
-                }
-            };
-            if (message.requestId) {
-                this.sendMessage({
-                    responseToRequestId: message.requestId,
-                    payload: response
-                });
-            }
-            break;
+          const response = {
+            success: true,
+            data: {
+              content:
+                '⚠️ **Migration Notice**\n\nThe Qwen Code architecture has been upgraded to MCP (Model Context Protocol). \n\nPlease use the **Qwen CLI** to interact with the agent:\n\n`$ qwen`\n\nThis SidePanel now serves as a status and tool visualization dashboard.',
+              stopReason: 'stop',
+            },
+          };
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: response,
+            });
+          }
+          break;
         }
-        
-        // Support getQwenSessions - return empty list
+
+        // Deprecated: getQwenSessions (legacy) - return empty list
         case 'getQwenSessions': {
-             if (message.requestId) {
-                this.sendMessage({
-                    responseToRequestId: message.requestId,
-                    payload: { success: true, data: { sessions: [], total: 0 } }
-                });
-            }
-            break;
+          if (message.requestId) {
+            this.sendMessage({
+              responseToRequestId: message.requestId,
+              payload: { success: true, data: { sessions: [], total: 0 } },
+            });
+          }
+          break;
         }
-        
+
         // ----------------------------------------
 
         // Keep ping/pong for simple liveness detection, but this differs from request-response pattern
@@ -235,10 +351,323 @@ export class NativeMessagingHost {
           }
       }
     } catch (error) {
-      this.sendError(
-        `Failed to handle directive message: ${(error as Error).message || String(error)}`,
-      );
+      const messageText =
+        (error as Error).message || String(error) || 'Unknown error';
+      if (message.requestId) {
+        this.sendMessage({
+          responseToRequestId: message.requestId,
+          error: messageText,
+        });
+      }
+      this.sendError(`Failed to handle directive message: ${messageText}`);
     }
+  }
+
+  private async handleAcpConnect(
+    payload?: MessagePayload,
+  ): Promise<{ sessionId: string | null }> {
+    if (this.acpConnecting) {
+      return this.acpConnecting;
+    }
+
+    this.acpConnecting = (async () => {
+      if (this.associatedServer && !this.associatedServer.isRunning) {
+        await this.startServer(payload?.port || 12306);
+      }
+
+      const repoRoot = this.resolveRepoRoot(__dirname) || process.cwd();
+      const cliPath =
+        (typeof payload?.cliPath === 'string' && payload.cliPath) ||
+        this.resolveCliPath(repoRoot);
+      const mcpServerPath =
+        (typeof payload?.mcpServerPath === 'string' && payload.mcpServerPath) ||
+        this.resolveMcpServerPath(repoRoot);
+      const cwd =
+        (typeof payload?.cwd === 'string' && payload.cwd) || os.homedir();
+
+      const env = { ...process.env };
+      if (env.OPENAI_API_KEY && !env.QWEN_DEFAULT_AUTH_TYPE) {
+        env.QWEN_DEFAULT_AUTH_TYPE = 'openai';
+      }
+      if (typeof payload?.openaiApiKey === 'string' && payload.openaiApiKey) {
+        env.OPENAI_API_KEY = payload.openaiApiKey;
+        env.QWEN_DEFAULT_AUTH_TYPE = env.QWEN_DEFAULT_AUTH_TYPE || 'openai';
+      }
+      if (typeof payload?.openaiBaseUrl === 'string' && payload.openaiBaseUrl) {
+        env.OPENAI_BASE_URL = payload.openaiBaseUrl;
+      }
+      if (typeof payload?.openaiModel === 'string' && payload.openaiModel) {
+        env.OPENAI_MODEL = payload.openaiModel;
+      }
+
+      const mcpServers = [
+        {
+          name: 'chrome',
+          command: process.execPath,
+          args: [mcpServerPath],
+          env: [],
+        },
+      ];
+
+      try {
+        const result = await this.acpClient.connect({
+          cliPath,
+          cwd,
+          mcpServers,
+          env,
+        });
+        this.sendAuthStatus({
+          authenticated: true,
+          method: this.resolveAuthMethod(env),
+        });
+        return result;
+      } catch (error) {
+        const err = error as {
+          message?: string;
+          code?: number;
+          data?: unknown;
+        };
+        this.sendAuthStatus({
+          authenticated: false,
+          method: this.resolveAuthMethod(env),
+          error: err?.message || 'Authentication required',
+          code: err?.code,
+          data: err?.data,
+        });
+        throw error;
+      }
+    })();
+
+    try {
+      return await this.acpConnecting;
+    } finally {
+      this.acpConnecting = null;
+    }
+  }
+
+  private resolveRepoRoot(startDir: string): string | null {
+    let current = startDir;
+    for (let i = 0; i < 8; i += 1) {
+      const candidate = path.join(current, 'dist', 'cli.js');
+      if (fs.existsSync(candidate)) {
+        return current;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+    return null;
+  }
+
+  private resolveCliPath(repoRoot: string): string {
+    const candidate = path.join(repoRoot, 'dist', 'cli.js');
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    return candidate;
+  }
+
+  private resolveMcpServerPath(repoRoot: string): string {
+    const candidate = path.join(
+      repoRoot,
+      'packages',
+      'mcp-chrome-integration',
+      'app',
+      'native-server',
+      'dist',
+      'mcp',
+      'mcp-server-stdio.js',
+    );
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    return candidate;
+  }
+
+  private resolveAuthMethod(env: NodeJS.ProcessEnv): string {
+    const explicit = env.QWEN_DEFAULT_AUTH_TYPE;
+    if (explicit) {
+      return explicit;
+    }
+    if (env.OPENAI_API_KEY) {
+      return 'openai';
+    }
+    return 'unknown';
+  }
+
+  private sendAuthStatus(payload: {
+    authenticated: boolean;
+    method?: string;
+    error?: string;
+    code?: number;
+    data?: unknown;
+  }): void {
+    this.sendMessage({ type: 'authStatus', data: payload });
+  }
+
+  private handleAcpInitialized(init: unknown): void {
+    try {
+      const modes = (init as { modes?: unknown })?.modes;
+      if (modes && typeof modes === 'object') {
+        this.sendMessage({
+          type: 'modeInfo',
+          data: {
+            currentModeId: (modes as { currentModeId?: string }).currentModeId,
+            availableModes: (modes as { availableModes?: unknown })
+              .availableModes,
+          },
+        });
+      }
+    } catch {
+      // Ignore parse errors
+    }
+  }
+
+  private handleAcpSessionUpdate(update: AcpSessionUpdate): void {
+    if (!update || typeof update !== 'object') {
+      return;
+    }
+    const payload = (update as { update?: { sessionUpdate?: string } }).update;
+    const sessionUpdate = payload?.sessionUpdate;
+    if (!sessionUpdate) {
+      return;
+    }
+
+    switch (sessionUpdate) {
+      case 'agent_message_chunk': {
+        if (this.thinkingActive) {
+          this.sendThinkingEnd();
+        }
+        const text =
+          payload?.content && typeof payload.content.text === 'string'
+            ? payload.content.text
+            : '';
+        if (text) {
+          this.sendStreamStart();
+          this.sendMessage({ type: 'streamChunk', data: { chunk: text } });
+        }
+        break;
+      }
+      case 'agent_thought_chunk': {
+        const text =
+          payload?.content && typeof payload.content.text === 'string'
+            ? payload.content.text
+            : '';
+        if (text) {
+          this.thinkingActive = true;
+          this.sendMessage({ type: 'thinkingChunk', data: { chunk: text } });
+        }
+        break;
+      }
+      case 'tool_call':
+      case 'tool_call_update': {
+        const data = {
+          ...(payload || {}),
+          type: sessionUpdate,
+          sessionId: (update as { sessionId?: string }).sessionId,
+        };
+        this.sendMessage({
+          type: sessionUpdate === 'tool_call' ? 'toolCall' : 'toolCallUpdate',
+          data,
+        });
+        break;
+      }
+      case 'current_mode_update': {
+        this.sendMessage({
+          type: 'modeChanged',
+          data: { modeId: (payload as { modeId?: string }).modeId },
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  private handleAcpAuthenticateUpdate(update: {
+    _meta?: { authUri?: string };
+  }): void {
+    const authUri = update?._meta?.authUri;
+    if (authUri) {
+      this.sendMessage({ type: 'authUpdate', data: { authUri } });
+    }
+  }
+
+  private async handleAcpPermissionRequest(
+    request: AcpPermissionRequest,
+    requestId: number,
+  ): Promise<{ optionId: string }> {
+    const options =
+      request?.options?.map((opt) => ({
+        name: opt.name,
+        kind: opt.kind || '',
+        optionId: opt.optionId || opt.id,
+      })) || [];
+    const toolCall = request?.toolCall || {};
+
+    this.sendMessage({
+      type: 'permissionRequest',
+      data: {
+        requestId,
+        sessionId: request?.sessionId,
+        options,
+        toolCall,
+      },
+    });
+
+    return new Promise((resolve, reject) => {
+      this.permissionRequests.set(requestId, { resolve, reject });
+    });
+  }
+
+  private handleAcpEndTurn(reason?: string): void {
+    if (this.thinkingActive) {
+      this.sendThinkingEnd();
+    }
+    this.sendStreamEnd(reason);
+  }
+
+  private handleAcpProcessExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    this.streamActive = false;
+    this.thinkingActive = false;
+    this.permissionRequests.forEach((pending) => {
+      pending.reject(
+        new Error(`ACP process exited (${code ?? 'unknown'} ${signal ?? ''})`),
+      );
+    });
+    this.permissionRequests.clear();
+    this.sendAuthStatus({
+      authenticated: false,
+      method: 'unknown',
+      error: 'ACP process exited',
+      code: code ?? undefined,
+    });
+  }
+
+  private handleAcpStderr(line: string): void {
+    if (!line) return;
+    this.sendMessage({ type: 'hostLog', data: { line } });
+  }
+
+  private sendStreamStart(): void {
+    if (this.streamActive) return;
+    this.streamActive = true;
+    this.sendMessage({ type: 'streamStart', data: { timestamp: Date.now() } });
+  }
+
+  private sendStreamEnd(reason?: string): void {
+    this.streamActive = false;
+    this.sendMessage({ type: 'streamEnd', data: { reason } });
+  }
+
+  private sendThinkingEnd(): void {
+    this.thinkingActive = false;
+    this.sendMessage({ type: 'thinkingEnd', data: { timestamp: Date.now() } });
   }
 
   /**

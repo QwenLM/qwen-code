@@ -1,46 +1,7 @@
-/* eslint-disable @typescript-eslint/no-unused-vars, @typescript-eslint/no-explicit-any */
-// @ts-nocheck
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 import './native-messaging';
-import {
-  isUiRequest,
-  routeUiRequest,
-  MIGRATION_NOTICE,
-} from './ui-request-router';
-
-const STREAM_END_DEBOUNCE_MS = 300;
-let streamEndTimeout: number | null = null;
-
-function broadcastToUI(message: unknown): void {
-  chrome.runtime.sendMessage(message).catch(() => {
-    // Ignore if sidepanel is closed
-  });
-}
-
-function scheduleStreamEnd(reason?: string): void {
-  if (streamEndTimeout) clearTimeout(streamEndTimeout);
-  streamEndTimeout = setTimeout(() => {
-    streamEndTimeout = null;
-    broadcastToUI({ type: 'streamEnd', data: { reason } });
-  }, STREAM_END_DEBOUNCE_MS);
-}
-
-function sendMigrationNotice(): void {
-  broadcastToUI({ type: 'streamStart', data: { timestamp: Date.now() } });
-  broadcastToUI({
-    type: 'message',
-    data: {
-      role: 'assistant',
-      content: MIGRATION_NOTICE,
-      timestamp: Date.now(),
-    },
-  });
-  scheduleStreamEnd('migration_notice');
-}
-
-function handleCancelStreaming(): void {
-  broadcastToUI({ type: 'streamEnd', data: { reason: 'user_cancelled' } });
-}
+import { isUiRequest, routeUiRequest } from './ui-request-router';
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (!isUiRequest(request)) {
@@ -50,19 +11,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   (async () => {
     const { handled, response, action } = await routeUiRequest(request, {
       connect: () => self.NativeMessaging?.connect?.() ?? false,
-      getStatus: () => self.NativeMessaging?.getStatus?.() ?? { connected: false },
+      getStatus: () =>
+        self.NativeMessaging?.getStatus?.() ?? { connected: false },
+      sendMessageWithResponse: (message) =>
+        self.NativeMessaging?.sendMessageWithResponse?.(message),
     });
 
     if (!handled) {
       return;
-    }
-
-    if (action === 'sendMigrationNotice') {
-      sendMigrationNotice();
-    }
-
-    if (action === 'cancelStreaming') {
-      handleCancelStreaming();
     }
 
     sendResponse(response);

@@ -5,11 +5,13 @@
 由于项目处于集成阶段，我们分两种调试场景：
 
 ### 场景 1: 调试 Native Server（独立测试）
+
 - ✅ 可以立即使用
 - 测试 MCP 工具是否正常工作
 - 验证与 Qwen CLI 的连接
 
 ### 场景 2: 调试完整集成（Native Server + Extension）
+
 - ⚠️ 需要完成 Extension 通信层适配
 - 端到端测试完整流程
 
@@ -48,6 +50,7 @@ node dist/cli.js doctor
 ```
 
 **预期输出**:
+
 ```
 ✅ Native messaging host registered successfully
 ✅ Configuration file created at:
@@ -66,6 +69,7 @@ node dist/index.js
 ```
 
 **预期输出**:
+
 ```
 [MCP Server] Starting...
 [Fastify] Server listening on http://127.0.0.1:12306
@@ -120,6 +124,7 @@ qwen mcp call chrome get_windows_and_tabs
 ### 步骤 5: 查看 Native Server 日志
 
 **日志输出位置**:
+
 - **stdout**: Native Server 的控制台输出
 - **stderr**: 错误信息
 
@@ -159,6 +164,7 @@ pnpm dev
 ```
 
 **构建产物位置**:
+
 ```
 app/chrome-extension/dist/extension/
 ├── manifest.json
@@ -173,6 +179,7 @@ app/chrome-extension/dist/extension/
 ### 步骤 2: 加载 Extension 到 Chrome
 
 1. **打开 Chrome 扩展管理页面**:
+
    ```
    chrome://extensions/
    ```
@@ -207,9 +214,7 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.m
   "description": "Qwen Code Chrome MCP Bridge",
   "path": "/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/native-server/dist/cli.js",
   "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://YOUR_EXTENSION_ID_HERE/"
-  ]
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID_HERE/"]
 }
 ```
 
@@ -224,6 +229,7 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.m
 3. 点击 "Inspect views: service worker"
 
 **这里可以看到**:
+
 - Service Worker 的控制台日志
 - Network 请求（如果有）
 - 错误信息
@@ -234,6 +240,7 @@ vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.m
 2. 或点击扩展卡片上的 "side panel"
 
 **这里可以看到**:
+
 - React UI
 - 用户交互
 
@@ -271,18 +278,24 @@ chrome.runtime.sendMessage({ type: 'CONNECT' }, (response) => {
 
 ```javascript
 // 测试截图工具
-chrome.runtime.sendMessage({
-  type: 'CAPTURE_SCREENSHOT'
-}, (response) => {
-  console.log('Screenshot response:', response);
-});
+chrome.runtime.sendMessage(
+  {
+    type: 'CAPTURE_SCREENSHOT',
+  },
+  (response) => {
+    console.log('Screenshot response:', response);
+  },
+);
 
 // 测试读取页面内容
-chrome.runtime.sendMessage({
-  type: 'EXTRACT_PAGE_DATA'
-}, (response) => {
-  console.log('Page data:', response);
-});
+chrome.runtime.sendMessage(
+  {
+    type: 'EXTRACT_PAGE_DATA',
+  },
+  (response) => {
+    console.log('Page data:', response);
+  },
+);
 ```
 
 #### 5.3 通过 Qwen CLI 测试完整流程
@@ -304,6 +317,7 @@ qwen mcp call chrome chrome_read_page
 ### 问题 1: Native Messaging 连接失败
 
 **症状**:
+
 ```
 Error: Native host has exited
 ```
@@ -311,22 +325,26 @@ Error: Native host has exited
 **排查步骤**:
 
 1. **检查注册状态**:
+
 ```bash
 cd app/native-server
 node dist/cli.js doctor
 ```
 
 2. **检查配置文件**:
+
 ```bash
 cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.qwen.mcp_chrome_bridge.json
 ```
 
 确认：
+
 - `path` 指向正确的 `cli.js` 文件
 - `allowed_origins` 包含正确的 Extension ID
 - 文件权限正确 (chmod 644)
 
 3. **检查 CLI 脚本可执行**:
+
 ```bash
 chmod +x app/native-server/dist/cli.js
 node app/native-server/dist/cli.js --version
@@ -335,6 +353,7 @@ node app/native-server/dist/cli.js --version
 ### 问题 2: Extension 无法加载
 
 **症状**:
+
 ```
 Failed to load extension
 ```
@@ -342,16 +361,19 @@ Failed to load extension
 **排查步骤**:
 
 1. **检查构建产物**:
+
 ```bash
 ls -la app/chrome-extension/dist/extension/
 ```
 
 确认存在:
+
 - `manifest.json`
 - `background/service-worker.js`
 - `sidepanel/sidepanel.html`
 
 2. **检查 manifest.json 语法**:
+
 ```bash
 cat app/chrome-extension/dist/extension/manifest.json | jq .
 ```
@@ -387,6 +409,7 @@ setInterval(() => {
 **解决方案**:
 
 **方式 A: 每次更新配置（开发阶段）**
+
 ```bash
 # 获取新的 Extension ID
 EXTENSION_ID=$(ls ~/Library/Application\ Support/Google/Chrome/Default/Extensions/ | head -1)
@@ -398,6 +421,7 @@ EXTENSION_ID=$(ls ~/Library/Application\ Support/Google/Chrome/Default/Extension
 **方式 B: 固定 Extension ID（推荐）**
 
 在 `manifest.json` 中添加:
+
 ```json
 {
   "key": "YOUR_PUBLIC_KEY_HERE"
@@ -405,6 +429,7 @@ EXTENSION_ID=$(ls ~/Library/Application\ Support/Google/Chrome/Default/Extension
 ```
 
 生成 key:
+
 ```bash
 # 使用 Chrome 打包工具生成 .pem 文件
 # 然后从 .pem 提取 public key
@@ -444,24 +469,28 @@ EXTENSION_ID=$(ls ~/Library/Application\ Support/Google/Chrome/Default/Extension
 ## 🛠️ 推荐的开发工具流程
 
 ### 终端 1: Native Server
+
 ```bash
 cd packages/mcp-chrome-integration/app/native-server
 node --inspect dist/index.js
 ```
 
 ### 终端 2: Extension 构建监听
+
 ```bash
 cd packages/mcp-chrome-integration/app/chrome-extension
 pnpm dev
 ```
 
 ### 终端 3: Qwen CLI
+
 ```bash
 qwen mcp list
 qwen mcp call chrome chrome_screenshot
 ```
 
 ### Chrome 标签页
+
 1. `chrome://extensions/` - Extension 管理
 2. Service Worker 控制台 - 查看后台日志
 3. Side Panel - UI 调试
@@ -472,6 +501,7 @@ qwen mcp call chrome chrome_screenshot
 ## 📝 调试日志示例
 
 ### 正常的 Native Server 启动日志
+
 ```
 [2026-01-16 23:00:00] Starting MCP Chrome Bridge...
 [2026-01-16 23:00:00] Fastify server listening on http://127.0.0.1:12306
@@ -480,6 +510,7 @@ qwen mcp call chrome chrome_screenshot
 ```
 
 ### 正常的 Extension 连接日志
+
 ```
 [Background] Service Worker activated
 [Background] Connecting to native host: com.qwen.mcp_chrome_bridge
