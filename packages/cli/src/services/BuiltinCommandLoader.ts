@@ -43,7 +43,7 @@ import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 
 /**
  * Loads the core, hard-coded slash commands that are an integral part
- * of the Gemini CLI application.
+ * of the Qwen Code application.
  */
 export class BuiltinCommandLoader implements ICommandLoader {
   constructor(private config: Config | null) {}

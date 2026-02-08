@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// File for 'gemini mcp add' command
+// File for 'qwen mcp add' command
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -159,14 +159,14 @@ export const addCommand: CommandModule = {
         alias: 's',
         describe: 'Configuration scope (user or project)',
         type: 'string',
-        default: 'project',
+        default: 'user',
         choices: ['user', 'project'],
       })
       .option('transport', {
         alias: 't',
-        describe: 'Transport type (stdio, sse, http)',
+        describe:
+          'Transport type (stdio, sse, http). Auto-detected from URL if not specified.',
         type: 'string',
-        default: 'stdio',
         choices: ['stdio', 'sse', 'http'],
       })
       .option('env', {
@@ -210,6 +210,20 @@ export const addCommand: CommandModule = {
         if (argv['--']) {
           const existingArgs = (argv['args'] as Array<string | number>) || [];
           argv['args'] = [...existingArgs, ...(argv['--'] as string[])];
+        }
+
+        // Auto-detect transport from URL if not explicitly specified
+        if (!argv['transport']) {
+          const commandOrUrl = argv['commandOrUrl'] as string;
+          if (
+            commandOrUrl &&
+            (commandOrUrl.startsWith('http://') ||
+              commandOrUrl.startsWith('https://'))
+          ) {
+            argv['transport'] = 'http';
+          } else {
+            argv['transport'] = 'stdio';
+          }
         }
       }),
   handler: async (argv) => {

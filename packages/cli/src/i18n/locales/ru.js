@@ -1057,9 +1057,6 @@ export default {
   // Статус MCP
   // ============================================================================
   'No MCP servers configured.': 'Не настроено MCP-серверов.',
-  'Please view MCP documentation in your browser:':
-    'Пожалуйста, просмотрите документацию MCP в браузере:',
-  'or use the cli /docs command': 'или используйте команду cli /docs',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCP-серверы запускаются ({{count}} инициализируется)...',
   'Note: First startup may take longer. Tool availability will update automatically.':

@@ -985,9 +985,6 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': '未配置 MCP 服务器',
-  'Please view MCP documentation in your browser:':
-    '请在浏览器中查看 MCP 文档：',
-  'or use the cli /docs command': '或使用 cli /docs 命令',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCP 服务器正在启动（{{count}} 个正在初始化）...',
   'Note: First startup may take longer. Tool availability will update automatically.':

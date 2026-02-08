@@ -746,9 +746,6 @@ export default {
   'Press Ctrl+D again to exit.': 'Ctrl+D をもう一度押すと終了します',
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
   // MCP Status
-  'Please view MCP documentation in your browser:':
-    'ブラウザでMCPドキュメントを確認してください:',
-  'or use the cli /docs command': 'または CLI の /docs コマンドを使用',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCPサーバーを起動中({{count}} 初期化中)...',
   'Note: First startup may take longer. Tool availability will update automatically.':

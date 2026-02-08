@@ -11,6 +11,7 @@ import { removeCommand } from './remove.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockDeleteCredentials = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
@@ -32,6 +33,17 @@ vi.mock('../../config/settings.js', async () => {
   return {
     ...actual,
     loadSettings: vi.fn(),
+  };
+});
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    MCPOAuthTokenStorage: vi.fn(() => ({
+      deleteCredentials: mockDeleteCredentials,
+    })),
   };
 });
 
@@ -59,24 +71,45 @@ describe('mcp remove command', () => {
       setValue: mockSetValue,
     });
     mockWriteStdoutLine.mockClear();
+    mockDeleteCredentials.mockClear();
   });
 
-  it('should remove a server from project settings', async () => {
+  it('should remove a server from user settings by default', async () => {
     await parser.parseAsync('remove test-server');
 
     expect(mockSetValue).toHaveBeenCalledWith(
-      SettingScope.Workspace,
+      SettingScope.User,
       'mcpServers',
       {},
     );
   });
 
-  it('should show a message if server not found', async () => {
+  it('should clean up OAuth tokens when removing a server', async () => {
+    await parser.parseAsync('remove test-server');
+
+    expect(mockDeleteCredentials).toHaveBeenCalledWith('test-server');
+  });
+
+  it('should not fail if OAuth token cleanup fails', async () => {
+    mockDeleteCredentials.mockRejectedValue(new Error('cleanup failed'));
+
+    await parser.parseAsync('remove test-server');
+
+    // Server should still be removed from settings despite token cleanup failure
+    expect(mockSetValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'mcpServers',
+      {},
+    );
+  });
+
+  it('should not clean up OAuth tokens if server not found', async () => {
     await parser.parseAsync('remove non-existent-server');
 
     expect(mockSetValue).not.toHaveBeenCalled();
+    expect(mockDeleteCredentials).not.toHaveBeenCalled();
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      'Server "non-existent-server" not found in project settings.',
+      'Server "non-existent-server" not found in user settings.',
     );
   });
 });

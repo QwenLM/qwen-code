@@ -49,13 +49,6 @@ export const McpStatus: React.FC<McpStatusProps> = ({
     return (
       <Box flexDirection="column">
         <Text>{t('No MCP servers configured.')}</Text>
-        <Text>
-          {t('Please view MCP documentation in your browser:')}{' '}
-          <Text color={theme.text.link}>
-            https://goo.gle/gemini-cli-docs-mcp
-          </Text>{' '}
-          {t('or use the cli /docs command')}
-        </Text>
       </Box>
     );
   }

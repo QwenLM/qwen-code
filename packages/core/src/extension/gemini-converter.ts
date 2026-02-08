@@ -5,7 +5,7 @@
  */
 
 /**
- * Converter for Gemini CLI extensions to Qwen Code format.
+ * Converter for Gemini extensions to Qwen Code format.
  */
 
 import * as fs from 'node:fs';
@@ -28,7 +28,7 @@ export interface GeminiExtensionConfig {
 }
 
 /**
- * Converts a Gemini CLI extension config to Qwen Code format.
+ * Converts a Gemini extension config to Qwen Code format.
  * @param extensionDir Path to the Gemini extension directory
  * @returns Qwen ExtensionConfig
  */

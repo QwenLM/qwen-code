@@ -355,11 +355,25 @@ export class OAuthUtils {
   /**
    * Build a resource parameter for OAuth requests.
    *
-   * @param endpointUrl The endpoint URL
-   * @returns The resource parameter value
+   * Per MCP spec and RFC 8707, the resource parameter MUST be the
+   * canonical URI of the MCP server. Clients SHOULD provide the most
+   * specific URI they can. The URI MUST NOT include a fragment and
+   * SHOULD NOT include a query component.
+   *
+   * @param endpointUrl The MCP server endpoint URL
+   * @returns The canonical resource URI
    */
   static buildResourceParameter(endpointUrl: string): string {
     const url = new URL(endpointUrl);
-    return `${url.protocol}//${url.host}`;
+    // Build canonical URI: scheme + host + path (no query, no fragment)
+    // per RFC 8707 Section 2 and MCP spec Resource Parameter Implementation
+    const path = url.pathname === '/' ? '' : url.pathname;
+    let canonical = `${url.protocol}//${url.host}${path}`;
+    // Remove trailing slash from non-root paths for consistency
+    // (MCP spec recommends form without trailing slash)
+    if (canonical.endsWith('/') && path !== '') {
+      canonical = canonical.slice(0, -1);
+    }
+    return canonical;
   }
 }

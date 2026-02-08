@@ -238,7 +238,11 @@ describe('ToolRegistry', () => {
 
       // Assert that the array has the correct tools and is sorted by name
       expect(toolsFromServer1).toHaveLength(3);
-      expect(toolNames).toEqual(['apple-tool', 'banana-tool', 'zebra-tool']);
+      expect(toolNames).toEqual([
+        'mcp__mcp-server-uno__apple-tool',
+        'mcp__mcp-server-uno__banana-tool',
+        'mcp__mcp-server-uno__zebra-tool',
+      ]);
 
       // Assert that all returned tools are indeed from the correct server
       for (const tool of toolsFromServer1) {

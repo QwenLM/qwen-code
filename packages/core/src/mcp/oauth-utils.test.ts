@@ -293,18 +293,53 @@ describe('OAuthUtils', () => {
   });
 
   describe('buildResourceParameter', () => {
-    it('should build resource parameter from endpoint URL', () => {
+    it('should return canonical URI with full path', () => {
       const result = OAuthUtils.buildResourceParameter(
         'https://example.com/oauth/token',
       );
-      expect(result).toBe('https://example.com');
+      expect(result).toBe('https://example.com/oauth/token');
     });
 
     it('should handle URLs with ports', () => {
       const result = OAuthUtils.buildResourceParameter(
         'https://example.com:8080/oauth/token',
       );
-      expect(result).toBe('https://example.com:8080');
+      expect(result).toBe('https://example.com:8080/oauth/token');
+    });
+
+    it('should strip query and fragment per RFC 8707', () => {
+      const result = OAuthUtils.buildResourceParameter(
+        'https://example.com/mcp?foo=bar#frag',
+      );
+      expect(result).toBe('https://example.com/mcp');
+    });
+
+    it('should remove trailing slash from paths', () => {
+      expect(
+        OAuthUtils.buildResourceParameter('https://example.com/mcp/'),
+      ).toBe('https://example.com/mcp');
+    });
+
+    it('should handle root URL consistently', () => {
+      // Both "https://example.com" and "https://example.com/" should
+      // produce the same canonical form without trailing slash
+      expect(OAuthUtils.buildResourceParameter('https://example.com')).toBe(
+        'https://example.com',
+      );
+      expect(OAuthUtils.buildResourceParameter('https://example.com/')).toBe(
+        'https://example.com',
+      );
+    });
+
+    // Regression test for https://github.com/QwenLM/qwen-code/issues/1749
+    // Per MCP spec, resource should be the canonical URI including the path,
+    // so multi-tenant servers can distinguish between different MCP servers.
+    it('should preserve full path for multi-tenant MCP servers (issue #1749)', () => {
+      const result = OAuthUtils.buildResourceParameter(
+        'https://mcp.alibaba-inc.com/yuque/mcp',
+      );
+      // Must include the full path, not just the host
+      expect(result).toBe('https://mcp.alibaba-inc.com/yuque/mcp');
     });
   });
 });
