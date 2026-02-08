@@ -12,6 +12,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   SessionMetrics,
+  McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
   OutputFormat,
@@ -26,7 +27,10 @@ import type {
   PermissionMode,
   CLISystemMessage,
 } from '../nonInteractive/types.js';
-import type { JsonOutputAdapterInterface } from '../nonInteractive/io/BaseJsonOutputAdapter.js';
+import type {
+  JsonOutputAdapterInterface,
+  MessageEmitter,
+} from '../nonInteractive/io/BaseJsonOutputAdapter.js';
 import { computeSessionStats } from '../ui/utils/computeStats.js';
 import { getAvailableCommands } from '../nonInteractiveCliCommands.js';
 
@@ -289,6 +293,45 @@ export async function buildSystemMessage(
   };
 
   return systemMessage;
+}
+
+function isMcpToolProgressData(
+  output: ToolResultDisplay,
+): output is McpToolProgressData {
+  return (
+    typeof output === 'object' &&
+    output !== null &&
+    'type' in output &&
+    (output as McpToolProgressData).type === 'mcp_tool_progress'
+  );
+}
+
+/**
+ * Creates a generic output update handler for tools with canUpdateOutput=true.
+ * This handler forwards MCP progress data (McpToolProgressData) as tool_progress
+ * stream events via the adapter. Progress events are only emitted when the adapter
+ * supports partial messages (i.e., includePartialMessages is true).
+ *
+ * @param request - Tool call request info
+ * @param adapter - The adapter instance for emitting messages
+ * @returns An object containing the output update handler
+ */
+export function createToolProgressHandler(
+  request: ToolCallRequestInfo,
+  adapter: MessageEmitter,
+): {
+  handler: OutputUpdateHandler;
+} {
+  const handler: OutputUpdateHandler = (
+    _callId: string,
+    output: ToolResultDisplay,
+  ) => {
+    if (isMcpToolProgressData(output)) {
+      adapter.emitToolProgress(request, output);
+    }
+  };
+
+  return { handler };
 }
 
 /**

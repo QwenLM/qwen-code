@@ -638,6 +638,7 @@ export async function discoverTools(
       return [];
     }
 
+    const mcpTimeout = mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC;
     const discoveredTools: DiscoveredMCPTool[] = [];
     for (const funcDecl of tool.functionDeclarations) {
       try {
@@ -655,6 +656,8 @@ export async function discoverTools(
             mcpServerConfig.trust,
             undefined,
             cliConfig,
+            mcpClient, // raw MCP Client for direct callTool with progress
+            mcpTimeout,
           ),
         );
       } catch (error) {

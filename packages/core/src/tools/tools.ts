@@ -470,13 +470,28 @@ export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
 }
 
+/**
+ * Structured progress data following the MCP notifications/progress spec.
+ * @see https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/progress
+ */
+export interface McpToolProgressData {
+  type: 'mcp_tool_progress';
+  /** Current progress value (must increase with each notification) */
+  progress: number;
+  /** Optional total value indicating the operation's target */
+  total?: number;
+  /** Optional human-readable progress message */
+  message?: string;
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
   | TaskResultDisplay
-  | AnsiOutputDisplay;
+  | AnsiOutputDisplay
+  | McpToolProgressData;
 
 export interface FileDiff {
   fileDiff: string;
