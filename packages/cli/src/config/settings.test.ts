@@ -2691,6 +2691,194 @@ describe('Settings Loading and Merging', () => {
 
       expect(process.env['TESTTEST']).not.toEqual('1234');
     });
+
+    describe('settings.env field', () => {
+      const originalEnv = { ...process.env };
+
+      beforeEach(() => {
+        process.env = { ...originalEnv };
+        delete process.env['ENV_FROM_SETTINGS'];
+        delete process.env['ENV_OVERRIDE_TEST'];
+        delete process.env['SYSTEM_ENV_VAR'];
+        delete process.env['MULTI_VAR_A'];
+        delete process.env['MULTI_VAR_B'];
+        delete process.env['MULTI_VAR_C'];
+        delete process.env['USER_ENV_VAR'];
+        delete process.env['WORKSPACE_ENV_VAR'];
+      });
+
+      afterEach(() => {
+        process.env = originalEnv;
+      });
+
+      it('should load environment variables from settings.env as fallback', () => {
+        const userSettingsContent: Settings = {
+          env: {
+            ENV_FROM_SETTINGS: 'settings_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with userSettings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['ENV_FROM_SETTINGS']).toEqual('settings_value');
+      });
+
+      it('should allow .env file to override settings.env values', () => {
+        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const userSettingsContent: Settings = {
+          env: {
+            ENV_OVERRIDE_TEST: 'from_settings',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, geminiEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === geminiEnvPath) return 'ENV_OVERRIDE_TEST=from_dotenv';
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with merged settings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // .env file has higher priority than settings.env (loaded first, no-override)
+        expect(process.env['ENV_OVERRIDE_TEST']).toEqual('from_dotenv');
+      });
+
+      it('should not override existing system environment variables', () => {
+        process.env['SYSTEM_ENV_VAR'] = 'system_value';
+
+        const geminiEnvPath = path.resolve(path.join(QWEN_DIR, '.env'));
+        const userSettingsContent: Settings = {
+          env: {
+            SYSTEM_ENV_VAR: 'from_settings',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, geminiEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === geminiEnvPath) return 'SYSTEM_ENV_VAR=from_dotenv';
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with userSettings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // System environment variable should have highest priority
+        expect(process.env['SYSTEM_ENV_VAR']).toEqual('system_value');
+      });
+
+      it('should support multiple env variables in settings.env', () => {
+        const userSettingsContent: Settings = {
+          env: {
+            MULTI_VAR_A: 'value_a',
+            MULTI_VAR_B: 'value_b',
+            MULTI_VAR_C: 'value_c',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with userSettings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['MULTI_VAR_A']).toEqual('value_a');
+        expect(process.env['MULTI_VAR_B']).toEqual('value_b');
+        expect(process.env['MULTI_VAR_C']).toEqual('value_c');
+      });
+
+      it('should load settings.env from both user and workspace settings', () => {
+        const workspaceSettingsContent = {
+          env: {
+            WORKSPACE_ENV_VAR: 'workspace_value',
+          },
+        };
+        const userSettingsContent: Settings = {
+          env: {
+            USER_ENV_VAR: 'user_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
+            p.toString(),
+          ),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify(workspaceSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        // loadSettings internally calls loadEnvironment with merged settings
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        // Both user-level and workspace-level env should be loaded
+        expect(process.env['USER_ENV_VAR']).toEqual('user_value');
+        expect(process.env['WORKSPACE_ENV_VAR']).toEqual('workspace_value');
+      });
+    });
   });
 
   describe('needsMigration', () => {

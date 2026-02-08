@@ -116,6 +116,19 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
+  // Environment variables fallback
+  env: {
+    type: 'object',
+    label: 'Environment Variables',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, string>,
+    description:
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   general: {
     type: 'object',
     label: 'General',

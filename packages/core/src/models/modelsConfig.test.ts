@@ -461,6 +461,41 @@ describe('ModelsConfig', () => {
     expect(gc.apiKeyEnvKey).toBeUndefined();
   });
 
+  it('should apply extra_body and customHeaders from model provider config', async () => {
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'model-with-extras',
+          name: 'Model With Extras',
+          baseUrl: 'https://api.example.com/v1',
+          envKey: 'API_KEY',
+          generationConfig: {
+            extra_body: { custom_param: 'value', enable_thinking: true },
+            customHeaders: { 'X-Custom-Header': 'header-value' },
+          },
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+    });
+
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'model-with-extras');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    expect(gc.extra_body).toEqual({
+      custom_param: 'value',
+      enable_thinking: true,
+    });
+    expect(gc.customHeaders).toEqual({ 'X-Custom-Header': 'header-value' });
+
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['extra_body']?.kind).toBe('modelProviders');
+    expect(sources['customHeaders']?.kind).toBe('modelProviders');
+  });
+
   it('should apply Qwen OAuth apiKey placeholder during syncAfterAuthRefresh for fresh users', () => {
     // Fresh user: authType not selected yet (currentAuthType undefined).
     const modelsConfig = new ModelsConfig();

@@ -748,66 +748,21 @@ export class ModelsConfig {
       detail: 'baseUrl',
     };
 
-    // Generation config
+    // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
-    this._generationConfig.samplingParams = { ...(gc.samplingParams || {}) };
-    this.generationConfigSources['samplingParams'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.samplingParams',
-    };
-
-    this._generationConfig.timeout = gc.timeout;
-    this.generationConfigSources['timeout'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.timeout',
-    };
-
-    this._generationConfig.maxRetries = gc.maxRetries;
-    this.generationConfigSources['maxRetries'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.maxRetries',
-    };
-
-    this._generationConfig.enableCacheControl = gc.enableCacheControl;
-    this.generationConfigSources['enableCacheControl'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.enableCacheControl',
-    };
-
-    this._generationConfig.schemaCompliance = gc.schemaCompliance;
-    this.generationConfigSources['schemaCompliance'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.schemaCompliance',
-    };
-
-    this._generationConfig.reasoning = gc.reasoning;
-    this.generationConfigSources['reasoning'] = {
-      kind: 'modelProviders',
-      authType: model.authType,
-      modelId: model.id,
-      detail: 'generationConfig.reasoning',
-    };
-
-    // Context window size: use provider value if set, otherwise auto-detect from model
-    if (gc.contextWindowSize !== undefined) {
-      this._generationConfig.contextWindowSize = gc.contextWindowSize;
-      this.generationConfigSources['contextWindowSize'] = {
+    for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._generationConfig as any)[field] = gc[field];
+      this.generationConfigSources[field] = {
         kind: 'modelProviders',
         authType: model.authType,
         modelId: model.id,
-        detail: 'generationConfig.contextWindowSize',
+        detail: `generationConfig.${field}`,
       };
-    } else {
+    }
+
+    // contextWindowSize fallback: auto-detect from model when not set by provider
+    if (gc.contextWindowSize === undefined) {
       this._generationConfig.contextWindowSize = tokenLimit(model.id, 'input');
       this.generationConfigSources['contextWindowSize'] = {
         kind: 'computed',

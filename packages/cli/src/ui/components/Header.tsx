@@ -106,10 +106,11 @@ export const Header: React.FC<HeaderProps> = ({
     availableInfoPanelWidth - infoPanelChromeWidth,
   );
   const authModelText = `${formattedAuthType} | ${model}`;
-  const authHintText = ' (/auth to change)';
-  const showAuthHint =
+  const modelHintText = ' (/model to change)';
+  const showModelHint =
     infoPanelContentWidth > 0 &&
-    getCachedStringWidth(authModelText + authHintText) <= infoPanelContentWidth;
+    getCachedStringWidth(authModelText + modelHintText) <=
+      infoPanelContentWidth;
 
   // Now shorten the path to fit the available space
   const tildeifiedPath = tildeifyPath(workingDirectory);
@@ -169,8 +170,8 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Auth and Model line */}
         <Text>
           <Text color={theme.text.secondary}>{authModelText}</Text>
-          {showAuthHint && (
-            <Text color={theme.text.secondary}>{authHintText}</Text>
+          {showModelHint && (
+            <Text color={theme.text.secondary}>{modelHintText}</Text>
           )}
         </Text>
         {/* Directory line */}
