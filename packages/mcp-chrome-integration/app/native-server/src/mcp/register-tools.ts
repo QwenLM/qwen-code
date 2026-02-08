@@ -1,12 +1,17 @@
-// @ts-nocheck
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
   CallToolResult,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import nativeMessagingHostInstance from '../native-messaging-host';
-import { NativeMessageType, TOOL_SCHEMAS } from '../shared';
+import nativeMessagingHostInstance from '../native-messaging-host.js';
+import { NativeMessageType, TOOL_SCHEMAS } from '../shared/index.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
 async function listDynamicFlowTools(): Promise<Tool[]> {

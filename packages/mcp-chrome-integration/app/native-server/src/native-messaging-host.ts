@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { stdin, stdout } from 'process';
 import { Server } from './server';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,6 +29,7 @@ interface BaseMessage {
   requestId?: string;
   responseToRequestId?: string;
   error?: string;
+  data?: unknown;
 }
 
 interface PendingRequest {
@@ -166,9 +173,14 @@ export class NativeMessagingHost {
     // Handle directive messages from Chrome
     try {
       switch (message.type) {
-        case NativeMessageType.START:
-          await this.startServer(message.payload?.port || 12306);
+        case NativeMessageType.START: {
+          const port =
+            typeof message.payload?.port === 'number'
+              ? message.payload.port
+              : 12306;
+          await this.startServer(port);
           break;
+        }
         case NativeMessageType.STOP:
           await this.stopServer();
           break;
@@ -259,8 +271,12 @@ export class NativeMessagingHost {
         // --- Deprecated: React UI legacy compatibility (do not use for new work) ---
 
         // Deprecated: legacy start_qwen message from React Extension
-        case 'start_qwen':
-          await this.startServer(message.payload?.port || 12306);
+        case 'start_qwen': {
+          const port =
+            typeof message.payload?.port === 'number'
+              ? message.payload.port
+              : 12306;
+          await this.startServer(port);
           // Send response back for the request
           if (message.requestId) {
             this.sendMessage({
@@ -274,13 +290,18 @@ export class NativeMessagingHost {
             });
           }
           break;
+        }
 
         // Deprecated: support CONNECT message from React Extension
         case 'CONNECT': {
           // Ensure the HTTP server is running so MCP stdio can reach /mcp.
           if (this.associatedServer && !this.associatedServer.isRunning) {
             // Auto-start server on connect if likely needed
-            await this.startServer(message.payload?.port || 12306);
+            const port =
+              typeof message.payload?.port === 'number'
+                ? message.payload.port
+                : 12306;
+            await this.startServer(port);
           }
 
           const payload = {
@@ -372,7 +393,8 @@ export class NativeMessagingHost {
 
     this.acpConnecting = (async () => {
       if (this.associatedServer && !this.associatedServer.isRunning) {
-        await this.startServer(payload?.port || 12306);
+        const port = typeof payload?.port === 'number' ? payload.port : 12306;
+        await this.startServer(port);
       }
 
       const repoRoot = this.resolveRepoRoot(__dirname) || process.cwd();
@@ -529,7 +551,15 @@ export class NativeMessagingHost {
     if (!update || typeof update !== 'object') {
       return;
     }
-    const payload = (update as { update?: { sessionUpdate?: string } }).update;
+    const payload = (
+      update as {
+        update?: {
+          sessionUpdate?: string;
+          content?: { text?: string };
+          [key: string]: unknown;
+        };
+      }
+    ).update;
     const sessionUpdate = payload?.sessionUpdate;
     if (!sessionUpdate) {
       return;

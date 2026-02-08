@@ -1,5 +1,7 @@
 # Development Guide for Qwen Code Chrome Integration
 
+> **版本**: 2.0.0 | **最后更新**: 2026-02-08
+
 This document outlines the development process for the **mcp-chrome-integration** package.
 
 > Note: the legacy `chrome-extension` package has been archived at `archive/chrome-extension`.
@@ -30,6 +32,7 @@ packages/mcp-chrome-integration/
 ## Development Setup
 
 1. Install dependencies (repo root):
+
    ```bash
    npm install
    ```

@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import * as fs from 'fs';
 
 // Import DevTools trace engine and formatters from chrome-devtools-frontend
@@ -19,19 +25,27 @@ import { AgentFocus } from 'chrome-devtools-frontend/front_end/models/ai_assista
 
 const engine = TraceEngine.TraceModel.Model.createWithAllHandlers();
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function readJsonFile(path: string): any {
   const text = fs.readFileSync(path, 'utf-8');
   return JSON.parse(text);
 }
 
-export async function parseTrace(json: any): Promise<{
+export async function parseTrace(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  json: any,
+): Promise<{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   parsedTrace: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   insights: any | null;
 }> {
   engine.resetProcessor();
   const events = Array.isArray(json) ? json : json.traceEvents;
   if (!events || !Array.isArray(events)) {
-    throw new Error('Invalid trace format: expected array or {traceEvents: []}');
+    throw new Error(
+      'Invalid trace format: expected array or {traceEvents: []}',
+    );
   }
   await engine.parse(events);
   const parsedTrace = engine.parsedTrace();
@@ -40,20 +54,30 @@ export async function parseTrace(json: any): Promise<{
   return { parsedTrace, insights };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function getTraceSummary(parsedTrace: any): string {
   const focus = AgentFocus.fromParsedTrace(parsedTrace);
   const formatter = new PerformanceTraceFormatter(focus);
   return formatter.formatTraceSummary();
 }
 
-export function getInsightText(parsedTrace: any, insights: any, insightName: string): string {
+export function getInsightText(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  parsedTrace: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  insights: any,
+  insightName: string,
+): string {
   if (!insights) throw new Error('No insights available for this trace');
-  const mainNavId = parsedTrace.data?.Meta?.mainFrameNavigations?.at(0)?.args?.data?.navigationId;
+  const mainNavId =
+    parsedTrace.data?.Meta?.mainFrameNavigations?.at(0)?.args?.data
+      ?.navigationId;
   const NO_NAV = TraceEngine.Types.Events.NO_NAVIGATION;
   const set = insights.get(mainNavId ?? NO_NAV);
   if (!set) throw new Error('No insights for selected navigation');
   const model = set.model || {};
-  if (!(insightName in model)) throw new Error(`Insight not found: ${insightName}`);
+  if (!(insightName in model))
+    throw new Error(`Insight not found: ${insightName}`);
   const formatter = new PerformanceInsightFormatter(
     AgentFocus.fromParsedTrace(parsedTrace),
     model[insightName],

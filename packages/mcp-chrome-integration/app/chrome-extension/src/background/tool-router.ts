@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { isKnownToolName } from './tool-catalog';
 
 export function createToolRouter(handlers, unsupportedFactory) {

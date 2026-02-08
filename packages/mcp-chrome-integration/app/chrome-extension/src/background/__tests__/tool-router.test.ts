@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -22,7 +28,9 @@ test('router returns handlers for known tools', async () => {
   const result = await handler({});
   assert.equal(result, 'ok');
 
-  const fallbackName = KNOWN_TOOL_NAMES.find((name) => name !== 'chrome_screenshot');
+  const fallbackName = KNOWN_TOOL_NAMES.find(
+    (name) => name !== 'chrome_screenshot',
+  );
   const fallback = router.get(fallbackName);
   assert.equal(typeof fallback, 'function');
   const fallbackResult = await fallback({});

@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Chrome Extension API adapter
  * Replaces VSCode API for Chrome extension side panel
  */
@@ -21,10 +27,12 @@ function getAPI(): VSCodeAPI {
     apiInstance = {
       postMessage: (message: unknown): Promise<unknown> => {
         console.log('[SidePanel] Sending message:', message);
-        return chrome.runtime.sendMessage(message as object).catch((err: Error) => {
-          console.error('[SidePanel] Failed to send message:', err);
-          return null;
-        });
+        return chrome.runtime
+          .sendMessage(message as object)
+          .catch((err: Error) => {
+            console.error('[SidePanel] Failed to send message:', err);
+            return null;
+          });
       },
       getState: () => {
         return {};

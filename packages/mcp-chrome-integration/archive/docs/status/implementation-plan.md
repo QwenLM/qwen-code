@@ -7,6 +7,7 @@
 ### 当前状态
 
 **现有架构** (`archive/chrome-extension`):
+
 ```
 Chrome Extension (React 19)
   ↓ HTTP (127.0.0.1:18765)
@@ -16,12 +17,14 @@ Browser MCP Server
   ↓ MCP Protocol
 Qwen CLI
 ```
+
 - **通信层数**: 5 层
 - **工具数量**: 10 个
 - **技术栈**: React 19 + esbuild + Tailwind CSS
 - **通信协议**: HTTP + SSE
 
 **目标架构** (基于 hangwin/mcp-chrome):
+
 ```
 Chrome Extension (React 19 - 保留现有)
   ↓ Native Messaging Protocol (stdio)
@@ -29,6 +32,7 @@ Native Server (hangwin - Fastify + MCP SDK)
   ↓ MCP Protocol (StreamableHttp/stdio)
 Qwen CLI
 ```
+
 - **通信层数**: 3 层(简化 40%)
 - **工具数量**: 20+ 个(增强 100%)
 - **技术栈**: React 19(保留) + hangwin Native Server
@@ -48,6 +52,7 @@ Qwen CLI
 ### 方案核心思路
 
 **混合集成**：
+
 1. **完整复制** hangwin/mcp-chrome 源码到 `packages/mcp-chrome-integration`
 2. **保留** hangwin 的 `native-server` (Fastify + MCP SDK + 20+ 工具)
 3. **替换** hangwin 的 Vue Extension 为现有的 React Extension
@@ -55,14 +60,14 @@ Qwen CLI
 
 ### 架构对比
 
-| 组件 | 现有实现 | hangwin | 集成后方案 |
-|------|---------|---------|-----------|
-| **Extension UI** | React 19 | Vue 3 | **保留 React 19** |
-| **Extension 构建** | esbuild | WXT | **保留 esbuild** |
-| **Extension 通信** | HTTP 18765 | Native Messaging | **切换到 Native Messaging** |
-| **Native Server** | 自定义 HTTP Bridge | Fastify + MCP SDK | **使用 hangwin** |
-| **MCP 工具** | 10 个 | 20+ 个 | **使用 hangwin 全部** |
-| **MCP Transport** | ACP → MCP | StreamableHttp/stdio | **使用 hangwin** |
+| 组件               | 现有实现           | hangwin              | 集成后方案                  |
+| ------------------ | ------------------ | -------------------- | --------------------------- |
+| **Extension UI**   | React 19           | Vue 3                | **保留 React 19**           |
+| **Extension 构建** | esbuild            | WXT                  | **保留 esbuild**            |
+| **Extension 通信** | HTTP 18765         | Native Messaging     | **切换到 Native Messaging** |
+| **Native Server**  | 自定义 HTTP Bridge | Fastify + MCP SDK    | **使用 hangwin**            |
+| **MCP 工具**       | 10 个              | 20+ 个               | **使用 hangwin 全部**       |
+| **MCP Transport**  | ACP → MCP          | StreamableHttp/stdio | **使用 hangwin**            |
 
 ---
 
@@ -148,6 +153,7 @@ packages/mcp-chrome-integration/
 **目标**: 将 `/Users/yiliang/projects/temp/mcp-chrome` 完整复制到 `packages/mcp-chrome-integration`
 
 **操作**:
+
 ```bash
 # 复制完整源码
 cp -r /Users/yiliang/projects/temp/mcp-chrome/app/native-server packages/mcp-chrome-integration/app/
@@ -160,6 +166,7 @@ cp /Users/yiliang/projects/temp/mcp-chrome/tsconfig.json packages/mcp-chrome-int
 ```
 
 **保留文件**:
+
 - ✅ `app/native-server/*` - 完整保留
 - ✅ `packages/shared/*` - 完整保留
 - ❌ `app/chrome-extension/*` - **不复制**(用现有 React 实现替代)
@@ -189,6 +196,7 @@ cp archive/chrome-extension/tsconfig.json packages/mcp-chrome-integration/app/ch
 **需要修改的部分**:
 
 1. **移除 HTTP 通信代码**:
+
 ```typescript
 // 删除这些
 const BACKEND_URL = 'http://127.0.0.1:18765';
@@ -197,13 +205,14 @@ fetch(BACKEND_URL + '/events');  // SSE
 ```
 
 2. **添加 Native Messaging 通信**:
+
 ```typescript
 // 参考 hangwin 的实现
 // 文件: /Users/yiliang/projects/temp/mcp-chrome/app/chrome-extension/entrypoints/background/native-host.ts
 
 // 核心代码示例：
 let nativePort: chrome.runtime.Port | null = null;
-const HOST_NAME = 'com.chromemcp.nativehost';  // 需要与 native-server 注册名一致
+const HOST_NAME = 'com.chromemcp.nativehost'; // 需要与 native-server 注册名一致
 
 function connectToNativeHost() {
   nativePort = chrome.runtime.connectNative(HOST_NAME);
@@ -235,9 +244,13 @@ chrome.runtime.onStartup.addListener(() => {
 ```
 
 3. **适配消息类型**:
+
 ```typescript
 // 导入 hangwin 的消息类型
-import { NativeMessageType, type NativeMessage } from '@chrome-mcp/shared/types';
+import {
+  NativeMessageType,
+  type NativeMessage,
+} from '@chrome-mcp/shared/types';
 
 // 工具调用消息
 const callToolMessage: NativeMessage = {
@@ -245,8 +258,8 @@ const callToolMessage: NativeMessage = {
   payload: {
     requestId: generateRequestId(),
     toolName: 'chrome_screenshot',
-    params: { fullPage: true }
-  }
+    params: { fullPage: true },
+  },
 };
 
 sendToNativeHost(callToolMessage);
@@ -262,7 +275,7 @@ sendToNativeHost(callToolMessage);
   "name": "Qwen Code Chrome Integration",
   "version": "2.0.0",
   "permissions": [
-    "nativeMessaging",  // 🔧 添加 Native Messaging 权限
+    "nativeMessaging", // 🔧 添加 Native Messaging 权限
     "activeTab",
     "tabs",
     "storage",
@@ -279,7 +292,7 @@ sendToNativeHost(callToolMessage);
   ],
   "background": {
     "service_worker": "background/service-worker.js"
-  },
+  }
   // ... 其余保持不变
 }
 ```
@@ -312,9 +325,7 @@ mcp-chrome-bridge doctor      // 诊断
   "description": "Qwen Code Chrome MCP Bridge",
   "path": "/path/to/packages/mcp-chrome-integration/app/native-server/dist/cli.js",
   "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://YOUR_EXTENSION_ID/"
-  ]
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID/"]
 }
 ```
 
@@ -342,6 +353,7 @@ node dist/cli.js register
    - 删除 SSE 事件流监听
 
 2. **添加 Native Messaging 状态**:
+
 ```typescript
 // hooks/useChromeExtension.ts
 const [nativeHostConnected, setNativeHostConnected] = useState(false);
@@ -387,10 +399,7 @@ useEffect(() => {
     "install:native": "cd app/native-server && node dist/cli.js register",
     "uninstall:native": "cd app/native-server && node dist/cli.js unregister"
   },
-  "workspaces": [
-    "packages/*",
-    "app/*"
-  ]
+  "workspaces": ["packages/*", "app/*"]
 }
 ```
 
@@ -414,16 +423,15 @@ fetch('http://127.0.0.1:18765/api', {
   method: 'POST',
   body: JSON.stringify({
     type: 'sendMessage',
-    data: { text: 'Hello' }
-  })
+    data: { text: 'Hello' },
+  }),
 });
 
 // Native Host → Extension (SSE)
-fetch('http://127.0.0.1:18765/events')
-  .then(response => {
-    const reader = response.body.getReader();
-    // 读取流...
-  });
+fetch('http://127.0.0.1:18765/events').then((response) => {
+  const reader = response.body.getReader();
+  // 读取流...
+});
 ```
 
 ### 新版 Native Messaging 协议
@@ -437,8 +445,8 @@ nativePort.postMessage({
   payload: {
     requestId: '123',
     toolName: 'chrome_screenshot',
-    params: {}
-  }
+    params: {},
+  },
 });
 
 // Native Host → Extension
@@ -450,6 +458,7 @@ nativePort.onMessage.addListener((message: NativeMessage) => {
 ```
 
 **消息格式** (Native Messaging - stdio):
+
 ```
 [4 bytes: message length (Little Endian)]
 [JSON message body]
@@ -461,20 +470,21 @@ nativePort.onMessage.addListener((message: NativeMessage) => {
 
 ### 从现有 10 个工具到 hangwin 20+ 个工具
 
-| 现有工具 | hangwin 对应工具 | 变化 |
-|---------|-----------------|------|
-| `browser_read_page` | `chrome_read_page` | ✅ 功能增强(accessibility tree) |
-| `browser_capture_screenshot` | `chrome_screenshot` | ✅ 新增全页/元素/自定义尺寸 |
-| `browser_get_network_logs` | `chrome_network_debugger_start/stop` | ⚠️ 改为两步操作 |
-| `browser_get_console_logs` | `chrome_console` | ✅ API 兼容 |
-| `browser_click` | `chrome_click_element` | ✅ 支持 ref/selector/coordinates |
-| `browser_click_text` | `chrome_click_element` | ✅ 合并 |
-| `browser_fill_form` | `chrome_fill_or_select` | ⚠️ 需循环调用 |
-| `browser_fill_form_auto` | `chrome_fill_or_select` | ⚠️ 需循环调用 |
-| `browser_input_text` | `chrome_fill_or_select` | ✅ 合并 |
-| `browser_run_js` | `chrome_inject_script` | ✅ 功能相同 |
+| 现有工具                     | hangwin 对应工具                     | 变化                             |
+| ---------------------------- | ------------------------------------ | -------------------------------- |
+| `browser_read_page`          | `chrome_read_page`                   | ✅ 功能增强(accessibility tree)  |
+| `browser_capture_screenshot` | `chrome_screenshot`                  | ✅ 新增全页/元素/自定义尺寸      |
+| `browser_get_network_logs`   | `chrome_network_debugger_start/stop` | ⚠️ 改为两步操作                  |
+| `browser_get_console_logs`   | `chrome_console`                     | ✅ API 兼容                      |
+| `browser_click`              | `chrome_click_element`               | ✅ 支持 ref/selector/coordinates |
+| `browser_click_text`         | `chrome_click_element`               | ✅ 合并                          |
+| `browser_fill_form`          | `chrome_fill_or_select`              | ⚠️ 需循环调用                    |
+| `browser_fill_form_auto`     | `chrome_fill_or_select`              | ⚠️ 需循环调用                    |
+| `browser_input_text`         | `chrome_fill_or_select`              | ✅ 合并                          |
+| `browser_run_js`             | `chrome_inject_script`               | ✅ 功能相同                      |
 
 **新增工具** (hangwin 独有):
+
 - `search_tabs_content` - AI 语义搜索
 - `chrome_history` - 浏览历史
 - `chrome_bookmark_search/add/delete` - 书签管理
@@ -524,6 +534,7 @@ pnpm install
 ### 阶段 3: Native Server 配置(1-2 小时)
 
 1. ✅ 构建 native-server:
+
 ```bash
 cd app/native-server
 pnpm install
@@ -531,11 +542,13 @@ pnpm build
 ```
 
 2. 🔧 注册 Native Messaging:
+
 ```bash
 node dist/cli.js register
 ```
 
 3. ✅ 验证注册:
+
 ```bash
 node dist/cli.js doctor
 ```
@@ -579,23 +592,23 @@ node dist/cli.js doctor
 
 ### 需要创建的文件
 
-| 文件路径 | 作用 | 来源 |
-|---------|------|------|
-| `package.json` | 根 workspace 配置 | 修改 hangwin |
-| `pnpm-workspace.yaml` | workspace 定义 | hangwin |
-| `app/chrome-extension/src/background/service-worker.ts` | Service Worker(适配 Native Messaging) | 修改现有 |
-| `app/chrome-extension/src/background/native-messaging.ts` | Native Messaging 封装 | 新建(参考 hangwin) |
-| `scripts/install.sh` | 安装脚本 | 新建 |
-| `scripts/build-all.sh` | 构建脚本 | 新建 |
-| `docs/design/03-architecture.md` | 架构文档 | 新建 |
+| 文件路径                                                  | 作用                                  | 来源               |
+| --------------------------------------------------------- | ------------------------------------- | ------------------ |
+| `package.json`                                            | 根 workspace 配置                     | 修改 hangwin       |
+| `pnpm-workspace.yaml`                                     | workspace 定义                        | hangwin            |
+| `app/chrome-extension/src/background/service-worker.ts`   | Service Worker(适配 Native Messaging) | 修改现有           |
+| `app/chrome-extension/src/background/native-messaging.ts` | Native Messaging 封装                 | 新建(参考 hangwin) |
+| `scripts/install.sh`                                      | 安装脚本                              | 新建               |
+| `scripts/build-all.sh`                                    | 构建脚本                              | 新建               |
+| `docs/design/03-architecture.md`                          | 架构文档                              | 新建               |
 
 ### 需要修改的文件
 
-| 文件路径 | 修改内容 |
-|---------|---------|
-| `app/chrome-extension/public/manifest.json` | 添加 `nativeMessaging` 权限 |
-| `app/chrome-extension/src/sidepanel/hooks/useChromeExtension.ts` | 适配 Native Messaging 状态 |
-| `app/native-server/src/cli.ts` | 调整注册路径和名称 |
+| 文件路径                                                         | 修改内容                    |
+| ---------------------------------------------------------------- | --------------------------- |
+| `app/chrome-extension/public/manifest.json`                      | 添加 `nativeMessaging` 权限 |
+| `app/chrome-extension/src/sidepanel/hooks/useChromeExtension.ts` | 适配 Native Messaging 状态  |
+| `app/native-server/src/cli.ts`                                   | 调整注册路径和名称          |
 
 ### 完整保留的文件(无需修改)
 
@@ -614,6 +627,7 @@ node dist/cli.js doctor
 **问题**: 重新加载 Extension 会改变 Extension ID
 
 **解决方案**:
+
 1. 首次加载后，记录 Extension ID
 2. 更新 Native Messaging 配置清单中的 `allowed_origins`
 3. 或使用开发者账号发布私有扩展(Extension ID 固定)
@@ -623,6 +637,7 @@ node dist/cli.js doctor
 **问题**: macOS/Linux 需要文件权限
 
 **解决方案**:
+
 ```bash
 # 确保 CLI 脚本可执行
 chmod +x app/native-server/dist/cli.js
@@ -636,6 +651,7 @@ chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.
 **问题**: React Extension 现有消息格式与 hangwin 不同
 
 **解决方案**:
+
 1. 使用 `@chrome-mcp/shared/types` 统一消息类型
 2. 在 Service Worker 中添加适配层
 3. 逐步迁移现有消息格式
@@ -645,6 +661,7 @@ chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.
 **问题**: Native Messaging 使用 stdio，不如 HTTP 好调试
 
 **解决方案**:
+
 1. hangwin 提供 `doctor` 命令诊断
 2. Extension Console 可查看 `chrome.runtime.lastError`
 3. native-server 添加详细日志
@@ -733,16 +750,20 @@ chmod 644 ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.
 ### 关键参考文件
 
 **Native Messaging 实现** (hangwin):
+
 - `/Users/yiliang/projects/temp/mcp-chrome/app/chrome-extension/entrypoints/background/native-host.ts`
 - `/Users/yiliang/projects/temp/mcp-chrome/app/native-server/src/native-messaging-host.ts`
 
 **消息类型定义** (hangwin):
+
 - `/Users/yiliang/projects/temp/mcp-chrome/packages/shared/src/types.ts`
 
 **MCP 工具定义** (hangwin):
+
 - `/Users/yiliang/projects/temp/mcp-chrome/packages/shared/src/tools.ts`
 
 **React Extension 通信** (现有):
+
 - `/Users/yiliang/projects/temp/qwen-code/archive/chrome-extension/src/background/service-worker.js`
 
 ---

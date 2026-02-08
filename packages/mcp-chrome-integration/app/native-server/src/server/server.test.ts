@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { describe, expect, test, afterAll, beforeAll } from '@jest/globals';
 import Server from './index';
 

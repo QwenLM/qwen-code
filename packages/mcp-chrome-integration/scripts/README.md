@@ -1,479 +1,232 @@
-# MCP Chrome Integration - 脚本工具集
+# Chrome MCP Integration - 脚本工具
 
-本目录包含 MCP Chrome Integration 项目的各种实用脚本，用于构建、安装、测试和诊断。
+> **版本**: 2.0.0 | **最后更新**: 2026-02-08
 
-**版本**: 1.0
-**最后更新**: 2026-01-25
-
----
-
-## 📋 脚本索引
-
-### 🔧 构建和安装脚本
-- [build-all.sh](#build-allsh) - 构建所有组件
-- [install.sh](#installsh) - 自动化完整安装
-- [setup-extension.sh](#setup-extensionsh) - 设置 Chrome 扩展
-
-### 🔍 测试脚本
-- [test-mcp.sh](#test-mcpsh) - MCP 集成测试
-- [test-mcp-tool.sh](#test-mcp-toolsh) - 单个 MCP 工具测试
-- [test-simple.sh](#test-simplesh) - 简单连接测试
-- [test-stdio.sh](#test-studiosh) - STDIO 模式测试
-- [test-stdio-full.sh](#test-stdio-fullsh) - STDIO 完整测试
-- [test-hangwin-tools.js](#test-hangwin-toolsjs) - Hangwin 工具测试
-- [test-service-worker.js](#test-service-workerjs) - Service Worker 测试
-
-### 🛠️ 维护脚本
-- [diagnose.sh](#diagnosesh) - 诊断工具
-- [verify-mcp.sh](#verify-mcpsh) - 验证 MCP 配置
-- [update-extension-id.sh](#update-extension-idsh) - 更新 Extension ID
+本目录包含用户安装和使用 Chrome MCP Integration 所需的脚本工具。
 
 ---
 
-## 📖 脚本详细说明
+## 🚀 快速开始
 
-### build-all.sh
+### 首次安装（推荐）
 
-**用途**: 构建项目的所有组件
-
-**描述**: 按照正确的依赖顺序构建 shared 包、native-server 和 chrome-extension
-
-**使用方法**:
 ```bash
-cd /path/to/mcp-chrome-integration
-./scripts/build-all.sh
-```
-
-**执行步骤**:
-1. 构建 `packages/shared` 包
-2. 构建 `app/native-server`
-3. 构建 `app/chrome-extension`
-
-**输出**: 各组件的构建产物在各自的 `dist/` 目录
-
-**依赖**: pnpm
-
-**预计时间**: 2-5 分钟
-
----
-
-### install.sh
-
-**用途**: 完整的自动化安装向导
-
-**描述**: 一键完成依赖安装、构建、Native Messaging 注册和验证
-
-**使用方法**:
-```bash
-cd /path/to/mcp-chrome-integration
+# 运行完整安装向导（包含构建、注册、Extension 加载指导）
 ./scripts/install.sh
 ```
 
-**执行步骤**:
-1. 检查 Node.js 和 pnpm 版本
-2. 安装所有依赖
-3. 构建所有组件（调用 build-all.sh）
-4. 注册 Native Messaging Host
-5. 验证安装（运行 doctor 命令）
+### 单独操作
 
-**环境要求**:
-- Node.js 22+
-- pnpm
-- macOS/Linux（Windows 需要修改路径）
+```bash
+# 1. 手动加载 Chrome Extension
+./scripts/setup-extension.sh
 
-**预计时间**: 5-10 分钟
+# 2. 更新 Extension ID（当 Extension 重新加载后 ID 变化时）
+./scripts/update-extension-id.sh <YOUR_EXTENSION_ID>
 
-**后续步骤**: 脚本会输出详细的下一步指引
+# 3. 诊断安装问题
+./scripts/diagnose.sh
+```
 
 ---
 
-### setup-extension.sh
+## 📋 脚本说明
 
-**用途**: 交互式设置 Chrome Extension
+### 🔧 核心脚本
 
-**描述**: 引导用户完成扩展加载、Extension ID 获取和配置更新
+#### `install.sh` - 完整安装向导
 
-**使用方法**:
+**用途**: 自动化完成所有安装步骤
+
+**功能**:
+
+- 检查依赖（Node.js, Chrome）
+- 自动构建 Extension 和 Native Server
+- 注册 Native Messaging Host
+- 指导用户加载 Extension
+- 验证安装状态
+
+**使用场景**: 首次安装或重新安装
+
+**示例**:
+
+```bash
+cd packages/mcp-chrome-integration
+./scripts/install.sh
+```
+
+---
+
+#### `setup-extension.sh` - Extension 安装助手
+
+**用途**: 指导用户手动加载 Chrome Extension
+
+**功能**:
+
+- 显示详细的 Extension 加载步骤
+- 提供正确的 Extension 目录路径
+- 帮助用户复制 Extension ID
+
+**使用场景**: 单独加载或重新加载 Extension
+
+**示例**:
+
 ```bash
 ./scripts/setup-extension.sh
 ```
 
-**交互步骤**:
-1. 提示用户在 Chrome 中加载扩展
-2. 要求输入 Extension ID
-3. 自动更新 Native Messaging 配置文件
-4. 引导验证连接
-
-**注意事项**:
-- 需要手动在 Chrome 中操作
-- 会备份原配置文件（.backup 后缀）
-- Extension ID 格式验证（32个小写字母）
-
-**配置文件位置**:
-- macOS: `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json`
-
 ---
 
-### diagnose.sh
+#### `update-extension-id.sh` - 更新 Extension ID
 
-**用途**: 全面的诊断工具
+**用途**: 更新 Native Messaging 配置中的 Extension ID
 
-**描述**: 检查所有组件的状态，帮助排查问题
+**功能**:
 
-**使用方法**:
-```bash
-./scripts/diagnose.sh
-```
+- 修改 Native Messaging manifest 文件
+- 更新 `allowed_origins` 配置
+- 适配新的 Extension ID
 
-**检查项目**:
-1. ✅ Chrome 扩展安装状态
-2. ✅ Native Messaging Host 配置
-3. ✅ 脚本文件可执行性
-4. ✅ Node.js 版本
-5. ✅ 日志文件
-6. ✅ HTTP 服务器运行状态（端口 12306）
+**使用场景**: Extension 重新加载后 ID 变化时
 
-**输出**:
-- 各项检查结果（✅ 或 ❌）
-- 最新日志摘要
-- 常见问题解决方案
-
-**适用场景**:
-- 安装后验证
-- 连接问题排查
-- 定期健康检查
-
----
-
-### test-mcp.sh
-
-**用途**: 测试 MCP 与 Qwen CLI 的集成
-
-**描述**: 检查 MCP 配置、Native Server 启动和基本连接
-
-**使用方法**:
-```bash
-./scripts/test-mcp.sh
-```
-
-**测试内容**:
-1. 检查 Qwen MCP 配置
-2. 验证 Native Server 文件存在
-3. 测试 Native Server 启动
-4. 显示手动测试步骤
-
-**输出**:
-- MCP 服务器列表
-- Native Server 启动日志
-- 手动测试指引
-
-**注意**: MCP 服务器显示 "Disconnected" 是正常的
-
----
-
-### test-mcp-tool.sh
-
-**用途**: 测试单个 MCP 工具
-
-**描述**: 针对特定工具的测试脚本
-
-**使用方法**:
-```bash
-./scripts/test-mcp-tool.sh [tool_name]
-```
-
-**参数**:
-- `tool_name`: 要测试的工具名称（可选）
+**参数**: `<EXTENSION_ID>` - 新的 Extension ID
 
 **示例**:
+
 ```bash
-./scripts/test-mcp-tool.sh chrome_screenshot
-```
-
----
-
-### test-simple.sh
-
-**用途**: 简单的 MCP 连接测试
-
-**描述**: 快速验证 MCP 配置和文件存在性
-
-**使用方法**:
-```bash
-./scripts/test-simple.sh
-```
-
-**检查项目**:
-1. MCP 配置列表
-2. MCP Server 文件存在性
-3. MCP Server 可执行性
-
-**特点**:
-- 快速（<10秒）
-- 无副作用
-- 适合频繁运行
-
----
-
-### test-stdio.sh
-
-**用途**: 测试 STDIO 模式
-
-**描述**: 验证 MCP Server 的 STDIO 通信模式
-
-**使用方法**:
-```bash
-./scripts/test-stdio.sh
-```
-
----
-
-### test-stdio-full.sh
-
-**用途**: STDIO 模式完整测试
-
-**描述**: 更全面的 STDIO 通信测试
-
-**使用方法**:
-```bash
-./scripts/test-stdio-full.sh
-```
-
----
-
-### test-hangwin-tools.js
-
-**用途**: 测试 Hangwin MCP 工具
-
-**描述**: Node.js 脚本，测试来自 hangwin/mcp-chrome 的工具
-
-**使用方法**:
-```bash
-node scripts/test-hangwin-tools.js
-```
-
-**依赖**: Node.js
-
----
-
-### test-service-worker.js
-
-**用途**: 测试 Service Worker
-
-**描述**: Node.js 脚本，测试 Chrome Extension 的 Service Worker
-
-**使用方法**:
-```bash
-node scripts/test-service-worker.js
-```
-
-**依赖**: Node.js
-
----
-
-### verify-mcp.sh
-
-**用途**: 验证 MCP 配置
-
-**描述**: 检查 MCP 配置的完整性和正确性
-
-**使用方法**:
-```bash
-./scripts/verify-mcp.sh
-```
-
-**验证内容**:
-- MCP 配置文件格式
-- 路径有效性
-- 权限设置
-
----
-
-### update-extension-id.sh
-
-**用途**: 更新 Extension ID
-
-**描述**: 更新 Native Messaging 配置中的 Extension ID
-
-**使用方法**:
-```bash
-./scripts/update-extension-id.sh <EXTENSION_ID>
-```
-
-**参数**:
-- `EXTENSION_ID`: 新的 Chrome Extension ID（32个字符）
-
-**示例**:
-```bash
+# 假设新的 Extension ID 是 abcdefghijklmnopqrstuvwxyz123456
 ./scripts/update-extension-id.sh abcdefghijklmnopqrstuvwxyz123456
 ```
 
-**注意**: 会备份原配置文件
+---
+
+### 🔍 诊断工具
+
+#### `diagnose.sh` - 系统诊断
+
+**用途**: 检查安装状态，排查问题
+
+**功能**:
+
+- 检查 Chrome Extension 安装状态
+- 检查 Native Messaging Host 注册
+- 检查 Native Server 文件
+- 检查 Qwen CLI MCP 配置
+- 验证权限和路径
+
+**使用场景**: 遇到连接或功能问题时
+
+**示例**:
+
+```bash
+./scripts/diagnose.sh
+```
 
 ---
 
-## 🚀 快速开始流程
+## 🔄 常见工作流
 
-### 首次安装
+### 工作流 1: 首次安装
 
 ```bash
-# 1. 完整安装
+# 一键完成所有安装步骤
 ./scripts/install.sh
 
-# 2. 设置扩展
-./scripts/setup-extension.sh
-
-# 3. 验证
+# 如果遇到问题，运行诊断
 ./scripts/diagnose.sh
 ```
 
-### 开发调试
+### 工作流 2: Extension ID 变更
 
 ```bash
-# 重新构建
-./scripts/build-all.sh
+# 1. 在 Chrome 中重新加载 Extension
+# 2. 复制新的 Extension ID
+# 3. 更新配置
+./scripts/update-extension-id.sh <NEW_EXTENSION_ID>
 
-# 快速测试
-./scripts/test-simple.sh
-
-# 完整测试
-./scripts/test-mcp.sh
+# 4. 验证更新成功
+./scripts/diagnose.sh
 ```
 
-### 问题排查
+### 工作流 3: 故障排查
 
 ```bash
-# 1. 运行诊断
+# 1. 运行诊断获取详细信息
 ./scripts/diagnose.sh
 
-# 2. 验证 MCP 配置
-./scripts/verify-mcp.sh
-
-# 3. 如果 Extension ID 改变
-./scripts/update-extension-id.sh <新ID>
+# 2. 根据诊断结果修复问题
+# 3. 如果需要重新安装
+./scripts/install.sh
 ```
 
 ---
 
-## 📊 脚本分类总结
+## 📝 与 npm scripts 的关系
 
-### 按用途分类
+这些 shell 脚本是对 `package.json` 中 npm scripts 的补充：
 
-| 分类 | 脚本数量 | 脚本列表 |
-|------|---------|---------|
-| 🔧 构建安装 | 3 | build-all.sh, install.sh, setup-extension.sh |
-| 🔍 测试 | 7 | test-*.sh, test-*.js |
-| 🛠️ 维护 | 3 | diagnose.sh, verify-mcp.sh, update-extension-id.sh |
+| Shell 脚本               | npm script 等价                                      | 说明                   |
+| ------------------------ | ---------------------------------------------------- | ---------------------- |
+| `install.sh`             | `npm run build && npm run install:native` + 手动步骤 | shell 脚本提供更多指导 |
+| `diagnose.sh`            | `npm run doctor` + 额外检查                          | shell 脚本检查更全面   |
+| `setup-extension.sh`     | 无等价命令                                           | 纯手动操作指导         |
+| `update-extension-id.sh` | 无等价命令                                           | 配置文件修改工具       |
 
-### 按使用频率分类
+**推荐做法**:
 
-| 频率 | 脚本 |
-|------|------|
-| **首次使用** | install.sh, setup-extension.sh |
-| **经常使用** | build-all.sh, test-simple.sh, diagnose.sh |
-| **偶尔使用** | test-mcp.sh, verify-mcp.sh, update-extension-id.sh |
-| **开发测试** | test-*.js, test-stdio*.sh |
+- 开发者使用 npm scripts（如 `npm run build`, `npm run dev`）
+- 最终用户使用 shell 脚本（如 `./scripts/install.sh`）
 
 ---
 
-## ⚙️ 配置和环境
+## ⚠️ 注意事项
 
-### 环境变量
+### Extension ID 问题
 
-某些脚本使用硬编码路径，如需修改，请编辑脚本中的以下变量：
+每次在 Chrome 中重新加载未打包的 Extension，Extension ID 都会改变。解决方案：
 
-```bash
-# 项目根目录
-PROJECT_ROOT="/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration"
+1. **临时方案**: 每次重新加载后执行 `update-extension-id.sh`
+2. **永久方案**: 发布为私有 Extension（固定 ID）
 
-# Native Messaging 配置文件
-CONFIG_FILE="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json"
+### 权限问题（macOS/Linux）
 
-# Extension ID
-EXTENSION_ID="mdcjeiebajocdnaiofbdjgadeoommfjh"
-```
+确保脚本有执行权限：
 
-### 日志位置
-
-- **Native Host 日志**: `~/Library/Logs/mcp-chrome-bridge/`
-- **测试日志**: `/tmp/mcp-server-test.log`
-- **Service Worker 日志**: Chrome DevTools Console
-
----
-
-## 🐛 常见问题
-
-### Q1: 脚本执行权限不足
-
-**问题**: `Permission denied`
-
-**解决**:
 ```bash
 chmod +x scripts/*.sh
 ```
 
-### Q2: pnpm 命令不存在
+### 路径问题
 
-**问题**: `pnpm: command not found`
+所有脚本都应该在项目根目录下执行：
 
-**解决**:
 ```bash
-npm install -g pnpm
+cd packages/mcp-chrome-integration
+./scripts/install.sh  # ✓ 正确
 ```
 
-### Q3: Node.js 版本过低
+---
 
-**问题**: Node.js 版本 < 18
+## 🔗 相关资源
 
-**解决**: 升级 Node.js 到 18+ 版本
-```bash
-# 使用 nvm
-nvm install 18
-nvm use 18
-```
-
-### Q4: Extension ID 改变
-
-**问题**: 每次重新加载扩展，ID 都会变
-
-**解决**: 使用 `update-extension-id.sh` 更新配置，或在 manifest.json 中固定 key
+- **安装指南**: [docs/guides/installation.md](../docs/guides/installation.md)
+- **快速开始**: [docs/guides/quick-start.md](../docs/guides/quick-start.md)
+- **故障排查**: [docs/guides/development.md](../docs/guides/development.md)
+- **项目 README**: [../README.md](../README.md)
 
 ---
 
-## 🔗 相关文档
+## 🗂️ 归档脚本
 
-- [项目文档索引](../docs/README.md)
-- [调试指南（历史）](../docs/archive/DEBUG_GUIDE.md)
-- [快速开始](../docs/guides/quick-start.md)
-- [开发指南](../docs/guides/development.md)
+开发和测试用的脚本已移至 `archive/scripts/`，包括：
 
----
+- 构建脚本（已被 npm scripts 替代）
+- MCP 测试脚本（开发者测试用）
+- Service Worker 调试代码（开发者调试用）
 
-## 📝 贡献指南
-
-### 添加新脚本
-
-1. 创建脚本文件
-2. 添加 shebang 和注释说明
-3. 设置可执行权限 (`chmod +x`)
-4. 更新本 README.md
-5. 测试脚本功能
-
-### 脚本命名规范
-
-- **构建脚本**: `build-*.sh`
-- **测试脚本**: `test-*.sh` 或 `test-*.js`
-- **维护脚本**: 动词开头，如 `update-`, `verify-`, `diagnose-`
-
-### 代码规范
-
-- 使用 `set -e` 在遇到错误时立即退出
-- 添加清晰的 echo 输出
-- 使用颜色区分成功/失败/警告
-- 提供明确的错误信息和解决建议
+详见: [../archive/scripts/README.md](../archive/scripts/README.md)
 
 ---
 
-**脚本总数**: 13 个
-**最后更新**: 2026-01-25
 **维护者**: Qwen Code Team
+**许可证**: Apache-2.0

@@ -1,67 +1,138 @@
-# MCP Chrome Integration 文档索引
+# Chrome MCP Integration 文档
 
-本目录包含 MCP Chrome Integration 的设计文档、指南、运维、状态与报告。
+> **版本**: 2.0.0 | **最后更新**: 2026-02-08
 
-## 📌 快速入口
-
-- **设计架构（文档结构）**: [DESIGN_DOCS_ARCHITECTURE.md](DESIGN_DOCS_ARCHITECTURE.md)
-- **快速开始**: [guides/quick-start.md](guides/quick-start.md)
-- **安装指南**: [guides/installation.md](guides/installation.md)
-- **集成状态**: [status/integration-status.md](status/integration-status.md)
+欢迎使用 Chrome MCP Integration 文档。本项目将 Chrome 浏览器与 Qwen CLI 集成，提供 **27 个强大的浏览器自动化工具**。
 
 ---
 
-## 🧭 文档导航（按类型）
+## 📚 快速导航
 
-### 设计文档（Design）
-- [design/00-overview.md](design/00-overview.md) - 目标/范围/非目标
-- [design/01-requirements.md](design/01-requirements.md) - 需求与约束
-- [design/02-system-context.md](design/02-system-context.md) - 系统上下文
-- [design/03-architecture.md](design/03-architecture.md) - 总体架构
-- [design/04-dataflow.md](design/04-dataflow.md) - 关键数据流
-- [design/05-protocols.md](design/05-protocols.md) - 协议与消息模型
-- [design/06-extension-design.md](design/06-extension-design.md) - 扩展设计
-- [design/07-native-server-design.md](design/07-native-server-design.md) - MCP Server 设计
-- [design/08-tools-catalog.md](design/08-tools-catalog.md) - 工具目录与能力
-- [design/09-security-permissions.md](design/09-security-permissions.md) - 安全与权限
-- [design/10-build-release.md](design/10-build-release.md) - 构建与发布（设计视角）
-- [design/11-migration-compat.md](design/11-migration-compat.md) - 迁移与兼容策略
-- [design/12-observability.md](design/12-observability.md) - 可观测性与诊断
-- [design/13-open-questions.md](design/13-open-questions.md) - 未决问题
-- [design/adr/README.md](design/adr/README.md) - ADR 索引
+### 🚀 新用户入门
 
-### 使用与开发指南（Guides）
-- [guides/quick-start.md](guides/quick-start.md) - 快速上手
-- [guides/installation.md](guides/installation.md) - 安装与配置
-- [guides/development.md](guides/development.md) - 开发指南
-- [guides/mcp-usage.md](guides/mcp-usage.md) - MCP 使用指南
-- [guides/customization.md](guides/customization.md) - 定制指南（占位）
+1. **[快速开始](guides/quick-start.md)** - 5分钟快速上手
+2. **[安装指南](guides/installation.md)** - 完整安装步骤
+3. **[MCP 使用指南](guides/mcp-usage.md)** - 在 Qwen CLI 中使用
 
-### 运维与发布（Ops）
-- [ops/deployment.md](ops/deployment.md) - 部署与发布
+### 🏗️ 架构与设计
 
-### 状态与里程碑（Status）
-- [status/integration-status.md](status/integration-status.md) - 当前集成状态（滚动更新）
-- [status/implementation-summary.md](status/implementation-summary.md) - 实施总结（里程碑）
-- [status/implementation-plan.md](status/implementation-plan.md) - 实施计划（历史参考）
-- [status/native-messaging-adaptation.md](status/native-messaging-adaptation.md) - 适配记录（待核验）
+- **[系统架构](architecture.md)** - 3层架构设计、组件说明、数据流
+- **[工具参考](tools-reference.md)** - 27个 chrome\_\* 工具的完整文档（539行）
 
-### 报告（Reports）
-- [reports/dependency-installation.md](reports/dependency-installation.md) - 依赖安装报告
-- [reports/validation-report.md](reports/validation-report.md) - 验证报告
+### 💻 开发者资源
 
-### 归档（Archive）
-- [archive/](archive/) - 历史/过时文档（仅供参考）
+- **[开发指南](guides/development.md)** - 开发环境配置、调试技巧
+- **[定制指南](guides/customization.md)** - 扩展和定制工具
+- **[架构决策记录 (ADR)](adr/README.md)** - 关键技术决策
 
 ---
 
-## 📝 文档维护规则
+## 🛠️ 核心功能
 
-1. 设计文档为单一真相来源（SSOT），状态/报告不得覆盖设计。
-2. 新增文档需放在对应分类目录，并更新本索引。
-3. 过时文档必须移入 `archive/`，并在正文顶部标注“历史”。
+### 27 个浏览器自动化工具
+
+| 类别         | 工具数量 | 主要功能                              |
+| ------------ | -------- | ------------------------------------- |
+| 浏览器管理   | 6        | 窗口/标签管理、页面导航、DOM 访问     |
+| 页面交互     | 5        | 点击、填充、键盘输入、JavaScript 执行 |
+| 网络监控     | 2        | 网络请求捕获、HTTP 请求发送           |
+| 内容分析     | 2        | 页面内容提取、控制台日志捕获          |
+| 数据管理     | 4        | 历史记录、书签管理                    |
+| 截图与录制   | 2        | 页面截图、GIF 录制                    |
+| 性能分析     | 3        | 性能追踪、分析                        |
+| 文件与对话框 | 3        | 文件上传、对话框处理、下载管理        |
+
+详见 **[工具参考文档](tools-reference.md)**
 
 ---
 
-**最后更新**: 2026-02-01
+## 🏛️ 架构概览
+
+```
+Chrome Extension (MV3)
+         ↓ Native Messaging
+    Native Server (Node.js)
+         ↓ MCP Protocol
+       Qwen CLI (AI Agent)
+```
+
+**3 层架构**，相比旧版 HTTP 架构：
+
+- 🎯 **架构简化**: 5层 → 3层 (-40%)
+- 🚀 **工具增强**: 10个 → 27个 (+170%)
+- ⚡ **性能提升**: Native Messaging 更快更稳定
+
+详见 **[架构文档](architecture.md)**
+
+---
+
+## 📖 文档结构
+
+```
+docs/
+├── README.md              # 本文档（导航入口）
+├── architecture.md        # 系统架构设计
+├── tools-reference.md     # 工具完整参考（539行）
+│
+├── guides/                # 用户指南
+│   ├── installation.md
+│   ├── quick-start.md
+│   ├── development.md
+│   ├── mcp-usage.md
+│   └── customization.md
+│
+└── adr/                   # 架构决策记录
+    ├── 0001-native-messaging.md
+    ├── 0002-mcp-stdio-entrypoint.md
+    ├── 0003-tool-naming.md
+    └── README.md
+```
+
+---
+
+## 🗂️ 归档文档
+
+开发过程中的中间产物已归档到 `../archive/docs/`：
+
+- **设计骨架**: 13个未完成的设计草稿
+- **状态追踪**: 4个实施计划和状态报告
+- **一次性报告**: 2个验证和依赖安装报告
+
+详见 [归档说明](../archive/docs/README.md)
+
+---
+
+## 💡 常见问题
+
+### 如何快速开始？
+
+1. 阅读 [快速开始](guides/quick-start.md)
+2. 按照 [安装指南](guides/installation.md) 配置环境
+3. 查看 [工具参考](tools-reference.md) 了解 27 个可用工具
+
+### 如何调试问题？
+
+参考 [开发指南](guides/development.md) 中的调试章节
+
+### 如何扩展新工具？
+
+参考 [定制指南](guides/customization.md)
+
+### 工具列表在哪里？
+
+- **完整参考**: [tools-reference.md](tools-reference.md) - 539行，每个工具详细说明
+- **快速查看**: [../README.md](../README.md) - 项目主页简要列表
+
+---
+
+## 🔗 相关资源
+
+- **项目主 README**: `../README.md`
+- **源码库**: 基于 [hangwin/mcp-chrome](https://github.com/hangwin/mcp-chrome)
+- **变更日志**: `../CHANGELOG.md`
+
+---
+
 **维护者**: Qwen Code Team
+**许可证**: Apache-2.0
+**文档版本**: 与代码版本 2.0.0 保持一致

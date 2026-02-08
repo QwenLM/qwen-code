@@ -6,21 +6,21 @@
 
 ### 变化总结
 
-| 方面 | 旧版 | 新版 | 变化 |
-|------|------|------|------|
-| **目录** | `archive/chrome-extension` | `packages/mcp-chrome-integration` | 新目录 |
-| **架构** | Extension → HTTP → Native Host → ACP → MCP | Extension → MCP | 简化 60% |
-| **工具数量** | 10 个 | 20+ 个 | 增加 100% |
-| **安装** | 复杂（Native Messaging 配置） | 简单（npm install -g） | 简化 70% |
-| **配置** | `host.js` + manifest + ACP | 仅 Qwen CLI 配置 | 简化 |
-| **维护** | 内部 | 社区 | 零成本 |
+| 方面         | 旧版                                       | 新版                              | 变化      |
+| ------------ | ------------------------------------------ | --------------------------------- | --------- |
+| **目录**     | `archive/chrome-extension`                 | `packages/mcp-chrome-integration` | 新目录    |
+| **架构**     | Extension → HTTP → Native Host → ACP → MCP | Extension → MCP                   | 简化 60%  |
+| **工具数量** | 10 个                                      | 20+ 个                            | 增加 100% |
+| **安装**     | 复杂（Native Messaging 配置）              | 简单（npm install -g）            | 简化 70%  |
+| **配置**     | `host.js` + manifest + ACP                 | 仅 Qwen CLI 配置                  | 简化      |
+| **维护**     | 内部                                       | 社区                              | 零成本    |
 
 ## 🔄 工具映射表
 
 ### 网络监控
 
-| 旧版工具 | 新版工具 | 迁移说明 |
-|---------|---------|---------|
+| 旧版工具                   | 新版工具                                                         | 迁移说明                                                                      |
+| -------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `browser_get_network_logs` | `chrome_network_debugger_start` + `chrome_network_debugger_stop` | **需要两步操作**：<br>1. 先调用 `start` 开始捕获<br>2. 再调用 `stop` 获取结果 |
 
 **示例对比**:
@@ -30,7 +30,9 @@
 const logs = await qwen.call('browser_get_network_logs');
 
 // 新版 - 两步操作
-await qwen.call('chrome_network_debugger_start', { url: 'https://example.com' });
+await qwen.call('chrome_network_debugger_start', {
+  url: 'https://example.com',
+});
 // ... 等待页面加载和请求完成
 const logs = await qwen.call('chrome_network_debugger_stop');
 ```
@@ -39,8 +41,8 @@ const logs = await qwen.call('chrome_network_debugger_stop');
 
 ### 页面内容
 
-| 旧版工具 | 新版工具 | 迁移说明 |
-|---------|---------|---------|
+| 旧版工具            | 新版工具           | 迁移说明                                                                                          |
+| ------------------- | ------------------ | ------------------------------------------------------------------------------------------------- |
 | `browser_read_page` | `chrome_read_page` | **参数变化**：<br>- 新增 `filter` 参数（可选 "interactive"）<br>- 返回格式包含 accessibility tree |
 
 **示例对比**:
@@ -54,14 +56,14 @@ const page = await qwen.call('chrome_read_page');
 
 // 新版 - 仅获取可交互元素
 const interactive = await qwen.call('chrome_read_page', {
-  filter: 'interactive'
+  filter: 'interactive',
 });
 ```
 
 ### 截图
 
-| 旧版工具 | 新版工具 | 迁移说明 |
-|---------|---------|---------|
+| 旧版工具                     | 新版工具            | 迁移说明                                                                                                                                   |
+| ---------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `browser_capture_screenshot` | `chrome_screenshot` | **功能增强**：<br>- 支持元素截图 (selector)<br>- 支持全页截图 (fullPage)<br>- 支持自定义尺寸 (width/height)<br>- 支持后台截图 (background) |
 
 **示例对比**:
@@ -76,20 +78,20 @@ const screenshot = await qwen.call('chrome_screenshot');
 // 新版 - 元素截图（新功能）
 const elementShot = await qwen.call('chrome_screenshot', {
   selector: '.main-content',
-  fullPage: false
+  fullPage: false,
 });
 
 // 新版 - 全页截图（新功能）
 const fullPage = await qwen.call('chrome_screenshot', {
   fullPage: true,
-  storeBase64: true
+  storeBase64: true,
 });
 ```
 
 ### Console 日志
 
-| 旧版工具 | 新版工具 | 迁移说明 |
-|---------|---------|---------|
+| 旧版工具                   | 新版工具         | 迁移说明                       |
+| -------------------------- | ---------------- | ------------------------------ |
 | `browser_get_console_logs` | `chrome_console` | **API 基本兼容**，直接替换即可 |
 
 **示例对比**:
@@ -104,14 +106,14 @@ const logs = await qwen.call('chrome_console');
 
 ### 页面交互
 
-| 旧版工具 | 新版工具 | 迁移说明 |
-|---------|---------|---------|
-| `browser_click` | `chrome_click_element` | **参数增强**：<br>- 支持 `ref`（从 chrome_read_page 获取）<br>- 支持 `selector`<br>- 支持 `coordinates` |
-| `browser_click_text` | `chrome_click_element` | **合并到 chrome_click_element**：<br>先用 chrome_read_page 找到元素的 ref，再点击 |
-| `browser_fill_form` | `chrome_fill_or_select` | **参数变化**：<br>- 使用 `ref` 或 `selector` 定位<br>- 使用 `value` 设置值 |
-| `browser_fill_form_auto` | `chrome_fill_or_select` | **需要循环调用**：<br>对每个字段调用一次 |
-| `browser_input_text` | `chrome_fill_or_select` | **合并到 chrome_fill_or_select** |
-| `browser_run_js` | `chrome_inject_script` | **功能相同**，名称变化 |
+| 旧版工具                 | 新版工具                | 迁移说明                                                                                                |
+| ------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| `browser_click`          | `chrome_click_element`  | **参数增强**：<br>- 支持 `ref`（从 chrome_read_page 获取）<br>- 支持 `selector`<br>- 支持 `coordinates` |
+| `browser_click_text`     | `chrome_click_element`  | **合并到 chrome_click_element**：<br>先用 chrome_read_page 找到元素的 ref，再点击                       |
+| `browser_fill_form`      | `chrome_fill_or_select` | **参数变化**：<br>- 使用 `ref` 或 `selector` 定位<br>- 使用 `value` 设置值                              |
+| `browser_fill_form_auto` | `chrome_fill_or_select` | **需要循环调用**：<br>对每个字段调用一次                                                                |
+| `browser_input_text`     | `chrome_fill_or_select` | **合并到 chrome_fill_or_select**                                                                        |
+| `browser_run_js`         | `chrome_inject_script`  | **功能相同**，名称变化                                                                                  |
 
 **示例对比**:
 
@@ -129,18 +131,18 @@ await qwen.call('chrome_click_element', { ref: 'ref_42' });
 await qwen.call('browser_fill_form', {
   entries: [
     { selector: '#username', value: 'user@example.com' },
-    { selector: '#password', value: 'password' }
-  ]
+    { selector: '#password', value: 'password' },
+  ],
 });
 
 // 新版 - 填充表单（需要循环）
 await qwen.call('chrome_fill_or_select', {
   selector: '#username',
-  value: 'user@example.com'
+  value: 'user@example.com',
 });
 await qwen.call('chrome_fill_or_select', {
   selector: '#password',
-  value: 'password'
+  value: 'password',
 });
 
 // 旧版 - 执行 JavaScript
@@ -157,7 +159,7 @@ await qwen.call('chrome_inject_script', { code: 'console.log("test")' });
 ```javascript
 // 在所有打开的标签页中语义搜索
 const results = await qwen.call('search_tabs_content', {
-  query: 'machine learning tutorials'
+  query: 'machine learning tutorials',
 });
 ```
 
@@ -167,7 +169,7 @@ const results = await qwen.call('search_tabs_content', {
 // 模拟键盘输入
 await qwen.call('chrome_keyboard', {
   keys: 'Ctrl+A',
-  selector: '#text-input'
+  selector: '#text-input',
 });
 ```
 
@@ -177,13 +179,13 @@ await qwen.call('chrome_keyboard', {
 // 统一的高级交互工具
 await qwen.call('chrome_computer', {
   action: 'hover',
-  ref: 'ref_12'
+  ref: 'ref_12',
 });
 
 await qwen.call('chrome_computer', {
   action: 'left_click_drag',
   startRef: 'ref_10',
-  ref: 'ref_15'
+  ref: 'ref_15',
 });
 ```
 
@@ -193,18 +195,18 @@ await qwen.call('chrome_computer', {
 // 搜索浏览历史
 const history = await qwen.call('chrome_history', {
   text: 'github',
-  maxResults: 50
+  maxResults: 50,
 });
 
 // 管理书签
 await qwen.call('chrome_bookmark_add', {
   url: 'https://example.com',
   title: 'Example',
-  parentId: 'Work/Resources'
+  parentId: 'Work/Resources',
 });
 
 const bookmarks = await qwen.call('chrome_bookmark_search', {
-  query: 'documentation'
+  query: 'documentation',
 });
 ```
 
@@ -219,12 +221,12 @@ await qwen.call('chrome_switch_tab', { tabId: 456 });
 
 // 关闭标签
 await qwen.call('chrome_close_tabs', {
-  tabIds: [123, 456]
+  tabIds: [123, 456],
 });
 
 // 浏览器导航
 await qwen.call('chrome_go_back_or_forward', {
-  direction: 'back'
+  direction: 'back',
 });
 ```
 
@@ -310,7 +312,7 @@ await qwen.call('chrome_go_back_or_forward', {
 ```javascript
 async function captureNetwork(url, maxTime = 30000) {
   await qwen.call('chrome_network_debugger_start', { url });
-  await new Promise(resolve => setTimeout(resolve, maxTime));
+  await new Promise((resolve) => setTimeout(resolve, maxTime));
   return await qwen.call('chrome_network_debugger_stop');
 }
 ```
@@ -326,7 +328,7 @@ async function fillForm(fields) {
   for (const field of fields) {
     await qwen.call('chrome_fill_or_select', {
       selector: field.selector,
-      value: field.value
+      value: field.value,
     });
   }
 }
@@ -356,6 +358,7 @@ async function clickByText(text) {
 ### Q: 如何回退到旧版？
 
 **A**:
+
 1. 移除新版配置: `qwen mcp remove chrome-mcp`
 2. 保持旧版配置不变
 3. `chrome-extension` 目录已保留，随时可用
@@ -378,5 +381,6 @@ async function clickByText(text) {
 ---
 
 **需要帮助？**
+
 - 查看 [故障排查文档](troubleshooting.md)
 - 查看 [hangwin/mcp-chrome Issues](https://github.com/hangwin/mcp-chrome/issues)

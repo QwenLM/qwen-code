@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Chrome Extension Side Panel App
  * Simplified version adapted from vscode-ide-companion
  */

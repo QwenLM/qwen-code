@@ -1,10 +1,10 @@
 # MCP Chrome Integration - 用户安装指南
 
+> **版本**: 2.0.0 | **最后更新**: 2026-02-08
+
 欢迎使用 MCP Chrome Integration！本指南将帮助你快速安装和配置，5-10分钟即可完成。
 
-**版本**: 1.0
 **适用对象**: 最终用户（无需编程经验）
-**最后更新**: 2026-01-25
 
 ---
 
@@ -25,24 +25,27 @@
 ### 必需软件
 
 ✅ **Node.js 22 或更高版本**
+
 - 检查版本：打开终端，运行 `node -v`
 - 如果未安装或版本过低，请访问 [nodejs.org](https://nodejs.org/) 下载安装
 
 ✅ **Google Chrome 浏览器**
+
 - 版本 120 或更高（推荐最新版本）
 - 检查版本：Chrome 菜单 → 关于 Google Chrome
 
 ✅ **pnpm 包管理器**
+
 - 检查是否安装：`pnpm -v`
 - 如果未安装：`npm install -g pnpm`
 
 ### 操作系统支持
 
-| 操作系统 | 支持状态 | 说明 |
-|---------|---------|------|
-| macOS | ✅ 完全支持 | 推荐 macOS 11+ |
-| Linux | ✅ 完全支持 | Ubuntu 20.04+ 或等效版本 |
-| Windows | ⚠️ 部分支持 | 需要修改部分路径配置 |
+| 操作系统 | 支持状态    | 说明                     |
+| -------- | ----------- | ------------------------ |
+| macOS    | ✅ 完全支持 | 推荐 macOS 11+           |
+| Linux    | ✅ 完全支持 | Ubuntu 20.04+ 或等效版本 |
+| Windows  | ⚠️ 部分支持 | 需要修改部分路径配置     |
 
 ### 磁盘空间
 
@@ -71,6 +74,7 @@ cd qwen-code/packages/mcp-chrome-integration
 ```
 
 这个脚本会自动完成：
+
 - ✅ 检查 Node.js 和 pnpm 版本
 - ✅ 安装所有依赖
 - ✅ 构建所有组件
@@ -168,6 +172,7 @@ node dist/cli.js register
 ```
 
 **预期输出**:
+
 ```
 ✅ Native messaging host registered successfully
 ```
@@ -187,22 +192,23 @@ node dist/cli.js doctor
 ### 3.6 更新 Extension ID
 
 **macOS**:
+
 ```bash
 # 编辑配置文件
 vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 ```
 
 **Linux**:
+
 ```bash
 vim ~/.config/google-chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 ```
 
 更新 `allowed_origins` 字段：
+
 ```json
 {
-  "allowed_origins": [
-    "chrome-extension://YOUR_EXTENSION_ID_HERE/"
-  ]
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID_HERE/"]
 }
 ```
 
@@ -219,6 +225,7 @@ vim ~/.config/google-chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 ```
 
 检查以下项目：
+
 - ✅ Chrome 扩展已安装
 - ✅ Native Messaging Host 配置正确
 - ✅ 脚本文件可执行
@@ -236,11 +243,13 @@ vim ~/.config/google-chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 #### 检查 2: Native Messaging 配置
 
 **macOS**:
+
 ```bash
 cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
 ```
 
 应该看到类似内容：
+
 ```json
 {
   "name": "com.chromemcp.nativehost",
@@ -295,6 +304,7 @@ node dist/start-server.js
 ```
 
 验证配置：
+
 ```bash
 qwen mcp list
 ```
@@ -319,6 +329,7 @@ qwen
 ```
 
 在 Qwen 会话中：
+
 ```
 > 你有哪些浏览器工具可以使用？
 ```
@@ -334,6 +345,7 @@ qwen
 **原因**: 开发模式下加载的扩展 ID 不固定。
 
 **解决方案 A** (推荐): 使用 `update-extension-id.sh` 脚本
+
 ```bash
 ./scripts/update-extension-id.sh <新的ID>
 ```
@@ -345,6 +357,7 @@ qwen
 **症状**: 控制台显示 `Native host has exited`
 
 **检查清单**:
+
 1. ✅ 确认 Extension ID 匹配配置文件
 2. ✅ 确认 `run_host.sh` 文件存在且可执行
 3. ✅ 确认 Node.js 路径正确
@@ -361,11 +374,13 @@ MCP 服务器是按需启动的，只有在实际使用时才会连接。"Discon
 ### Q4: 构建失败？
 
 **常见原因**:
+
 - Node.js 版本过低（需要 22+）
 - pnpm 未安装
 - 依赖下载失败（网络问题）
 
 **解决步骤**:
+
 1. 检查 Node.js 版本：`node -v`
 2. 清理缓存：`pnpm store prune`
 3. 重新安装：`rm -rf node_modules && pnpm install`
@@ -375,6 +390,7 @@ MCP 服务器是按需启动的，只有在实际使用时才会连接。"Discon
 **注意**: Windows 支持有限，需要手动调整路径。
 
 **主要修改**:
+
 1. 脚本中的路径分隔符（`/` → `\`）
 2. Native Messaging 配置文件位置：
    ```
@@ -406,11 +422,14 @@ rm -rf /path/to/mcp-chrome-integration
 **排查步骤**:
 
 1. 检查 manifest.json 语法：
+
    ```bash
    cd app/chrome-extension/dist/extension
    cat manifest.json | jq .
    ```
+
    如果报错，重新构建：
+
    ```bash
    cd app/chrome-extension
    pnpm build
@@ -432,6 +451,7 @@ rm -rf /path/to/mcp-chrome-integration
 **排查步骤**:
 
 1. 检查配置文件是否存在：
+
    ```bash
    cat ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
    ```
@@ -441,6 +461,7 @@ rm -rf /path/to/mcp-chrome-integration
    - Chrome 中显示的实际 ID
 
 3. 检查路径和权限：
+
    ```bash
    # 检查 run_host.sh 是否存在
    ls -la /path/to/native-server/dist/run_host.sh
@@ -462,6 +483,7 @@ rm -rf /path/to/mcp-chrome-integration
 **原因**: 端口 12306 已被占用
 
 **解决**:
+
 ```bash
 # 查找占用端口的进程
 lsof -i :12306
@@ -479,12 +501,14 @@ kill <PID>
 **排查**:
 
 1. 检查配置文件位置：
+
    ```bash
    # 查找所有可能的配置文件
    find ~ -name "settings.json" -path "*/.qwen/*" 2>/dev/null
    ```
 
 2. 验证配置语法：
+
    ```bash
    cat ~/.qwen/settings.json | jq .
    ```
@@ -500,6 +524,7 @@ kill <PID>
 如果以上方法都无法解决问题：
 
 1. **查看详细日志**:
+
    ```bash
    # Native Host 日志
    tail -f ~/Library/Logs/mcp-chrome-bridge/native_host_wrapper_*.log
@@ -509,6 +534,7 @@ kill <PID>
    ```
 
 2. **运行完整诊断**:
+
    ```bash
    ./scripts/diagnose.sh
    ```

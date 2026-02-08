@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { program } from 'commander';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -10,21 +16,38 @@ import {
   ensureExecutionPermissions,
   writeNodePathFile,
 } from './scripts/utils';
-import { BrowserType, parseBrowserType, detectInstalledBrowsers } from './scripts/browser-config';
+import {
+  BrowserType,
+  parseBrowserType,
+  detectInstalledBrowsers,
+} from './scripts/browser-config';
 import { runDoctor } from './scripts/doctor';
 import { runReport } from './scripts/report';
+import { readPackageJson } from './scripts/doctor-utils';
+
+const packageJson = readPackageJson();
 
 program
-  .version(require('../package.json').version)
-  .description('Mcp Chrome Bridge - Local service for communicating with Chrome extension');
+  .version(
+    typeof packageJson.version === 'string' ? packageJson.version : 'unknown',
+  )
+  .description(
+    'Mcp Chrome Bridge - Local service for communicating with Chrome extension',
+  );
 
 // Register Native Messaging host
 program
   .command('register')
   .description('Register Native Messaging host')
   .option('-f, --force', 'Force re-registration')
-  .option('-s, --system', 'Use system-level installation (requires administrator/sudo privileges)')
-  .option('-b, --browser <browser>', 'Register for specific browser (chrome, chromium, or all)')
+  .option(
+    '-s, --system',
+    'Use system-level installation (requires administrator/sudo privileges)',
+  )
+  .option(
+    '-b, --browser <browser>',
+    'Register for specific browser (chrome, chromium, or all)',
+  )
   .option('-d, --detect', 'Auto-detect installed browsers')
   .action(async (options) => {
     try {
@@ -37,7 +60,9 @@ program
       if (options.browser) {
         if (options.browser.toLowerCase() === 'all') {
           targetBrowsers = [BrowserType.CHROME, BrowserType.CHROMIUM];
-          console.log(colorText('Registering for all supported browsers...', 'blue'));
+          console.log(
+            colorText('Registering for all supported browsers...', 'blue'),
+          );
         } else {
           const browserType = parseBrowserType(options.browser);
           if (!browserType) {
@@ -71,10 +96,15 @@ program
       let isAdmin = false;
       if (process.platform === 'win32') {
         try {
-          isAdmin = require('is-admin')(); // Windows requires additional package
-        } catch (error) {
+          // Dynamic import for optional Windows-only dependency
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          isAdmin = require('is-admin')();
+        } catch {
           console.warn(
-            colorText('Warning: Unable to detect administrator privileges on Windows', 'yellow'),
+            colorText(
+              'Warning: Unable to detect administrator privileges on Windows',
+              'yellow',
+            ),
           );
           isAdmin = false;
         }
@@ -87,7 +117,10 @@ program
         // TODO: Update registerWithElevatedPermissions to support multiple browsers
         await registerWithElevatedPermissions();
         console.log(
-          colorText('System-level Native Messaging host registered successfully!', 'green'),
+          colorText(
+            'System-level Native Messaging host registered successfully!',
+            'green',
+          ),
         );
         console.log(
           colorText(
@@ -97,11 +130,18 @@ program
         );
       } else {
         // Regular user-level installation
-        console.log(colorText('Registering user-level Native Messaging host...', 'blue'));
+        console.log(
+          colorText('Registering user-level Native Messaging host...', 'blue'),
+        );
         const success = await tryRegisterUserLevelHost(targetBrowsers);
 
         if (success) {
-          console.log(colorText('Native Messaging host registered successfully!', 'green'));
+          console.log(
+            colorText(
+              'Native Messaging host registered successfully!',
+              'green',
+            ),
+          );
           console.log(
             colorText(
               'You can now use connectNative in Chrome extension to connect to this service.',
@@ -115,13 +155,18 @@ program
               'yellow',
             ),
           );
-          console.log(colorText('  1. sudo mcp-chrome-bridge register', 'yellow'));
-          console.log(colorText('  2. mcp-chrome-bridge register --system', 'yellow'));
+          console.log(
+            colorText('  1. sudo mcp-chrome-bridge register', 'yellow'),
+          );
+          console.log(
+            colorText('  2. mcp-chrome-bridge register --system', 'yellow'),
+          );
           process.exit(1);
         }
       }
-    } catch (error: any) {
-      console.error(colorText(`Registration failed: ${error.message}`, 'red'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(colorText(`Registration failed: ${message}`, 'red'));
       process.exit(1);
     }
   });
@@ -134,9 +179,12 @@ program
     try {
       console.log(colorText('Fixing execution permissions...', 'blue'));
       await ensureExecutionPermissions();
-      console.log(colorText('✓ Execution permissions fixed successfully!', 'green'));
-    } catch (error: any) {
-      console.error(colorText(`Failed to fix permissions: ${error.message}`, 'red'));
+      console.log(
+        colorText('✓ Execution permissions fixed successfully!', 'green'),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(colorText(`Failed to fix permissions: ${message}`, 'red'));
       process.exit(1);
     }
   });
@@ -149,14 +197,24 @@ program
     try {
       const portNumber = parseInt(port, 10);
       if (isNaN(portNumber) || portNumber < 1 || portNumber > 65535) {
-        console.error(colorText('Error: Port must be a valid number between 1 and 65535', 'red'));
+        console.error(
+          colorText(
+            'Error: Port must be a valid number between 1 and 65535',
+            'red',
+          ),
+        );
         process.exit(1);
       }
 
       const configPath = path.join(__dirname, 'mcp', 'stdio-config.json');
 
       if (!fs.existsSync(configPath)) {
-        console.error(colorText(`Error: Configuration file not found at ${configPath}`, 'red'));
+        console.error(
+          colorText(
+            `Error: Configuration file not found at ${configPath}`,
+            'red',
+          ),
+        );
         process.exit(1);
       }
 
@@ -169,10 +227,13 @@ program
 
       fs.writeFileSync(configPath, JSON.stringify(config, null, 4));
 
-      console.log(colorText(`✓ Port updated successfully to ${portNumber}`, 'green'));
+      console.log(
+        colorText(`✓ Port updated successfully to ${portNumber}`, 'green'),
+      );
       console.log(colorText(`Updated URL: ${config.url}`, 'blue'));
-    } catch (error: any) {
-      console.error(colorText(`Failed to update port: ${error.message}`, 'red'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(colorText(`Failed to update port: ${message}`, 'red'));
       process.exit(1);
     }
   });
@@ -183,7 +244,10 @@ program
   .description('Diagnose installation and environment issues')
   .option('--json', 'Output diagnostics as JSON')
   .option('--fix', 'Attempt to fix common issues automatically')
-  .option('-b, --browser <browser>', 'Target browser (chrome, chromium, or all)')
+  .option(
+    '-b, --browser <browser>',
+    'Target browser (chrome, chromium, or all)',
+  )
   .action(async (options) => {
     try {
       const exitCode = await runDoctor({
@@ -192,8 +256,9 @@ program
         browser: options.browser,
       });
       process.exit(exitCode);
-    } catch (error: any) {
-      console.error(colorText(`Doctor failed: ${error.message}`, 'red'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(colorText(`Doctor failed: ${message}`, 'red'));
       process.exit(1);
     }
   });
@@ -206,9 +271,16 @@ program
   .option('--output <file>', 'Write report to file instead of stdout')
   .option('--copy', 'Copy report to clipboard')
   .option('--no-redact', 'Disable redaction of usernames/paths/tokens')
-  .option('--include-logs <mode>', 'Include wrapper logs: none | tail | full', 'tail')
+  .option(
+    '--include-logs <mode>',
+    'Include wrapper logs: none | tail | full',
+    'tail',
+  )
   .option('--log-lines <n>', 'Lines to include when --include-logs=tail', '200')
-  .option('-b, --browser <browser>', 'Target browser (chrome, chromium, or all)')
+  .option(
+    '-b, --browser <browser>',
+    'Target browser (chrome, chromium, or all)',
+  )
   .action(async (options) => {
     try {
       const exitCode = await runReport({
@@ -221,8 +293,9 @@ program
         browser: options.browser,
       });
       process.exit(exitCode);
-    } catch (error: any) {
-      console.error(colorText(`Report failed: ${error.message}`, 'red'));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(colorText(`Report failed: ${message}`, 'red'));
       process.exit(1);
     }
   });

@@ -14,6 +14,7 @@
 **文件**: `app/chrome-extension/src/background/native-messaging.js`
 
 实现了完整的 Native Messaging 通信功能：
+
 - ✅ 连接管理（自动连接、断线重连）
 - ✅ 消息发送和接收
 - ✅ 请求-响应模式（Promise-based）
@@ -25,6 +26,7 @@
 **文件**: `app/chrome-extension/src/background/service-worker.js`
 
 **修改内容**:
+
 - ✅ 移除 HTTP 通信代码（`BACKEND_URL`, `fetch`, `EventSource`）
 - ✅ 添加 `importScripts('native-messaging.js')`
 - ✅ 修改 `callBackend()` 使用 Native Messaging
@@ -37,12 +39,14 @@
 **文件**: `app/chrome-extension/public/manifest.json`
 
 **修改内容**:
+
 - ✅ 添加 `nativeMessaging` 权限
 - ✅ 移除 `http://127.0.0.1:18765/*` host 权限（不再需要）
 
 ### 4. 重新构建
 
 **结果**:
+
 - ✅ Extension 构建成功
 - ✅ native-messaging.js 已打包到 dist/extension/background/
 - ✅ service-worker.js 已更新
@@ -66,6 +70,7 @@ node dist/cli.js register
 ```
 
 **预期输出**:
+
 ```
 ✅ Native messaging host registered successfully
 ✅ Configuration file: ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
@@ -94,6 +99,7 @@ chrome://extensions/
 #### 2.4 记录 Extension ID
 
 加载后会显示类似的 ID:
+
 ```
 Extension ID: abcdefghijklmnopqrstuvwxyz123456
 ```
@@ -127,13 +133,12 @@ notepad %APPDATA%\Google\Chrome\NativeMessagingHosts\com.chromemcp.nativehost.js
   "description": "Qwen Code Chrome MCP Bridge",
   "path": "/path/to/native-server/dist/cli.js",
   "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://YOUR_EXTENSION_ID_HERE/"
-  ]
+  "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID_HERE/"]
 }
 ```
 
 **注意**:
+
 - 替换 `YOUR_EXTENSION_ID_HERE` 为步骤 2.4 中记录的实际 ID
 - 末尾的 `/` 不能省略
 
@@ -154,6 +159,7 @@ notepad %APPDATA%\Google\Chrome\NativeMessagingHosts\com.chromemcp.nativehost.js
 在控制台中应该看到：
 
 **成功连接**:
+
 ```
 [ServiceWorker] Initializing Native Messaging...
 [NativeMessaging] Initializing...
@@ -163,6 +169,7 @@ notepad %APPDATA%\Google\Chrome\NativeMessagingHosts\com.chromemcp.nativehost.js
 ```
 
 **连接失败**:
+
 ```
 [NativeMessaging] Disconnected from native host: {Error message}
 [NativeMessaging] Reconnecting in XXXms
@@ -174,20 +181,20 @@ notepad %APPDATA%\Google\Chrome\NativeMessagingHosts\com.chromemcp.nativehost.js
 
 ```javascript
 // 检查连接状态
-self.NativeMessaging.getStatus()
+self.NativeMessaging.getStatus();
 // 输出: {connected: true, reconnecting: false, attempts: 0}
 
 // 测试发送消息
 self.NativeMessaging.sendMessage({
   type: 'TEST',
-  payload: { message: 'Hello from Extension' }
-})
+  payload: { message: 'Hello from Extension' },
+});
 
 // 测试请求-响应
 await self.NativeMessaging.sendMessageWithResponse({
   type: 'PING',
-  payload: { timestamp: Date.now() }
-})
+  payload: { timestamp: Date.now() },
+});
 ```
 
 ### 步骤 6: 测试浏览器工具
@@ -207,10 +214,10 @@ https://example.com
 const result = await callBackend({
   type: 'CALL_TOOL',
   toolName: 'chrome_screenshot',
-  params: { fullPage: false }
-})
+  params: { fullPage: false },
+});
 
-console.log('Screenshot result:', result)
+console.log('Screenshot result:', result);
 ```
 
 #### 6.3 测试页面读取
@@ -220,10 +227,10 @@ console.log('Screenshot result:', result)
 const result = await callBackend({
   type: 'CALL_TOOL',
   toolName: 'chrome_read_page',
-  params: {}
-})
+  params: {},
+});
 
-console.log('Page content:', result)
+console.log('Page content:', result);
 ```
 
 ---
@@ -235,6 +242,7 @@ console.log('Page content:', result)
 **原因**: Native Messaging Host 未注册或配置错误
 
 **解决方案**:
+
 ```bash
 cd app/native-server
 node dist/cli.js doctor
@@ -247,6 +255,7 @@ node dist/cli.js register
 **原因**: Extension ID 与配置文件中的 `allowed_origins` 不匹配
 
 **解决方案**:
+
 1. 在 `chrome://extensions/` 查看当前 Extension ID
 2. 更新 Native Messaging 配置文件中的 `allowed_origins`
 3. 重新加载 Extension
@@ -258,6 +267,7 @@ node dist/cli.js register
 **解决方案**:
 
 查看 Native Server 日志：
+
 ```bash
 # 查看系统日志（macOS）
 log show --predicate 'process == "node"' --last 5m | grep mcp-chrome-bridge
@@ -274,6 +284,7 @@ node dist/index.js
 **解决方案**:
 
 检查 manifest.json 语法：
+
 ```bash
 cat dist/extension/manifest.json | jq .
 ```
@@ -283,6 +294,7 @@ cat dist/extension/manifest.json | jq .
 **查看错误**: 在 `chrome://extensions/` 点击 "Errors" 按钮
 
 **常见问题**:
+
 - `importScripts` 路径错误 → 确认 native-messaging.js 在 background/ 目录
 - 语法错误 → 检查 service-worker.js 语法
 
@@ -313,6 +325,7 @@ Qwen CLI
 ```
 
 **优势**:
+
 - ✅ 更简单（3层 vs 5层）
 - ✅ 更快（直接通信）
 - ✅ 更稳定（无 HTTP 端口占用）
@@ -331,6 +344,7 @@ Qwen CLI
 **方法 2**: 使用固定的密钥
 
 在 manifest.json 中添加：
+
 ```json
 {
   "key": "YOUR_PUBLIC_KEY_HERE"
@@ -340,6 +354,7 @@ Qwen CLI
 ### 2. 测试所有浏览器工具
 
 测试清单：
+
 - [ ] `chrome_screenshot` - 截图
 - [ ] `chrome_read_page` - 读取页面
 - [ ] `chrome_click_element` - 点击元素
@@ -367,21 +382,25 @@ qwen
 ## ✅ 验证清单
 
 ### 构建验证
+
 - [x] Extension 构建成功
 - [x] native-messaging.js 打包完成
 - [x] manifest.json 包含 nativeMessaging 权限
 
 ### 配置验证
+
 - [ ] Native Server 已注册
 - [ ] `doctor` 命令检查通过
 - [ ] Extension ID 已更新到配置文件
 
 ### 连接验证
+
 - [ ] Extension 加载无错误
 - [ ] Service Worker Console 显示连接成功
 - [ ] `NativeMessaging.getStatus()` 返回 connected: true
 
 ### 功能验证
+
 - [ ] 能够发送测试消息
 - [ ] 浏览器工具调用成功
 - [ ] Qwen CLI 能够使用 Chrome 工具

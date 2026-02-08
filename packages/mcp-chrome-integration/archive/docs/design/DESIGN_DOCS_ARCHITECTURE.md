@@ -69,24 +69,24 @@ docs/
 
 > 仅列出 docs 目录下的现有文件。目标是“保留有价值信息、消除冲突”。
 
-| 现有文件 | 建议归档位置 | 处理方式 | 备注 |
-|---|---|---|---|
-| `architecture.md` | `design/03-architecture.md` | 保留并更新 | 作为总体架构主文档 |
-| `implementation-plan.md` | `status/implementation-plan.md` 或 `design/11-migration-compat.md` | 拆分合并 | 设计内容并入 design，进度/计划并入 status |
-| `IMPLEMENTATION_SUMMARY.md` | `status/implementation-summary.md` | 迁移 | 保留里程碑信息 |
-| `INTEGRATION_STATUS.md` | `status/integration-status.md` | 迁移 | 作为唯一“当前状态”来源 |
-| `NATIVE_MESSAGING_ADAPTATION_COMPLETE.md` | `status/` 或 `archive/` | 先迁移后验证 | 与当前状态冲突需验证 |
-| `api-reference.md` | `design/05-protocols.md` | 合并重写 | 当前内容偏旧协议，需统一 |
-| `MCP_NOTES.md` | `archive/` 或 `design/08-tools-catalog.md` | 甄别后迁移 | 描述旧 HTTP 路径，谨慎使用 |
-| `migration-guide.md` | `design/11-migration-compat.md` | 保留 | 适配新版工具映射 |
-| `QUICK_START.md` | `guides/quick-start.md` | 保留/修订 | 统一主机名/路径 |
-| `INSTALLATION.md` | `guides/installation.md` | 保留/修订 | 修正与实现不一致内容 |
-| `development.md` | `guides/development.md` | 保留 | 补齐 dev workflow |
-| `MCP_USAGE_GUIDE.md` | `guides/mcp-usage.md` | 保留 | 修正路径/命令差异 |
-| `DEPLOYMENT.md` | `ops/deployment.md` | 保留 | 生产发布流程 |
-| `DEPENDENCY_INSTALLATION_REPORT.md` | `reports/dependency-installation.md` | 迁移 | 报告归档 |
-| `hangwin-mcp-chrome-validation-report.md` | `reports/validation-report.md` | 迁移 | 报告归档 |
-| `docs/archive/*` | `archive/` | 保持 | 只做索引 |
+| 现有文件                                  | 建议归档位置                                                       | 处理方式     | 备注                                      |
+| ----------------------------------------- | ------------------------------------------------------------------ | ------------ | ----------------------------------------- |
+| `architecture.md`                         | `design/03-architecture.md`                                        | 保留并更新   | 作为总体架构主文档                        |
+| `implementation-plan.md`                  | `status/implementation-plan.md` 或 `design/11-migration-compat.md` | 拆分合并     | 设计内容并入 design，进度/计划并入 status |
+| `IMPLEMENTATION_SUMMARY.md`               | `status/implementation-summary.md`                                 | 迁移         | 保留里程碑信息                            |
+| `INTEGRATION_STATUS.md`                   | `status/integration-status.md`                                     | 迁移         | 作为唯一“当前状态”来源                    |
+| `NATIVE_MESSAGING_ADAPTATION_COMPLETE.md` | `status/` 或 `archive/`                                            | 先迁移后验证 | 与当前状态冲突需验证                      |
+| `api-reference.md`                        | `design/05-protocols.md`                                           | 合并重写     | 当前内容偏旧协议，需统一                  |
+| `MCP_NOTES.md`                            | `archive/` 或 `design/08-tools-catalog.md`                         | 甄别后迁移   | 描述旧 HTTP 路径，谨慎使用                |
+| `migration-guide.md`                      | `design/11-migration-compat.md`                                    | 保留         | 适配新版工具映射                          |
+| `QUICK_START.md`                          | `guides/quick-start.md`                                            | 保留/修订    | 统一主机名/路径                           |
+| `INSTALLATION.md`                         | `guides/installation.md`                                           | 保留/修订    | 修正与实现不一致内容                      |
+| `development.md`                          | `guides/development.md`                                            | 保留         | 补齐 dev workflow                         |
+| `MCP_USAGE_GUIDE.md`                      | `guides/mcp-usage.md`                                              | 保留         | 修正路径/命令差异                         |
+| `DEPLOYMENT.md`                           | `ops/deployment.md`                                                | 保留         | 生产发布流程                              |
+| `DEPENDENCY_INSTALLATION_REPORT.md`       | `reports/dependency-installation.md`                               | 迁移         | 报告归档                                  |
+| `hangwin-mcp-chrome-validation-report.md` | `reports/validation-report.md`                                     | 迁移         | 报告归档                                  |
+| `docs/archive/*`                          | `archive/`                                                         | 保持         | 只做索引                                  |
 
 ## 5) 当前文档冲突点（已裁决）
 

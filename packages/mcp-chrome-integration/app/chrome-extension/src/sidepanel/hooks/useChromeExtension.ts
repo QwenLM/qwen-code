@@ -1,4 +1,10 @@
 /**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
  * Chrome Extension API adapter
  * Replaces useVSCode for Chrome extension side panel
  */

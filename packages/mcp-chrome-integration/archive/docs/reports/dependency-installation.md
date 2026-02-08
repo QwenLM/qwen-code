@@ -21,6 +21,7 @@
 所有包已成功构建：
 
 #### shared 包
+
 ```
 packages/shared/dist/
 ├── index.js         (88 KB, CJS)
@@ -30,6 +31,7 @@ packages/shared/dist/
 ```
 
 #### native-server 包
+
 ```
 app/native-server/dist/
 ├── cli.js                      # CLI 入口（可执行）
@@ -45,6 +47,7 @@ app/native-server/dist/
 ```
 
 #### chrome-extension 包
+
 ```
 app/chrome-extension/dist/extension/
 ├── manifest.json         # Manifest V3
@@ -101,6 +104,7 @@ node dist/cli.js doctor
 ```
 
 **预期输出**:
+
 ```
 ✅ Native messaging host registered successfully
 ✅ Configuration file: ~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
@@ -114,6 +118,7 @@ node dist/index.js
 ```
 
 **预期输出**:
+
 ```
 [MCP Server] Starting...
 [Fastify] Server listening on http://127.0.0.1:12306
@@ -151,6 +156,7 @@ qwen mcp get chrome
 2. 启用"开发者模式"
 3. 点击"加载已解压的扩展程序"
 4. 选择目录:
+
    ```
    /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension/dist/extension
    ```
@@ -158,16 +164,16 @@ qwen mcp get chrome
 5. 记录 Extension ID（例如: `abcdefghijklmnopqrstuvwxyz123456`）
 
 6. 更新 Native Messaging 配置文件中的 `allowed_origins`:
+
    ```bash
    vim ~/Library/Application\ Support/Google/Chrome/NativeMessagingHosts/com.chromemcp.nativehost.json
    ```
 
    更新为:
+
    ```json
    {
-     "allowed_origins": [
-       "chrome-extension://YOUR_EXTENSION_ID_HERE/"
-     ]
+     "allowed_origins": ["chrome-extension://YOUR_EXTENSION_ID_HERE/"]
    }
    ```
 
@@ -180,6 +186,7 @@ qwen mcp get chrome
 **状态**: Extension 仍在使用 HTTP (127.0.0.1:18765) 通信
 
 **影响**:
+
 - ✅ Native Server 可以独立运行和测试
 - ✅ Qwen CLI 可以连接到 Native Server
 - ❌ Extension 无法连接到 Native Server
@@ -207,12 +214,14 @@ qwen mcp get chrome
 ## 🔍 验证检查清单
 
 ### 构建验证
+
 - [x] `shared` 包构建成功
 - [x] `native-server` 包构建成功
 - [x] `chrome-extension` 包构建成功
 - [x] 所有构建产物存在
 
 ### 可测试功能
+
 - [ ] Native Messaging Host 注册成功
 - [ ] `doctor` 命令检查通过
 - [ ] Native Server 独立启动成功
@@ -220,6 +229,7 @@ qwen mcp get chrome
 - [ ] Extension 加载无错误（但无法连接）
 
 ### 待完成功能
+
 - [ ] Extension 通信层适配
 - [ ] Extension ↔ Native Server 连接
 - [ ] 端到端工具调用测试
@@ -234,6 +244,7 @@ qwen mcp get chrome
 **待完成**: Extension 通信层适配 (~10-15 小时)
 
 **下一步建议**:
+
 1. 先测试 Native Server 独立运行
 2. 测试与 Qwen CLI 的集成
 3. 再完成 Extension 通信层适配

@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import {
@@ -88,11 +94,14 @@ export const ensureMcpClient = async () => {
       await mcpClient.connect(transport);
     } finally {
       // Restore original proxy settings
-      if (originalHttpProxy !== undefined) process.env.HTTP_PROXY = originalHttpProxy;
+      if (originalHttpProxy !== undefined)
+        process.env.HTTP_PROXY = originalHttpProxy;
       else delete process.env.HTTP_PROXY;
-      if (originalHttpsProxy !== undefined) process.env.HTTPS_PROXY = originalHttpsProxy;
+      if (originalHttpsProxy !== undefined)
+        process.env.HTTPS_PROXY = originalHttpsProxy;
       else delete process.env.HTTPS_PROXY;
-      if (originalAllProxy !== undefined) process.env.ALL_PROXY = originalAllProxy;
+      if (originalAllProxy !== undefined)
+        process.env.ALL_PROXY = originalAllProxy;
       else delete process.env.ALL_PROXY;
       if (originalNoProxy !== undefined) process.env.NO_PROXY = originalNoProxy;
       else delete process.env.NO_PROXY;

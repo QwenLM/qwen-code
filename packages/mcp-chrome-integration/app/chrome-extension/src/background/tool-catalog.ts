@@ -1,6 +1,11 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 export const KNOWN_TOOL_NAMES = [
   'get_windows_and_tabs',
-  'search_tabs_content',
   'chrome_navigate',
   'chrome_screenshot',
   'chrome_close_tabs',
@@ -22,7 +27,6 @@ export const KNOWN_TOOL_NAMES = [
   'chrome_bookmark_add',
   'chrome_bookmark_delete',
   'chrome_inject_script',
-  'chrome_send_command_to_inject_script',
   'chrome_javascript',
   'chrome_console',
   'chrome_upload_file',
@@ -30,13 +34,10 @@ export const KNOWN_TOOL_NAMES = [
   'chrome_computer',
   'chrome_handle_dialog',
   'chrome_handle_download',
-  'chrome_userscript',
   'performance_start_trace',
   'performance_stop_trace',
   'performance_analyze_insight',
   'chrome_gif_recorder',
-  'record_replay_flow_run',
-  'record_replay_list_published',
 ];
 
 export const LEGACY_TOOL_ALIASES = {

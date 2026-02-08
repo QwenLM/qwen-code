@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 const STATIC_TYPES = new Set([
   'image',
   'stylesheet',
@@ -162,6 +168,7 @@ function normalizeHeaders(
   return result;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function normalizeRequestBody(requestBody: any): RequestBody | undefined {
   if (!requestBody) return undefined;
 
@@ -205,6 +212,7 @@ function normalizeRequestBody(requestBody: any): RequestBody | undefined {
 export function createWebRequestRecorder({ includeStatic = false } = {}) {
   const requests = new Map<string, RawNetworkRequest>();
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function ensureEntry(details: any): RawNetworkRequest | null {
     if (!details || !details.requestId) return null;
     if (!shouldInclude(details, includeStatic)) return null;
@@ -222,6 +230,7 @@ export function createWebRequestRecorder({ includeStatic = false } = {}) {
     return requests.get(details.requestId);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function recordBeforeRequest(details: any) {
     const entry = ensureEntry(details);
     if (!entry) return;
@@ -231,6 +240,7 @@ export function createWebRequestRecorder({ includeStatic = false } = {}) {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function recordBeforeSendHeaders(details: any) {
     const entry = ensureEntry(details);
     if (!entry) return;
@@ -241,6 +251,7 @@ export function createWebRequestRecorder({ includeStatic = false } = {}) {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function recordCompleted(details: any) {
     const entry = ensureEntry(details);
     if (!entry) return;
@@ -254,6 +265,7 @@ export function createWebRequestRecorder({ includeStatic = false } = {}) {
     };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   function recordError(details: any) {
     const entry = ensureEntry(details);
     if (!entry) return;

@@ -111,46 +111,60 @@ npm run doctor --workspace=@qwen-code/mcp-chrome-integration
 }
 ```
 
-## 🛠️ 可用工具
+## 🛠️ 可用工具（27个）
 
 ### 浏览器管理（6个工具）
 
 - `get_windows_and_tabs` - 列出所有窗口和标签
-- `chrome_navigate` - 导航到 URL
-- `chrome_switch_tab` - 切换标签
-- `chrome_close_tabs` - 关闭标签
-- `chrome_go_back_or_forward` - 浏览器导航
-- `chrome_inject_script` - 注入脚本
+- `chrome_navigate` - 导航到 URL、刷新页面、前进/后退
+- `chrome_switch_tab` - 切换到指定标签
+- `chrome_close_tabs` - 关闭一个或多个标签
+- `chrome_read_page` - 获取页面可访问性树（元素结构）
+- `chrome_computer` - 统一的浏览器交互工具（鼠标、键盘、截图）
 
-### 网络监控（4个工具）
+### 页面交互（5个工具）
 
-- `chrome_network_capture_start/stop` - 网络捕获（webRequest API）
-- `chrome_network_debugger_start/stop` - **网络调试（包含 response body）**
-- `chrome_network_request` - 发送 HTTP 请求
+- `chrome_click_element` - 点击元素（支持 CSS/XPath/坐标）
+- `chrome_fill_or_select` - 填充表单元素
+- `chrome_keyboard` - 模拟键盘输入
+- `chrome_request_element_selection` - 请求用户手动选择元素（人在回路）
+- `chrome_javascript` - 执行 JavaScript 代码并返回结果
 
-### 页面交互（3个工具）
+### 网络监控（2个工具）
 
-- `chrome_click_element` - 点击元素
-- `chrome_fill_or_select` - 填充表单
-- `chrome_keyboard` - 键盘输入
+- `chrome_network_capture` - 统一的网络捕获工具（支持 response body、WebSocket）
+- `chrome_network_request` - 发送带浏览器上下文的 HTTP 请求
 
-### 内容分析（4个工具）
+### 内容分析（2个工具）
 
-- `search_tabs_content` - **AI 语义搜索**
-- `chrome_get_web_content` - 提取页面内容
-- `chrome_get_interactive_elements` - 查找可交互元素
-- `chrome_console` - 捕获控制台日志
+- `chrome_get_web_content` - 提取页面内容（HTML/文本）
+- `chrome_console` - 捕获控制台输出（支持快照和缓冲模式）
 
-### 数据管理（5个工具）
+### 数据管理（4个工具）
 
 - `chrome_history` - 搜索浏览历史
 - `chrome_bookmark_search` - 搜索书签
 - `chrome_bookmark_add` - 添加书签
 - `chrome_bookmark_delete` - 删除书签
 
-### 截图（1个工具）
+### 截图与录制（2个工具）
 
-- `chrome_screenshot` - 高级截图（支持全页、元素、自定义尺寸）
+- `chrome_screenshot` - 高级截图（全页/元素/自定义尺寸）
+- `chrome_gif_recorder` - 录制浏览器活动为 GIF 动画
+
+### 性能分析（3个工具）
+
+- `performance_start_trace` - 开始性能追踪
+- `performance_stop_trace` - 停止性能追踪并保存
+- `performance_analyze_insight` - 分析性能追踪结果
+
+### 文件与对话框（3个工具）
+
+- `chrome_upload_file` - 上传文件到表单
+- `chrome_handle_dialog` - 处理 JavaScript 对话框（alert/confirm/prompt）
+- `chrome_handle_download` - 等待并处理下载
+
+> **注意**: 部分高级工具（如 `search_tabs_content`、`chrome_inject_script`、`chrome_userscript` 等）可能在源码中被注释，需要时可以启用。详见 [工具参考文档](docs/design/tools-reference.md)。
 
 ## 🛠️ 开发
 

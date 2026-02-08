@@ -28,6 +28,7 @@
 在发布前，确保完成以下检查：
 
 #### 代码质量
+
 - [ ] 所有单元测试通过
 - [ ] 集成测试通过
 - [ ] 代码审查完成
@@ -35,17 +36,20 @@
 - [ ] 性能测试通过
 
 #### 文档
+
 - [ ] CHANGELOG.md 已更新
 - [ ] README.md 反映最新功能
 - [ ] API 文档更新
 - [ ] 用户指南更新
 
 #### 版本号
+
 - [ ] package.json 版本号已更新
 - [ ] manifest.json 版本号已更新
 - [ ] 遵循语义化版本规范（SemVer）
 
 #### 安全
+
 - [ ] 依赖项安全扫描通过（`npm audit`）
 - [ ] 敏感信息已移除（API keys, tokens）
 - [ ] 内容安全策略（CSP）配置正确
@@ -243,12 +247,14 @@ zip -r mcp-chrome-integration-v1.1.0.zip extension/
 ### 3.4 审核常见问题
 
 **常见拒绝原因**:
+
 - 权限使用未充分说明
 - manifest.json 配置错误
 - 包含混淆代码（未提供源码）
 - 违反内容政策
 
 **加快审核**:
+
 - 提供清晰的权限说明
 - 在描述中解释 Native Messaging 用途
 - 提供测试账号（如需要）
@@ -335,11 +341,7 @@ npm publish --access public
   "bin": {
     "mcp-chrome-integration": "./dist/cli.js"
   },
-  "files": [
-    "dist/**/*",
-    "README.md",
-    "LICENSE"
-  ]
+  "files": ["dist/**/*", "README.md", "LICENSE"]
 }
 ```
 
@@ -348,12 +350,14 @@ npm publish --access public
 **推荐的用户安装方式**:
 
 1. **通过 npm 全局安装**（最简单）:
+
    ```bash
    npm install -g @mcp-chrome/native-server
    mcp-chrome-integration register
    ```
 
 2. **通过下载安装脚本**:
+
    ```bash
    curl -fsSL https://your-domain.com/install.sh | bash
    ```
@@ -376,6 +380,7 @@ npm publish --access public
 - **PATCH**: 向下兼容的 bug 修复
 
 **示例**:
+
 - `1.0.0` → 首次正式发布
 - `1.0.1` → Bug 修复
 - `1.1.0` → 新功能
@@ -419,23 +424,28 @@ git push origin --tags
 ## [1.1.0] - 2026-01-25
 
 ### Added
+
 - 新增 AI 语义搜索功能
 - 添加书签管理工具
 
 ### Changed
+
 - 优化截图性能
 - 更新依赖项
 
 ### Fixed
+
 - 修复 Native Messaging 连接问题
 - 修复表单填充 bug
 
 ### Security
+
 - 更新依赖以修复安全漏洞
 
 ## [1.0.0] - 2026-01-20
 
 ### Added
+
 - 初始发布
 - 20+ 个浏览器工具
 - Native Messaging 支持
@@ -448,6 +458,7 @@ git push origin --tags
 ### 6.1 发布前检查（Pre-release Checklist）
 
 #### 代码
+
 - [ ] 所有测试通过（单元测试、集成测试）
 - [ ] 代码审查完成
 - [ ] 没有 `console.log` 或调试代码
@@ -455,23 +466,27 @@ git push origin --tags
 - [ ] 依赖项安全扫描通过 (`npm audit`)
 
 #### 文档
+
 - [ ] CHANGELOG.md 已更新
 - [ ] README.md 已更新
 - [ ] 用户安装指南已更新（INSTALLATION.md）
 - [ ] API 文档已更新
 
 #### 版本
+
 - [ ] 所有 package.json 版本号一致
 - [ ] manifest.json 版本号已更新
 - [ ] Git 标签已创建
 
 #### 构建
+
 - [ ] 生产构建成功
 - [ ] 构建产物已验证
 - [ ] Chrome Extension ZIP 包已创建
 - [ ] Native Server 包已创建
 
 #### 配置
+
 - [ ] 生产环境配置正确
 - [ ] API endpoints 指向生产环境
 - [ ] 敏感信息已移除
@@ -479,31 +494,37 @@ git push origin --tags
 ### 6.2 发布步骤（Release Steps）
 
 1. **准备发布分支**
+
    ```bash
    git checkout -b release/v1.0.0
    ```
 
 2. **更新版本号**
+
    ```bash
    npm version 1.0.0
    ```
 
 3. **更新 CHANGELOG**
+
    ```bash
    vim CHANGELOG.md
    ```
 
 4. **构建生产版本**
+
    ```bash
    ./scripts/build-all.sh
    ```
 
 5. **运行测试**
+
    ```bash
    pnpm test
    ```
 
 6. **创建发布包**
+
    ```bash
    # Chrome Extension
    cd app/chrome-extension/dist
@@ -515,6 +536,7 @@ git push origin --tags
    ```
 
 7. **提交变更**
+
    ```bash
    git add .
    git commit -m "chore: prepare release v1.0.0"
@@ -527,6 +549,7 @@ git push origin --tags
    - 合并到 main
 
 9. **创建 Git 标签**
+
    ```bash
    git checkout main
    git pull
@@ -540,6 +563,7 @@ git push origin --tags
     - 提交审核
 
 11. **发布 Native Server**（如果使用 npm）
+
     ```bash
     cd app/native-server
     npm publish
@@ -668,9 +692,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   test:
@@ -719,23 +743,23 @@ jobs:
 
 ### 常规发布周期
 
-| 周 | 活动 |
-|----|------|
-| 1-2 | 开发新功能 |
-| 3 | 功能冻结，bug 修复 |
-| 4 | 测试和文档 |
-| 5 | 发布准备 |
-| 6 | 发布和监控 |
+| 周  | 活动               |
+| --- | ------------------ |
+| 1-2 | 开发新功能         |
+| 3   | 功能冻结，bug 修复 |
+| 4   | 测试和文档         |
+| 5   | 发布准备           |
+| 6   | 发布和监控         |
 
 ### 紧急热修复
 
-| 时间 | 活动 |
-|------|------|
-| H+0 | 发现严重 bug |
-| H+1 | 修复开发 |
-| H+2 | 测试验证 |
-| H+3 | 构建和发布 |
-| H+4 | 监控部署 |
+| 时间 | 活动         |
+| ---- | ------------ |
+| H+0  | 发现严重 bug |
+| H+1  | 修复开发     |
+| H+2  | 测试验证     |
+| H+3  | 构建和发布   |
+| H+4  | 监控部署     |
 
 ---
 

@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 export function normalizeImageDataUrl(dataUrl, fallbackMimeType = 'image/png') {
   if (typeof dataUrl !== 'string' || dataUrl.length === 0) {
     throw new Error('Invalid image data');

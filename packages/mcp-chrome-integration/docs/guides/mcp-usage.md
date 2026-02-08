@@ -1,5 +1,7 @@
 # MCP Chrome 快速使用指南
 
+> **版本**: 2.0.0 | **最后更新**: 2026-02-08
+
 ## ✅ 配置已完成
 
 MCP 服务器 "chrome" 已成功添加到 Qwen CLI。
@@ -51,11 +53,13 @@ qwen
 ### 检查配置文件
 
 **项目配置**:
+
 ```bash
 cat /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension/.qwen/settings.json
 ```
 
 应该包含：
+
 ```json
 {
   "mcpServers": {
@@ -70,6 +74,7 @@ cat /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/c
 ```
 
 **全局配置**（如果使用方式 2）:
+
 ```bash
 # 查找全局配置
 find ~/.qwen -name "settings.json" -exec grep -l "mcpServers" {} \;
@@ -102,10 +107,12 @@ EOF
 ### 测试 2: 浏览器工具（需要 Extension）
 
 **前提条件**:
+
 1. Chrome Extension 已加载
 2. Extension 已连接到 Native Server
 
 **测试命令**:
+
 ```bash
 cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension
 
@@ -123,6 +130,7 @@ EOF
 **原因**: 在错误的目录运行命令
 
 **解决**:
+
 ```bash
 # 进入配置目录
 cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension
@@ -142,6 +150,7 @@ cd ~ && qwen mcp add chrome node /path/to/index.js
 ### Q3: 如何知道 MCP 服务器是否真的工作？
 
 **测试方法**:
+
 ```bash
 cd /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension
 
@@ -178,15 +187,18 @@ EOF
 ## 🎉 总结
 
 ✅ **MCP 配置已完成**
+
 - 配置文件: `app/chrome-extension/.qwen/settings.json`
 - 服务器路径: `app/native-server/dist/mcp/mcp-server-stdio.js`
 - 状态: Disconnected（正常）
 
 ✅ **使用方式**
+
 - 方式 1: 在 `app/chrome-extension/` 目录下使用 ✅
 - 方式 2: 添加到全局配置（任意目录使用）
 
 ✅ **下一步**
+
 - 在 Qwen 会话中实际测试
 - 如需浏览器工具，需完成 Extension 适配
 
