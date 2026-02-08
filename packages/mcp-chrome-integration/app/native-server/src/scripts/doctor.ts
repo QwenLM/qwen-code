@@ -18,9 +18,11 @@
 
 import fs from 'fs';
 import path from 'path';
-import { EXTENSION_ID, HOST_NAME, COMMAND_NAME } from './constant.js';
-import { colorText, getLogDir } from './utils.js';
-import { NATIVE_SERVER_PORT } from '../constant.js';
+import { execFileSync } from 'child_process';
+import { EXTENSION_ID, HOST_NAME, COMMAND_NAME } from './constant';
+import { colorText, getLogDir } from './utils';
+import { getBrowserConfig } from './browser-config';
+const NATIVE_SERVER_PORT = 12306;
 
 // Re-export types and utilities from submodules for external consumers
 export type {

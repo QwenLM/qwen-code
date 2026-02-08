@@ -18,6 +18,7 @@ import {
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { execSync } from 'node:child_process';
 
 interface MessagePayload {
   [key: string]: unknown;
@@ -54,6 +55,9 @@ export class NativeMessagingHost {
   private thinkingActive = false;
 
   constructor() {
+    // Clean up any orphaned processes from previous runs
+    this.cleanupOrphanedProcesses();
+
     this.acpClient = new AcpClient({
       onSessionUpdate: (update) => this.handleAcpSessionUpdate(update),
       onAuthenticateUpdate: (update) =>
@@ -65,6 +69,38 @@ export class NativeMessagingHost {
       onProcessExit: (code, signal) => this.handleAcpProcessExit(code, signal),
       onStderr: (line) => this.handleAcpStderr(line),
     });
+  }
+
+  /**
+   * Clean up orphaned CLI and MCP Server processes from previous runs
+   */
+  private cleanupOrphanedProcesses(): void {
+    try {
+      console.error('[NativeHost] Cleaning up orphaned processes...');
+
+      // Kill orphaned Qwen CLI processes
+      try {
+        execSync('pkill -9 -f "cli.js --acp"', { stdio: 'ignore' });
+        console.error('[NativeHost] Cleaned up orphaned CLI processes');
+      } catch {
+        // No processes to kill
+        console.error('[NativeHost] No orphaned CLI processes found');
+      }
+
+      // Kill orphaned MCP Server processes
+      try {
+        execSync('pkill -9 -f "mcp-server-stdio.js"', { stdio: 'ignore' });
+        console.error('[NativeHost] Cleaned up orphaned MCP Server processes');
+      } catch {
+        // No processes to kill
+        console.error('[NativeHost] No orphaned MCP Server processes found');
+      }
+
+      console.error('[NativeHost] Orphan cleanup complete');
+    } catch (error) {
+      console.error('[NativeHost] Error during orphan cleanup:', error);
+      // Continue anyway
+    }
   }
 
   public setServer(serverInstance: Server): void {
@@ -172,6 +208,7 @@ export class NativeMessagingHost {
 
     // Handle directive messages from Chrome
     try {
+      console.error('[NativeHost] Processing message type:', message.type);
       switch (message.type) {
         case NativeMessageType.START: {
           const port =
@@ -214,8 +251,19 @@ export class NativeMessagingHost {
           if (!text) {
             throw new Error('Missing prompt text');
           }
-          await this.handleAcpConnect(message.payload);
+          // Only connect if not already connected
+          const status = this.acpClient.getStatus();
+          if (!status.connected || !status.sessionId) {
+            console.error(
+              '[NativeHost] ACP not connected, connecting first...',
+            );
+            await this.handleAcpConnect(message.payload);
+          }
+
+          console.error('[NativeHost] Sending prompt, length:', text.length);
           await this.acpClient.prompt(text);
+          console.error('[NativeHost] Prompt sent successfully');
+
           if (message.requestId) {
             this.sendMessage({
               responseToRequestId: message.requestId,
@@ -374,13 +422,33 @@ export class NativeMessagingHost {
     } catch (error) {
       const messageText =
         (error as Error).message || String(error) || 'Unknown error';
+      const errorCode = (error as { code?: number }).code;
+      const errorData = (error as { data?: unknown }).data;
+
+      console.error('[NativeHost] Error processing message:', {
+        type: message.type,
+        error: messageText,
+        code: errorCode,
+        data: errorData,
+        stack: (error as Error).stack,
+      });
+
+      // Send detailed error response
       if (message.requestId) {
         this.sendMessage({
           responseToRequestId: message.requestId,
           error: messageText,
+          payload: {
+            success: false,
+            error: messageText,
+            code: errorCode,
+            data: errorData,
+          },
         });
+      } else {
+        // For non-request messages, send error notification
+        this.sendError(`${message.type || 'Message'} failed: ${messageText}`);
       }
-      this.sendError(`Failed to handle directive message: ${messageText}`);
     }
   }
 
@@ -427,17 +495,67 @@ export class NativeMessagingHost {
           name: 'chrome',
           command: process.execPath,
           args: [mcpServerPath],
-          env: [],
+          env: [], // Empty env array - will inherit from parent process
+          trust: true, // Trust this MCP Server so Qwen CLI will load its tools
+          timeout: 120000, // 2 minutes timeout for tool calls
         },
       ];
 
+      // Add MCP Server info to environment variables
+      // This ensures Qwen CLI knows about the MCP Server even if session_new doesn't register it
+      const mcpEnv = {
+        ...env,
+        QWEN_MCP_SERVERS: JSON.stringify(mcpServers),
+      };
+
+      console.error('[NativeHost] MCP Server configuration:', {
+        name: 'chrome',
+        command: process.execPath,
+        mcpServerPath,
+        mcpServerPathExists: fs.existsSync(mcpServerPath),
+      });
+
+      console.error(
+        '[NativeHost] Full mcpServers array:',
+        JSON.stringify(mcpServers, null, 2),
+      );
+
       try {
+        console.error('[NativeHost] Calling acpClient.connect with:', {
+          cliPath,
+          cwd,
+          mcpServersCount: mcpServers.length,
+          hasMcpEnv: !!mcpEnv.QWEN_MCP_SERVERS,
+        });
+
         const result = await this.acpClient.connect({
           cliPath,
           cwd,
           mcpServers,
-          env,
+          env: mcpEnv, // Use mcpEnv instead of env to pass MCP Server info
         });
+
+        console.error(
+          '[NativeHost] Connect result:',
+          JSON.stringify(result, null, 2),
+        );
+
+        // Send a system message to help Qwen understand it has Chrome MCP capabilities
+        // Wait longer (5 seconds) to ensure MCP Server is fully ready and tools are registered
+        setTimeout(async () => {
+          try {
+            await this.acpClient.prompt(
+              'System: You now have access to Chrome browser MCP tools including: ' +
+                'get_windows_and_tabs, chrome_read_page, chrome_get_web_content, chrome_navigate, ' +
+                'chrome_screenshot, chrome_network_capture, chrome_console, chrome_click_element, ' +
+                'chrome_fill_or_select, chrome_keyboard, chrome_javascript, and others. ' +
+                'Use these tools to interact with the browser when the user asks about web pages or browser content.',
+            );
+          } catch {
+            // Silently ignore errors - the system message is a hint, not required
+          }
+        }, 5000); // Wait 5 seconds to ensure MCP Server is fully ready and tools are registered
+
         this.sendAuthStatus({
           authenticated: true,
           method: this.resolveAuthMethod(env),
@@ -470,10 +588,27 @@ export class NativeMessagingHost {
   private resolveRepoRoot(startDir: string): string | null {
     let current = startDir;
     for (let i = 0; i < 8; i += 1) {
-      const candidate = path.join(current, 'dist', 'cli.js');
-      if (fs.existsSync(candidate)) {
-        return current;
+      // Look for monorepo root by checking for package.json with workspaces
+      const pkgJsonPath = path.join(current, 'package.json');
+      const cliPath = path.join(current, 'dist', 'cli.js');
+
+      // Check if this directory has both package.json and dist/cli.js
+      if (fs.existsSync(pkgJsonPath) && fs.existsSync(cliPath)) {
+        try {
+          const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+          // Verify this is the qwen-code monorepo root by checking for workspaces or name
+          if (
+            pkgJson.workspaces ||
+            pkgJson.name === 'qwen-code' ||
+            pkgJson.name === '@qwen-code/monorepo'
+          ) {
+            return current;
+          }
+        } catch {
+          // Ignore JSON parse errors
+        }
       }
+
       const parent = path.dirname(current);
       if (parent === current) {
         break;
@@ -561,6 +696,14 @@ export class NativeMessagingHost {
       }
     ).update;
     const sessionUpdate = payload?.sessionUpdate;
+
+    // Debug: Log all session updates
+    console.error(
+      '[NativeHost] ACP session update:',
+      sessionUpdate,
+      JSON.stringify(payload).substring(0, 200),
+    );
+
     if (!sessionUpdate) {
       return;
     }
@@ -681,6 +824,9 @@ export class NativeMessagingHost {
 
   private handleAcpStderr(line: string): void {
     if (!line) return;
+    // Output to stderr so it appears in log files
+    console.error(line);
+    // Also send to browser for debugging
     this.sendMessage({ type: 'hostLog', data: { line } });
   }
 

@@ -127,18 +127,38 @@ export class AcpClient {
     }
 
     const spawnCommand = process.execPath;
+
+    // Dynamically extract all MCP server names from the configuration
+    const allowedMcpServerNames = options.mcpServers.map(
+      (server) => server.name,
+    );
+
     const spawnArgs = [
       options.cliPath,
       '--acp',
       '--channel=ACP',
-      ...(options.extraArgs || []),
+      '--yolo', // Auto-approve all tool calls (YOLO mode)
     ];
+
+    // Add --allowed-mcp-server-names parameter if there are any MCP servers configured
+    if (allowedMcpServerNames.length > 0) {
+      spawnArgs.push('--allowed-mcp-server-names', ...allowedMcpServerNames);
+    }
+
+    spawnArgs.push(...(options.extraArgs || []));
+
+    // Debug: Log the complete spawn arguments
+    console.error(
+      '[AcpClient] Spawning Qwen CLI with args:',
+      JSON.stringify(spawnArgs, null, 2),
+    );
 
     const spawnOptions: SpawnOptions = {
       cwd: options.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: options.env || process.env,
       shell: false,
+      detached: false, // Don't detach, so we can kill the process group
     };
 
     this.child = spawn(spawnCommand, spawnArgs, spawnOptions);
@@ -157,6 +177,11 @@ export class AcpClient {
       cwd: options.cwd,
       mcpServers: options.mcpServers || [],
     });
+
+    console.error(
+      '[AcpClient] session_new result:',
+      JSON.stringify(newSessionResult, null, 2),
+    );
 
     this.sessionId =
       (newSessionResult as { sessionId?: string }).sessionId || null;
@@ -186,12 +211,53 @@ export class AcpClient {
   }
 
   async stop(): Promise<void> {
+    console.error('[AcpClient] Stopping...');
+
     if (this.child && !this.child.killed) {
-      this.child.kill();
+      console.error(
+        '[AcpClient] Killing child process (PID:',
+        this.child.pid,
+        ')',
+      );
+
+      // Kill the entire process tree
+      if (this.child.pid) {
+        try {
+          // On Unix, kill the process group to ensure all children are killed
+          process.kill(-this.child.pid, 'SIGTERM');
+          console.error('[AcpClient] Sent SIGTERM to process group');
+        } catch (error) {
+          console.error(
+            '[AcpClient] Failed to kill process group, trying direct kill:',
+            error,
+          );
+          this.child.kill('SIGTERM');
+        }
+      } else {
+        this.child.kill('SIGTERM');
+      }
+
+      // Wait a bit for graceful shutdown, then force kill if needed
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+
+      if (this.child && !this.child.killed) {
+        console.error('[AcpClient] Process still alive, sending SIGKILL');
+        if (this.child.pid) {
+          try {
+            process.kill(-this.child.pid, 'SIGKILL');
+          } catch {
+            this.child.kill('SIGKILL');
+          }
+        } else {
+          this.child.kill('SIGKILL');
+        }
+      }
     }
+
     this.child = null;
     this.sessionId = null;
     this.pendingRequests.clear();
+    console.error('[AcpClient] Stopped');
   }
 
   private attachProcessHandlers(): void {

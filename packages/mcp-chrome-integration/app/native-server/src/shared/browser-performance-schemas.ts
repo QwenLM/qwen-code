@@ -5,7 +5,7 @@
  */
 
 import { type Tool } from '@modelcontextprotocol/sdk/types.js';
-import { TOOL_NAMES } from './tools.js';
+import { TOOL_NAMES } from './tool-names.js';
 
 export const PERFORMANCE_SCHEMAS: Tool[] = [
   {

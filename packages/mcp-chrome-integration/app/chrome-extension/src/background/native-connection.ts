@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 /**
  * @license
@@ -44,11 +44,6 @@ let handleNativeMessageExternal: ((message: NativeHostMessage) => void) | null =
   null;
 
 /**
- * External broadcast function - set by native-message-handler.ts
- */
-let broadcastToUIExternal: ((message: any) => void) | null = null;
-
-/**
  * Set external message handler
  */
 export function setMessageHandler(
@@ -58,19 +53,9 @@ export function setMessageHandler(
 }
 
 /**
- * Set external broadcast function
- */
-export function setBroadcastFunction(broadcast: (message: any) => void): void {
-  broadcastToUIExternal = broadcast;
-}
-
-/**
  * Broadcast message to all UI components
  */
-export function broadcastToUI(message: any): void {
-  if (broadcastToUIExternal) {
-    broadcastToUIExternal(message);
-  }
+export function broadcastToUI(message: unknown): void {
   try {
     chrome.runtime.sendMessage(message).catch(() => {
       // Ignore errors if no listeners
@@ -108,6 +93,26 @@ export function connectNativeHost(): boolean {
     // Set up message handler
     nativePort.onMessage.addListener((message) => {
       console.log(LOG_PREFIX, 'Received message:', message);
+
+      // Handle pending request responses
+      if (
+        message &&
+        typeof message === 'object' &&
+        message.responseToRequestId
+      ) {
+        const requestId = message.responseToRequestId as string;
+        const pending = pendingRequests.get(requestId);
+        if (pending) {
+          clearTimeout(pending.timeoutId);
+          if (message.error) {
+            pending.reject(new Error(message.error as string));
+          } else {
+            pending.resolve(message.payload);
+          }
+          pendingRequests.delete(requestId);
+        }
+      }
+
       if (handleNativeMessageExternal) {
         handleNativeMessageExternal(message);
       }
@@ -252,7 +257,7 @@ export function sendNativeMessage(message: NativeHostMessage): boolean {
 export function sendNativeMessageWithResponse(
   message: NativeHostMessage,
   timeout = 30000,
-): Promise<any> {
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (!nativePort) {
       reject(new Error('Not connected to native host'));
@@ -316,7 +321,7 @@ export function initConnectionExports(): void {
       connect: connectNativeHost,
       disconnect: disconnectNativeHost,
       sendMessage: sendNativeMessage,
-      sendMessageWithResponse,
+      sendMessageWithResponse: sendNativeMessageWithResponse,
       getStatus: getConnectionStatus,
       isConnected: () => connectionStatus,
     };

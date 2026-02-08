@@ -29,7 +29,7 @@ export const MIN_NODE_MAJOR_VERSION = 20;
  */
 export function readPackageJson(): Record<string, unknown> {
   try {
-    const pkgPath = new URL('../../package.json', import.meta.url);
+    const pkgPath = path.resolve(__dirname, '..', '..', 'package.json');
     const content = fs.readFileSync(pkgPath, 'utf8');
     return JSON.parse(content) as Record<string, unknown>;
   } catch {

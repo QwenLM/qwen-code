@@ -14,14 +14,31 @@ import nativeMessagingHostInstance from '../native-messaging-host.js';
 import { NativeMessageType, TOOL_SCHEMAS } from '../shared/index.js';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
+interface FlowResponse {
+  status?: string;
+  items?: Array<{
+    slug: string;
+    id: string;
+    description?: string;
+    meta?: { tool?: { description?: string } };
+    variables?: Array<{
+      key: string;
+      label?: string;
+      type?: string;
+      default?: unknown;
+      rules?: { required?: boolean; enum?: string[] };
+    }>;
+  }>;
+}
+
 async function listDynamicFlowTools(): Promise<Tool[]> {
   try {
     const response =
-      await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+      (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
         {},
         'rr_list_published_flows',
         20000,
-      );
+      )) as FlowResponse;
     if (
       response &&
       response.status === 'success' &&
@@ -105,11 +122,11 @@ const handleToolCall = async (
       // We need to resolve flow by slug to ID
       try {
         const resp =
-          await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+          (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
             {},
             'rr_list_published_flows',
             20000,
-          );
+          )) as FlowResponse;
         const items = (resp && resp.items) || [];
         const slug = name.slice('flow.'.length);
         const match = items.find(
@@ -118,21 +135,22 @@ const handleToolCall = async (
         if (!match) throw new Error(`Flow not found for tool ${name}`);
         const flowArgs = { flowId: match.id, args };
         const proxyRes =
-          await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+          (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
             { name: 'record_replay_flow_run', args: flowArgs },
             NativeMessageType.CALL_TOOL,
             120000,
-          );
-        if (proxyRes.status === 'success') return proxyRes.data;
+          )) as { status?: string; data?: CallToolResult; error?: string };
+        if (proxyRes.status === 'success')
+          return proxyRes.data as CallToolResult;
         return {
           content: [
             {
               type: 'text',
-              text: `Error calling dynamic flow tool: ${proxyRes.error}`,
+              text: `Error calling dynamic flow tool: ${proxyRes.error || 'unknown error'}`,
             },
           ],
           isError: true,
-        };
+        } as CallToolResult;
       } catch (err) {
         return {
           content: [
@@ -147,26 +165,26 @@ const handleToolCall = async (
     }
     // 发送请求到Chrome扩展并等待响应
     const response =
-      await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
+      (await nativeMessagingHostInstance.sendRequestToExtensionAndWait(
         {
           name,
           args,
         },
         NativeMessageType.CALL_TOOL,
         120000, // 延长到 120 秒，避免性能分析等长任务超时
-      );
+      )) as { status?: string; data?: CallToolResult; error?: string };
     if (response.status === 'success') {
-      return response.data;
+      return response.data as CallToolResult;
     } else {
       return {
         content: [
           {
             type: 'text',
-            text: `Error calling tool: ${response.error}`,
+            text: `Error calling tool: ${response.error || 'unknown error'}`,
           },
         ],
         isError: true,
-      };
+      } as CallToolResult;
     }
   } catch (error) {
     return {

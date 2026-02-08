@@ -21,6 +21,7 @@ import {
   WaitingMessage,
   PermissionDrawer,
   GenericToolCall,
+  ChromeToolCall,
 } from '@qwen-code/webui';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import { useToolCalls } from './hooks/useToolCalls.js';
@@ -126,6 +127,16 @@ export const App: React.FC = () => {
       console.log('[App] Received message:', message);
 
       switch (message.type) {
+        case 'nativeHostConnected': {
+          console.log('[App] Native host connected');
+          setIsConnected(true);
+          break;
+        }
+        case 'nativeHostDisconnected': {
+          console.log('[App] Native host disconnected');
+          setIsConnected(false);
+          break;
+        }
         case 'STATUS_UPDATE': {
           const statusData = message.data as { status: string } | undefined;
           if (statusData && 'status' in statusData) {
@@ -780,8 +791,24 @@ ${formatted || '(no logs captured)'}`;
               const nextType = timelineItems[index + 1]?.type;
               const isFirst = prevType !== 'toolCall';
               const isLast = nextType !== 'toolCall';
+
+              // Determine if this is a Chrome MCP tool
+              const toolName =
+                item.data.rawInput && typeof item.data.rawInput === 'object'
+                  ? (item.data.rawInput as Record<string, unknown>).name
+                  : item.data.kind;
+              const isChromeToolCall =
+                typeof toolName === 'string' &&
+                (toolName.startsWith('chrome_') ||
+                  toolName === 'get_windows_and_tabs');
+
+              // Use ChromeToolCall for Chrome MCP tools, GenericToolCall for others
+              const ToolCallComponent = isChromeToolCall
+                ? ChromeToolCall
+                : GenericToolCall;
+
               return (
-                <GenericToolCall
+                <ToolCallComponent
                   key={`tool-${item.data.toolCallId}-${index}`}
                   toolCall={item.data}
                   isFirst={isFirst}

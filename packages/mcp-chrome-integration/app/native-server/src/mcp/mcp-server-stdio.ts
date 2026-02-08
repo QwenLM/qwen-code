@@ -20,6 +20,38 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
+
+// Create a log file for debugging
+const logDir = path.join(os.homedir(), 'Library', 'Logs', 'mcp-chrome-bridge');
+const logFile = path.join(
+  logDir,
+  `mcp-server-stdio_${new Date().toISOString().replace(/[:.]/g, '-')}.log`,
+);
+
+// Ensure log directory exists
+try {
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
+} catch {
+  // Ignore
+}
+
+// Custom log function that writes to both file and stderr
+function log(message: string, ...args: unknown[]) {
+  const timestamp = new Date().toISOString();
+  const logMessage = `[${timestamp}] ${message} ${args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`;
+
+  try {
+    fs.appendFileSync(logFile, logMessage + '\n');
+  } catch {
+    // Ignore file write errors
+  }
+
+  // Also write to stderr
+  console.error(logMessage);
+}
 
 let stdioMcpServer: Server | null = null;
 let mcpClient: Client | null = null;
@@ -70,6 +102,7 @@ export const ensureMcpClient = async () => {
     }
 
     const config = loadConfig();
+    log('[MCP Server] Connecting to HTTP endpoint:', config.url);
     mcpClient = new Client(
       { name: 'Mcp Chrome Proxy', version: '1.0.0' },
       { capabilities: {} },
@@ -92,6 +125,7 @@ export const ensureMcpClient = async () => {
         {},
       );
       await mcpClient.connect(transport);
+      log('[MCP Server] Successfully connected to HTTP endpoint');
     } finally {
       // Restore original proxy settings
       if (originalHttpProxy !== undefined)
@@ -111,15 +145,18 @@ export const ensureMcpClient = async () => {
   } catch (error) {
     mcpClient?.close();
     mcpClient = null;
-    console.error('Failed to connect to MCP server:', error);
+    log('[MCP Server] Failed to connect to MCP HTTP endpoint:', error);
   }
 };
 
 export const setupTools = (server: Server) => {
   // List tools handler
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOL_SCHEMAS,
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    log('[MCP Server] Received tools/list request');
+    const tools = TOOL_SCHEMAS;
+    log('[MCP Server] Returning', tools.length, 'tools');
+    return { tools };
+  });
 
   // Call tool handler
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
@@ -141,6 +178,7 @@ const handleToolCall = async (
   name: string,
   args: Record<string, unknown>,
 ): Promise<CallToolResult> => {
+  log('[MCP Server] Handling tool call:', name);
   try {
     const client = await ensureMcpClient();
     if (!client) {
@@ -151,8 +189,10 @@ const handleToolCall = async (
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout: DEFAULT_CALL_TIMEOUT_MS,
     });
+    log('[MCP Server] Tool call succeeded:', name);
     return result as CallToolResult;
   } catch (error) {
+    log('[MCP Server] Tool call failed:', name, error);
     return {
       content: [
         {
@@ -166,11 +206,16 @@ const handleToolCall = async (
 };
 
 async function main() {
+  log('[MCP Server stdio] Starting...');
+  log('[MCP Server stdio] Log file:', logFile);
+  log('[MCP Server stdio] TOOL_SCHEMAS count:', TOOL_SCHEMAS.length);
   const transport = new StdioServerTransport();
+  log('[MCP Server stdio] Transport created, connecting...');
   await getStdioMcpServer().connect(transport);
+  log('[MCP Server stdio] Connected and ready to receive requests');
 }
 
 main().catch((error) => {
-  console.error('Fatal error Chrome MCP Server main():', error);
+  log('Fatal error Chrome MCP Server main():', error);
   process.exit(1);
 });

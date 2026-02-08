@@ -19,7 +19,6 @@ import {
   getConnectionStatus,
   broadcastToUI,
   setMessageHandler,
-  setBroadcastFunction,
   initConnectionExports,
 } from './native-connection';
 
@@ -53,7 +52,6 @@ import { createToolRouter } from './tool-router';
 
 // Set up cross-module dependencies first
 setMessageHandler(handleNativeMessage);
-setBroadcastFunction(broadcastToUI);
 setSendMessageFunction(sendNativeMessage);
 
 // Create tool router with all browser tools

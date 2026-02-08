@@ -116,6 +116,7 @@
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
     "global-directory": "4.0.1",
+    "object-hash": "^3.0.0",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {
