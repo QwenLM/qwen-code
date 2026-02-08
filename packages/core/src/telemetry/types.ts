@@ -5,6 +5,7 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
+import { normalizeErrorMessage, normalizeStatusCode } from './errorUtils.js';
 import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
 import type { CompletedToolCall } from '../core/coreToolScheduler.js';
@@ -239,7 +240,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   model: string;
   error: string;
   error_type?: string;
-  status_code?: number | string;
+  status_code?: number | string | null;
   duration_ms: number;
   prompt_id: string;
   auth_type?: string;
@@ -252,15 +253,16 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     prompt_id: string,
     auth_type?: string,
     error_type?: string,
-    status_code?: number | string,
+    status_code?: number | string | null,
   ) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
     this.response_id = response_id;
     this.model = model;
-    this.error = error;
+    // Normalize error message and status code for better telemetry
+    this.error = normalizeErrorMessage(error);
     this.error_type = error_type;
-    this.status_code = status_code;
+    this.status_code = normalizeStatusCode(status_code);
     this.duration_ms = duration_ms;
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
@@ -288,7 +290,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   'event.timestamp': string; // ISO 8601
   response_id: string;
   model: string;
-  status_code?: number | string;
+  status_code?: number | null;
   duration_ms: number;
   input_token_count: number;
   output_token_count: number;
@@ -314,6 +316,9 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.response_id = response_id;
     this.model = model;
     this.duration_ms = duration_ms;
+    // Default to 200 for successful API responses when no explicit HTTP
+    // status code is provided. For errors and network failures, callers
+    // should pass a status_code (or it will be normalized to null).
     this.status_code = 200;
     this.input_token_count = usage_data?.promptTokenCount ?? 0;
     this.output_token_count = usage_data?.candidatesTokenCount ?? 0;
