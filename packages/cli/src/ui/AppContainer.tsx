@@ -688,6 +688,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     handleVisionSwitchRequired, // onVisionSwitchRequired
     embeddedShellFocused,
+    historyManager.removeItemsById,
   );
 
   // Track whether suggestions are visible for Tab key handling
