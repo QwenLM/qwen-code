@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Qwen CLI Chrome Extension",
+  "name": "Qwen Code",
   "version": "1.0.0",
   "description": "Bridge between Chrome browser and Qwen CLI for enhanced AI interactions",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAjG5E28TwkSdpl08Bqat3ZslK+HFrhsU5bFo8bvkbhkJaFrvw+NTUOtAzF+/G7oSuzhwk6YijlCzCh5/LrMkgF78gfs31Iz1P2dKAffcGGlAjvP4wAT7qWoKxnOkUy1t4NvvU0oF5WjO48Q697gn3VhmFXYcg9oYbGZBg5DHDUTXBJ6cx5WpTn3GwHQzpPXJZ64BCTQTSL5kp6bcDS74LmTJTREEfE/pHOlqBmzj3VcRN5nF2z/gz/ftZucEQJIm2qjcDqrC9aFDxCQHS7WMcii3FXj6SvjbTccXjiIAIZSAUNUpeIG9z+Zzgm9ycPoqvoBSyTBuPwTplXIneM4XyBQIDAQAB",

@@ -63,6 +63,10 @@ export const App: React.FC = () => {
     method?: string;
     error?: string;
   } | null>(null);
+  const [mcpToolsStatus, setMcpToolsStatus] = useState<{
+    status: 'loading' | 'ready' | 'error' | null;
+    message?: string;
+  }>({ status: null });
   const [isComposing, setIsComposing] = useState(false);
   const [permissionRequest, setPermissionRequest] = useState<{
     requestId: number;
@@ -70,7 +74,7 @@ export const App: React.FC = () => {
     options: PermissionOption[];
     toolCall: PermissionToolCall;
   } | null>(null);
-  const { toolCalls, handleToolCallUpdate, clearToolCalls } = useToolCalls();
+  const { toolCalls, handleToolCallUpdate } = useToolCalls();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -311,6 +315,30 @@ export const App: React.FC = () => {
           break;
         }
 
+        case 'mcpToolsStatus': {
+          const statusData = message as {
+            data?: {
+              status?: 'loading' | 'ready' | 'error';
+              message?: string;
+            };
+          };
+          if (statusData.data) {
+            setMcpToolsStatus({
+              status: statusData.data.status || null,
+              message: statusData.data.message,
+            });
+            // Auto-hide ready message after 3 seconds
+            if (statusData.data.status === 'ready') {
+              setTimeout(() => {
+                setMcpToolsStatus((prev) =>
+                  prev.status === 'ready' ? { status: null } : prev,
+                );
+              }, 3000);
+            }
+          }
+          break;
+        }
+
         default:
           // Handle unknown message types
           console.log('[App] Unknown message type:', message.type);
@@ -415,25 +443,24 @@ export const App: React.FC = () => {
     }
   }, [vscode]);
 
-  // Handle exit (stop CLI session)
-  const handleExit = useCallback(async () => {
-    const response = (await vscode.postMessage({ type: 'EXIT' })) as {
-      success?: boolean;
-    } | null;
-    if (response?.success) {
-      setIsConnected(false);
-      setIsStreaming(false);
-      setIsWaitingForResponse(false);
-      setLoadingMessage(null);
-      setStreamingContent('');
-      setThinkingContent('');
-      setThinkingStatus('default');
-      setAuthUri(null);
-      setAuthStatus(null);
-      setPermissionRequest(null);
-      clearToolCalls();
-    }
-  }, [vscode, clearToolCalls]);
+  // Handle exit (stop CLI session) - commented out as not currently used
+  // const handleExit = useCallback(async () => {
+  //   const response = (await vscode.postMessage({ type: 'EXIT' })) as {
+  //     success?: boolean;
+  //   } | null;
+  //   if (response?.success) {
+  //     setIsConnected(false);
+  //     setIsStreaming(false);
+  //     setIsWaitingForResponse(false);
+  //     setLoadingMessage(null);
+  //     setStreamingContent('');
+  //     setThinkingContent('');
+  //     setThinkingStatus('default');
+  //     setAuthUri(null);
+  //     setAuthStatus(null);
+  //     setPermissionRequest(null);
+  //   }
+  // }, [vscode]);
 
   // Auto-connect once on mount/when disconnected
   useEffect(() => {
@@ -664,20 +691,36 @@ ${formatted || '(no logs captured)'}`;
       data: tc,
     })),
   ].sort((a, b) => a.timestamp - b.timestamp);
-  const formatAuthMethod = (method?: string) => {
-    if (!method) return 'ok';
-    if (method === 'openai') return 'OpenAI';
-    if (method === 'qwen-oauth') return 'Qwen OAuth';
-    return method;
-  };
-  const authLabel = authStatus
-    ? authStatus.authenticated
-      ? formatAuthMethod(authStatus.method)
-      : authStatus.error || 'required'
-    : null;
+  // Auth label formatting - commented out as not currently used
+  // const formatAuthMethod = (method?: string) => {
+  //   if (!method) return 'ok';
+  //   if (method === 'openai') return 'OpenAI';
+  //   if (method === 'qwen-oauth') return 'Qwen OAuth';
+  //   return method;
+  // };
+  // const authLabel = authStatus
+  //   ? authStatus.authenticated
+  //     ? formatAuthMethod(authStatus.method)
+  //     : authStatus.error || 'required'
+  //   : null;
 
   return (
     <div className="chat-container relative flex flex-col h-screen bg-[#1e1e1e] text-white">
+      {/* Hide slash command, attach, and edit mode buttons */}
+      <style>{`
+        .composer-actions button[title*="command menu"],
+        .composer-actions button[title*="Attach context"],
+        .composer-actions button[aria-label*="command menu"],
+        .composer-actions button[aria-label*="Attach context"] {
+          display: none !important;
+        }
+        .composer-actions button[title*="${getEditModeInfo('default').title}"],
+        .composer-actions .btn-text-compact--primary:first-child {
+          opacity: 0.5;
+          pointer-events: none;
+          cursor: not-allowed;
+        }
+      `}</style>
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-gray-700">
         <h1 className="text-sm font-medium">Qwen Code</h1>
@@ -688,18 +731,6 @@ ${formatted || '(no logs captured)'}`;
           <span className="text-xs text-gray-400">
             {isConnected ? `Connected` : 'Disconnected'}
           </span>
-          {authLabel && (
-            <span className="text-xs text-gray-400">Auth: {authLabel}</span>
-          )}
-          {isConnected && (
-            <button
-              className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
-              onClick={handleExit}
-              title="Stop CLI session"
-            >
-              Exit
-            </button>
-          )}
           {/* {isConnected && (
             <button
               className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
@@ -919,9 +950,37 @@ ${formatted || '(no logs captured)'}`;
         />
       )}
 
+      {/* MCP Tools Status Banner */}
+      {mcpToolsStatus.status && (
+        <div
+          className={`absolute left-3 right-3 top-10 z-50 rounded p-2 text-[12px] flex items-center justify-between gap-2 ${
+            mcpToolsStatus.status === 'loading'
+              ? 'bg-[#2a2d2e] border border-blue-600 text-blue-200'
+              : mcpToolsStatus.status === 'ready'
+                ? 'bg-[#2a2d2e] border border-green-600 text-green-200'
+                : 'bg-[#2a2d2e] border border-red-600 text-red-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {mcpToolsStatus.status === 'loading' && (
+              <div className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+            )}
+            {mcpToolsStatus.status === 'ready' && <span>✅</span>}
+            {mcpToolsStatus.status === 'error' && <span>❌</span>}
+            <span>{mcpToolsStatus.message}</span>
+          </div>
+          <button
+            className="px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
+            onClick={() => setMcpToolsStatus({ status: null })}
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Auth Required banner */}
       {authUri && (
-        <div className="absolute left-3 right-3 top-10 z-50 bg-[#2a2d2e] border border-yellow-600 text-yellow-200 rounded p-2 text-[12px] flex items-center justify-between gap-2">
+        <div className="absolute left-3 right-3 top-[4.5rem] z-50 bg-[#2a2d2e] border border-yellow-600 text-yellow-200 rounded p-2 text-[12px] flex items-center justify-between gap-2">
           <div>Authentication required. Click to sign in.</div>
           <div className="flex items-center gap-2">
             <button

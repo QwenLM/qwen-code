@@ -13,7 +13,6 @@ import { App } from './App.js';
 import { ChromePlatformProvider } from './platform/ChromePlatformProvider.js';
 import '@qwen-code/webui/styles.css';
 import './styles/tailwind.css';
-import './styles/App.css';
 import './styles/styles.css';
 
 function injectExtensionUri(): void {

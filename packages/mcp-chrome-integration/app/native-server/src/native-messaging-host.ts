@@ -541,7 +541,14 @@ export class NativeMessagingHost {
         );
 
         // Send a system message to help Qwen understand it has Chrome MCP capabilities
-        // Wait longer (5 seconds) to ensure MCP Server is fully ready and tools are registered
+        // Wait longer (10 seconds) to ensure MCP Server is fully ready and tools are registered
+
+        // Send loading status to UI
+        this.sendMessage({
+          type: 'mcpToolsStatus',
+          data: { status: 'loading', message: 'MCP 工具正在加载...' },
+        });
+
         setTimeout(async () => {
           try {
             await this.acpClient.prompt(
@@ -551,10 +558,20 @@ export class NativeMessagingHost {
                 'chrome_fill_or_select, chrome_keyboard, chrome_javascript, and others. ' +
                 'Use these tools to interact with the browser when the user asks about web pages or browser content.',
             );
+
+            // Send ready status to UI
+            this.sendMessage({
+              type: 'mcpToolsStatus',
+              data: { status: 'ready', message: 'MCP 工具已就绪' },
+            });
           } catch {
             // Silently ignore errors - the system message is a hint, not required
+            this.sendMessage({
+              type: 'mcpToolsStatus',
+              data: { status: 'error', message: 'MCP 工具加载失败' },
+            });
           }
-        }, 5000); // Wait 5 seconds to ensure MCP Server is fully ready and tools are registered
+        }, 10000); // Wait 10 seconds to ensure MCP Server is fully ready and tools are registered
 
         this.sendAuthStatus({
           authenticated: true,
