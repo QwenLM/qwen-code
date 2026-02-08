@@ -19,7 +19,7 @@ import { createMigrationStep } from '../pipeline.js';
  * Mapping of V1 flat field names to V2 nested paths.
  * Fields not in this map will be preserved as unknown fields.
  */
-const V1_TO_V2_MAP: Record<string, string> = {
+export const V1_TO_V2_MAP: Record<string, string> = {
   // UI settings
   theme: 'ui.theme',
   hideWindowTitle: 'ui.hideWindowTitle',

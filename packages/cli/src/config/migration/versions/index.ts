@@ -29,5 +29,5 @@ export const MIGRATIONS: Array<Migration<unknown, unknown>> = [
 ];
 
 // Re-export individual migrations for direct use
-export { migrateV1ToV2 } from './v1-to-v2.js';
+export { migrateV1ToV2, V1_TO_V2_MAP } from './v1-to-v2.js';
 export { migrateV2ToV3 } from './v2-to-v3.js';

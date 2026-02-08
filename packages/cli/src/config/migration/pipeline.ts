@@ -18,6 +18,29 @@ import {
   LATEST_VERSION,
   SETTINGS_VERSION_KEY,
 } from './types.js';
+import { V1_TO_V2_MAP } from './versions/v1-to-v2.js';
+
+/**
+ * Known V2 container names.
+ * These are fields that exist as V2 container keys.
+ */
+const KNOWN_V2_CONTAINERS = new Set([
+  'ui',
+  'general',
+  'model',
+  'context',
+  'tools',
+  'mcp',
+  'security',
+  'advanced',
+  'output',
+  'ide',
+  'privacy',
+  'telemetry',
+  'extensions',
+  'experimental',
+  'modelProviders',
+]);
 
 /**
  * Detects the schema version of a settings object.
@@ -41,6 +64,36 @@ export function detectVersion(data: unknown): number {
   const version = obj[SETTINGS_VERSION_KEY];
   if (typeof version === 'number' && version >= 3) {
     return version;
+  }
+
+  // First, check for any V1 legacy keys with V1-style values (non-objects).
+  // If there are V1 keys with primitive values (string, boolean, number), this is a V1 settings file.
+  // Note: Some keys like 'model' exist in both V1 (as string) and V2 (as object),
+  // so we only treat them as V1 if the value is not an object.
+  const v1Keys = Object.keys(V1_TO_V2_MAP);
+  const hasV1StyleKeys = Object.entries(obj).some(([key, value]) => {
+    if (!v1Keys.includes(key)) return false;
+    // If the value is a primitive (string, boolean, number), it's V1 style (e.g., model: 'gemini-pro', autoAccept: false)
+    // If the value is an object/array, it might be V2 style (e.g., model: { name: 'gemini-pro' })
+    return typeof value !== 'object' || value === null;
+  });
+  if (hasV1StyleKeys) {
+    return 1;
+  }
+
+  // Check for V2: presence of any known V2 container as a top-level object
+  // This catches partially migrated settings that have V2 structure but no version field
+  for (const key of Object.keys(obj)) {
+    if (KNOWN_V2_CONTAINERS.has(key)) {
+      const value = obj[key];
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        return 2;
+      }
+    }
   }
 
   // Check for V2: nested structure with disable* booleans

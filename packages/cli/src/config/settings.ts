@@ -36,6 +36,7 @@ import {
   needsMigration,
   LATEST_VERSION,
   SETTINGS_VERSION_KEY,
+  V1_TO_V2_MAP,
 } from './migration/index.js';
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
@@ -64,6 +65,7 @@ export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 export {
   SETTINGS_VERSION_KEY,
   LATEST_VERSION as SETTINGS_VERSION,
+  needsMigration,
 } from './migration/index.js';
 
 export function getSystemSettingsPath(): string {
@@ -158,20 +160,73 @@ function getSettingsFileKeyWarnings(
   }
 
   const warnings: string[] = [];
-
-  // Unknown top-level keys.
   const schemaKeys = new Set(Object.keys(getSettingsSchema()));
+
+  // Check for legacy V1 keys.
   for (const key of Object.keys(settings)) {
     if (key === SETTINGS_VERSION_KEY) {
       continue;
     }
-    if (schemaKeys.has(key)) {
+
+    // Check if this is a legacy V1 key.
+    const v2Path = V1_TO_V2_MAP[key];
+    if (v2Path) {
+      // Special case: Some keys like 'model' exist as both V1 string keys
+      // and V2/V3 container objects. Only warn if the value looks like V1.
+      const value = settings[key];
+      const targetContainer = v2Path.split('.')[0];
+
+      // If the value is an object and matches a valid V2/V3 container,
+      // it's likely already in V2/V3 format, not a V1 legacy key.
+      if (
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value) &&
+        schemaKeys.has(targetContainer)
+      ) {
+        // Check if this is a V1-style value (e.g., model: 'gemini-pro' vs model: { name: 'gemini-pro' })
+        // For 'model', V1 uses string, V2 uses object
+        // For other keys, check if the structure matches V2 expectations
+        const isV1StyleValue =
+          key === 'model' && typeof value === 'string' ? true : false;
+
+        // Additional check: if the key is a container in V2 and value is object with expected properties,
+        // treat it as valid V2/V3
+        const schema = getSettingsSchema();
+        const containerSchema = (
+          schema as Record<string, SettingDefinition | undefined>
+        )[targetContainer];
+        if (containerSchema?.properties) {
+          const containerKeys = Object.keys(containerSchema.properties);
+          const valueKeys = Object.keys(value as Record<string, unknown>);
+          const hasV2Structure = valueKeys.some((k) =>
+            containerKeys.includes(k),
+          );
+
+          if (hasV2Structure) {
+            // This looks like valid V2/V3 structure, skip warning
+            continue;
+          }
+        }
+
+        if (!isV1StyleValue) {
+          continue;
+        }
+      }
+
+      warnings.push(
+        `Warning: Legacy setting '${key}' will be ignored in ${settingsFilePath}. ` +
+          `Use '${v2Path}' instead.`,
+      );
       continue;
     }
 
-    warnings.push(
-      `Warning: Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
-    );
+    // Check for unknown top-level keys.
+    if (!schemaKeys.has(key)) {
+      warnings.push(
+        `Warning: Unknown setting '${key}' will be ignored in ${settingsFilePath}.`,
+      );
+    }
   }
 
   return warnings;

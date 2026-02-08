@@ -55,7 +55,11 @@ export {
   preserveUnknownFields,
   deepClone,
 } from './utils.js';
-export { migrateV1ToV2, migrateV2ToV3 } from './versions/index.js';
+export {
+  migrateV1ToV2,
+  migrateV2ToV3,
+  V1_TO_V2_MAP,
+} from './versions/index.js';
 
 /**
  * The migration pipeline instance.
