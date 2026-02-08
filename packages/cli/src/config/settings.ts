@@ -28,9 +28,15 @@ import {
   getSettingsSchema,
 } from './settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { customDeepMerge, type MergeableObject } from '../utils/deepMerge.js';
+import { customDeepMerge } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import {
+  migrateToLatest,
+  needsMigration,
+  LATEST_VERSION,
+  SETTINGS_VERSION_KEY,
+} from './migration/index.js';
 
 function getMergeStrategyForPath(path: string[]): MergeStrategy | undefined {
   let current: SettingDefinition | undefined = undefined;
@@ -54,114 +60,11 @@ export const USER_SETTINGS_PATH = Storage.getGlobalSettingsPath();
 export const USER_SETTINGS_DIR = path.dirname(USER_SETTINGS_PATH);
 export const DEFAULT_EXCLUDED_ENV_VARS = ['DEBUG', 'DEBUG_MODE'];
 
-const MIGRATE_V2_OVERWRITE = true;
-
-// Settings version to track migration state
-export const SETTINGS_VERSION = 3;
-export const SETTINGS_VERSION_KEY = '$version';
-
-const MIGRATION_MAP: Record<string, string> = {
-  accessibility: 'ui.accessibility',
-  allowedTools: 'tools.allowed',
-  allowMCPServers: 'mcp.allowed',
-  autoAccept: 'tools.autoAccept',
-  autoConfigureMaxOldSpaceSize: 'advanced.autoConfigureMemory',
-  bugCommand: 'advanced.bugCommand',
-  chatCompression: 'model.chatCompression',
-  checkpointing: 'general.checkpointing',
-  coreTools: 'tools.core',
-  contextFileName: 'context.fileName',
-  customThemes: 'ui.customThemes',
-  customWittyPhrases: 'ui.customWittyPhrases',
-  debugKeystrokeLogging: 'general.debugKeystrokeLogging',
-  dnsResolutionOrder: 'advanced.dnsResolutionOrder',
-  enforcedAuthType: 'security.auth.enforcedType',
-  excludeTools: 'tools.exclude',
-  excludeMCPServers: 'mcp.excluded',
-  excludedProjectEnvVars: 'advanced.excludedEnvVars',
-  extensions: 'extensions',
-  fileFiltering: 'context.fileFiltering',
-  folderTrustFeature: 'security.folderTrust.featureEnabled',
-  folderTrust: 'security.folderTrust.enabled',
-  hasSeenIdeIntegrationNudge: 'ide.hasSeenNudge',
-  hideWindowTitle: 'ui.hideWindowTitle',
-  showStatusInTitle: 'ui.showStatusInTitle',
-  hideTips: 'ui.hideTips',
-  showLineNumbers: 'ui.showLineNumbers',
-  showCitations: 'ui.showCitations',
-  ideMode: 'ide.enabled',
-  includeDirectories: 'context.includeDirectories',
-  loadMemoryFromIncludeDirectories: 'context.loadFromIncludeDirectories',
-  maxSessionTurns: 'model.maxSessionTurns',
-  mcpServers: 'mcpServers',
-  mcpServerCommand: 'mcp.serverCommand',
-  memoryImportFormat: 'context.importFormat',
-  model: 'model.name',
-  preferredEditor: 'general.preferredEditor',
-  sandbox: 'tools.sandbox',
-  selectedAuthType: 'security.auth.selectedType',
-  shouldUseNodePtyShell: 'tools.shell.enableInteractiveShell',
-  shellPager: 'tools.shell.pager',
-  shellShowColor: 'tools.shell.showColor',
-  skipNextSpeakerCheck: 'model.skipNextSpeakerCheck',
-  summarizeToolOutput: 'model.summarizeToolOutput',
-  telemetry: 'telemetry',
-  theme: 'ui.theme',
-  toolDiscoveryCommand: 'tools.discoveryCommand',
-  toolCallCommand: 'tools.callCommand',
-  usageStatisticsEnabled: 'privacy.usageStatisticsEnabled',
-  useExternalAuth: 'security.auth.useExternal',
-  useRipgrep: 'tools.useRipgrep',
-  vimMode: 'general.vimMode',
-
-  enableWelcomeBack: 'ui.enableWelcomeBack',
-  approvalMode: 'tools.approvalMode',
-  sessionTokenLimit: 'model.sessionTokenLimit',
-  contentGenerator: 'model.generationConfig',
-  skipLoopDetection: 'model.skipLoopDetection',
-  skipStartupContext: 'model.skipStartupContext',
-  enableOpenAILogging: 'model.enableOpenAILogging',
-  tavilyApiKey: 'advanced.tavilyApiKey',
-  vlmSwitchMode: 'experimental.vlmSwitchMode',
-  visionModelPreview: 'experimental.visionModelPreview',
-};
-
-// Settings that need boolean inversion during migration (V1 -> V3)
-// Old negative naming -> new positive naming with inverted value
-const INVERTED_BOOLEAN_MIGRATIONS: Record<string, string> = {
-  disableAutoUpdate: 'general.enableAutoUpdate',
-  disableUpdateNag: 'general.enableAutoUpdate',
-  disableLoadingPhrases: 'ui.accessibility.enableLoadingPhrases',
-  disableFuzzySearch: 'context.fileFiltering.enableFuzzySearch',
-  disableCacheControl: 'model.generationConfig.enableCacheControl',
-};
-
-// Consolidated settings: multiple old V1 keys that map to a single new key.
-// Policy: if ANY of the old disable* settings is true, the new enable* should be false.
-const CONSOLIDATED_SETTINGS: Record<string, string[]> = {
-  'general.enableAutoUpdate': ['disableAutoUpdate', 'disableUpdateNag'],
-};
-
-// V2 nested paths that need inversion when migrating to V3
-const INVERTED_V2_PATHS: Record<string, string> = {
-  'general.disableAutoUpdate': 'general.enableAutoUpdate',
-  'general.disableUpdateNag': 'general.enableAutoUpdate',
-  'ui.accessibility.disableLoadingPhrases':
-    'ui.accessibility.enableLoadingPhrases',
-  'context.fileFiltering.disableFuzzySearch':
-    'context.fileFiltering.enableFuzzySearch',
-  'model.generationConfig.disableCacheControl':
-    'model.generationConfig.enableCacheControl',
-};
-
-// Consolidated V2 paths: multiple old paths that map to a single new path.
-// Policy: if ANY of the old disable* settings is true, the new enable* should be false.
-const CONSOLIDATED_V2_PATHS: Record<string, string[]> = {
-  'general.enableAutoUpdate': [
-    'general.disableAutoUpdate',
-    'general.disableUpdateNag',
-  ],
-};
+// Re-export for backward compatibility
+export {
+  SETTINGS_VERSION_KEY,
+  LATEST_VERSION as SETTINGS_VERSION,
+} from './migration/index.js';
 
 export function getSystemSettingsPath(): string {
   if (process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']) {
@@ -245,334 +148,21 @@ function setNestedProperty(
   current[lastKey] = value;
 }
 
-// Dynamically determine the top-level keys from the V2 settings structure.
-const KNOWN_V2_CONTAINERS = new Set([
-  ...Object.values(MIGRATION_MAP).map((path) => path.split('.')[0]),
-  ...Object.values(INVERTED_BOOLEAN_MIGRATIONS).map(
-    (path) => path.split('.')[0],
-  ),
-]);
-
-export function needsMigration(settings: Record<string, unknown>): boolean {
-  // Check version field first - if present and matches current version, no migration needed
-  if (SETTINGS_VERSION_KEY in settings) {
-    const version = settings[SETTINGS_VERSION_KEY];
-    if (typeof version === 'number' && version >= SETTINGS_VERSION) {
-      return false;
-    }
-  }
-
-  // Fallback to legacy detection: A file needs migration if it contains any
-  // top-level key that is moved to a nested location in V2.
-  const hasV1Keys = Object.entries(MIGRATION_MAP).some(([v1Key, v2Path]) => {
-    if (v1Key === v2Path || !(v1Key in settings)) {
-      return false;
-    }
-    // If a key exists that is both a V1 key and a V2 container (like 'model'),
-    // we need to check the type. If it's an object, it's a V2 container and not
-    // a V1 key that needs migration.
-    if (
-      KNOWN_V2_CONTAINERS.has(v1Key) &&
-      typeof settings[v1Key] === 'object' &&
-      settings[v1Key] !== null
-    ) {
-      return false;
-    }
-    return true;
-  });
-
-  // Also check for old inverted boolean keys (disable* -> enable*)
-  const hasInvertedBooleanKeys = Object.keys(INVERTED_BOOLEAN_MIGRATIONS).some(
-    (v1Key) => v1Key in settings,
-  );
-
-  return hasV1Keys || hasInvertedBooleanKeys;
-}
-
-/**
- * Migrates V1 (flat) settings directly to V3.
- * This includes both structural migration (flat -> nested) and boolean
- * inversion (disable* -> enable*), so migrateV2ToV3 will be skipped.
- */
-function migrateV1ToV3(
-  flatSettings: Record<string, unknown>,
-): Record<string, unknown> | null {
-  if (!needsMigration(flatSettings)) {
-    return null;
-  }
-
-  const v2Settings: Record<string, unknown> = {};
-  const flatKeys = new Set(Object.keys(flatSettings));
-
-  for (const [oldKey, newPath] of Object.entries(MIGRATION_MAP)) {
-    if (flatKeys.has(oldKey)) {
-      // Safety check: If this key is a V2 container (like 'model') and it's
-      // already an object, it's likely already in V2 format. Skip migration
-      // to prevent double-nesting (e.g., model.name.name).
-      if (
-        KNOWN_V2_CONTAINERS.has(oldKey) &&
-        typeof flatSettings[oldKey] === 'object' &&
-        flatSettings[oldKey] !== null &&
-        !Array.isArray(flatSettings[oldKey])
-      ) {
-        // This is already a V2 container, carry it over as-is
-        v2Settings[oldKey] = flatSettings[oldKey];
-        flatKeys.delete(oldKey);
-        continue;
-      }
-
-      setNestedProperty(v2Settings, newPath, flatSettings[oldKey]);
-      flatKeys.delete(oldKey);
-    }
-  }
-
-  // Handle consolidated settings first (multiple old keys -> single new key)
-  // Policy: if ANY of the old disable* settings is true, the new enable* should be false
-  for (const [newPath, oldKeys] of Object.entries(CONSOLIDATED_SETTINGS)) {
-    let hasAnyDisable = false;
-    let hasAnyValue = false;
-    for (const oldKey of oldKeys) {
-      if (flatKeys.has(oldKey)) {
-        hasAnyValue = true;
-        const oldValue = flatSettings[oldKey];
-        if (typeof oldValue === 'boolean' && oldValue === true) {
-          hasAnyDisable = true;
-        }
-        flatKeys.delete(oldKey);
-      }
-    }
-    if (hasAnyValue) {
-      // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
-      setNestedProperty(v2Settings, newPath, !hasAnyDisable);
-    }
-  }
-
-  // Handle remaining V1 settings that need boolean inversion (disable* -> enable*)
-  // Skip keys that were already handled by consolidated settings
-  const consolidatedKeys = new Set(Object.values(CONSOLIDATED_SETTINGS).flat());
-  for (const [oldKey, newPath] of Object.entries(INVERTED_BOOLEAN_MIGRATIONS)) {
-    if (consolidatedKeys.has(oldKey)) {
-      continue;
-    }
-    if (flatKeys.has(oldKey)) {
-      const oldValue = flatSettings[oldKey];
-      if (typeof oldValue === 'boolean') {
-        setNestedProperty(v2Settings, newPath, !oldValue);
-      }
-      flatKeys.delete(oldKey);
-    }
-  }
-
-  // Preserve mcpServers at the top level
-  if (flatSettings['mcpServers']) {
-    v2Settings['mcpServers'] = flatSettings['mcpServers'];
-    flatKeys.delete('mcpServers');
-  }
-
-  // Carry over any unrecognized keys
-  for (const remainingKey of flatKeys) {
-    const existingValue = v2Settings[remainingKey];
-    const newValue = flatSettings[remainingKey];
-
-    if (
-      typeof existingValue === 'object' &&
-      existingValue !== null &&
-      !Array.isArray(existingValue) &&
-      typeof newValue === 'object' &&
-      newValue !== null &&
-      !Array.isArray(newValue)
-    ) {
-      const pathAwareGetStrategy = (path: string[]) =>
-        getMergeStrategyForPath([remainingKey, ...path]);
-      v2Settings[remainingKey] = customDeepMerge(
-        pathAwareGetStrategy,
-        {},
-        newValue as MergeableObject,
-        existingValue as MergeableObject,
-      );
-    } else {
-      v2Settings[remainingKey] = newValue;
-    }
-  }
-
-  // Set version field to indicate this is a V2 settings file
-  v2Settings[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
-
-  return v2Settings;
-}
-
-// Migrate V2 settings to V3 (invert disable* -> enable* booleans)
-function migrateV2ToV3(
-  settings: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const version = settings[SETTINGS_VERSION_KEY];
-  if (typeof version === 'number' && version >= 3) {
-    return null;
-  }
-
-  let changed = false;
-  const result = structuredClone(settings);
-  const processedPaths = new Set<string>();
-
-  // Handle consolidated V2 paths first (multiple old paths -> single new path)
-  // Policy: if ANY of the old disable* settings is true, the new enable* should be false
-  for (const [newPath, oldPaths] of Object.entries(CONSOLIDATED_V2_PATHS)) {
-    let hasAnyDisable = false;
-    let hasAnyValue = false;
-    for (const oldPath of oldPaths) {
-      const oldValue = getNestedProperty(result, oldPath);
-      if (typeof oldValue === 'boolean') {
-        hasAnyValue = true;
-        if (oldValue === true) {
-          hasAnyDisable = true;
-        }
-        deleteNestedProperty(result, oldPath);
-        processedPaths.add(oldPath);
-        changed = true;
-      }
-    }
-    if (hasAnyValue) {
-      // enableAutoUpdate = !hasAnyDisable (if any disable* was true, enable should be false)
-      setNestedProperty(result, newPath, !hasAnyDisable);
-    }
-  }
-
-  // Handle remaining V2 paths that need inversion
-  for (const [oldPath, newPath] of Object.entries(INVERTED_V2_PATHS)) {
-    if (processedPaths.has(oldPath)) {
-      continue;
-    }
-    const oldValue = getNestedProperty(result, oldPath);
-    if (typeof oldValue === 'boolean') {
-      // Remove old property
-      deleteNestedProperty(result, oldPath);
-      // Set new property with inverted value
-      setNestedProperty(result, newPath, !oldValue);
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    result[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
-    return result;
-  }
-
-  // Even if no changes, bump version to 3 to skip future migration checks
-  if (typeof version === 'number' && version < SETTINGS_VERSION) {
-    result[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
-    return result;
-  }
-
-  return null;
-}
-
-function deleteNestedProperty(
-  obj: Record<string, unknown>,
-  path: string,
-): void {
-  const keys = path.split('.');
-  const lastKey = keys.pop();
-  if (!lastKey) return;
-
-  let current: Record<string, unknown> = obj;
-  for (const key of keys) {
-    const next = current[key];
-    if (typeof next !== 'object' || next === null) {
-      return;
-    }
-    current = next as Record<string, unknown>;
-  }
-  delete current[lastKey];
-}
-
-function getNestedProperty(
-  obj: Record<string, unknown>,
-  path: string,
-): unknown {
-  const keys = path.split('.');
-  let current: unknown = obj;
-  for (const key of keys) {
-    if (typeof current !== 'object' || current === null || !(key in current)) {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[key];
-  }
-  return current;
-}
-
-const REVERSE_MIGRATION_MAP: Record<string, string> = Object.fromEntries(
-  Object.entries(MIGRATION_MAP).map(([key, value]) => [value, key]),
-);
-
-// Reverse map for old V2 paths (before rename) to V1 keys.
-// Used when migrating settings that still have old V2 naming (e.g., general.disableAutoUpdate).
-const OLD_V2_TO_V1_MAP: Record<string, string> = {};
-for (const [oldV2Path, newV3Path] of Object.entries(INVERTED_V2_PATHS)) {
-  // Find the V1 key that maps to this V3 path
-  for (const [v1Key, v3Path] of Object.entries(INVERTED_BOOLEAN_MIGRATIONS)) {
-    if (v3Path === newV3Path) {
-      OLD_V2_TO_V1_MAP[oldV2Path] = v1Key;
-      break;
-    }
-  }
-}
-
-// Reverse map for new V3 paths to V1 keys (with boolean inversion).
-// Used when migrating settings that have new V3 naming (e.g., general.enableAutoUpdate).
-const V3_TO_V1_INVERTED_MAP: Record<string, string> = Object.fromEntries(
-  Object.entries(INVERTED_BOOLEAN_MIGRATIONS).map(([v1Key, v3Path]) => [
-    v3Path,
-    v1Key,
-  ]),
-);
-
 function getSettingsFileKeyWarnings(
   settings: Record<string, unknown>,
   settingsFilePath: string,
 ): string[] {
   const version = settings[SETTINGS_VERSION_KEY];
-  if (typeof version !== 'number' || version < SETTINGS_VERSION) {
+  if (typeof version !== 'number' || version < LATEST_VERSION) {
     return [];
   }
 
   const warnings: string[] = [];
-  const ignoredLegacyKeys = new Set<string>();
-
-  // Ignored legacy keys (V1 top-level keys that moved to a nested V2 path).
-  for (const [oldKey, newPath] of Object.entries(MIGRATION_MAP)) {
-    if (oldKey === newPath) {
-      continue;
-    }
-    if (!(oldKey in settings)) {
-      continue;
-    }
-
-    const oldValue = settings[oldKey];
-
-    // If this key is a V2 container (like 'model') and it's already an object,
-    // it's likely already in V2 format. Don't warn.
-    if (
-      KNOWN_V2_CONTAINERS.has(oldKey) &&
-      typeof oldValue === 'object' &&
-      oldValue !== null &&
-      !Array.isArray(oldValue)
-    ) {
-      continue;
-    }
-
-    ignoredLegacyKeys.add(oldKey);
-    warnings.push(
-      `Warning: Legacy setting '${oldKey}' will be ignored in ${settingsFilePath}. Please use '${newPath}' instead.`,
-    );
-  }
 
   // Unknown top-level keys.
   const schemaKeys = new Set(Object.keys(getSettingsSchema()));
   for (const key of Object.keys(settings)) {
     if (key === SETTINGS_VERSION_KEY) {
-      continue;
-    }
-    if (ignoredLegacyKeys.has(key)) {
       continue;
     }
     if (schemaKeys.has(key)) {
@@ -616,75 +206,6 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
   }
 
   return [...warningSet];
-}
-
-export function migrateSettingsToV1(
-  v2Settings: Record<string, unknown>,
-): Record<string, unknown> {
-  const v1Settings: Record<string, unknown> = {};
-  const v2Keys = new Set(Object.keys(v2Settings));
-
-  for (const [newPath, oldKey] of Object.entries(REVERSE_MIGRATION_MAP)) {
-    const value = getNestedProperty(v2Settings, newPath);
-    if (value !== undefined) {
-      v1Settings[oldKey] = value;
-      v2Keys.delete(newPath.split('.')[0]);
-    }
-  }
-
-  // Handle old V2 inverted paths (no value inversion needed)
-  // e.g., general.disableAutoUpdate -> disableAutoUpdate
-  for (const [oldV2Path, v1Key] of Object.entries(OLD_V2_TO_V1_MAP)) {
-    const value = getNestedProperty(v2Settings, oldV2Path);
-    if (value !== undefined) {
-      v1Settings[v1Key] = value;
-      v2Keys.delete(oldV2Path.split('.')[0]);
-    }
-  }
-
-  // Handle new V3 inverted paths (WITH value inversion)
-  // e.g., general.enableAutoUpdate -> disableAutoUpdate (inverted)
-  for (const [v3Path, v1Key] of Object.entries(V3_TO_V1_INVERTED_MAP)) {
-    const value = getNestedProperty(v2Settings, v3Path);
-    if (value !== undefined && typeof value === 'boolean') {
-      v1Settings[v1Key] = !value;
-      v2Keys.delete(v3Path.split('.')[0]);
-    }
-  }
-
-  // Preserve mcpServers at the top level
-  if (v2Settings['mcpServers']) {
-    v1Settings['mcpServers'] = v2Settings['mcpServers'];
-    v2Keys.delete('mcpServers');
-  }
-
-  // Carry over any unrecognized keys
-  for (const remainingKey of v2Keys) {
-    // Skip the version field - it's only for V2 format
-    if (remainingKey === SETTINGS_VERSION_KEY) {
-      continue;
-    }
-
-    const value = v2Settings[remainingKey];
-    if (value === undefined) {
-      continue;
-    }
-
-    // Don't carry over empty objects that were just containers for migrated settings.
-    if (
-      KNOWN_V2_CONTAINERS.has(remainingKey) &&
-      typeof value === 'object' &&
-      value !== null &&
-      !Array.isArray(value) &&
-      Object.keys(value).length === 0
-    ) {
-      continue;
-    }
-
-    v1Settings[remainingKey] = value;
-  }
-
-  return v1Settings;
 }
 
 function mergeSettings(
@@ -928,7 +449,7 @@ export function loadSettings(
 
   const loadAndMigrate = (
     filePath: string,
-    scope: SettingScope,
+    _scope: SettingScope,
   ): { settings: Settings; rawJson?: string } => {
     try {
       if (fs.existsSync(filePath)) {
@@ -948,71 +469,48 @@ export function loadSettings(
         }
 
         let settingsObject = rawSettings as Record<string, unknown>;
-        if (needsMigration(settingsObject)) {
-          const migratedSettings = migrateV1ToV3(settingsObject);
-          if (migratedSettings) {
-            if (MIGRATE_V2_OVERWRITE) {
-              try {
-                fs.renameSync(filePath, `${filePath}.orig`);
-                fs.writeFileSync(
-                  filePath,
-                  JSON.stringify(migratedSettings, null, 2),
-                  'utf-8',
-                );
-              } catch (e) {
-                writeStderrLine(
-                  `Error migrating settings file on disk: ${getErrorMessage(
-                    e,
-                  )}`,
-                );
-              }
-            } else {
-              migratedInMemorScopes.add(scope);
-            }
-            settingsObject = migratedSettings;
-          }
-        } else if (!(SETTINGS_VERSION_KEY in settingsObject)) {
-          // No migration needed, but version field is missing - add it for future optimizations
-          settingsObject[SETTINGS_VERSION_KEY] = SETTINGS_VERSION;
-          if (MIGRATE_V2_OVERWRITE) {
-            try {
-              fs.writeFileSync(
-                filePath,
-                JSON.stringify(settingsObject, null, 2),
-                'utf-8',
-              );
-            } catch (e) {
-              writeStderrLine(
-                `Error adding version to settings file: ${getErrorMessage(e)}`,
-              );
-            }
-          }
-        }
 
-        // V2 to V3 migration (invert disable* -> enable* booleans)
-        const v3Migrated = migrateV2ToV3(settingsObject);
-        if (v3Migrated) {
-          if (MIGRATE_V2_OVERWRITE) {
+        // Use new migration pipeline
+        if (needsMigration(settingsObject)) {
+          const migrationResult = migrateToLatest(settingsObject);
+
+          if (migrationResult.success) {
+            // Backup and write migrated settings
             try {
-              // Only backup if not already backed up by V1->V2 migration
               const backupPath = `${filePath}.orig`;
               if (!fs.existsSync(backupPath)) {
                 fs.renameSync(filePath, backupPath);
               }
               fs.writeFileSync(
                 filePath,
-                JSON.stringify(v3Migrated, null, 2),
+                JSON.stringify(migrationResult.data, null, 2),
                 'utf-8',
               );
             } catch (e) {
               writeStderrLine(
-                `Error migrating settings file to V3: ${getErrorMessage(e)}`,
+                `Error migrating settings file on disk: ${getErrorMessage(e)}`,
               );
             }
+            settingsObject = migrationResult.data as Record<string, unknown>;
           } else {
-            migratedInMemorScopes.add(scope);
+            writeStderrLine(
+              `Settings migration failed: ${migrationResult.warnings.join(', ')}`,
+            );
           }
-          settingsObject = v3Migrated;
+        } else if (!(SETTINGS_VERSION_KEY in settingsObject)) {
+          // No migration needed, but version field is missing - add it for future optimizations
+          settingsObject[SETTINGS_VERSION_KEY] = LATEST_VERSION;
+          try {
+            fs.writeFileSync(
+              filePath,
+              JSON.stringify(settingsObject, null, 2),
+              'utf-8',
+            );
+          } catch (e) {
+            writeStderrLine(
+              `Error adding version to settings file: ${getErrorMessage(e)}`,
+            );
+          }
         }
 
         return { settings: settingsObject as Settings, rawJson: content };
@@ -1141,17 +639,10 @@ export function saveSettings(settingsFile: SettingsFile): void {
       fs.mkdirSync(dirPath, { recursive: true });
     }
 
-    let settingsToSave = settingsFile.originalSettings;
-    if (!MIGRATE_V2_OVERWRITE) {
-      settingsToSave = migrateSettingsToV1(
-        settingsToSave as Record<string, unknown>,
-      ) as Settings;
-    }
-
     // Use the format-preserving update function
     updateSettingsFilePreservingFormat(
       settingsFile.path,
-      settingsToSave as Record<string, unknown>,
+      settingsFile.originalSettings as Record<string, unknown>,
     );
   } catch (error) {
     writeStderrLine('Error saving user settings file.');
