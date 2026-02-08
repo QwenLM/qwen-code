@@ -889,15 +889,22 @@ describe('convertToFunctionResponse', () => {
       { text: 'Another text part' },
     ];
     const result = convertToFunctionResponse(toolName, callId, llmContent);
+    // All content should be inside the FunctionResponse:
+    // - text parts joined into response.output
+    // - media parts in response.parts
     expect(result).toEqual([
       {
         functionResponse: {
           name: toolName,
           id: callId,
-          response: { output: 'Tool execution succeeded.' },
+          response: {
+            output: 'Some textual description\nAnother text part',
+          },
+          parts: [
+            { inlineData: { mimeType: 'image/jpeg', data: 'base64data...' } },
+          ],
         },
       },
-      ...llmContent,
     ]);
   });
 
