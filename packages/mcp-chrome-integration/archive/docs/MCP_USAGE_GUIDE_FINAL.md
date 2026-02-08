@@ -34,6 +34,7 @@ qwen
 ```
 
 **测试命令**:
+
 ```
 > /mcp list
 
@@ -51,6 +52,7 @@ qwen
 ## 🛠️ 可用的 27 个工具
 
 ### 导航和标签管理
+
 - `chrome_navigate` - 导航到 URL
 - `chrome_go_back_or_forward` - 前进/后退
 - `chrome_switch_tab` - 切换标签页
@@ -58,6 +60,7 @@ qwen
 - `get_windows_and_tabs` - 获取所有窗口和标签页
 
 ### 页面交互
+
 - `chrome_read_page` - 读取页面内容（使用 accessibility tree）
 - `chrome_screenshot` - 截图（全页/可见区域/元素）
 - `chrome_click_element` - 点击元素
@@ -67,6 +70,7 @@ qwen
 - `chrome_keyboard` - 键盘快捷键
 
 ### 调试和分析
+
 - `chrome_console` - 获取控制台日志
 - `chrome_network_debugger_start` - 开始网络监控
 - `chrome_network_debugger_stop` - 停止网络监控并获取日志
@@ -74,12 +78,14 @@ qwen
 - `chrome_performance_debugger_stop` - 停止性能分析
 
 ### 书签和历史
+
 - `chrome_bookmark_search` - 搜索书签
 - `chrome_bookmark_add` - 添加书签
 - `chrome_bookmark_delete` - 删除书签
 - `chrome_history` - 浏览历史
 
 ### 高级功能
+
 - `search_tabs_content` - AI 语义搜索标签页内容
 - `chrome_request_element_selection` - 请求用户选择页面元素
 - `chrome_request_user_file` - 请求用户选择文件
@@ -168,12 +174,12 @@ Claude 会:
 
 ## 📁 文件位置
 
-| 文件/目录 | 说明 |
-|---------|------|
-| `/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/native-server/dist/start-server.js` | HTTP 服务器启动脚本 |
-| `/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/native-server/dist/mcp/mcp-server-stdio.js` | MCP Server (stdio) |
-| `/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension/.qwen/settings.json` | Qwen MCP 配置 |
-| `/private/tmp/claude/-Users-yiliang-projects-temp-qwen-code/tasks/bc09dba.output` | 服务器日志 |
+| 文件/目录                                                                                                               | 说明                |
+| ----------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| `/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/native-server/dist/start-server.js`         | HTTP 服务器启动脚本 |
+| `/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/native-server/dist/mcp/mcp-server-stdio.js` | MCP Server (stdio)  |
+| `/Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/app/chrome-extension/.qwen/settings.json`       | Qwen MCP 配置       |
+| `/private/tmp/claude/-Users-yiliang-projects-temp-qwen-code/tasks/bc09dba.output`                                       | 服务器日志          |
 
 ---
 
@@ -214,6 +220,7 @@ chmod +x /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/
 ```
 
 使用：
+
 ```bash
 /Users/yiliang/projects/temp/qwen-code/packages/mcp-chrome-integration/start-mcp.sh
 ```

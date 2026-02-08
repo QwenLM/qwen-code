@@ -12,14 +12,14 @@
 
 ### 核心优势
 
-| 维度 | hangwin/mcp-chrome | 当前实现 | 优势 |
-|------|-------------------|---------|------|
-| **Response Body** | ✅ 完整支持 | ✅ 完整支持 | `chrome_network_debugger` 明确包含 response bodies |
-| **页面操作** | ✅ 完整支持 | ✅ 完整支持 | 功能更丰富 (click/fill/keyboard/inject) |
-| **架构复杂度** | 🟢 **2层** | 🔴 **5层** | 简化 60% 通信链路 |
-| **工具数量** | 🟢 **20+** | 🔴 **10** | 功能增强 100% |
-| **维护成本** | 🟢 社区维护 | 🔴 内部维护 | 零维护成本 |
-| **安装复杂度** | 🟢 简单 | 🔴 复杂 | `npm install -g mcp-chrome-bridge` |
+| 维度              | hangwin/mcp-chrome | 当前实现    | 优势                                               |
+| ----------------- | ------------------ | ----------- | -------------------------------------------------- |
+| **Response Body** | ✅ 完整支持        | ✅ 完整支持 | `chrome_network_debugger` 明确包含 response bodies |
+| **页面操作**      | ✅ 完整支持        | ✅ 完整支持 | 功能更丰富 (click/fill/keyboard/inject)            |
+| **架构复杂度**    | 🟢 **2层**         | 🔴 **5层**  | 简化 60% 通信链路                                  |
+| **工具数量**      | 🟢 **20+**         | 🔴 **10**   | 功能增强 100%                                      |
+| **维护成本**      | 🟢 社区维护        | 🔴 内部维护 | 零维护成本                                         |
+| **安装复杂度**    | 🟢 简单            | 🔴 复杂     | `npm install -g mcp-chrome-bridge`                 |
 
 ---
 
@@ -28,6 +28,7 @@
 ### 1. Response Body 获取 ✅ 完全满足
 
 #### hangwin/mcp-chrome
+
 ```json
 工具: chrome_network_debugger_start/stop
 描述: "Debugger API with response bodies"
@@ -35,6 +36,7 @@
 ```
 
 #### 当前实现
+
 ```typescript
 方式: CDP + Content-Script 双重拦截
 限制: 200KB 文本限制 (可配置)
@@ -47,16 +49,16 @@
 
 ### 2. 页面操作能力对比 ✅ 完全覆盖
 
-| 当前工具 | hangwin/mcp-chrome | 状态 | 说明 |
-|---------|-------------------|------|------|
-| `browser_click` | `chrome_click_element` | ✅ 更强 | 支持 ref/selector/coordinates |
-| `browser_click_text` | `chrome_computer` (action: left_click) | ✅ 更强 | 统一交互工具 |
-| `browser_fill_form` | `chrome_fill_or_select` | ✅ 支持 | 支持 ref/selector |
-| `browser_fill_form_auto` | `chrome_fill_or_select` | ✅ 支持 | 自动填充 |
-| `browser_input_text` | `chrome_fill_or_select` | ✅ 支持 | 文本输入 |
-| `browser_run_js` | `chrome_inject_script` | ✅ 支持 | 注入脚本 |
-| - | `chrome_keyboard` | ✅ **新增** | 键盘快捷键 (Ctrl+C 等) |
-| - | `chrome_computer` | ✅ **新增** | 统一高级交互 (hover/drag/scroll) |
+| 当前工具                 | hangwin/mcp-chrome                     | 状态        | 说明                             |
+| ------------------------ | -------------------------------------- | ----------- | -------------------------------- |
+| `browser_click`          | `chrome_click_element`                 | ✅ 更强     | 支持 ref/selector/coordinates    |
+| `browser_click_text`     | `chrome_computer` (action: left_click) | ✅ 更强     | 统一交互工具                     |
+| `browser_fill_form`      | `chrome_fill_or_select`                | ✅ 支持     | 支持 ref/selector                |
+| `browser_fill_form_auto` | `chrome_fill_or_select`                | ✅ 支持     | 自动填充                         |
+| `browser_input_text`     | `chrome_fill_or_select`                | ✅ 支持     | 文本输入                         |
+| `browser_run_js`         | `chrome_inject_script`                 | ✅ 支持     | 注入脚本                         |
+| -                        | `chrome_keyboard`                      | ✅ **新增** | 键盘快捷键 (Ctrl+C 等)           |
+| -                        | `chrome_computer`                      | ✅ **新增** | 统一高级交互 (hover/drag/scroll) |
 
 **验证结果**: ✅ **完全覆盖** - 所有当前功能都有对应或更强的替代
 
@@ -65,6 +67,7 @@
 ### 3. Console 日志捕获 ✅ 支持
 
 #### hangwin/mcp-chrome
+
 ```json
 工具: chrome_console
 描述: "Capture and retrieve console output from browser tabs"
@@ -72,6 +75,7 @@
 ```
 
 #### 当前实现
+
 ```typescript
 方式: Content-Script 拦截
 缓存: 最后 100 条日志
@@ -84,12 +88,12 @@
 
 ### 4. 页面内容读取 ✅ 功能更强
 
-| 功能 | hangwin/mcp-chrome | 当前实现 |
-|------|-------------------|---------|
-| 页面文本 | `chrome_get_web_content` (text/html) | ✅ |
-| DOM 结构 | `chrome_read_page` (accessibility tree) | ❌ |
-| 交互元素 | `chrome_get_interactive_elements` | ✅ |
-| AI 语义搜索 | `search_tabs_content` | ❌ |
+| 功能        | hangwin/mcp-chrome                      | 当前实现 |
+| ----------- | --------------------------------------- | -------- |
+| 页面文本    | `chrome_get_web_content` (text/html)    | ✅       |
+| DOM 结构    | `chrome_read_page` (accessibility tree) | ❌       |
+| 交互元素    | `chrome_get_interactive_elements`       | ✅       |
+| AI 语义搜索 | `search_tabs_content`                   | ❌       |
 
 **验证结果**: ✅ **功能更强**
 
@@ -98,6 +102,7 @@
 ### 5. 截图功能 ✅ 功能更丰富
 
 #### hangwin/mcp-chrome
+
 ```json
 工具: chrome_screenshot
 功能:
@@ -109,6 +114,7 @@
 ```
 
 #### 当前实现
+
 ```typescript
 工具: browser_capture_screenshot
 功能:
@@ -123,6 +129,7 @@
 ## 🚀 额外功能 (当前实现不具备)
 
 ### 1. AI 语义搜索
+
 ```json
 工具: search_tabs_content
 功能: AI-powered semantic search across browser tabs
@@ -130,6 +137,7 @@
 ```
 
 ### 2. 浏览器数据管理
+
 ```json
 工具组:
   - chrome_history: 搜索浏览历史
@@ -139,6 +147,7 @@
 ```
 
 ### 3. 高级交互
+
 ```json
 工具: chrome_computer
 功能:
@@ -151,6 +160,7 @@
 ```
 
 ### 4. 跨标签页管理
+
 ```json
 工具:
   - get_windows_and_tabs: 列出所有窗口和标签
@@ -164,6 +174,7 @@
 ## 📐 架构对比
 
 ### 当前架构 (5层通信)
+
 ```
 Chrome Extension
   ↓ HTTP (127.0.0.1:18765)
@@ -175,12 +186,14 @@ Qwen CLI
 ```
 
 **问题**:
+
 - 🔴 通信层级过多 (5层)
 - 🔴 调试困难
 - 🔴 维护成本高
 - 🔴 单点故障多
 
 ### hangwin/mcp-chrome 架构 (2层通信)
+
 ```
 Chrome Extension
   ↓ MCP Protocol (HTTP/stdio)
@@ -188,6 +201,7 @@ Qwen CLI
 ```
 
 **优势**:
+
 - ✅ 通信简洁 (2层)
 - ✅ 调试容易
 - ✅ 社区维护
@@ -200,17 +214,20 @@ Qwen CLI
 ### 安装步骤 (3步)
 
 1. **安装 mcp-chrome-bridge**
+
 ```bash
 npm install -g mcp-chrome-bridge
 ```
 
 2. **加载 Chrome Extension**
+
 ```bash
 cd /Users/yiliang/projects/temp/mcp-chrome/releases/chrome-extension
 # 在 Chrome 中加载 unpacked extension
 ```
 
 3. **配置 Qwen CLI**
+
 ```json
 {
   "mcpServers": {
@@ -223,6 +240,7 @@ cd /Users/yiliang/projects/temp/mcp-chrome/releases/chrome-extension
 ```
 
 **对比当前安装**:
+
 - 当前: Native Messaging 配置, manifest.json, host.js 部署
 - hangwin: 仅需 `npm install -g` 和加载扩展
 
@@ -232,18 +250,18 @@ cd /Users/yiliang/projects/temp/mcp-chrome/releases/chrome-extension
 
 ## 📊 工具映射表
 
-| 当前工具 | hangwin 对应工具 | 迁移难度 | 说明 |
-|---------|-----------------|---------|------|
-| `browser_read_page` | `chrome_read_page` | 🟢 低 | API 类似 |
-| `browser_capture_screenshot` | `chrome_screenshot` | 🟢 低 | 参数略有不同 |
-| `browser_get_network_logs` | `chrome_network_debugger_start/stop` | 🟡 中 | 需要 start/stop 两步 |
-| `browser_get_console_logs` | `chrome_console` | 🟢 低 | API 类似 |
-| `browser_click` | `chrome_click_element` | 🟢 低 | 支持 selector |
-| `browser_click_text` | `chrome_click_element` | 🟢 低 | 通过 text 查找 |
-| `browser_fill_form` | `chrome_fill_or_select` | 🟢 低 | API 类似 |
-| `browser_fill_form_auto` | `chrome_fill_or_select` | 🟢 低 | 逐个填充 |
-| `browser_input_text` | `chrome_fill_or_select` | 🟢 低 | 同一工具 |
-| `browser_run_js` | `chrome_inject_script` | 🟢 低 | 注入脚本 |
+| 当前工具                     | hangwin 对应工具                     | 迁移难度 | 说明                 |
+| ---------------------------- | ------------------------------------ | -------- | -------------------- |
+| `browser_read_page`          | `chrome_read_page`                   | 🟢 低    | API 类似             |
+| `browser_capture_screenshot` | `chrome_screenshot`                  | 🟢 低    | 参数略有不同         |
+| `browser_get_network_logs`   | `chrome_network_debugger_start/stop` | 🟡 中    | 需要 start/stop 两步 |
+| `browser_get_console_logs`   | `chrome_console`                     | 🟢 低    | API 类似             |
+| `browser_click`              | `chrome_click_element`               | 🟢 低    | 支持 selector        |
+| `browser_click_text`         | `chrome_click_element`               | 🟢 低    | 通过 text 查找       |
+| `browser_fill_form`          | `chrome_fill_or_select`              | 🟢 低    | API 类似             |
+| `browser_fill_form_auto`     | `chrome_fill_or_select`              | 🟢 低    | 逐个填充             |
+| `browser_input_text`         | `chrome_fill_or_select`              | 🟢 低    | 同一工具             |
+| `browser_run_js`             | `chrome_inject_script`               | 🟢 低    | 注入脚本             |
 
 **总体迁移难度**: 🟢 **低** (80% 工具可直接映射)
 
@@ -251,13 +269,13 @@ cd /Users/yiliang/projects/temp/mcp-chrome/releases/chrome-extension
 
 ## ⚠️ 风险评估
 
-| 风险 | 可能性 | 影响 | 缓解措施 | 状态 |
-|------|-------|------|---------|------|
-| Response body 不完整 | 🟢 低 | 🔴 高 | 文档明确支持 | ✅ 无风险 |
-| 工具功能有差异 | 🟡 中 | 🟡 中 | 详细映射表 | ✅ 可控 |
-| 与 Qwen CLI 集成问题 | 🟢 低 | 🟡 中 | 支持 stdio + HTTP | ✅ 无风险 |
-| 性能下降 | 🟢 低 | 🟢 低 | 架构更简洁 | ✅ 可能更快 |
-| 社区维护不稳定 | 🟢 低 | 🟡 中 | 项目活跃 | ✅ 可控 |
+| 风险                 | 可能性 | 影响  | 缓解措施          | 状态        |
+| -------------------- | ------ | ----- | ----------------- | ----------- |
+| Response body 不完整 | 🟢 低  | 🔴 高 | 文档明确支持      | ✅ 无风险   |
+| 工具功能有差异       | 🟡 中  | 🟡 中 | 详细映射表        | ✅ 可控     |
+| 与 Qwen CLI 集成问题 | 🟢 低  | 🟡 中 | 支持 stdio + HTTP | ✅ 无风险   |
+| 性能下降             | 🟢 低  | 🟢 低 | 架构更简洁        | ✅ 可能更快 |
+| 社区维护不稳定       | 🟢 低  | 🟡 中 | 项目活跃          | ✅ 可控     |
 
 **总体风险**: 🟢 **低风险**
 
@@ -292,6 +310,7 @@ cd /Users/yiliang/projects/temp/mcp-chrome/releases/chrome-extension
 ### ✅ 强烈推荐完全替换
 
 **理由**:
+
 1. ✅ **功能完全覆盖**: 所有当前功能都有对应或更强的替代
 2. ✅ **架构大幅简化**: 从 5 层降至 2 层，降低 60% 复杂度
 3. ✅ **工具数量翻倍**: 从 10 个增加到 20+

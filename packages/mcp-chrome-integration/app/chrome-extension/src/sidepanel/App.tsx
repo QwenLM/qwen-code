@@ -11,16 +11,17 @@ import { EmptyState } from './platform/EmptyState.js';
 import {
   UserMessage,
   AssistantMessage,
+  ThinkingMessage,
   WaitingMessage,
   PermissionDrawer,
 } from '@qwen-code/webui';
-import type {
-  PermissionOption,
-  PermissionToolCall,
-} from '@qwen-code/webui';
+import { ToolCall as ToolCallCard } from './components/messages/toolcalls/ToolCall.js';
+import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
+import { useToolCalls } from './hooks/useToolCalls.js';
+import type { ToolCallUpdate } from './types/chatTypes.js';
 
 interface Message {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
 }
@@ -42,10 +43,19 @@ export const App: React.FC = () => {
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState('');
+  const [thinkingContent, setThinkingContent] = useState('');
+  const [thinkingStatus, setThinkingStatus] = useState<'loading' | 'default'>(
+    'default',
+  );
   // Debug: cache slash-commands (available_commands_update) & MCP tools list
   const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
   const [showToolsPanel, setShowToolsPanel] = useState(false);
   const [authUri, setAuthUri] = useState<string | null>(null);
+  const [authStatus, setAuthStatus] = useState<{
+    authenticated: boolean;
+    method?: string;
+    error?: string;
+  } | null>(null);
   const [isComposing, setIsComposing] = useState(false);
   const [permissionRequest, setPermissionRequest] = useState<{
     requestId: number;
@@ -53,16 +63,56 @@ export const App: React.FC = () => {
     options: PermissionOption[];
     toolCall: PermissionToolCall;
   } | null>(null);
+  const { toolCalls, handleToolCallUpdate, clearToolCalls } = useToolCalls();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputFieldRef = useRef<HTMLDivElement>(null);
   const autoConnectAttemptedRef = useRef(false);
 
+  const finalizeThinking = useCallback(
+    (timestamp?: number) => {
+      setThinkingContent((current) => {
+        if (current) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'thinking',
+              content: current,
+              timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+            },
+          ]);
+        }
+        return '';
+      });
+      setThinkingStatus('default');
+    },
+    [setMessages],
+  );
+
+  const flushStreamingToMessages = useCallback(
+    (timestamp?: number) => {
+      setStreamingContent((current) => {
+        if (current) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: current,
+              timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+            },
+          ]);
+        }
+        return '';
+      });
+    },
+    [setMessages],
+  );
+
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, streamingContent]);
+  }, [messages, streamingContent, toolCalls, thinkingContent]);
 
   // Listen for messages from background script
   useEffect(() => {
@@ -93,7 +143,31 @@ export const App: React.FC = () => {
         case 'authUpdate': {
           const authMessage = message as { data?: { authUri?: string } };
           const uri = authMessage.data?.authUri;
-          if (uri) setAuthUri(uri);
+          if (uri) {
+            setAuthUri(uri);
+            setAuthStatus({
+              authenticated: false,
+              method: authStatus?.method,
+              error: 'Authentication required',
+            });
+          }
+          break;
+        }
+        case 'authStatus': {
+          const authMessage = message as {
+            data?: {
+              authenticated?: boolean;
+              method?: string;
+              error?: string;
+            };
+          };
+          if (authMessage.data) {
+            setAuthStatus({
+              authenticated: !!authMessage.data.authenticated,
+              method: authMessage.data.method,
+              error: authMessage.data.error,
+            });
+          }
           break;
         }
         case 'mcpTools': {
@@ -126,21 +200,51 @@ export const App: React.FC = () => {
         }
 
         case 'streamEnd': {
-          setStreamingContent((current) => {
-            if (current) {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  role: 'assistant',
-                  content: current,
-                  timestamp: Date.now(),
-                },
-              ]);
-            }
-            return '';
-          });
+          finalizeThinking(Date.now() - 1);
+          flushStreamingToMessages();
           setIsStreaming(false);
           setIsWaitingForResponse(false);
+          break;
+        }
+
+        case 'thinkingChunk': {
+          const chunkMessage = message as { data: { chunk: string } };
+          setThinkingStatus('loading');
+          setThinkingContent((prev) => prev + (chunkMessage.data?.chunk || ''));
+          break;
+        }
+
+        case 'thinkingEnd': {
+          finalizeThinking();
+          break;
+        }
+
+        case 'toolCall':
+        case 'toolCallUpdate': {
+          const toolCallData = (message as { data?: ToolCallUpdate }).data;
+          if (toolCallData) {
+            const normalized =
+              toolCallData.sessionUpdate && !toolCallData.type
+                ? {
+                    ...toolCallData,
+                    type: toolCallData.sessionUpdate as
+                      | 'tool_call'
+                      | 'tool_call_update',
+                  }
+                : toolCallData;
+            handleToolCallUpdate(normalized as ToolCallUpdate);
+            const status = (normalized as ToolCallUpdate).status;
+            const isStart = normalized.type === 'tool_call';
+            const isFinal =
+              normalized.type === 'tool_call_update' &&
+              (status === 'completed' || status === 'failed');
+            if (isStart || isFinal) {
+              const ts = (normalized as ToolCallUpdate).timestamp;
+              flushStreamingToMessages(
+                typeof ts === 'number' ? ts - 1 : undefined,
+              );
+            }
+          }
           break;
         }
 
@@ -159,6 +263,7 @@ export const App: React.FC = () => {
           break;
         }
         case 'error': {
+          finalizeThinking();
           setIsStreaming(false);
           setIsWaitingForResponse(false);
           setLoadingMessage(null);
@@ -173,8 +278,8 @@ export const App: React.FC = () => {
               data: {
                 requestId: number;
                 sessionId?: string | null;
-    options: PermissionOption[];
-    toolCall: PermissionToolCall;
+                options: PermissionOption[];
+                toolCall: PermissionToolCall;
               };
             }
           ).data;
@@ -203,7 +308,13 @@ export const App: React.FC = () => {
         chrome.runtime.onMessage.removeListener(handleMessage);
       };
     }
-  }, [streamingContent]);
+  }, [
+    streamingContent,
+    finalizeThinking,
+    flushStreamingToMessages,
+    authStatus?.method,
+    handleToolCallUpdate,
+  ]);
 
   // Check connection status on mount
   useEffect(() => {
@@ -242,6 +353,8 @@ export const App: React.FC = () => {
           timestamp: Date.now(),
         },
       ]);
+      setThinkingContent('');
+      setThinkingStatus('default');
 
       // Clear input
       setInputText('');
@@ -284,6 +397,26 @@ export const App: React.FC = () => {
       setTimeout(() => setLoadingMessage(null), 3000);
     }
   }, [vscode]);
+
+  // Handle exit (stop CLI session)
+  const handleExit = useCallback(async () => {
+    const response = (await vscode.postMessage({ type: 'EXIT' })) as {
+      success?: boolean;
+    } | null;
+    if (response?.success) {
+      setIsConnected(false);
+      setIsStreaming(false);
+      setIsWaitingForResponse(false);
+      setLoadingMessage(null);
+      setStreamingContent('');
+      setThinkingContent('');
+      setThinkingStatus('default');
+      setAuthUri(null);
+      setAuthStatus(null);
+      setPermissionRequest(null);
+      clearToolCalls();
+    }
+  }, [vscode, clearToolCalls]);
 
   // Auto-connect once on mount/when disconnected
   useEffect(() => {
@@ -493,7 +626,38 @@ ${formatted || '(no logs captured)'}`;
     }
   }, [vscode]); */
 
-  const hasContent = messages.length > 0 || isStreaming || streamingContent;
+  const hasContent =
+    messages.length > 0 ||
+    isStreaming ||
+    streamingContent ||
+    thinkingContent ||
+    toolCalls.size > 0;
+  const toolCallItems = Array.from(toolCalls.values()).sort(
+    (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
+  );
+  const timelineItems = [
+    ...messages.map((msg) => ({
+      type: 'message' as const,
+      timestamp: msg.timestamp,
+      data: msg,
+    })),
+    ...toolCallItems.map((tc) => ({
+      type: 'toolCall' as const,
+      timestamp: tc.timestamp || Date.now(),
+      data: tc,
+    })),
+  ].sort((a, b) => a.timestamp - b.timestamp);
+  const formatAuthMethod = (method?: string) => {
+    if (!method) return 'ok';
+    if (method === 'openai') return 'OpenAI';
+    if (method === 'qwen-oauth') return 'Qwen OAuth';
+    return method;
+  };
+  const authLabel = authStatus
+    ? authStatus.authenticated
+      ? formatAuthMethod(authStatus.method)
+      : authStatus.error || 'required'
+    : null;
 
   return (
     <div className="chat-container relative flex flex-col h-screen bg-[#1e1e1e] text-white">
@@ -507,6 +671,18 @@ ${formatted || '(no logs captured)'}`;
           <span className="text-xs text-gray-400">
             {isConnected ? `Connected` : 'Disconnected'}
           </span>
+          {authLabel && (
+            <span className="text-xs text-gray-400">Auth: {authLabel}</span>
+          )}
+          {isConnected && (
+            <button
+              className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
+              onClick={handleExit}
+              title="Stop CLI session"
+            >
+              Exit
+            </button>
+          )}
           {/* {isConnected && (
             <button
               className="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
@@ -558,28 +734,63 @@ ${formatted || '(no logs captured)'}`;
           />
         ) : (
           <>
-            {messages.map((msg, index) =>
-              msg.role === 'user' ? (
-                <UserMessage
-                  key={index}
-                  content={msg.content}
-                  timestamp={msg.timestamp}
-                  onFileClick={() => {
-                    // No action required
-                  }}
-                />
-              ) : (
-                <AssistantMessage
-                  key={index}
-                  content={msg.content}
-                  timestamp={msg.timestamp}
-                  onFileClick={() => {
-                    // No action required
-                  }}
-                />
-              ),
-            )}
+            {timelineItems.map((item, index) => {
+              if (item.type === 'message') {
+                if (item.data.role === 'user') {
+                  return (
+                    <UserMessage
+                      key={`msg-${index}`}
+                      content={item.data.content}
+                      timestamp={item.data.timestamp}
+                      onFileClick={() => {
+                        // No action required
+                      }}
+                    />
+                  );
+                }
+                if (item.data.role === 'thinking') {
+                  return (
+                    <ThinkingMessage
+                      key={`msg-${index}`}
+                      content={item.data.content}
+                      timestamp={item.data.timestamp}
+                      status="default"
+                    />
+                  );
+                }
+                return (
+                  <AssistantMessage
+                    key={`msg-${index}`}
+                    content={item.data.content}
+                    timestamp={item.data.timestamp}
+                    onFileClick={() => {
+                      // No action required
+                    }}
+                  />
+                );
+              }
 
+              const prevType = timelineItems[index - 1]?.type;
+              const nextType = timelineItems[index + 1]?.type;
+              const isFirst = prevType !== 'toolCall';
+              const isLast = nextType !== 'toolCall';
+              return (
+                <ToolCallCard
+                  key={`tool-${item.data.toolCallId}-${index}`}
+                  toolCall={item.data}
+                  isFirst={isFirst}
+                  isLast={isLast}
+                />
+              );
+            })}
+
+            {thinkingContent && (
+              <ThinkingMessage
+                content={thinkingContent}
+                timestamp={Date.now()}
+                status={thinkingStatus}
+              />
+            )}
             {/* Streaming message */}
             {isStreaming && streamingContent && (
               <AssistantMessage

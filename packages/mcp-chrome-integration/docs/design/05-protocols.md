@@ -28,11 +28,14 @@ This document provides reference for the APIs and message formats used in the Qw
 
 ## Legacy protocol (deprecated)
 
-### Extension to Native Host Messages (legacy)
+**Deprecated**: The message types in this section are legacy-only. Do not use them for new work.
+
+### Extension to Native Host Messages (legacy, deprecated)
 
 The extension communicates with the native host using the following message formats:
 
-### Handshake
+### Handshake (Deprecated)
+
 ```
 Request:
 {
@@ -50,7 +53,8 @@ Response:
 }
 ```
 
-### Start Qwen CLI
+### Start Qwen CLI (Deprecated)
+
 ```
 Request:
 {
@@ -67,7 +71,8 @@ Response:
 }
 ```
 
-### Send Prompt to Qwen CLI
+### Send Prompt to Qwen CLI (Deprecated)
+
 ```
 Request:
 {
@@ -83,7 +88,8 @@ Response:
 }
 ```
 
-### Extract Page Data
+### Extract Page Data (Deprecated)
+
 ```
 Request:
 {
@@ -114,6 +120,7 @@ Response:
 The extension provides the following MCP tools to Qwen CLI:
 
 ### browser_read_page
+
 ```
 Description: Read the content of the current browser page
 Input: {}
@@ -127,6 +134,7 @@ Output: {
 ```
 
 ### browser_capture_screenshot
+
 ```
 Description: Capture a screenshot of the current browser tab
 Input: {}
@@ -137,6 +145,7 @@ Output: {
 ```
 
 ### browser_get_network_logs
+
 ```
 Description: Get network request logs from the current browser tab
 Input: {}
@@ -146,6 +155,7 @@ Output: {
 ```
 
 ### browser_get_console_logs
+
 ```
 Description: Get console logs from the current browser tab
 Input: {}
@@ -159,6 +169,7 @@ Output: {
 The extension components communicate internally using these message formats:
 
 ### Get Status
+
 ```
 Request:
 {
@@ -176,6 +187,7 @@ Response:
 ```
 
 ### Send Message
+
 ```
 Request:
 {
@@ -194,6 +206,7 @@ Response:
 ```
 
 ### Get Network Logs
+
 ```
 Request:
 {
@@ -213,6 +226,7 @@ Response:
 The extension broadcasts various events:
 
 ### Status Update
+
 ```
 {
   "type": "STATUS_UPDATE",
@@ -221,12 +235,15 @@ The extension broadcasts various events:
 ```
 
 ### Stream Start/End
+
 ```
 {
   "type": "streamStart"
 }
 ```
+
 or
+
 ```
 {
   "type": "streamEnd"
@@ -234,6 +251,7 @@ or
 ```
 
 ### Tool Progress
+
 ```
 {
   "type": "toolProgress",
