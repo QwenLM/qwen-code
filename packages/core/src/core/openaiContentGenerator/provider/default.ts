@@ -9,7 +9,9 @@ import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js'
 /**
  * Default provider for standard OpenAI-compatible APIs
  */
-export class DefaultOpenAICompatibleProvider implements OpenAICompatibleProvider {
+export class DefaultOpenAICompatibleProvider
+  implements OpenAICompatibleProvider
+{
   protected contentGeneratorConfig: ContentGeneratorConfig;
   protected cliConfig: Config;
 

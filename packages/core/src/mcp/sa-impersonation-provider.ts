@@ -24,7 +24,9 @@ function createIamApiUrl(targetSA: string): string {
   return `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(targetSA)}:generateIdToken`;
 }
 
-export class ServiceAccountImpersonationProvider implements OAuthClientProvider {
+export class ServiceAccountImpersonationProvider
+  implements OAuthClientProvider
+{
   private readonly targetServiceAccount: string;
   private readonly targetAudience: string; // OAuth Client Id
   private readonly auth: GoogleAuth;

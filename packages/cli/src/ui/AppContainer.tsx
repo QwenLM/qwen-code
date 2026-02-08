@@ -876,9 +876,9 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
   const shouldShowIdePrompt = Boolean(
     currentIDE &&
-    !config.getIdeMode() &&
-    !settings.merged.ide?.hasSeenNudge &&
-    !idePromptAnswered,
+      !config.getIdeMode() &&
+      !settings.merged.ide?.hasSeenNudge &&
+      !idePromptAnswered,
   );
 
   // Command migration nudge

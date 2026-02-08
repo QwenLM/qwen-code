@@ -165,8 +165,9 @@ describe('runNonInteractive', () => {
       computeMergedSettings: vi.fn(),
     } as unknown as LoadedSettings;
 
-    const { handleAtCommand } =
-      await import('./ui/hooks/atCommandProcessor.js');
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
     vi.mocked(handleAtCommand).mockImplementation(async ({ query }) => ({
       processedQuery: [{ text: query }],
       shouldProceed: true,
@@ -464,8 +465,9 @@ describe('runNonInteractive', () => {
   it('should preprocess @include commands before sending to the model', async () => {
     setupMetricsMock();
     // 1. Mock the imported atCommandProcessor
-    const { handleAtCommand } =
-      await import('./ui/hooks/atCommandProcessor.js');
+    const { handleAtCommand } = await import(
+      './ui/hooks/atCommandProcessor.js'
+    );
     const mockHandleAtCommand = vi.mocked(handleAtCommand);
 
     // 2. Define the raw input and the expected processed output

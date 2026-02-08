@@ -18,7 +18,9 @@ import type {
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { tokenLimit } from '../../tokenLimits.js';
 
-export class DashScopeOpenAICompatibleProvider implements OpenAICompatibleProvider {
+export class DashScopeOpenAICompatibleProvider
+  implements OpenAICompatibleProvider
+{
   private contentGeneratorConfig: ContentGeneratorConfig;
   private cliConfig: Config;
 
@@ -181,7 +183,7 @@ export class DashScopeOpenAICompatibleProvider implements OpenAICompatibleProvid
         : messages.map((message, index) => {
             const shouldAddCacheControl = Boolean(
               (index === systemIndex && systemIndex !== -1) ||
-              (index === lastIndex && cacheControl === 'all'),
+                (index === lastIndex && cacheControl === 'all'),
             );
 
             if (
