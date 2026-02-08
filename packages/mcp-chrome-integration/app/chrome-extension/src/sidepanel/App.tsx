@@ -14,8 +14,8 @@ import {
   ThinkingMessage,
   WaitingMessage,
   PermissionDrawer,
+  GenericToolCall,
 } from '@qwen-code/webui';
-import { ToolCall as ToolCallCard } from './components/messages/toolcalls/ToolCall.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import type { ToolCallUpdate } from './types/chatTypes.js';
@@ -775,7 +775,7 @@ ${formatted || '(no logs captured)'}`;
               const isFirst = prevType !== 'toolCall';
               const isLast = nextType !== 'toolCall';
               return (
-                <ToolCallCard
+                <GenericToolCall
                   key={`tool-${item.data.toolCallId}-${index}`}
                   toolCall={item.data}
                   isFirst={isFirst}
