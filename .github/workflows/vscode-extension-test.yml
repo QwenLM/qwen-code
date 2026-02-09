@@ -3,16 +3,17 @@ name: 'VSCode Extension Tests'
 on:
   push:
     branches:
-      - 'main'
-      - 'release/**'
+      # - 'main'
+      # - 'release/**'
       - feat/ide-test-ci
     paths:
       - 'packages/vscode-ide-companion/**'
       - '.github/workflows/vscode-extension-test.yml'
   pull_request:
     branches:
-      - 'main'
-      - 'release/**'
+      # - 'main'
+      # - 'release/**'
+      - feat/ide-test-ci
     paths:
       - 'packages/vscode-ide-companion/**'
       - '.github/workflows/vscode-extension-test.yml'

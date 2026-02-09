@@ -9,7 +9,7 @@
 import type React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createRoot } from 'react-dom/client';
-import { act } from 'react-dom/test-utils';
+import { act } from 'react';
 import { ChatViewer } from './ChatViewer.js';
 import type { ChatMessageData } from './ChatViewer.js';
 

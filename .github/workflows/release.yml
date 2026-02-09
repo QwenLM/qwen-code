@@ -135,6 +135,8 @@ jobs:
           npm run preflight
           npm run test:integration:cli:sandbox:none
           npm run test:integration:cli:sandbox:docker
+          npm run test:ci --workspace=packages/vscode-ide-companion
+          xvfb-run -a npm run test:integration --workspace=packages/vscode-ide-companion
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'

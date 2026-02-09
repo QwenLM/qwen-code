@@ -15,6 +15,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as vscode from 'vscode';
 import { MessageHandler } from './MessageHandler.js';
 import type { QwenAgentManager } from '../services/qwenAgentManager.js';
 import type { ConversationStore } from '../services/conversationStore.js';
@@ -35,6 +36,10 @@ describe('MessageHandler', () => {
       cancelCurrentPrompt: vi.fn().mockResolvedValue(undefined),
       connect: vi.fn().mockResolvedValue({ requiresAuth: false }),
       disconnect: vi.fn(),
+      setModelFromUi: vi.fn().mockResolvedValue({
+        modelId: 'coder-model',
+        name: 'coder-model',
+      }),
       currentSessionId: null,
     } as unknown as QwenAgentManager;
 
@@ -154,6 +159,41 @@ describe('MessageHandler', () => {
           data: {},
         }),
       ).resolves.not.toThrow();
+    });
+
+    it('should ignore empty sendMessage text', async () => {
+      await messageHandler.route({
+        type: 'sendMessage',
+        data: { text: '   ' },
+      });
+
+      expect(mockConversationStore.createConversation).not.toHaveBeenCalled();
+      expect(mockConversationStore.addMessage).not.toHaveBeenCalled();
+      expect(mockSendToWebView).not.toHaveBeenCalled();
+    });
+
+    it('should prompt login and send friendly error on auth-required setModel', async () => {
+      (
+        mockAgentManager.setModelFromUi as ReturnType<typeof vi.fn>
+      ).mockRejectedValueOnce(
+        new Error(
+          'Authentication required (code: -32000)\nData: {"details":"Qwen OAuth credentials expired.","authMethods":[{"id":"qwen-oauth"}]}',
+        ),
+      );
+
+      await messageHandler.route({
+        type: 'setModel',
+        data: { modelId: 'coder-model' },
+      });
+
+      expect(vscode.window.showWarningMessage).toHaveBeenCalled();
+      expect(vscode.window.showErrorMessage).not.toHaveBeenCalled();
+      expect(mockSendToWebView).toHaveBeenCalledWith({
+        type: 'error',
+        data: {
+          message: 'Authentication required. Please login to switch models.',
+        },
+      });
     });
   });
 
