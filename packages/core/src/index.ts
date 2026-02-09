@@ -13,6 +13,9 @@ export * from './config/config.js';
 export { Storage } from './config/storage.js';
 export * from './utils/configResolver.js';
 
+// Hooks
+export * from './hooks/types.js';
+
 // Model configuration
 export {
   DEFAULT_QWEN_MODEL,
