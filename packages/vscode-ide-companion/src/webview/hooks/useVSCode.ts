@@ -18,6 +18,15 @@ declare const acquireVsCodeApi: () => VSCodeAPI;
  */
 let vscodeApiInstance: VSCodeAPI | null = null;
 
+function recordPostedMessage(message: unknown): void {
+  const holder = globalThis as typeof globalThis & {
+    __qwenPostedMessages?: unknown[];
+  };
+  if (Array.isArray(holder.__qwenPostedMessages)) {
+    holder.__qwenPostedMessages.push(message);
+  }
+}
+
 /**
  * Get VS Code API instance
  * Uses module-level cache to ensure acquireVsCodeApi() is only called once
@@ -28,13 +37,21 @@ function getVSCodeAPI(): VSCodeAPI {
   }
 
   if (typeof acquireVsCodeApi !== 'undefined') {
-    vscodeApiInstance = acquireVsCodeApi();
+    const api = acquireVsCodeApi();
+    vscodeApiInstance = {
+      ...api,
+      postMessage: (message: unknown) => {
+        recordPostedMessage(message);
+        api.postMessage(message);
+      },
+    };
     return vscodeApiInstance;
   }
 
   // Fallback for development/testing
   vscodeApiInstance = {
     postMessage: (message: unknown) => {
+      recordPostedMessage(message);
       console.log('Mock postMessage:', message);
     },
     getState: () => ({}),

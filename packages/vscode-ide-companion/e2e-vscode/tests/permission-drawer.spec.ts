@@ -11,13 +11,45 @@ test('shows permission drawer and closes after allow', async ({
 }: {
   page: import('@playwright/test').Page;
 }) => {
+  await page.addInitScript(() => {
+    (window as typeof window & {
+      __qwenPostedMessages?: unknown[];
+      __qwenReceivedMessages?: unknown[];
+    }).__qwenPostedMessages = [];
+    (window as typeof window & {
+      __qwenPostedMessages?: unknown[];
+      __qwenReceivedMessages?: unknown[];
+    }).__qwenReceivedMessages = [];
+  });
+
   await runCommand(page, 'Qwen Code: Open');
   const webview = await waitForWebviewReady(page);
 
-  await dispatchWebviewMessage(webview, {
-    type: 'authState',
-    data: { authenticated: true },
-  });
+  await webview.waitForFunction(
+    () => {
+      const received = (window as typeof window & {
+        __qwenReceivedMessages?: unknown[];
+      }).__qwenReceivedMessages;
+      return (
+        Array.isArray(received) &&
+        received.some((message) => {
+          if (!message || typeof message !== 'object') {
+            return false;
+          }
+          const payload = message as {
+            type?: string;
+            data?: { authenticated?: boolean | null };
+          };
+          return (
+            payload.type === 'agentConnected' ||
+            (payload.type === 'authState' &&
+              payload.data?.authenticated === true)
+          );
+        })
+      );
+    },
+    { timeout: 60_000 },
+  );
   await dispatchWebviewMessage(webview, {
     type: 'permissionRequest',
     data: {

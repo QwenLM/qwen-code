@@ -15,6 +15,12 @@ import { downloadAndUnzipVSCode } from '@vscode/test-electron';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionPath = path.resolve(__dirname, '../..');
 const workspacePath = path.resolve(__dirname, '../../test/fixtures/workspace');
+const bundledCliEntry = path.resolve(
+  extensionPath,
+  'dist',
+  'qwen-cli',
+  'cli.js',
+);
 const createTempDir = (suffix: string) =>
   fs.mkdtempSync(path.join(os.tmpdir(), `qwen-code-vscode-${suffix}-`));
 const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number) =>
@@ -33,6 +39,28 @@ const withTimeout = async <T>(promise: Promise<T>, timeoutMs: number) =>
       },
     );
   });
+
+const ensureBundledCli = () => {
+  if (!fs.existsSync(bundledCliEntry)) {
+    throw new Error(
+      `Bundled CLI entry not found at ${bundledCliEntry}. Run "node scripts/prepackage.js" first.`,
+    );
+  }
+};
+
+const ensureAuthEnv = () => {
+  const hasQwenOauth = !!process.env.QWEN_OAUTH;
+  const hasOpenAiEnv =
+    !!process.env.OPENAI_API_KEY &&
+    !!process.env.OPENAI_BASE_URL &&
+    !!process.env.OPENAI_MODEL;
+
+  if (!hasQwenOauth && !hasOpenAiEnv) {
+    throw new Error(
+      'Missing auth env for VSCode E2E tests. Set QWEN_OAUTH or OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL.',
+    );
+  }
+};
 
 const resolveVSCodeExecutablePath = async (): Promise<string> => {
   if (process.env.VSCODE_EXECUTABLE_PATH) {
@@ -57,12 +85,19 @@ export const test = base.extend<{
   electronApp: ElectronApplication;
   page: Page;
 }>({
-  electronApp: async ({}, use: (r: ElectronApplication) => Promise<void>) => {
+  electronApp: async (
+    _args,
+    runFixture: (r: ElectronApplication) => Promise<void>,
+  ) => {
     const executablePath = await resolveVSCodeExecutablePath();
+    ensureBundledCli();
+    ensureAuthEnv();
     const userDataDir = createTempDir('user-data');
     const extensionsDir = createTempDir('extensions');
+    const launchEnv = { ...process.env };
     const electronApp = await _electron.launch({
       executablePath,
+      env: launchEnv,
       args: [
         '--no-sandbox',
         '--disable-gpu-sandbox',
@@ -78,7 +113,7 @@ export const test = base.extend<{
       ],
     });
 
-    await use(electronApp);
+    await runFixture(electronApp);
     try {
       await withTimeout(electronApp.evaluate(({ app }) => app.quit()), 3_000);
     } catch {
@@ -102,10 +137,13 @@ export const test = base.extend<{
       }
     }
   },
-  page: async ({ electronApp }: { electronApp: ElectronApplication }, use: (r: Page) => Promise<void>) => {
+  page: async (
+    { electronApp }: { electronApp: ElectronApplication },
+    runFixture: (r: Page) => Promise<void>,
+  ) => {
     const page = await electronApp.firstWindow();
     await page.waitForLoadState('domcontentloaded');
-    await use(page);
+    await runFixture(page);
     await page.close().catch(() => undefined);
   },
 });

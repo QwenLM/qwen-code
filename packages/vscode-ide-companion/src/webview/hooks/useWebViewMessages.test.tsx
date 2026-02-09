@@ -275,6 +275,25 @@ describe('useWebViewMessages', () => {
     unmount();
   });
 
+  it('records inbound messages when test array is present', async () => {
+    const { unmount } = await setup();
+    const holder = globalThis as typeof globalThis & {
+      __qwenReceivedMessages?: unknown[];
+    };
+    holder.__qwenReceivedMessages = [];
+
+    const payload = { type: 'authState', data: { authenticated: true } };
+
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data: payload }));
+    });
+
+    expect(holder.__qwenReceivedMessages).toEqual([payload]);
+
+    delete holder.__qwenReceivedMessages;
+    unmount();
+  });
+
   it('closes permission drawer when extension resolves permission', async () => {
     const { props, unmount } = await setup();
 

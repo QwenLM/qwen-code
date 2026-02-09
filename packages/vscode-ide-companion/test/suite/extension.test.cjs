@@ -76,6 +76,13 @@ async function activateExtension() {
   await extension.activate();
 }
 
+function getExtensionTestApi() {
+  const extension = vscode.extensions.getExtension(
+    'qwenlm.qwen-code-vscode-ide-companion',
+  );
+  return extension?.exports;
+}
+
 async function ensureChatOpen() {
   await vscode.commands.executeCommand('qwen-code.openChat');
   await waitFor(() => getChatTabs().length > 0);
@@ -120,6 +127,37 @@ async function testShowDiffOpensDiffTab() {
   await waitFor(() => getQwenDiffTabs().length > 0);
 }
 
+async function testAgentLoginSuccess() {
+  await ensureChatOpen();
+
+  const api = getExtensionTestApi();
+  assert.ok(
+    api && typeof api.getLastWebviewProvider === 'function',
+    'Extension test API not available. Set QWEN_CODE_TEST=1.',
+  );
+
+  const provider = api.getLastWebviewProvider();
+  assert.ok(provider, 'No WebViewProvider available after opening chat.');
+
+  await waitFor(
+    () => {
+      if (typeof provider.getAgentConnectionStateForTest !== 'function') {
+        return false;
+      }
+      const state = provider.getAgentConnectionStateForTest();
+      return (
+        state &&
+        state.agentInitialized &&
+        state.isConnected &&
+        Boolean(state.currentSessionId) &&
+        state.authState === true
+      );
+    },
+    20000,
+    200,
+  );
+}
+
 async function cleanupEditors() {
   try {
     await vscode.commands.executeCommand('workbench.action.closeAllEditors');
@@ -134,6 +172,7 @@ async function runExtensionTests() {
   await runTest('openChat reuses an existing webview', testOpenChatReusesPanel);
   await runTest('openNewChatTab opens a new webview', testOpenNewChatTabCreatesPanel);
   await runTest('showDiff opens a qwen-diff editor', testShowDiffOpensDiffTab);
+  await runTest('agent connects and login succeeds', testAgentLoginSuccess);
 
   await cleanupEditors();
 }

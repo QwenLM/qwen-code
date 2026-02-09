@@ -102,6 +102,11 @@ jobs:
       - name: 'Run integration tests'
         run: 'xvfb-run -a npm run test:integration'
         working-directory: 'packages/vscode-ide-companion'
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          QWEN_OAUTH: '${{ secrets.QWEN_OAUTH }}'
 
   e2e-test:
     name: 'E2E Tests'
@@ -186,6 +191,11 @@ jobs:
       - name: 'Run VSCode E2E tests'
         run: 'xvfb-run -a npm run test:e2e:vscode'
         working-directory: 'packages/vscode-ide-companion'
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          QWEN_OAUTH: '${{ secrets.QWEN_OAUTH }}'
 
       - name: 'Upload VSCode E2E test results'
         if: always()

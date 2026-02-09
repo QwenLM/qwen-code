@@ -24,6 +24,15 @@ const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'session_expired',
 ]);
 
+const recordReceivedMessage = (message: unknown): void => {
+  const holder = globalThis as typeof globalThis & {
+    __qwenReceivedMessages?: unknown[];
+  };
+  if (Array.isArray(holder.__qwenReceivedMessages)) {
+    holder.__qwenReceivedMessages.push(message);
+  }
+};
+
 interface UseWebViewMessagesProps {
   // Session management
   sessionManagement: {
@@ -228,6 +237,7 @@ export const useWebViewMessages = ({
     (event: MessageEvent) => {
       const message = event.data;
       const handlers = handlersRef.current;
+      recordReceivedMessage(message);
 
       switch (message.type) {
         case 'modeInfo': {

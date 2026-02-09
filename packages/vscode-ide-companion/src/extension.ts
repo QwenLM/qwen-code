@@ -356,6 +356,16 @@ export async function activate(context: vscode.ExtensionContext) {
       await vscode.window.showTextDocument(noticePath);
     }),
   );
+
+  if (process.env.QWEN_CODE_TEST === '1') {
+    return {
+      getWebviewProviders: () => webViewProviders,
+      getLastWebviewProvider: () =>
+        webViewProviders.length > 0
+          ? webViewProviders[webViewProviders.length - 1]
+          : null,
+    };
+  }
 }
 
 export async function deactivate(): Promise<void> {
