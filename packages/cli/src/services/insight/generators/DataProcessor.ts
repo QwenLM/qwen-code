@@ -269,7 +269,7 @@ export class DataProcessor {
     const allChatFiles = await this.scanChatFiles(baseDir);
 
     if (onProgress) onProgress('Generating metrics', 10);
-    const metrics = await this.generateMetrics(allChatFiles);
+    const metrics = await this.generateMetrics(allChatFiles, onProgress);
 
     if (onProgress) onProgress('Analyzing sessions', 20);
     const facets = await this.generateFacets(
@@ -774,6 +774,7 @@ None captured`;
 
   private async generateMetrics(
     files: Array<{ path: string; mtime: number }>,
+    onProgress?: InsightProgressCallback,
   ): Promise<Omit<InsightData, 'facets' | 'qualitative'>> {
     // Initialize data structures
     const heatmap: HeatMapData = {};
@@ -786,63 +787,100 @@ None captured`;
     const uniqueFiles = new Set<string>();
     const toolUsage: Record<string, number> = {};
 
-    for (const fileInfo of files) {
-      const records = await readJsonlFile<ChatRecord>(fileInfo.path);
-      totalMessages += records.length;
+    // Process files in batches to avoid OOM and blocking the event loop
+    const BATCH_SIZE = 50;
+    const totalFiles = files.length;
 
-      // Process each record
-      for (const record of records) {
-        const timestamp = new Date(record.timestamp);
-        const dateKey = this.formatDate(timestamp);
-        const hour = timestamp.getHours();
+    for (let i = 0; i < totalFiles; i += BATCH_SIZE) {
+      const batchEnd = Math.min(i + BATCH_SIZE, totalFiles);
+      const batch = files.slice(i, batchEnd);
 
-        // Update heatmap (count of interactions per day)
-        heatmap[dateKey] = (heatmap[dateKey] || 0) + 1;
+      // Process batch sequentially to minimize memory usage
+      for (const fileInfo of batch) {
+        try {
+          const records = await readJsonlFile<ChatRecord>(fileInfo.path);
+          totalMessages += records.length;
 
-        // Update active hours
-        activeHours[hour] = (activeHours[hour] || 0) + 1;
+          // Process each record
+          for (const record of records) {
+            const timestamp = new Date(record.timestamp);
+            const dateKey = this.formatDate(timestamp);
+            const hour = timestamp.getHours();
 
-        // Track session times
-        if (!sessionStartTimes[record.sessionId]) {
-          sessionStartTimes[record.sessionId] = timestamp;
-        }
-        sessionEndTimes[record.sessionId] = timestamp;
+            // Update heatmap (count of interactions per day)
+            heatmap[dateKey] = (heatmap[dateKey] || 0) + 1;
 
-        // Track tool usage
-        if (record.type === 'assistant' && record.message?.parts) {
-          for (const part of record.message.parts) {
-            if ('functionCall' in part) {
-              const name = part.functionCall!.name!;
-              toolUsage[name] = (toolUsage[name] || 0) + 1;
+            // Update active hours
+            activeHours[hour] = (activeHours[hour] || 0) + 1;
+
+            // Track session times
+            if (!sessionStartTimes[record.sessionId]) {
+              sessionStartTimes[record.sessionId] = timestamp;
+            }
+            sessionEndTimes[record.sessionId] = timestamp;
+
+            // Track tool usage
+            if (record.type === 'assistant' && record.message?.parts) {
+              for (const part of record.message.parts) {
+                if ('functionCall' in part) {
+                  const name = part.functionCall!.name!;
+                  toolUsage[name] = (toolUsage[name] || 0) + 1;
+                }
+              }
+            }
+
+            // Track lines and files from tool results
+            if (
+              record.type === 'tool_result' &&
+              record.toolCallResult?.resultDisplay
+            ) {
+              const display = record.toolCallResult.resultDisplay;
+              // Check if it matches FileDiff shape
+              if (
+                typeof display === 'object' &&
+                display !== null &&
+                'fileName' in display
+              ) {
+                // Cast to any to avoid importing FileDiff type which might not be available here
+                const diff = display as {
+                  fileName: unknown;
+                  diffStat?: {
+                    model_added_lines?: number;
+                    model_removed_lines?: number;
+                  };
+                };
+                if (typeof diff.fileName === 'string') {
+                  uniqueFiles.add(diff.fileName);
+                }
+
+                if (diff.diffStat) {
+                  totalLinesAdded += diff.diffStat.model_added_lines || 0;
+                  totalLinesRemoved += diff.diffStat.model_removed_lines || 0;
+                }
+              }
             }
           }
-        }
-
-        // Track lines and files from tool results
-        if (
-          record.type === 'tool_result' &&
-          record.toolCallResult?.resultDisplay
-        ) {
-          const display = record.toolCallResult.resultDisplay;
-          // Check if it matches FileDiff shape
-          if (
-            typeof display === 'object' &&
-            display !== null &&
-            'fileName' in display
-          ) {
-            // Cast to any to avoid importing FileDiff type which might not be available here
-            const diff = display;
-            if (typeof diff.fileName === 'string') {
-              uniqueFiles.add(diff.fileName);
-            }
-
-            if (diff.diffStat) {
-              totalLinesAdded += diff.diffStat.model_added_lines || 0;
-              totalLinesRemoved += diff.diffStat.model_removed_lines || 0;
-            }
-          }
+        } catch (error) {
+          console.error(
+            `Failed to process metrics for file ${fileInfo.path}:`,
+            error,
+          );
+          // Continue to next file
         }
       }
+
+      // Update progress (mapped to 10-20% range of total progress)
+      if (onProgress) {
+        const percentComplete = batchEnd / totalFiles;
+        const overallProgress = 10 + Math.round(percentComplete * 10);
+        onProgress(
+          `Generating metrics (${batchEnd}/${totalFiles})`,
+          overallProgress,
+        );
+      }
+
+      // Yield to event loop to allow GC and UI updates
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
     // Calculate streak data
