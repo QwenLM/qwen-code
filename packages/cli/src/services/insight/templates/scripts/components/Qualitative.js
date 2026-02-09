@@ -58,7 +58,6 @@ function NavToc() {
       <a href="#section-features">Features to Try</a>
       <a href="#section-patterns">New Usage Patterns</a>
       <a href="#section-horizon">On the Horizon</a>
-      <a href="#section-feedback">Team Feedback</a>
     </nav>
   );
 }
