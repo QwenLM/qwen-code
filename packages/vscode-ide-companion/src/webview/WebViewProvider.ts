@@ -16,6 +16,7 @@ import { getFileName } from './utils/webviewUtils.js';
 import { type ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { DedicatedTerminalManager } from '../services/dedicatedTerminalManager.js';
+import { isDedicatedTerminalEnabled } from '../services/settingsReader.js';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -204,7 +205,7 @@ export class WebViewProvider {
       }
 
       // Route shell command events to dedicated terminal
-      if (update.kind === 'execute') {
+      if (update.kind === 'execute' && isDedicatedTerminalEnabled()) {
         this.dedicatedTerminal.handleToolCall(update);
       }
 
@@ -229,8 +230,9 @@ export class WebViewProvider {
       async (request: AcpPermissionRequest) => {
         // Route shell command permission requests to dedicated terminal
         if (
-          request.toolCall?.kind === 'execute' ||
-          request.toolCall?.rawInput?.command
+          isDedicatedTerminalEnabled() &&
+          (request.toolCall?.kind === 'execute' ||
+            request.toolCall?.rawInput?.command)
         ) {
           this.dedicatedTerminal.handlePermissionRequest(request);
         }
