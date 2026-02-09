@@ -14,6 +14,7 @@ import type {
   HeatMapData,
   StreakData,
   SessionFacets,
+  InsightProgressCallback,
 } from '../types/StaticInsightTypes.js';
 import type {
   QualitativeInsights,
@@ -262,18 +263,28 @@ export class DataProcessor {
   async generateInsights(
     baseDir: string,
     facetsOutputDir?: string,
+    onProgress?: InsightProgressCallback,
   ): Promise<InsightData> {
+    if (onProgress) onProgress('Scanning chat files', 0);
     const allChatFiles = await this.scanChatFiles(baseDir);
 
-    const [metrics, facets] = await Promise.all([
-      this.generateMetrics(allChatFiles),
-      this.generateFacets(allChatFiles, facetsOutputDir),
-    ]);
+    if (onProgress) onProgress('Generating metrics', 10);
+    const metrics = await this.generateMetrics(allChatFiles);
 
+    if (onProgress) onProgress('Analyzing sessions', 20);
+    const facets = await this.generateFacets(
+      allChatFiles,
+      facetsOutputDir,
+      onProgress,
+    );
+
+    if (onProgress) onProgress('Generating qualitative insights', 80);
     const qualitative = await this.generateQualitativeInsights(metrics, facets);
 
     // Aggregate satisfaction and friction data from facets
     const { satisfactionAgg, frictionAgg } = this.aggregateFacetsData(facets);
+
+    if (onProgress) onProgress('Finalizing report', 100);
 
     return {
       ...metrics,
@@ -901,6 +912,7 @@ None captured`;
   private async generateFacets(
     allFiles: Array<{ path: string; mtime: number }>,
     facetsOutputDir?: string,
+    onProgress?: InsightProgressCallback,
   ): Promise<SessionFacets[]> {
     // Sort files by recency (descending) and take top 50
     const recentFiles = [...allFiles]
@@ -911,6 +923,9 @@ None captured`;
 
     // Create a limit function with concurrency of 4 to avoid 429 errors
     const limit = pLimit(4);
+
+    let completed = 0;
+    const total = recentFiles.length;
 
     // Analyze sessions concurrently with limit
     const analysisPromises = recentFiles.map((fileInfo) =>
@@ -933,6 +948,15 @@ None captured`;
                   'utf-8',
                 );
                 const existingFacet = JSON.parse(existingData);
+                completed++;
+                if (onProgress) {
+                  const percent = 20 + Math.round((completed / total) * 60);
+                  onProgress(
+                    'Analyzing sessions',
+                    percent,
+                    `${completed}/${total}`,
+                  );
+                }
                 return existingFacet;
               } catch (readError) {
                 // File doesn't exist or is invalid, proceed to analyze
@@ -967,9 +991,20 @@ None captured`;
             }
           }
 
+          completed++;
+          if (onProgress) {
+            const percent = 20 + Math.round((completed / total) * 60);
+            onProgress('Analyzing sessions', percent, `${completed}/${total}`);
+          }
+
           return facet;
         } catch (e) {
           console.error(`Error analyzing session file ${fileInfo.path}:`, e);
+          completed++;
+          if (onProgress) {
+            const percent = 20 + Math.round((completed / total) * 60);
+            onProgress('Analyzing sessions', percent, `${completed}/${total}`);
+          }
           return null;
         }
       }),

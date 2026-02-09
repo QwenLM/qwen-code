@@ -7,6 +7,7 @@
 import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
+import type { HistoryItemInsightProgress } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
@@ -67,17 +68,33 @@ export const insightCommand: SlashCommand = {
         context.services.config,
       );
 
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t('Processing your chat history...'),
-        },
-        Date.now(),
-      );
+      const updateProgress = (
+        stage: string,
+        progress: number,
+        detail?: string,
+      ) => {
+        const progressItem: HistoryItemInsightProgress = {
+          type: MessageType.INSIGHT_PROGRESS,
+          progress: {
+            stage,
+            progress,
+            detail,
+          },
+        };
+        context.ui.setPendingItem(progressItem);
+      };
+
+      // Initial progress
+      updateProgress(t('Starting insight generation...'), 0);
 
       // Generate the static insight HTML file
-      const outputPath =
-        await insightGenerator.generateStaticInsight(projectsDir);
+      const outputPath = await insightGenerator.generateStaticInsight(
+        projectsDir,
+        updateProgress,
+      );
+
+      // Clear pending item
+      context.ui.setPendingItem(null);
 
       context.ui.addItem(
         {
@@ -119,6 +136,9 @@ export const insightCommand: SlashCommand = {
 
       context.ui.setDebugMessage(t('Insights ready.'));
     } catch (error) {
+      // Clear pending item on error
+      context.ui.setPendingItem(null);
+
       context.ui.addItem(
         {
           type: MessageType.ERROR,

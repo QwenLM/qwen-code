@@ -9,7 +9,10 @@ import path from 'path';
 import os from 'os';
 import { DataProcessor } from './DataProcessor.js';
 import { TemplateRenderer } from './TemplateRenderer.js';
-import type { InsightData } from '../types/StaticInsightTypes.js';
+import type {
+  InsightData,
+  InsightProgressCallback,
+} from '../types/StaticInsightTypes.js';
 
 import type { Config } from '@qwen-code/qwen-code-core';
 
@@ -30,7 +33,10 @@ export class StaticInsightGenerator {
   }
 
   // Generate the static insight HTML file
-  async generateStaticInsight(baseDir: string): Promise<string> {
+  async generateStaticInsight(
+    baseDir: string,
+    onProgress?: InsightProgressCallback,
+  ): Promise<string> {
     try {
       // Ensure output directory exists
       const outputDir = await this.ensureOutputDirectory();
@@ -42,6 +48,7 @@ export class StaticInsightGenerator {
       const insights: InsightData = await this.dataProcessor.generateInsights(
         baseDir,
         facetsDir,
+        onProgress,
       );
 
       // Render HTML

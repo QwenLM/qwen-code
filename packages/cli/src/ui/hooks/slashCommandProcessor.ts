@@ -181,10 +181,21 @@ export const useSlashCommandProcessor = (
           type: 'summary',
           summary: message.summary,
         };
-      } else {
+      } else if (message.type === MessageType.INSIGHT_PROGRESS) {
         historyItemContent = {
-          type: message.type,
-          text: message.content,
+          type: 'insight_progress',
+          progress: message.progress,
+        };
+      } else {
+        // At this point message should be of type { type: INFO|ERROR|USER, content: string }
+        // We cast to be sure or check existence of content
+        const msg = message as {
+          type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
+          content: string;
+        };
+        historyItemContent = {
+          type: msg.type,
+          text: msg.content,
         };
       }
       addItem(historyItemContent, message.timestamp.getTime());

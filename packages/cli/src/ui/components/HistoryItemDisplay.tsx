@@ -33,6 +33,7 @@ import { getMCPServerStatus } from '@qwen-code/qwen-code-core';
 import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
+import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -175,6 +176,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'mcp_status' && (
         <McpStatus {...itemForDisplay} serverStatus={getMCPServerStatus} />
+      )}
+      {itemForDisplay.type === 'insight_progress' && (
+        <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
     </Box>
   );

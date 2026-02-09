@@ -79,3 +79,9 @@ export interface StaticInsightTemplateData {
   scripts: string;
   generatedTime: string;
 }
+
+export type InsightProgressCallback = (
+  stage: string,
+  progress: number,
+  detail?: string,
+) => void;
