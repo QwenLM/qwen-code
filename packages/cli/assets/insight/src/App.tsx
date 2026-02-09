@@ -1,9 +1,24 @@
-/* eslint-disable react/jsx-no-undef */
-/* eslint-disable react/prop-types */
-/* eslint-disable no-undef */
+import { useState } from 'react';
+import ReactDOM from 'react-dom/client';
+import { Header, StatsRow } from './Header';
+import {
+  AtAGlance,
+  NavToc,
+  ProjectAreas,
+  InteractionStyle,
+  ImpressiveWorkflows,
+  FrictionPoints,
+  Improvements,
+  FutureOpportunities,
+  MemorableMoment,
+} from './Qualitative';
+import './styles.css';
+import { InsightData } from './types';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import React from 'react';
 
 // Main App Component
-function InsightApp({ data }) {
+function InsightApp({ data }: { data: InsightData }) {
   if (!data) {
     return (
       <div className="text-center text-slate-600">
@@ -17,9 +32,10 @@ function InsightApp({ data }) {
   let dateRangeStr = '';
   if (heatmapKeys.length > 0) {
     const dates = heatmapKeys.map((d) => new Date(d));
-    const minDate = new Date(Math.min(...dates));
-    const maxDate = new Date(Math.max(...dates));
-    const formatDate = (d) => d.toISOString().split('T')[0];
+    const timestamps = dates.map((d) => d.getTime());
+    const minDate = new Date(Math.min(...timestamps));
+    const maxDate = new Date(Math.max(...timestamps));
+    const formatDate = (d: Date) => d.toISOString().split('T')[0];
     dateRangeStr = `${formatDate(minDate)} to ${formatDate(maxDate)}`;
   }
 
@@ -56,8 +72,8 @@ function InsightApp({ data }) {
         <>
           <ImpressiveWorkflows
             qualitative={data.qualitative}
-            primarySuccess={data.primarySuccess}
-            outcomes={data.outcomes}
+            primarySuccess={data.primarySuccess!}
+            outcomes={data.outcomes!}
           />
           <FrictionPoints
             qualitative={data.qualitative}
@@ -90,7 +106,7 @@ function ExportButton() {
     setIsExporting(true);
 
     try {
-      const canvas = await html2canvas(container, {
+      const canvas = await window.html2canvas(container, {
         scale: 2,
         useCORS: true,
         logging: false,
@@ -127,13 +143,13 @@ function ExportButton() {
 
 // App Initialization - Mount React app when DOM is ready
 const container = document.getElementById('react-root');
-if (container && window.INSIGHT_DATA && window.ReactDOM) {
+if (container && window.INSIGHT_DATA && ReactDOM) {
   const root = ReactDOM.createRoot(container);
-  root.render(React.createElement(InsightApp, { data: window.INSIGHT_DATA }));
+  root.render(<InsightApp data={window.INSIGHT_DATA} />);
 } else {
   console.error('Failed to mount React app:', {
     container: !!container,
     data: !!window.INSIGHT_DATA,
-    ReactDOM: !!window.ReactDOM,
+    ReactDOM: !!ReactDOM,
   });
 }

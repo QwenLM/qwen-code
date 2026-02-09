@@ -37,33 +37,25 @@ export class StaticInsightGenerator {
     baseDir: string,
     onProgress?: InsightProgressCallback,
   ): Promise<string> {
-    try {
-      // Ensure output directory exists
-      const outputDir = await this.ensureOutputDirectory();
-      const facetsDir = path.join(outputDir, 'facets');
-      await fs.mkdir(facetsDir, { recursive: true });
+    // Ensure output directory exists
+    const outputDir = await this.ensureOutputDirectory();
+    const facetsDir = path.join(outputDir, 'facets');
+    await fs.mkdir(facetsDir, { recursive: true });
 
-      // Process data
-      console.log('Processing insight data...');
-      const insights: InsightData = await this.dataProcessor.generateInsights(
-        baseDir,
-        facetsDir,
-        onProgress,
-      );
+    // Process data
+    const insights: InsightData = await this.dataProcessor.generateInsights(
+      baseDir,
+      facetsDir,
+      onProgress,
+    );
 
-      // Render HTML
-      console.log('Rendering HTML template...');
-      const html = await this.templateRenderer.renderInsightHTML(insights);
+    // Render HTML
+    const html = await this.templateRenderer.renderInsightHTML(insights);
 
-      const outputPath = path.join(outputDir, 'insight.html');
+    const outputPath = path.join(outputDir, 'insight.html');
 
-      // Write the HTML file
-      console.log(`Writing HTML file to: ${outputPath}`);
-      await fs.writeFile(outputPath, html, 'utf-8');
-      return outputPath;
-    } catch (error) {
-      console.log(`Error generating static insight: ${error}`);
-      throw error;
-    }
+    // Write the HTML file
+    await fs.writeFile(outputPath, html, 'utf-8');
+    return outputPath;
   }
 }

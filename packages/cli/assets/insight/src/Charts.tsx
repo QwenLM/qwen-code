@@ -1,13 +1,16 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable react/prop-types */
-/* eslint-disable no-undef */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { InsightData } from './types';
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import React, { useRef, useEffect } from 'react';
+const Chart = (window as any).Chart;
 
 // -----------------------------------------------------------------------------
 // Existing Components
 // -----------------------------------------------------------------------------
 
 // Dashboard Cards Component
-function DashboardCards({ insights }) {
+export function DashboardCards({ insights }: { insights: InsightData }) {
   const cardClass = 'glass-card p-6';
   const sectionTitleClass =
     'text-lg font-semibold tracking-tight text-slate-900';
@@ -38,7 +41,17 @@ function DashboardCards({ insights }) {
 }
 
 // Streak Card Component
-function StreakCard({ currentStreak, longestStreak, cardClass, captionClass }) {
+export function StreakCard({
+  currentStreak,
+  longestStreak,
+  cardClass,
+  captionClass,
+}: {
+  currentStreak: number;
+  longestStreak: number;
+  cardClass: string;
+  captionClass: string;
+}) {
   return (
     <div className={`${cardClass} h-full`}>
       <div className="flex items-start justify-between">
@@ -60,9 +73,17 @@ function StreakCard({ currentStreak, longestStreak, cardClass, captionClass }) {
 }
 
 // Active Hours Chart Component
-function ActiveHoursChart({ activeHours, cardClass, sectionTitleClass }) {
-  const chartRef = useRef(null);
-  const chartInstance = useRef(null);
+export function ActiveHoursChart({
+  activeHours,
+  cardClass,
+  sectionTitleClass,
+}: {
+  activeHours: Record<number, number>;
+  cardClass: string;
+  sectionTitleClass: string;
+}) {
+  const chartRef = useRef<HTMLCanvasElement | null>(null);
+  const chartInstance = useRef<any>(null);
 
   useEffect(() => {
     if (chartInstance.current) {
@@ -138,6 +159,12 @@ function WorkSessionCard({
   latestActiveTime,
   cardClass,
   sectionTitleClass,
+}: {
+  longestWorkDuration: number;
+  longestWorkDate: string | null;
+  latestActiveTime: string | null;
+  cardClass: string;
+  sectionTitleClass: string;
 }) {
   return (
     <div className={`${cardClass} h-full space-y-3`}>
@@ -173,7 +200,11 @@ function WorkSessionCard({
 }
 
 // Heatmap Section Component
-function HeatmapSection({ heatmap }) {
+export function HeatmapSection({
+  heatmap,
+}: {
+  heatmap: Record<string, number>;
+}) {
   const cardClass = 'glass-card p-6';
   const sectionTitleClass =
     'text-lg font-semibold tracking-tight text-slate-900';
@@ -194,7 +225,11 @@ function HeatmapSection({ heatmap }) {
 }
 
 // Activity Heatmap Component
-function ActivityHeatmap({ heatmapData }) {
+function ActivityHeatmap({
+  heatmapData,
+}: {
+  heatmapData: Record<string, number>;
+}) {
   const width = 1000;
   const height = 150;
   const cellSize = 14;
@@ -215,7 +250,7 @@ function ActivityHeatmap({ heatmapData }) {
   const colorLevels = [0, 2, 4, 10, 20];
   const colors = ['#e2e8f0', '#a5d8ff', '#74c0fc', '#339af0', '#1c7ed6'];
 
-  function getColor(value) {
+  function getColor(value: number) {
     if (value === 0) return colors[0];
     for (let i = colorLevels.length - 1; i >= 1; i--) {
       if (value >= colorLevels[i]) return colors[i];

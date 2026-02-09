@@ -6,7 +6,10 @@
 
 import fs from 'fs/promises';
 import path from 'path';
-import { read as readJsonlFile } from '@qwen-code/qwen-code-core';
+import {
+  read as readJsonlFile,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
 import pLimit from 'p-limit';
 import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
@@ -39,6 +42,8 @@ import {
   PROMPT_AT_A_GLANCE,
   ANALYSIS_PROMPT,
 } from '../prompts/InsightPrompts.js';
+
+const logger = createDebugLogger('DataProcessor');
 
 export class DataProcessor {
   constructor(private config: Config) {}
@@ -194,7 +199,7 @@ export class DataProcessor {
         session_id: records[0].sessionId,
       };
     } catch (error) {
-      console.error(
+      logger.error(
         `Failed to analyze session ${records[0]?.sessionId}:`,
         error,
       );
@@ -362,7 +367,7 @@ export class DataProcessor {
       return undefined;
     }
 
-    console.log('Generating qualitative insights...');
+    logger.info('Generating qualitative insights...');
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
@@ -380,7 +385,7 @@ export class DataProcessor {
         });
         return result as T;
       } catch (error) {
-        console.error('Failed to generate insight:', error);
+        logger.error('Failed to generate insight:', error);
         throw error;
       }
     };
@@ -620,39 +625,6 @@ export class DataProcessor {
         ),
       ]);
 
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ impressiveWorkflows:',
-        impressiveWorkflows,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ atAGlance:',
-        atAGlance,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ interactionStyle:',
-        interactionStyle,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ improvements:',
-        improvements,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ memorableMoment:',
-        memorableMoment,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ frictionPoints:',
-        frictionPoints,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ futureOpportunities:',
-        futureOpportunities,
-      );
-      console.log(
-        '🚀 ~ DataProcessor ~ generateQualitativeInsights ~ projectAreas:',
-        projectAreas,
-      );
-
       return {
         impressiveWorkflows,
         projectAreas,
@@ -664,7 +636,7 @@ export class DataProcessor {
         atAGlance,
       };
     } catch (e) {
-      console.error('Error generating qualitative insights:', e);
+      logger.error('Error generating qualitative insights:', e);
       return undefined;
     }
   }
@@ -783,12 +755,12 @@ None captured`;
                 const fileStats = await fs.stat(filePath);
                 allChatFiles.push({ path: filePath, mtime: fileStats.mtimeMs });
               } catch (e) {
-                console.error(`Failed to stat file ${filePath}:`, e);
+                logger.error(`Failed to stat file ${filePath}:`, e);
               }
             }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-              console.log(
+              logger.error(
                 `Error reading chats directory for project ${projectDir}: ${error}`,
               );
             }
@@ -800,9 +772,9 @@ None captured`;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         // Base directory doesn't exist, return empty
-        console.log(`Base directory does not exist: ${baseDir}`);
+        logger.info(`Base directory does not exist: ${baseDir}`);
       } else {
-        console.log(`Error reading base directory: ${error}`);
+        logger.error(`Error reading base directory: ${error}`);
       }
     }
 
@@ -898,7 +870,7 @@ None captured`;
             }
           }
         } catch (error) {
-          console.error(
+          logger.error(
             `Failed to process metrics for file ${fileInfo.path}:`,
             error,
           );
@@ -994,10 +966,10 @@ None captured`;
       .sort((a, b) => b.mtime - a.mtime)
       .slice(0, 50);
 
-    console.log(`Analyzing ${recentFiles.length} recent sessions with LLM...`);
+    logger.info(`Analyzing ${recentFiles.length} recent sessions with LLM...`);
 
     // Create a limit function with concurrency of 4 to avoid 429 errors
-    const limit = pLimit(4);
+    const limit = pLimit(2);
 
     let completed = 0;
     const total = recentFiles.length;
@@ -1036,7 +1008,7 @@ None captured`;
               } catch (readError) {
                 // File doesn't exist or is invalid, proceed to analyze
                 if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') {
-                  console.warn(
+                  logger.warn(
                     `Failed to read existing facet for ${sessionId}, regenerating:`,
                     readError,
                   );
@@ -1059,7 +1031,7 @@ None captured`;
                 'utf-8',
               );
             } catch (writeError) {
-              console.error(
+              logger.error(
                 `Failed to write facet file for session ${facet.session_id}:`,
                 writeError,
               );
@@ -1074,7 +1046,7 @@ None captured`;
 
           return facet;
         } catch (e) {
-          console.error(`Error analyzing session file ${fileInfo.path}:`, e);
+          logger.error(`Error analyzing session file ${fileInfo.path}:`, e);
           completed++;
           if (onProgress) {
             const percent = 20 + Math.round((completed / total) * 60);

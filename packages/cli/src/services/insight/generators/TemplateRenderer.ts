@@ -4,80 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'fs/promises';
-import { existsSync } from 'fs';
-import path, { dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { INSIGHT_JS, INSIGHT_CSS } from '../templates/insightTemplate.js';
 import type { InsightData } from '../types/StaticInsightTypes.js';
 
 export class TemplateRenderer {
-  private templateDir: string;
-
-  constructor() {
-    const __filename = fileURLToPath(import.meta.url);
-    const __dirname = dirname(__filename);
-
-    // In bundled version (dist/cli.js), __dirname is dist/, templates at dist/templates/
-    // In development (dist/src/services/insight/generators/), templates at dist/src/services/insight/templates/
-    const bundledTemplatePath = path.join(__dirname, 'templates');
-    const devTemplatePath = path.join(__dirname, '..', 'templates');
-
-    // Try bundled path first (for production), fall back to dev path
-    try {
-      // Check if bundled templates exist
-      if (existsSync(bundledTemplatePath)) {
-        this.templateDir = bundledTemplatePath;
-      } else {
-        this.templateDir = devTemplatePath;
-      }
-    } catch {
-      // If check fails, use dev path as fallback
-      this.templateDir = devTemplatePath;
-    }
-  }
-
-  // Load template files
-  private async loadTemplate(): Promise<string> {
-    const templatePath = path.join(this.templateDir, 'insight-template.html');
-    return await fs.readFile(templatePath, 'utf-8');
-  }
-
-  private async loadStyles(): Promise<string> {
-    const stylesPath = path.join(this.templateDir, 'styles', 'base.css');
-    return await fs.readFile(stylesPath, 'utf-8');
-  }
-
-  private async loadScripts(): Promise<string> {
-    const componentsDir = path.join(this.templateDir, 'scripts', 'components');
-
-    const componentFiles = [
-      'utils.js',
-      'Header.js',
-      'Qualitative.js',
-      'Charts.js',
-      'App.js',
-    ];
-
-    const scripts = await Promise.all(
-      componentFiles.map((file) =>
-        fs.readFile(path.join(componentsDir, file), 'utf-8'),
-      ),
-    );
-
-    return scripts.join('\n\n');
-  }
-
   // Render the complete HTML file
   async renderInsightHTML(insights: InsightData): Promise<string> {
-    const template = await this.loadTemplate();
-    const styles = await this.loadStyles();
-    const scripts = await this.loadScripts();
+    const html = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Qwen Code Insights</title>
+    <style>
+      ${INSIGHT_CSS}
+    </style>
+  </head>
+  <body>
+    <div class="min-h-screen" id="container">
+      <div class="mx-auto max-w-6xl px-6 py-10 md:py-12">
+        <div id="react-root"></div>
+      </div>
+    </div>
 
-    // Replace all placeholders
-    let html = template;
-    html = html.replace('{{STYLES_PLACEHOLDER}}', styles);
-    html = html.replace('{{DATA_PLACEHOLDER}}', JSON.stringify(insights));
-    html = html.replace('{{SCRIPTS_PLACEHOLDER}}', scripts);
+    <!-- React CDN -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+    <!-- CDN Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+    <!-- Application Data -->
+    <script>
+      window.INSIGHT_DATA = ${JSON.stringify(insights)};
+    </script>
+
+    <!-- App Script -->
+    <script>
+      ${INSIGHT_JS}
+    </script>
+  </body>
+</html>`;
 
     return html;
   }

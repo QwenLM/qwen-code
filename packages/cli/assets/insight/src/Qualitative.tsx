@@ -1,13 +1,16 @@
-/* eslint-disable react/jsx-no-undef */
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable react/prop-types */
-/* eslint-disable no-undef */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useState } from 'react';
+import { DashboardCards, HeatmapSection } from './Charts';
+import { InsightData, QualitativeData } from './types';
+import { CopyButton, MarkdownText } from './Components';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import React from 'react';
 
 // -----------------------------------------------------------------------------
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
 
-function AtAGlance({ qualitative }) {
+export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
   const { atAGlance } = qualitative;
   if (!atAGlance) return null;
 
@@ -48,7 +51,7 @@ function AtAGlance({ qualitative }) {
   );
 }
 
-function NavToc() {
+export function NavToc() {
   return (
     <nav className="nav-toc">
       <a href="#section-work">What You Work On</a>
@@ -62,7 +65,15 @@ function NavToc() {
   );
 }
 
-function ProjectAreas({ qualitative, topGoals, topTools }) {
+export function ProjectAreas({
+  qualitative,
+  topGoals,
+  topTools,
+}: {
+  qualitative: QualitativeData;
+  topGoals?: Record<string, number>;
+  topTools?: Record<string, number> | [string, number][];
+}) {
   const { projectAreas } = qualitative;
 
   // Convert topTools (array of tuples) to object for chart if needed
@@ -124,7 +135,13 @@ function ProjectAreas({ qualitative, topGoals, topTools }) {
   );
 }
 
-function InteractionStyle({ qualitative, insights }) {
+export function InteractionStyle({
+  qualitative,
+  insights,
+}: {
+  qualitative: QualitativeData;
+  insights: InsightData;
+}) {
   const { interactionStyle } = qualitative;
   if (!interactionStyle) return null;
 
@@ -154,7 +171,15 @@ function InteractionStyle({ qualitative, insights }) {
   );
 }
 
-function ImpressiveWorkflows({ qualitative, primarySuccess, outcomes }) {
+export function ImpressiveWorkflows({
+  qualitative,
+  primarySuccess,
+  outcomes,
+}: {
+  qualitative: QualitativeData;
+  primarySuccess: Record<string, number>;
+  outcomes: Record<string, number>;
+}) {
   const { impressiveWorkflows } = qualitative;
   if (!impressiveWorkflows) return null;
 
@@ -227,7 +252,7 @@ function ImpressiveWorkflows({ qualitative, primarySuccess, outcomes }) {
 }
 
 // Format label for display (capitalize and replace underscores with spaces)
-function formatLabel(label) {
+function formatLabel(label: string) {
   if (label === 'unclear_from_transcript') {
     return 'Unclear';
   }
@@ -243,6 +268,11 @@ function HorizontalBarChart({
   title,
   color = '#3b82f6',
   allowedKeys = null,
+}: {
+  data: Record<string, number>;
+  title: string;
+  color?: string;
+  allowedKeys?: string[] | null;
 }) {
   if (!data || Object.keys(data).length === 0) return null;
 
@@ -362,7 +392,15 @@ function HorizontalBarChart({
   );
 }
 
-function FrictionPoints({ qualitative, satisfaction, friction }) {
+export function FrictionPoints({
+  qualitative,
+  satisfaction,
+  friction,
+}: {
+  qualitative: QualitativeData;
+  satisfaction?: Record<string, number>;
+  friction?: Record<string, number>;
+}) {
   const { frictionPoints } = qualitative;
   if (!frictionPoints) return null;
 
@@ -444,13 +482,19 @@ function FrictionPoints({ qualitative, satisfaction, friction }) {
 }
 
 // Qwen.md Additions Section Component
-function QwenMdAdditionsSection({ additions }) {
+function QwenMdAdditionsSection({
+  additions,
+}: {
+  additions: NonNullable<
+    NonNullable<QualitativeData['improvements']>['Qwen_md_additions']
+  >;
+}) {
   const [checkedState, setCheckedState] = useState(
     new Array(additions.length).fill(true),
   );
   const [copiedAll, setCopiedAll] = useState(false);
 
-  const handleCheckboxChange = (position) => {
+  const handleCheckboxChange = (position: number) => {
     const updatedCheckedState = checkedState.map((item, index) =>
       index === position ? !item : item,
     );
@@ -460,7 +504,7 @@ function QwenMdAdditionsSection({ additions }) {
   const handleCopyAll = () => {
     const textToCopy = additions
       .filter((_, index) => checkedState[index])
-      .map((item) => item.addition)
+      .map((item: { addition: any }) => item.addition)
       .join('\n\n');
 
     if (!textToCopy) return;
@@ -511,7 +555,11 @@ function QwenMdAdditionsSection({ additions }) {
   );
 }
 
-function Improvements({ qualitative }) {
+export function Improvements({
+  qualitative,
+}: {
+  qualitative: QualitativeData;
+}) {
   const { improvements } = qualitative;
   if (!improvements) return null;
 
@@ -594,7 +642,11 @@ function Improvements({ qualitative }) {
   );
 }
 
-function FutureOpportunities({ qualitative }) {
+export function FutureOpportunities({
+  qualitative,
+}: {
+  qualitative: QualitativeData;
+}) {
   const { futureOpportunities } = qualitative;
   if (!futureOpportunities) return null;
 
@@ -644,7 +696,11 @@ function FutureOpportunities({ qualitative }) {
   );
 }
 
-function MemorableMoment({ qualitative }) {
+export function MemorableMoment({
+  qualitative,
+}: {
+  qualitative: QualitativeData;
+}) {
   const { memorableMoment } = qualitative;
   if (!memorableMoment) return null;
 

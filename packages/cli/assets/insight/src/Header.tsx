@@ -1,8 +1,15 @@
-/* eslint-disable @typescript-eslint/no-unused-vars */
-/* eslint-disable react/prop-types */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import React from 'react';
+import { InsightData } from './types';
 
 // Header Component
-function Header({ data, dateRangeStr }) {
+export function Header({
+  data,
+  dateRangeStr,
+}: {
+  data: InsightData;
+  dateRangeStr: string;
+}) {
   const { totalMessages, totalSessions } = data;
 
   return (
@@ -20,7 +27,7 @@ function Header({ data, dateRangeStr }) {
   );
 }
 
-function StatsRow({ data }) {
+export function StatsRow({ data }: { data: InsightData }) {
   const {
     totalMessages = 0,
     totalLinesAdded = 0,
@@ -34,9 +41,10 @@ function StatsRow({ data }) {
   let daysSpan = 0;
   if (heatmapKeys.length > 0) {
     const dates = heatmapKeys.map((d) => new Date(d));
-    const minDate = new Date(Math.min(...dates));
-    const maxDate = new Date(Math.max(...dates));
-    const diffTime = Math.abs(maxDate - minDate);
+    const timestamps = dates.map((d) => d.getTime());
+    const minDate = new Date(Math.min(...timestamps));
+    const maxDate = new Date(Math.max(...timestamps));
+    const diffTime = Math.abs(maxDate.getTime() - minDate.getTime());
     daysSpan = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
   }
 
