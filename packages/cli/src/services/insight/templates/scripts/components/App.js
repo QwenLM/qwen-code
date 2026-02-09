@@ -55,7 +55,11 @@ function InsightApp({ data }) {
       {data.qualitative && (
         <>
           <ImpressiveWorkflows qualitative={data.qualitative} />
-          <FrictionPoints qualitative={data.qualitative} />
+          <FrictionPoints
+            qualitative={data.qualitative}
+            satisfaction={data.satisfaction}
+            friction={data.friction}
+          />
           <Improvements qualitative={data.qualitative} />
           <FutureOpportunities qualitative={data.qualitative} />
           <MemorableMoment qualitative={data.qualitative} />

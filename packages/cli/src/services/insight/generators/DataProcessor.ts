@@ -272,10 +272,38 @@ export class DataProcessor {
 
     const qualitative = await this.generateQualitativeInsights(metrics, facets);
 
+    // Aggregate satisfaction and friction data from facets
+    const { satisfactionAgg, frictionAgg } = this.aggregateFacetsData(facets);
+
     return {
       ...metrics,
       qualitative,
+      satisfaction: satisfactionAgg,
+      friction: frictionAgg,
     };
+  }
+
+  // Aggregate satisfaction and friction data from facets
+  private aggregateFacetsData(facets: SessionFacets[]): {
+    satisfactionAgg: Record<string, number>;
+    frictionAgg: Record<string, number>;
+  } {
+    const satisfactionAgg: Record<string, number> = {};
+    const frictionAgg: Record<string, number> = {};
+
+    facets.forEach((facet) => {
+      // Aggregate satisfaction
+      Object.entries(facet.user_satisfaction_counts).forEach(([sat, count]) => {
+        satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
+      });
+
+      // Aggregate friction
+      Object.entries(facet.friction_counts).forEach(([fric, count]) => {
+        frictionAgg[fric] = (frictionAgg[fric] || 0) + count;
+      });
+    });
+
+    return { satisfactionAgg, frictionAgg };
   }
 
   private async generateQualitativeInsights(

@@ -26,6 +26,8 @@ export interface InsightData {
   totalFiles?: number;
   topTools?: Array<[string, number]>;
   qualitative?: QualitativeInsights;
+  satisfaction?: Record<string, number>;
+  friction?: Record<string, number>;
 }
 
 export interface StreakData {

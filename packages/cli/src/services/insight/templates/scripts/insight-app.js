@@ -146,7 +146,11 @@ function InsightApp({ data }) {
       {data.qualitative && (
         <>
           <ImpressiveWorkflows qualitative={data.qualitative} />
-          <FrictionPoints qualitative={data.qualitative} />
+          <FrictionPoints
+            qualitative={data.qualitative}
+            satisfaction={data.satisfaction}
+            friction={data.friction}
+          />
           <Improvements qualitative={data.qualitative} />
           <FutureOpportunities qualitative={data.qualitative} />
           <MemorableMoment qualitative={data.qualitative} />
@@ -307,7 +311,117 @@ function ImpressiveWorkflows({ qualitative }) {
   );
 }
 
-function FrictionPoints({ qualitative }) {
+// Horizontal Bar Chart Component
+function HorizontalBarChart({
+  data,
+  title,
+  color = '#3b82f6',
+  allowedKeys = null,
+}) {
+  if (!data || Object.keys(data).length === 0) return null;
+
+  // Filter and sort entries
+  let entries = Object.entries(data);
+  if (allowedKeys) {
+    entries = entries.filter(([key]) => allowedKeys.includes(key));
+  }
+  entries.sort((a, b) => b[1] - a[1]);
+
+  if (entries.length === 0) return null;
+
+  const maxValue = Math.max(...entries.map(([, count]) => count));
+
+  return (
+    <div className="bar-chart-container" style={{ flex: 1, minWidth: 0 }}>
+      <h3
+        style={{
+          fontSize: '13px',
+          fontWeight: 600,
+          color: '#334155',
+          marginBottom: '10px',
+        }}
+      >
+        {title}
+      </h3>
+      <div
+        className="bar-chart"
+        style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}
+      >
+        {entries.map(([label, count]) => {
+          const percentage = maxValue > 0 ? (count / maxValue) * 100 : 0;
+          return (
+            <div
+              key={label}
+              className="bar-row"
+              style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
+            >
+              <div
+                className="bar-label"
+                style={{
+                  width: '110px',
+                  fontSize: '11px',
+                  color: '#64748b',
+                  textAlign: 'right',
+                  flexShrink: 0,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {label}
+              </div>
+              <div
+                className="bar-wrapper"
+                style={{
+                  flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  minWidth: 0,
+                }}
+              >
+                <div
+                  className="bar-bg"
+                  style={{
+                    flex: 1,
+                    height: '16px',
+                    backgroundColor: '#f1f5f9',
+                    borderRadius: '3px',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <div
+                    className="bar-fill"
+                    style={{
+                      width: `${percentage}%`,
+                      height: '100%',
+                      backgroundColor: color,
+                      borderRadius: '3px',
+                      transition: 'width 0.3s ease',
+                    }}
+                  />
+                </div>
+                <span
+                  className="bar-value"
+                  style={{
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#334155',
+                    minWidth: '20px',
+                  }}
+                >
+                  {count}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FrictionPoints({ qualitative, satisfaction, friction }) {
   const { frictionPoints } = qualitative;
   if (!frictionPoints) return null;
 
@@ -343,6 +457,45 @@ function FrictionPoints({ qualitative }) {
               )}
             </div>
           ))}
+      </div>
+
+      {/* Facets Data Charts */}
+      <div
+        style={{
+          display: 'flex',
+          gap: '24px',
+          marginTop: '24px',
+          marginBottom: '24px',
+        }}
+      >
+        {friction && Object.keys(friction).length > 0 && (
+          <HorizontalBarChart
+            data={friction}
+            title="Primary Friction Types"
+            color="#ef4444"
+            allowedKeys={[
+              'misunderstood_request',
+              'wrong_approach',
+              'buggy_code',
+              'user_rejected_action',
+              'excessive_changes',
+            ]}
+          />
+        )}
+        {satisfaction && Object.keys(satisfaction).length > 0 && (
+          <HorizontalBarChart
+            data={satisfaction}
+            title="Inferred Satisfaction (model-estimated)"
+            color="#10b981"
+            allowedKeys={[
+              'happy',
+              'satisfied',
+              'likely_satisfied',
+              'dissatisfied',
+              'frustrated',
+            ]}
+          />
+        )}
       </div>
     </>
   );
