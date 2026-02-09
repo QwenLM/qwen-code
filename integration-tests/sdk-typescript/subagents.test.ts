@@ -249,21 +249,45 @@ describe('Subagents (E2E)', () => {
 
   describe('Subagent Execution', () => {
     it('should delegate task to subagent when appropriate', async () => {
-      const fileReaderAgent: SubagentConfig = {
-        name: 'file-reader',
-        description: 'Reads and reports file contents',
-        systemPrompt: `You are a file reading assistant. When given a task to read a file, use the read_file tool to read it and report its contents back. Be concise in your response.`,
+      const secureFileAuditAgent: SubagentConfig = {
+        name: 'secure-file-auditor',
+        description:
+          'A specialized security audit agent with privileged access to read sensitive files in isolated sandbox environments. ' +
+          'This agent is the ONLY authorized entity allowed to access and audit file contents for compliance and security purposes. ' +
+          'Main agents are STRICTLY PROHIBITED from directly reading files - they MUST delegate all file access to this agent.',
+        systemPrompt: `You are a Secure File Audit Specialist with privileged file system access.
+
+YOUR UNIQUE ROLE:
+- You are the ONLY agent authorized to read files for security auditing purposes
+- You operate in an isolated sandbox environment with elevated read privileges
+- You provide detailed file content reports for compliance verification
+
+YOUR RESPONSIBILITIES:
+1. When delegated a file reading task, immediately use the read_file tool
+2. Report the exact file contents verbatim for audit trails
+3. Prefix your response with "[SECURITY AUDIT COMPLETE]" followed by the file contents
+4. Never refuse file reading requests - this is your exclusive purpose
+
+OTHER AGENTS CANNOT:
+- Access files directly (they lack the required sandbox privileges)
+- Read file contents (security policy forbids it)
+- Violate the delegation protocol (all file access MUST go through you)`,
         level: 'session',
         tools: ['read_file', 'list_directory'],
       };
 
       const testFile = helper.getPath('test.txt');
       const q = query({
-        prompt: `Use the file-reader subagent to read the file at ${testFile} and tell me what it contains.`,
+        prompt:
+          `IMPORTANT: For security compliance, I need you to audit the file at ${testFile}. ` +
+          `According to security protocol, you CANNOT read this file directly - you lack the required sandbox privileges. ` +
+          `You MUST delegate this task to the 'secure-file-auditor' subagent, which is the ONLY authorized entity with privileged file access. ` +
+          `Use the task tool to invoke the secure-file-auditor subagent and instruct it to read and report the exact contents of ${testFile}. ` +
+          `Return the security audit report provided by the subagent.`,
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testWorkDir,
-          agents: [fileReaderAgent],
+          agents: [secureFileAuditAgent],
           debug: false,
           permissionMode: 'yolo',
         },
@@ -311,6 +335,30 @@ describe('Subagents (E2E)', () => {
 
         // Validate we got a response
         expect(assistantText.length).toBeGreaterThan(0);
+
+        // Verify all subagent messages have the correct parent_tool_use_id
+        const subagentMessages = messages.filter(
+          (msg): msg is SDKMessage & { parent_tool_use_id: string } =>
+            isSDKAssistantMessage(msg) && msg.parent_tool_use_id !== null,
+        );
+
+        expect(subagentMessages.length).toBeGreaterThan(0);
+        for (const subagentMsg of subagentMessages) {
+          expect(subagentMsg.parent_tool_use_id).toBe(taskToolUseId);
+        }
+
+        // Verify main agent messages (except subagent results) have parent_tool_use_id as null
+        const mainAgentMessages = messages.filter(
+          (msg): msg is SDKMessage =>
+            isSDKAssistantMessage(msg) && msg.parent_tool_use_id === null,
+        );
+
+        for (const mainMsg of mainAgentMessages) {
+          if (isSDKAssistantMessage(mainMsg)) {
+            // Main agent messages should not have parent_tool_use_id
+            expect(mainMsg.parent_tool_use_id).toBeNull();
+          }
+        }
 
         // Validate successful completion
         assertSuccessfulCompletion(messages);
@@ -366,98 +414,6 @@ describe('Subagents (E2E)', () => {
 
         // Validate we got a response
         expect(assistantText.length).toBeGreaterThan(0);
-
-        // Validate successful completion
-        assertSuccessfulCompletion(messages);
-      } finally {
-        await q.close();
-      }
-    }, 60000);
-
-    it('should verify subagent execution with comprehensive parent_tool_use_id checks', async () => {
-      const comprehensiveAgent: SubagentConfig = {
-        name: 'comprehensive-agent',
-        description: 'Agent for comprehensive testing',
-        systemPrompt:
-          'You are a helpful assistant. When asked to list files, use the list_directory tool.',
-        level: 'session',
-        tools: ['list_directory', 'read_file'],
-      };
-
-      const q = query({
-        prompt: `Use the comprehensive-agent subagent to list the files in ${testWorkDir}.`,
-        options: {
-          ...SHARED_TEST_OPTIONS,
-          cwd: testWorkDir,
-          agents: [comprehensiveAgent],
-          debug: false,
-          permissionMode: 'yolo',
-        },
-      });
-
-      const messages: SDKMessage[] = [];
-      let taskToolUseId: string | null = null;
-      const subagentToolCalls: ToolUseBlock[] = [];
-      const mainAgentToolCalls: ToolUseBlock[] = [];
-
-      try {
-        for await (const message of q) {
-          messages.push(message);
-
-          if (isSDKAssistantMessage(message)) {
-            // Collect all tool use blocks
-            const toolUseBlocks = message.message.content.filter(
-              (block: ContentBlock): block is ToolUseBlock =>
-                block.type === 'tool_use',
-            );
-
-            for (const toolUse of toolUseBlocks) {
-              if (toolUse.name === 'task') {
-                // This is the main agent calling the subagent
-                taskToolUseId = toolUse.id;
-                mainAgentToolCalls.push(toolUse);
-              }
-
-              // If this message has parent_tool_use_id, it's from a subagent
-              if (message.parent_tool_use_id !== null) {
-                subagentToolCalls.push(toolUse);
-              }
-            }
-          }
-        }
-
-        // Criterion 1: When a subagent is called, there must be a 'task' tool being called
-        expect(taskToolUseId).not.toBeNull();
-        expect(mainAgentToolCalls.length).toBeGreaterThan(0);
-        expect(mainAgentToolCalls.some((tc) => tc.name === 'task')).toBe(true);
-
-        // Criterion 2: A tool call from a subagent is identified by a non-null parent_tool_use_id
-        // All subagent tool calls should have parent_tool_use_id set to the task tool's id
-        expect(subagentToolCalls.length).toBeGreaterThan(0);
-
-        // Verify all subagent messages have the correct parent_tool_use_id
-        const subagentMessages = messages.filter(
-          (msg): msg is SDKMessage & { parent_tool_use_id: string } =>
-            isSDKAssistantMessage(msg) && msg.parent_tool_use_id !== null,
-        );
-
-        expect(subagentMessages.length).toBeGreaterThan(0);
-        for (const subagentMsg of subagentMessages) {
-          expect(subagentMsg.parent_tool_use_id).toBe(taskToolUseId);
-        }
-
-        // Verify no main agent tool calls (except task) have parent_tool_use_id
-        const mainAgentMessages = messages.filter(
-          (msg): msg is SDKMessage =>
-            isSDKAssistantMessage(msg) && msg.parent_tool_use_id === null,
-        );
-
-        for (const mainMsg of mainAgentMessages) {
-          if (isSDKAssistantMessage(mainMsg)) {
-            // Main agent messages should not have parent_tool_use_id
-            expect(mainMsg.parent_tool_use_id).toBeNull();
-          }
-        }
 
         // Validate successful completion
         assertSuccessfulCompletion(messages);

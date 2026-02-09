@@ -148,7 +148,9 @@ export const QueryOptionsSchema = z
     coreTools: z.array(z.string()).optional(),
     excludeTools: z.array(z.string()).optional(),
     allowedTools: z.array(z.string()).optional(),
-    authType: z.enum(['openai', 'qwen-oauth']).optional(),
+    authType: z
+      .enum(['openai', 'anthropic', 'qwen-oauth', 'gemini', 'vertex-ai'])
+      .optional(),
     agents: z
       .array(
         z.custom<SubagentConfig>(
@@ -164,6 +166,7 @@ export const QueryOptionsSchema = z
       )
       .optional(),
     includePartialMessages: z.boolean().optional(),
+    resume: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

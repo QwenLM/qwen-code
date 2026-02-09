@@ -9,10 +9,13 @@ import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { relaunchApp } from '../../utils/processUtils.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 interface IdeTrustChangeDialogProps {
   reason: RestartReason;
 }
+
+const debugLogger = createDebugLogger('IDE_TRUST_DIALOG');
 
 export const IdeTrustChangeDialog = ({ reason }: IdeTrustChangeDialogProps) => {
   useKeypress(
@@ -27,7 +30,7 @@ export const IdeTrustChangeDialog = ({ reason }: IdeTrustChangeDialogProps) => {
   let message = 'Workspace trust has changed.';
   if (reason === 'NONE') {
     // This should not happen, but provides a fallback and a debug log.
-    console.error(
+    debugLogger.error(
       'IdeTrustChangeDialog rendered with unexpected reason "NONE"',
     );
   } else if (reason === 'CONNECTION_CHANGE') {

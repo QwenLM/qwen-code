@@ -23,6 +23,7 @@ export default {
   'auto-accept edits': 'Режим принятия правок',
   'Accepting edits': 'Принятие правок',
   '(shift + tab to cycle)': '(shift + tab для переключения)',
+  '(tab to cycle)': '(Tab для переключения)',
   'Execute shell commands via {{symbol}} (e.g., {{example1}}) or use natural language (e.g., {{example2}}).':
     'Выполняйте команды терминала через {{symbol}} (например, {{example1}}) или используйте естественный язык (например, {{example2}}).',
   '!': '!',
@@ -354,7 +355,6 @@ export default {
   'Folder Trust': 'Доверие к папке',
   'Vision Model Preview': 'Визуальная модель (предпросмотр)',
   'Tool Schema Compliance': 'Соответствие схеме инструмента',
-  'Experimental: Skills': 'Экспериментальное: Навыки',
   // Варианты перечислений настроек
   'Auto (detect from system)': 'Авто (определить из системы)',
   Text: 'Текст',
@@ -443,6 +443,8 @@ export default {
   'This extension will install the following subagents:':
     'Это расширение установит следующие подагенты:',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
+    'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref и --auto-update неприменимы для расширений из маркетплейса.',
   'Extension "{{name}}" installed successfully and enabled.':
@@ -1055,9 +1057,6 @@ export default {
   // Статус MCP
   // ============================================================================
   'No MCP servers configured.': 'Не настроено MCP-серверов.',
-  'Please view MCP documentation in your browser:':
-    'Пожалуйста, просмотрите документацию MCP в браузере:',
-  'or use the cli /docs command': 'или используйте команду cli /docs',
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCP-серверы запускаются ({{count}} инициализируется)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
@@ -1372,4 +1371,8 @@ export default {
     'Открываем страницу расширений в браузере: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Не удалось открыть браузер. Посетите галерею расширений по адресу {{url}}',
+  'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
+    'Вы можете быстро переключать режим разрешений с помощью Shift+Tab или /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
 };

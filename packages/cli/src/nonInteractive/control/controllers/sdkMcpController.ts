@@ -82,12 +82,10 @@ export class SdkMcpController extends BaseController {
     serverName: string,
     message: JSONRPCMessage,
   ): Promise<JSONRPCMessage> {
-    if (this.context.debugMode) {
-      console.error(
-        `[SdkMcpController] Sending MCP message to SDK server '${serverName}':`,
-        JSON.stringify(message),
-      );
-    }
+    this.debugLogger.debug(
+      `[SdkMcpController] Sending MCP message to SDK server '${serverName}':`,
+      JSON.stringify(message),
+    );
 
     // Send control request to SDK with the MCP message
     const response = await this.sendControlRequest(
@@ -110,12 +108,10 @@ export class SdkMcpController extends BaseController {
       );
     }
 
-    if (this.context.debugMode) {
-      console.error(
-        `[SdkMcpController] Received MCP response from SDK server '${serverName}':`,
-        JSON.stringify(mcpResponse),
-      );
-    }
+    this.debugLogger.debug(
+      `[SdkMcpController] Received MCP response from SDK server '${serverName}':`,
+      JSON.stringify(mcpResponse),
+    );
 
     return mcpResponse;
   }

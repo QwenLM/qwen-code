@@ -12,6 +12,9 @@ import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_CONFIG_DIR } from '../tools/memoryTool.js';
 import type { GenerateContentConfig } from '@google/genai';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PROMPTS');
 
 export function resolvePathFromEnv(envVar?: string): {
   isSwitch: boolean;
@@ -46,7 +49,7 @@ export function resolvePathFromEnv(envVar?: string): {
       }
     } catch (error) {
       // If os.homedir() fails, we catch the error instead of crashing.
-      console.warn(
+      debugLogger.warn(
         `Could not resolve home directory for path: ${trimmedEnvVar}`,
         error,
       );
@@ -203,7 +206,7 @@ I've found some existing telemetry code. Let me mark the first todo as in_progre
 ## Software Engineering Tasks
 When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
 - **Plan:** After understanding the user's request, create an initial plan based on your existing knowledge and any immediately obvious context. Use the '${ToolNames.TODO_WRITE}' tool to capture this rough plan for complex or multi-step work. Don't wait for complete understanding - start with what you know.
-- **Implement:** Begin implementing the plan while gathering additional context as needed. Use '${ToolNames.GREP}', '${ToolNames.GLOB}', '${ToolNames.READ_FILE}', and '${ToolNames.READ_MANY_FILES}' tools strategically when you encounter specific unknowns during implementation. Use the available tools (e.g., '${ToolNames.EDIT}', '${ToolNames.WRITE_FILE}' '${ToolNames.SHELL}' ...) to act on the plan, strictly adhering to the project's established conventions (detailed under 'Core Mandates').
+- **Implement:** Begin implementing the plan while gathering additional context as needed. Use '${ToolNames.GREP}', '${ToolNames.GLOB}', and '${ToolNames.READ_FILE}' tools strategically when you encounter specific unknowns during implementation. Use the available tools (e.g., '${ToolNames.EDIT}', '${ToolNames.WRITE_FILE}' '${ToolNames.SHELL}' ...) to act on the plan, strictly adhering to the project's established conventions (detailed under 'Core Mandates').
 - **Adapt:** As you discover new information or encounter obstacles, update your plan and todos accordingly. Mark todos as in_progress when starting and completed when finishing each task. Add new todos if the scope expands. Refine your approach based on what you learn.
 - **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands.
 - **Verify (Standards):** VERY IMPORTANT: After making code changes, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .') that you have identified for this project (or obtained from the user). This ensures code quality and adherence to standards. If unsure about these commands, you can ask the user if they'd like you to run them and if so how to.
@@ -311,7 +314,7 @@ ${(function () {
 ${getToolCallExamples(model || '')}
 
 # Final Reminder
-Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' or '${ToolNames.READ_MANY_FILES}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
+Your core function is efficient and safe assistance. Balance extreme conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
 `.trim();
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
@@ -447,7 +450,7 @@ model: true
 
 <example>
 user: start the server implemented in server.js
-model: [tool_call: ${ToolNames.SHELL} for 'node server.js &' because it must run in the background]
+model: [tool_call: ${ToolNames.SHELL} for 'node server.js &' with is_background: true because it must run in the background]
 </example>
 
 <example>
@@ -488,7 +491,7 @@ model:
 Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
 [tool_call: ${ToolNames.READ_FILE} for path '/path/to/someFile.ts']
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
-[tool_call: ${ToolNames.READ_MANY_FILES} for paths ['**/*.test.ts', 'src/**/*.spec.ts']]
+[tool_call: ${ToolNames.READ_FILE} for path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
 [tool_call: ${ToolNames.WRITE_FILE} for path '/path/to/someFile.test.ts']
 I've written the tests. Now I'll run the project's test command to verify them.
@@ -523,11 +526,14 @@ model: true
 
 <example>
 user: start the server implemented in server.js
-model: 
+model:
 <tool_call>
 <function=${ToolNames.SHELL}>
 <parameter=command>
 node server.js &
+</parameter>
+<parameter=is_background>
+true
 </parameter>
 </function>
 </tool_call>
@@ -620,9 +626,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 </tool_call>
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <tool_call>
-<function=${ToolNames.READ_MANY_FILES}>
-<parameter=paths>
-['**/*.test.ts', 'src/**/*.spec.ts']
+<function=${ToolNames.READ_FILE}>
+<parameter=path>
+/path/to/existingTest.test.ts
 </parameter>
 </function>
 </tool_call>
@@ -679,7 +685,7 @@ model: true
 user: start the server implemented in server.js
 model: 
 <tool_call>
-{"name": "${ToolNames.SHELL}", "arguments": {"command": "node server.js &"}}
+{"name": "${ToolNames.SHELL}", "arguments": {"command": "node server.js &", "is_background": true}}
 </tool_call>
 </example>
 
@@ -734,7 +740,7 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 </tool_call>
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <tool_call>
-{"name": "${ToolNames.READ_MANY_FILES}", "arguments": {"paths": ["**/*.test.ts", "src/**/*.spec.ts"]}}
+{"name": "${ToolNames.READ_FILE}", "arguments": {"path": "/path/to/existingTest.test.ts"}}
 </tool_call>
 (After reviewing existing tests and the file content)
 <tool_call>
@@ -774,7 +780,7 @@ function getToolCallExamples(model?: string): string {
       case 'general':
         return generalToolCallExamples;
       default:
-        console.warn(
+        debugLogger.warn(
           `Unknown QWEN_CODE_TOOL_CALL_STYLE value: ${toolCallStyle}. Using model-based detection.`,
         );
         break;

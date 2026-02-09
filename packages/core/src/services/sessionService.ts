@@ -17,6 +17,9 @@ import type {
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SESSION');
 
 /**
  * Session item for list display.
@@ -324,7 +327,7 @@ export class SessionService {
       return await jsonl.read<ChatRecord>(filePath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error('Error reading session file:', error);
+        debugLogger.error('Error reading session file:', error);
       }
       return [];
     }

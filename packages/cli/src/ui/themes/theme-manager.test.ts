@@ -160,22 +160,14 @@ describe('ThemeManager', () => {
       expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
     });
 
-    it('should not load a theme from an untrusted file path and log a message', () => {
+    it('should not load a theme from an untrusted file path', () => {
       vi.spyOn(fs, 'existsSync').mockReturnValue(true);
       vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(mockTheme));
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => {});
 
       const result = themeManager.setActiveTheme('/untrusted/my-theme.json');
 
       expect(result).toBe(false);
       expect(themeManager.getActiveTheme().name).toBe(DEFAULT_THEME.name);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('is outside your home directory'),
-      );
-
-      consoleWarnSpy.mockRestore();
     });
   });
 });

@@ -227,9 +227,20 @@ function getLatestStableReleaseTag() {
   }
 }
 
+function getNextPatchVersion() {
+  // Get latest stable version from npm and increment patch
+  const latestVersion = getVersionFromNPM('latest');
+  if (!latestVersion) {
+    // Fallback to package.json if npm fails
+    const packageJson = readJson(join(__dirname, '..', 'package.json'));
+    return packageJson.version.split('-')[0];
+  }
+  const [major, minor, patch] = latestVersion.split('.').map(Number);
+  return `${major}.${minor}.${patch + 1}`;
+}
+
 function getNightlyVersion() {
-  const packageJson = readJson(join(__dirname, '..', 'package.json'));
-  const baseVersion = packageJson.version.split('-')[0];
+  const baseVersion = getNextPatchVersion();
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, '');
   const gitShortHash = execSync('git rev-parse --short HEAD').toString().trim();
   const releaseVersion = `${baseVersion}-nightly.${date}.${gitShortHash}`;
@@ -281,10 +292,9 @@ function getPreviewVersion(args) {
     );
     releaseVersion = overrideVersion;
   } else {
-    // Try to get from nightly, fallback to package.json for first release
-    const { latestVersion: latestNightlyVersion } = getAndVerifyTags('nightly');
-    releaseVersion =
-      latestNightlyVersion.replace(/-nightly.*/, '') + '-preview.0';
+    // Get next patch version from npm latest and add preview suffix
+    const baseVersion = getNextPatchVersion();
+    releaseVersion = `${baseVersion}-preview.0`;
   }
 
   return {

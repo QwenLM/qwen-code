@@ -81,6 +81,7 @@ const mockConfigInternal = {
       registerTool: vi.fn(),
       discoverTools: vi.fn(),
     }) as unknown as ToolRegistry,
+  getDefaultFileEncoding: () => 'utf-8',
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -728,6 +729,131 @@ describe('WriteFileTool', () => {
       expect(result.returnDisplay).toContain(
         'Error writing to file: Generic write error',
       );
+    });
+  });
+
+  describe('BOM preservation (Issue #1672)', () => {
+    const abortSignal = new AbortController().signal;
+
+    it('should preserve BOM when overwriting existing file with BOM', async () => {
+      const filePath = path.join(rootDir, 'bom_file.txt');
+      const originalContent = 'original content';
+      const newContent = 'new content';
+
+      // Create file with BOM
+      fs.writeFileSync(
+        filePath,
+        Buffer.concat([
+          Buffer.from([0xef, 0xbb, 0xbf]),
+          Buffer.from(originalContent, 'utf-8'),
+        ]),
+      );
+
+      // Spy on writeTextFile to verify BOM option
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      const params = { file_path: filePath, content: newContent };
+      const invocation = tool.build(params);
+      await invocation.execute(abortSignal);
+
+      // Verify writeTextFile was called with bom: true
+      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
+        bom: true,
+      });
+
+      // Cleanup
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    it('should not add BOM when overwriting existing file without BOM', async () => {
+      const filePath = path.join(rootDir, 'no_bom_file.txt');
+      const originalContent = 'original content';
+      const newContent = 'new content';
+
+      // Create file without BOM
+      fs.writeFileSync(filePath, originalContent, 'utf-8');
+
+      // Spy on writeTextFile to verify BOM option
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      const params = { file_path: filePath, content: newContent };
+      const invocation = tool.build(params);
+      await invocation.execute(abortSignal);
+
+      // Verify writeTextFile was called with bom: false
+      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
+        bom: false,
+      });
+
+      // Cleanup
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    it('should use default encoding for new files', async () => {
+      const filePath = path.join(rootDir, 'new_file.txt');
+      const newContent = 'new content';
+
+      // Ensure file does not exist
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+
+      // Spy on writeTextFile to verify BOM option
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      const params = { file_path: filePath, content: newContent };
+      const invocation = tool.build(params);
+      await invocation.execute(abortSignal);
+
+      // Verify writeTextFile was called with bom: false (default is utf-8)
+      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
+        bom: false,
+      });
+
+      // Cleanup
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    });
+
+    it('should use BOM for new files when defaultFileEncoding is utf-8-bom', async () => {
+      const filePath = path.join(rootDir, 'new_file_bom.txt');
+      const newContent = 'new content';
+
+      // Ensure file does not exist
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+
+      // Mock config to return utf-8-bom
+      const originalGetDefaultFileEncoding =
+        mockConfigInternal.getDefaultFileEncoding;
+      mockConfigInternal.getDefaultFileEncoding = () => 'utf-8-bom';
+
+      // Spy on writeTextFile to verify BOM option
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      const params = { file_path: filePath, content: newContent };
+      const invocation = tool.build(params);
+      await invocation.execute(abortSignal);
+
+      // Verify writeTextFile was called with bom: true
+      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
+        bom: true,
+      });
+
+      // Restore mock
+      mockConfigInternal.getDefaultFileEncoding =
+        originalGetDefaultFileEncoding;
+
+      // Cleanup
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
     });
   });
 });

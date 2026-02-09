@@ -4,18 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { linkCommand, handleLink } from './link.js';
 import yargs from 'yargs';
 
 const mockInstallExtension = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('./utils.js', () => ({
   getExtensionManager: vi.fn().mockResolvedValue({
@@ -30,6 +25,12 @@ vi.mock('./consent.js', () => ({
 
 vi.mock('../../utils/errors.js', () => ({
   getErrorMessage: vi.fn((error: Error) => error.message),
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
 }));
 
 describe('extensions link command', () => {
@@ -50,20 +51,15 @@ describe('extensions link command', () => {
 });
 
 describe('handleLink', () => {
-  let consoleLogSpy: MockInstance;
-  let consoleErrorSpy: MockInstance;
-  let processExitSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation(() => undefined as never);
     vi.clearAllMocks();
   });
 
   it('should link an extension from a local path', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockInstallExtension.mockResolvedValueOnce({ name: 'linked-extension' });
 
     await handleLink({
@@ -77,19 +73,27 @@ describe('handleLink', () => {
       },
       expect.any(Function),
     );
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "linked-extension" linked successfully and enabled.',
     );
+
+    processExitSpy.mockRestore();
   });
 
   it('should handle errors and exit with code 1', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockInstallExtension.mockRejectedValueOnce(new Error('Link failed'));
 
     await handleLink({
       path: '/some/local/path',
     });
 
-    expect(consoleErrorSpy).toHaveBeenCalledWith('Link failed');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('Link failed');
     expect(processExitSpy).toHaveBeenCalledWith(1);
+
+    processExitSpy.mockRestore();
   });
 });

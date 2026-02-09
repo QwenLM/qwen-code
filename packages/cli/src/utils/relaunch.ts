@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { basename } from 'node:path';
 import { RELAUNCH_EXIT_CODE } from './processUtils.js';
+import { writeStderrLine } from './stdioHelpers.js';
 
 export async function relaunchOnExitCode(runner: () => Promise<number>) {
   while (true) {
@@ -18,7 +19,8 @@ export async function relaunchOnExitCode(runner: () => Promise<number>) {
       }
     } catch (error) {
       process.stdin.resume();
-      console.error('Fatal error: Failed to relaunch the CLI process.', error);
+      writeStderrLine('Fatal error: Failed to relaunch the CLI process.');
+      writeStderrLine(error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   }

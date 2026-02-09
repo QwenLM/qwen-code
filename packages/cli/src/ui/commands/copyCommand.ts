@@ -48,7 +48,7 @@ export const copyCommand: SlashCommand = {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.debug(message);
+        context.services.config?.getDebugLogger().debug(message);
 
         return {
           type: 'message',

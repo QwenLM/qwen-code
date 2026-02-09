@@ -54,13 +54,14 @@ interface UseWebViewMessagesProps {
     setActiveSelection: (
       selection: { startLine: number; endLine: number } | null,
     ) => void;
-    setWorkspaceFiles: (
+    setWorkspaceFilesFromResponse: (
       files: Array<{
         id: string;
         label: string;
         description: string;
         path: string;
       }>,
+      requestId?: number,
     ) => void;
     addFileReference: (name: string, path: string) => void;
   };
@@ -923,9 +924,13 @@ export const useWebViewMessages = ({
             description: string;
             path: string;
           }>;
+          const requestId = message.data?.requestId as number | undefined;
           if (files) {
             console.log('[WebView] Received workspaceFiles:', files.length);
-            handlers.fileContext.setWorkspaceFiles(files);
+            handlers.fileContext.setWorkspaceFilesFromResponse(
+              files,
+              requestId,
+            );
           }
           break;
         }
@@ -936,15 +941,12 @@ export const useWebViewMessages = ({
         }
 
         case 'cancelStreaming':
-          // Handle cancel streaming request from webview
+          // Handle cancel streaming response from extension
+          // Note: The "Interrupted" message is already added by handleCancel in App.tsx
+          // to provide immediate UI feedback. We only need to ensure streaming states
+          // are properly cleaned up here.
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearWaitingForResponse();
-          // Add interrupted message
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: 'Interrupted',
-            timestamp: Date.now(),
-          });
           break;
 
         default:

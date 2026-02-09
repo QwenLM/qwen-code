@@ -9,6 +9,7 @@ import { render, Box, useApp } from 'ink';
 import { getGitBranch, SessionService } from '@qwen-code/qwen-code-core';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { SessionPicker } from './SessionPicker.js';
+import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface StandalonePickerScreenProps {
   sessionService: SessionService;
@@ -70,7 +71,7 @@ export async function showResumeSessionPicker(
   const sessionService = new SessionService(cwd);
   const hasSession = await sessionService.loadLastSession();
   if (!hasSession) {
-    console.log('No sessions found. Start a new session with `qwen`.');
+    writeStdoutLine('No sessions found. Start a new session with `qwen`.');
     return undefined;
   }
 

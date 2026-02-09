@@ -13,6 +13,7 @@ import type { Config } from '../config/config.js';
 import {
   ChatRecordingService,
   type ChatRecord,
+  type AtCommandRecordPayload,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
@@ -128,6 +129,33 @@ describe('ChatRecordingService', () => {
 
       expect(user2.uuid).toBe('00000000-0000-0000-0000-000000000003');
       expect(user2.parentUuid).toBe('00000000-0000-0000-0000-000000000002');
+    });
+  });
+
+  describe('recordAtCommand', () => {
+    it('should record @-command metadata as a system payload', () => {
+      const userParts: Part[] = [{ text: 'Hello, world!' }];
+      const payload: AtCommandRecordPayload = {
+        filesRead: ['foo.txt'],
+        status: 'success',
+        message: 'Success',
+        userText: '@foo.txt',
+      };
+
+      chatRecordingService.recordUserMessage(userParts);
+      chatRecordingService.recordAtCommand(payload);
+
+      expect(jsonl.writeLineSync).toHaveBeenCalledTimes(2);
+      const userRecord = vi.mocked(jsonl.writeLineSync).mock
+        .calls[0][1] as ChatRecord;
+      const systemRecord = vi.mocked(jsonl.writeLineSync).mock
+        .calls[1][1] as ChatRecord;
+
+      expect(userRecord.type).toBe('user');
+      expect(systemRecord.type).toBe('system');
+      expect(systemRecord.subtype).toBe('at_command');
+      expect(systemRecord.systemPayload).toEqual(payload);
+      expect(systemRecord.parentUuid).toBe(userRecord.uuid);
     });
   });
 

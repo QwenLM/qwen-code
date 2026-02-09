@@ -11,10 +11,12 @@ import {
   Type,
   type GenerateContentParameters,
   type Content,
+  type Part,
   type Tool,
   type CallableTool,
 } from '@google/genai';
 import type OpenAI from 'openai';
+import { convertToFunctionResponse } from '../coreToolScheduler.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: OpenAIContentConverter;
@@ -861,6 +863,151 @@ describe('OpenAIContentConverter', () => {
     });
   });
 
+  describe('MCP multi-part tool results (issue #1520)', () => {
+    /**
+     * Regression tests for https://github.com/QwenLM/qwen-code/issues/1520
+     *
+     * Ensures that when an MCP tool returns multiple content blocks
+     * (e.g., text + image, or multiple text sections), all content
+     * ends up inside the tool message – NOT in a separate user message.
+     *
+     * These tests simulate the data shape produced by the *fixed*
+     * convertToFunctionResponse(), where all text is joined into
+     * `response.output` and media is placed in `response.parts`.
+     */
+
+    it('should include all text content in tool message when function response has joined text', () => {
+      // After the fix, convertToFunctionResponse joins multiple text parts
+      // into the FunctionResponse.response.output.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_mcp_1',
+                  name: 'figma_get_code',
+                  args: { nodeId: '38:521' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_mcp_1',
+                  name: 'figma_get_code',
+                  response: {
+                    output:
+                      '<div data-node-id="38:521">...</div>\nSUPER CRITICAL: The generated React+Tailwind code MUST be converted...',
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect((toolMessage as { tool_call_id?: string }).tool_call_id).toBe(
+        'call_mcp_1',
+      );
+
+      // All content is in the tool message
+      const toolContent = toolMessage?.content;
+      expect(Array.isArray(toolContent)).toBe(true);
+      const toolTexts = (toolContent as Array<{ type: string; text?: string }>)
+        .filter((p) => p.type === 'text')
+        .map((p) => p.text);
+      expect(toolTexts).toHaveLength(1);
+      expect(toolTexts[0]).toContain('data-node-id');
+      expect(toolTexts[0]).toContain('SUPER CRITICAL');
+
+      // No user message should be created
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(userMessages).toHaveLength(0);
+    });
+
+    it('should include text and image in tool message when function response has media parts', () => {
+      // After the fix, convertToFunctionResponse puts media into
+      // FunctionResponse.parts, which the OpenAI converter picks up
+      // in createToolMessage().
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_mcp_2',
+                  name: 'figma_get_screenshot',
+                  args: { nodeId: '38:521' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_mcp_2',
+                  name: 'figma_get_screenshot',
+                  response: {
+                    output:
+                      "[Tool 'figma' provided the following image data with mime-type: image/png]",
+                  },
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==',
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(request);
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      expect((toolMessage as { tool_call_id?: string }).tool_call_id).toBe(
+        'call_mcp_2',
+      );
+
+      // Tool message should contain both text and image
+      const toolContent = toolMessage?.content;
+      expect(Array.isArray(toolContent)).toBe(true);
+      const contentArray = toolContent as Array<{
+        type: string;
+        text?: string;
+        image_url?: { url: string };
+      }>;
+      expect(contentArray).toHaveLength(2);
+      expect(contentArray[0].type).toBe('text');
+      expect(contentArray[0].text).toContain('image data');
+      expect(contentArray[1].type).toBe('image_url');
+      expect(contentArray[1].image_url?.url).toContain('data:image/png');
+
+      // No user message should be created
+      const userMessages = messages.filter((m) => m.role === 'user');
+      expect(userMessages).toHaveLength(0);
+    });
+  });
+
   describe('OpenAI -> Gemini reasoning content', () => {
     it('should convert reasoning_content to a thought part for non-streaming responses', () => {
       const response = converter.convertOpenAIResponseToGemini({
@@ -1521,5 +1668,292 @@ describe('OpenAIContentConverter', () => {
       expect(messages).toHaveLength(1);
       expect(messages[0].content).toBe('FirstSecond');
     });
+  });
+});
+
+describe('MCP tool result end-to-end through OpenAI converter (issue #1520)', () => {
+  /**
+   * End-to-end regression tests for https://github.com/QwenLM/qwen-code/issues/1520
+   *
+   * Simulates the full pipeline:
+   *   transformMcpContentToParts → convertToFunctionResponse → OpenAI converter
+   *
+   * Verifies that multi-part MCP tool results are properly carried through
+   * into the OpenAI tool message, with no content leaking into user messages.
+   */
+  let converter: OpenAIContentConverter;
+
+  beforeEach(() => {
+    converter = new OpenAIContentConverter('test-model');
+  });
+
+  it('should preserve MCP multi-text content in tool message (not leak to user message)', () => {
+    // Step 1: Simulate what transformMcpContentToParts returns for a Figma
+    // tool that returns code + instructions as two text blocks
+    const mcpTransformedParts: Part[] = [
+      { text: '<div data-node-id="38:521"><h1>Welcome</h1></div>' },
+      {
+        text: 'SUPER CRITICAL: Convert the React+Tailwind code to match the target stack.',
+      },
+    ];
+
+    // Step 2: convertToFunctionResponse wraps the MCP result
+    const callId = 'call_figma_1';
+    const toolName = 'figma_get_code';
+    const responseParts = convertToFunctionResponse(
+      toolName,
+      callId,
+      mcpTransformedParts,
+    );
+
+    // Step 3: Build the conversation history (model tool call + tool result)
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: callId,
+              name: toolName,
+              args: { nodeId: '38:521' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: responseParts,
+      },
+    ];
+
+    // Step 4: Convert to OpenAI format
+    const request: GenerateContentParameters = {
+      model: 'models/test',
+      contents,
+    };
+    const messages = converter.convertGeminiRequestToOpenAI(request);
+
+    const toolMessages = messages.filter((m) => m.role === 'tool');
+    const userMessages = messages.filter((m) => m.role === 'user');
+    const assistantMessages = messages.filter((m) => m.role === 'assistant');
+
+    expect(toolMessages).toHaveLength(1);
+    expect(assistantMessages).toHaveLength(1);
+    // No content should leak into a user message
+    expect(userMessages).toHaveLength(0);
+
+    // Tool message should contain the actual MCP content
+    const toolMsg = toolMessages[0];
+    expect((toolMsg as { tool_call_id: string }).tool_call_id).toBe(callId);
+
+    const toolContent = toolMsg.content;
+    expect(Array.isArray(toolContent)).toBe(true);
+    const toolTexts = (toolContent as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === 'text')
+      .map((p) => p.text);
+    expect(toolTexts).toHaveLength(1);
+    expect(toolTexts[0]).toContain('data-node-id');
+    expect(toolTexts[0]).toContain('SUPER CRITICAL');
+  });
+
+  it('should preserve MCP text+image content in tool message', () => {
+    // Simulates MCP tool returning text description + image (e.g., get_screenshot)
+    const mcpTransformedParts: Part[] = [
+      {
+        text: "[Tool 'figma' provided the following image data with mime-type: image/png]",
+      },
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'iVBORw0KGgo=',
+        },
+      },
+    ];
+
+    const callId = 'call_figma_2';
+    const toolName = 'figma_get_screenshot';
+    const responseParts = convertToFunctionResponse(
+      toolName,
+      callId,
+      mcpTransformedParts,
+    );
+
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: callId,
+              name: toolName,
+              args: { nodeId: '38:521' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: responseParts,
+      },
+    ];
+
+    const request: GenerateContentParameters = {
+      model: 'models/test',
+      contents,
+    };
+    const messages = converter.convertGeminiRequestToOpenAI(request);
+
+    const toolMessages = messages.filter((m) => m.role === 'tool');
+    const userMessages = messages.filter((m) => m.role === 'user');
+
+    expect(toolMessages).toHaveLength(1);
+    // No content should leak into a user message
+    expect(userMessages).toHaveLength(0);
+
+    // Tool message should contain both text description and image
+    const toolMsg = toolMessages[0];
+    const toolContent = toolMsg.content;
+    expect(Array.isArray(toolContent)).toBe(true);
+    const contentArray = toolContent as Array<{
+      type: string;
+      text?: string;
+      image_url?: { url: string };
+    }>;
+    expect(contentArray).toHaveLength(2);
+    expect(contentArray[0].type).toBe('text');
+    expect(contentArray[0].text).toContain('image data');
+    expect(contentArray[1].type).toBe('image_url');
+    expect(contentArray[1].image_url?.url).toContain('data:image/png');
+  });
+
+  it('should work correctly when MCP tool returns a single text part', () => {
+    // Single text part — the control case that has always worked
+    const mcpTransformedParts: Part[] = [
+      { text: 'Single text response from MCP tool' },
+    ];
+
+    const callId = 'call_mcp_single';
+    const toolName = 'mcp_tool';
+    const responseParts = convertToFunctionResponse(
+      toolName,
+      callId,
+      mcpTransformedParts,
+    );
+
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: callId,
+              name: toolName,
+              args: {},
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: responseParts,
+      },
+    ];
+
+    const request: GenerateContentParameters = {
+      model: 'models/test',
+      contents,
+    };
+    const messages = converter.convertGeminiRequestToOpenAI(request);
+
+    const toolMessages = messages.filter((m) => m.role === 'tool');
+    const userMessages = messages.filter((m) => m.role === 'user');
+
+    expect(toolMessages).toHaveLength(1);
+    expect(userMessages).toHaveLength(0);
+
+    const toolMsg = toolMessages[0];
+    const toolContent = toolMsg.content;
+    expect(Array.isArray(toolContent)).toBe(true);
+    const toolTexts = (toolContent as Array<{ type: string; text?: string }>)
+      .filter((p) => p.type === 'text')
+      .map((p) => p.text);
+    expect(toolTexts).toHaveLength(1);
+    expect(toolTexts[0]).toBe('Single text response from MCP tool');
+  });
+
+  it('should preserve MCP multi-text + multi-image content in tool message', () => {
+    // Simulates a complex MCP response with multiple text blocks and images
+    const mcpTransformedParts: Part[] = [
+      { text: 'Here is the design mockup:' },
+      {
+        text: "[Tool 'pencil' provided the following image data with mime-type: image/png]",
+      },
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'screenshotBase64Data',
+        },
+      },
+      { text: 'And here are the node details...' },
+    ];
+
+    const callId = 'call_pencil_1';
+    const toolName = 'mcp__pencil__get_screenshot';
+    const responseParts = convertToFunctionResponse(
+      toolName,
+      callId,
+      mcpTransformedParts,
+    );
+
+    const contents: Content[] = [
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: callId,
+              name: toolName,
+              args: { nodeId: 'vHOGa' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: responseParts,
+      },
+    ];
+
+    const request: GenerateContentParameters = {
+      model: 'models/test',
+      contents,
+    };
+    const messages = converter.convertGeminiRequestToOpenAI(request);
+
+    const toolMessages = messages.filter((m) => m.role === 'tool');
+    const userMessages = messages.filter((m) => m.role === 'user');
+
+    expect(toolMessages).toHaveLength(1);
+    expect(userMessages).toHaveLength(0);
+
+    const toolMsg = toolMessages[0];
+    expect((toolMsg as { tool_call_id: string }).tool_call_id).toBe(callId);
+
+    const toolContent = toolMsg.content;
+    expect(Array.isArray(toolContent)).toBe(true);
+    const contentArray = toolContent as Array<{
+      type: string;
+      text?: string;
+      image_url?: { url: string };
+    }>;
+
+    // Should have text (all joined) + image
+    expect(contentArray).toHaveLength(2);
+    expect(contentArray[0].type).toBe('text');
+    expect(contentArray[0].text).toContain('design mockup');
+    expect(contentArray[0].text).toContain('image data');
+    expect(contentArray[0].text).toContain('node details');
+    expect(contentArray[1].type).toBe('image_url');
+    expect(contentArray[1].image_url?.url).toContain('data:image/png');
   });
 });

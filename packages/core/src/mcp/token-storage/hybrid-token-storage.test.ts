@@ -101,8 +101,8 @@ describe('HybridTokenStorage', () => {
       expect(await storage.getStorageType()).toBe(TokenStorageType.KEYCHAIN);
     });
 
-    it('should use file storage when GEMINI_FORCE_FILE_STORAGE is set', async () => {
-      process.env['GEMINI_FORCE_FILE_STORAGE'] = 'true';
+    it('should use file storage when QWEN_CODE_FORCE_FILE_STORAGE is set', async () => {
+      process.env['QWEN_CODE_FORCE_FILE_STORAGE'] = 'true';
       mockFileStorage.getCredentials.mockResolvedValue(null);
 
       await storage.getCredentials('test-server');

@@ -394,10 +394,6 @@ describe('QwenOAuthProgress', () => {
     it('should handle QR code generation errors gracefully', async () => {
       const qrcode = await import('qrcode-terminal');
       const mockGenerate = vi.mocked(qrcode.default.generate);
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
-
       mockGenerate.mockImplementation(() => {
         throw new Error('QR Code generation failed');
       });
@@ -413,12 +409,6 @@ describe('QwenOAuthProgress', () => {
       // Should not crash and should not show QR code section since QR generation failed
       const output = lastFrame();
       expect(output).not.toContain('Or scan the QR code below:');
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Failed to generate QR code:',
-        expect.any(Error),
-      );
-
-      consoleErrorSpy.mockRestore();
     });
 
     it('should not generate QR code when deviceAuth is null', async () => {

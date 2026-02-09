@@ -329,6 +329,19 @@ describe('Query', () => {
       await transport2.close();
     });
 
+    it('should use resume parameter as session ID if provided', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const query = new Query(transport, {
+        cwd: '/test',
+        resume: resumeId,
+      });
+
+      expect(query.getSessionId()).toBe(resumeId);
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
     it('should handle initialization errors', async () => {
       const query = new Query(transport, {
         cwd: '/test',

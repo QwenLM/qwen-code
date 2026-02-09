@@ -57,6 +57,7 @@ export function query({
     allowedTools: options.allowedTools,
     authType: options.authType,
     includePartialMessages: options.includePartialMessages,
+    resume: options.resume,
   });
 
   const queryOptions: QueryOptions = {
