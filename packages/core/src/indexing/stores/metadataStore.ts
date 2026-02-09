@@ -353,6 +353,86 @@ export class MetadataStore implements IMetadataStore {
   }
 
   /**
+   * Gets the first chunk from the most recently modified files.
+   * Uses a single optimized SQL query with JOIN and window functions.
+   *
+   * @param limit Maximum number of chunks to return.
+   * @returns Array of scored chunks from recent files.
+   */
+  getRecentChunks(limit: number): ScoredChunk[] {
+    // Use a subquery with ROW_NUMBER() to get only the first chunk (chunk_index = 0) from each file,
+    // joined with file_meta to get last_modified for sorting
+    const rows = this.db
+      .prepare(
+        `
+      SELECT 
+        c.id,
+        c.file_path as filePath,
+        c.content,
+        c.start_line as startLine,
+        c.end_line as endLine,
+        f.last_modified as lastModified,
+        ROW_NUMBER() OVER (ORDER BY f.last_modified DESC) as recency_rank
+      FROM chunks c
+      INNER JOIN file_meta f ON c.file_path = f.path
+      WHERE c.chunk_index = 0
+      ORDER BY f.last_modified DESC
+      LIMIT ?
+    `,
+      )
+      .all(limit) as Array<{
+      id: string;
+      filePath: string;
+      content: string;
+      startLine: number;
+      endLine: number;
+      lastModified: number;
+      recency_rank: number;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      filePath: row.filePath,
+      content: row.content,
+      startLine: row.startLine,
+      endLine: row.endLine,
+      // Score based on recency: most recent = 1.0, decreasing by 0.05 per rank
+      score: Math.max(0, 1.0 - (row.recency_rank - 1) * 0.05),
+      rank: row.recency_rank,
+      source: 'recent' as const,
+    }));
+  }
+
+  /**
+   * Gets the primary programming languages in the repository.
+   * Returns languages sorted by file count (most common first).
+   * Excludes null/undefined languages.
+   * @param limit Maximum number of languages to return (default: 5).
+   * @returns Array of language names, e.g., ['typescript', 'javascript', 'python'].
+   */
+  getPrimaryLanguages(): string[] {
+    const rows = this.db
+      .prepare(
+        `
+      SELECT language, COUNT(*) as file_count
+      FROM file_meta
+      WHERE language IS NOT NULL AND language != ''
+      GROUP BY language
+      ORDER BY file_count DESC
+      LIMIT ?
+    `,
+      )
+      .all(5) as Array<{ language: string; file_count: number }>;
+    const allFileCounts = rows.reduce((sum, row) => sum + row.file_count, 0);
+    // Only return languages that make up at least 30% of files
+    const filteredRows = rows.filter(
+      (row) => row.file_count / allFileCounts >= 0.2,
+    );
+
+    return filteredRows.map((row) => row.language);
+  }
+
+  /**
    * Performs BM25 full-text search on chunks.
    * @param query Search query string.
    * @param limit Maximum number of results.

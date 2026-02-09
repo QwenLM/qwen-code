@@ -21,10 +21,16 @@ import type {
 } from './types.js';
 import { hasChanges } from './types.js';
 import { MetadataStore, getIndexDir } from './stores/metadataStore.js';
+import { VectorStore } from './stores/vectorStore.js';
+import { GraphStore } from './stores/graphStore.js';
 import { DEFAULT_INDEX_CONFIG } from './defaults.js';
 import { ChangeDetector } from './changeDetector.js';
 import { BranchHandler } from './branchHandler.js';
 import { FileScanner } from './fileScanner.js';
+import { RetrievalService } from './retrievalService.js';
+import type { IGraphStore } from './types.js';
+import { EmbeddingLlmClient } from './embeddingLlmClient.js';
+import type { BaseLlmClient } from '../core/baseLlmClient.js';
 
 /**
  * Check if running on Windows platform.
@@ -74,12 +80,13 @@ export interface IndexServiceConfig {
   projectRoot: string;
   /** Index configuration overrides. */
   config?: Partial<IndexConfig>;
-  /** LLM client configuration for embeddings. */
+  /** LLM client configuration for embeddings (used by Worker thread). */
   llmClientConfig?: {
     apiKey: string;
     baseUrl?: string;
     model?: string;
   };
+  baseLlmClient?: BaseLlmClient;
   /** Maximum worker restart attempts. Default: 3. */
   maxRestartAttempts?: number;
   /** Delay between restart attempts in ms. Default: 1000. */
@@ -110,12 +117,14 @@ export class IndexService extends EventEmitter {
   private projectHash: string;
   private config: IndexConfig;
   private llmClientConfig?: IndexServiceConfig['llmClientConfig'];
+  private baseLlmClient?: BaseLlmClient;
   private maxRestartAttempts: number;
   private restartDelayMs: number;
   private restartAttempts = 0;
   private currentProgress: IndexingProgress;
   private isBuilding = false;
   private enabled = true;
+  private retrievalService: RetrievalService | null = null;
 
   // Polling and change detection
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -134,6 +143,7 @@ export class IndexService extends EventEmitter {
     this.projectHash = this.computeProjectHash(this.projectRoot);
     this.config = { ...DEFAULT_INDEX_CONFIG, ...serviceConfig.config };
     this.llmClientConfig = serviceConfig.llmClientConfig;
+    this.baseLlmClient = serviceConfig.baseLlmClient;
     this.maxRestartAttempts = serviceConfig.maxRestartAttempts ?? 3;
     this.restartDelayMs = serviceConfig.restartDelayMs ?? 1000;
 
@@ -735,6 +745,100 @@ export class IndexService extends EventEmitter {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Creates an async version of RetrievalService with properly initialized stores.
+   * Use this when you need guaranteed store initialization.
+   *
+   * @returns Promise resolving to RetrievalService or null if not available.
+   */
+  async getRetrievalServiceAsync(): Promise<RetrievalService | null> {
+    if (this.retrievalService) {
+      return this.retrievalService;
+    }
+    // Check if index is ready
+    if (!this.isIndexReady()) {
+      return null;
+    }
+    // Check if baseLlmClient is available
+    if (!this.baseLlmClient) {
+      return null;
+    }
+    try {
+      // Create stores for retrieval
+      const metadataStore = new MetadataStore(this.projectHash);
+      const vectorStore = new VectorStore(this.projectHash);
+
+      // Initialize vector store
+      await vectorStore.initialize();
+
+      let graphStore: GraphStore | undefined;
+      if (this.config.enableGraph) {
+        graphStore = new GraphStore(this.projectHash);
+        await graphStore.initialize();
+      }
+
+      // Create dummy graph store if not enabled
+      const effectiveGraphStore = graphStore ?? this.createDummyGraphStore();
+
+      const embeddingLlmClient = new EmbeddingLlmClient(this.llmClientConfig!);
+
+      this.retrievalService = new RetrievalService(
+        metadataStore,
+        vectorStore,
+        effectiveGraphStore,
+        this.baseLlmClient,
+        embeddingLlmClient,
+        {
+          topK: 20,
+          bm25TopK: 50,
+          vectorTopK: 50,
+          recentTopK: 20,
+          rrfK: 60,
+          maxTokens: 8000,
+          enableGraph: this.config.enableGraph,
+          graphDepth: 2,
+          maxGraphNodes: 50,
+          weights: {
+            bm25: 1.0,
+            vector: 1.0,
+            recent: 0.5,
+          },
+        },
+      );
+
+      return this.retrievalService;
+    } catch (error) {
+      console.error('Error initializing RetrievalService:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Sets the base LLM client for retrieval operations.
+   * This allows updating the client after initialization.
+   *
+   * @param client The LLM client implementing IRetrievalLlmClient interface.
+   */
+  setBaseLlmClient(client: BaseLlmClient): void {
+    this.baseLlmClient = client;
+  }
+
+  /**
+   * Creates a dummy graph store for when graph is disabled.
+   */
+  private createDummyGraphStore(): IGraphStore {
+    return {
+      initialize: async () => {},
+      close: async () => {},
+      insertEntities: async () => {},
+      insertRelations: async () => {},
+      getEntitiesByChunkIds: async () => [],
+      query: async () => [],
+      deleteByFilePath: async () => {},
+      getStats: async () => ({ nodeCount: 0, edgeCount: 0 }),
+    };
   }
 
   // ===== Event Emitter Type Safety =====

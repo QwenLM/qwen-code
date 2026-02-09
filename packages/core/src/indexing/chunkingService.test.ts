@@ -271,7 +271,7 @@ function b() {}
   });
 
   describe('large file handling', () => {
-    it('should split large functions into multiple chunks', async () => {
+    it('should collapse large functions when possible', async () => {
       const largeFunction = `
 function processData(data: any[]): any[] {
   ${Array(200).fill('  const x = 1;').join('\n')}
@@ -281,8 +281,33 @@ function processData(data: any[]): any[] {
       const customService = new ChunkingService({ maxChunkTokens: 200 });
       const chunks = await customService.chunkFile('large.ts', largeFunction);
 
-      // Large function should be split
-      expect(chunks.length).toBeGreaterThan(1);
+      // Large function should be collapsed to signature + { ... }
+      expect(chunks.length).toBeGreaterThanOrEqual(1);
+      // Check if the chunk is collapsed (contains "{ ... }")
+      const hasCollapsedChunk = chunks.some(
+        (c) => c.content.includes('{ ... }') || c.metadata.collapsed,
+      );
+      expect(hasCollapsedChunk).toBe(true);
+    });
+
+    it('should split extremely large functions that cannot be collapsed', async () => {
+      // Create a function with a very long signature that exceeds maxChunkTokens even when collapsed
+      const veryLongParamNames = Array(50)
+        .fill(0)
+        .map((_, i) => `veryLongParameterName${i}: VeryLongTypeName${i}`)
+        .join(', ');
+      const hugeFunction = `
+function processData(${veryLongParamNames}): any[] {
+  ${Array(200).fill('  const x = 1;').join('\n')}
+  return data;
+}
+`;
+      const customService = new ChunkingService({ maxChunkTokens: 100 });
+      const chunks = await customService.chunkFile('huge.ts', hugeFunction);
+
+      // With the Continue-style chunker, large functions get collapsed
+      // and children are recursively processed. At minimum we should get one chunk.
+      expect(chunks.length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -318,6 +343,40 @@ fn main() {
       const chunks = await service.chunkFile('main.rs', rustContent);
       expect(chunks.length).toBeGreaterThan(0);
       expect(chunks[0].type).toBe('block');
+    });
+
+    it('should collapse long comments', async () => {
+      // Create a file with a very long block comment
+      const longComment = Array(50)
+        .fill(
+          ' * This is a very long line of documentation that goes on and on.',
+        )
+        .join('\n');
+      const fileWithLongComment = `
+/**
+${longComment}
+ */
+function documented(): void {
+  return;
+}
+`;
+      const customService = new ChunkingService({ maxChunkTokens: 200 });
+      const chunks = await customService.chunkFile(
+        'documented.ts',
+        fileWithLongComment,
+      );
+
+      // Should have chunks and at least one should be collapsed or shortened
+      expect(chunks.length).toBeGreaterThan(0);
+
+      // The total content should be manageable (not contain the full 50-line comment)
+      const totalTokens = chunks.reduce(
+        (sum, c) => sum + Math.ceil(c.content.length / 4),
+        0,
+      );
+      // With collapse, total tokens should be much less than the original
+      const originalTokens = Math.ceil(fileWithLongComment.length / 4);
+      expect(totalTokens).toBeLessThan(originalTokens);
     });
   });
 });

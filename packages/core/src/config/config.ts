@@ -761,6 +761,7 @@ export class Config {
             enableGraph: this.indexingConfig.enableGraph,
             pollIntervalMs: this.indexingConfig.pollIntervalMs,
           },
+          // llmClientConfig is only used by Worker thread for embedding during index build
           llmClientConfig: embeddingApiKey
             ? {
                 apiKey: embeddingApiKey,
@@ -768,6 +769,8 @@ export class Config {
                 model: this.embeddingModel,
               }
             : undefined,
+          // baseLlmClient is used for retrieval queries - use the shared client from Config
+          baseLlmClient: this.baseLlmClient,
         });
 
         // Auto-start build if configured

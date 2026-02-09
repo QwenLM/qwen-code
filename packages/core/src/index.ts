@@ -163,3 +163,6 @@ export { Storage } from './config/storage.js';
 
 // Export test utils
 export * from './test-utils/index.js';
+
+// Export indexing module
+export * from './indexing/index.js';

@@ -20,7 +20,7 @@ import { GraphStore } from '../stores/graphStore.js';
 import { IndexManager } from '../indexManager.js';
 import { CheckpointManager } from '../checkpointManager.js';
 import { DEFAULT_INDEX_CONFIG } from '../defaults.js';
-import { OpenAI } from 'openai';
+import { EmbeddingLlmClient } from '../embeddingLlmClient.js';
 
 /**
  * Worker initialization data passed from the main thread.
@@ -36,62 +36,6 @@ interface WorkerInitData {
 }
 
 /**
- * Simple LLM client for generating embeddings within the worker.
- * This is a minimal implementation that directly calls the embedding API.
- */
-class WorkerLlmClient {
-  private apiKey: string;
-  private baseUrl: string;
-  private model: string;
-  private client: OpenAI;
-
-  totalUsedTokens: number = 0;
-
-  constructor(config: { apiKey: string; baseUrl?: string; model?: string }) {
-    this.apiKey = config.apiKey;
-    this.baseUrl =
-      config.baseUrl ?? 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-    this.model = config.model ?? 'text-embedding-v4';
-
-    this.client = new OpenAI({
-      apiKey: this.apiKey,
-      baseURL: this.baseUrl,
-    });
-  }
-
-  /**
-   * Generates embeddings for a batch of texts.
-   */
-  async generateEmbedding(texts: string[]): Promise<number[][]> {
-    try {
-      const completion = await this.client.embeddings.create({
-        model: this.model,
-        input: texts,
-      });
-      this.totalUsedTokens += completion.usage.total_tokens;
-
-      return completion.data
-        .sort((a, b) => a.index - b.index)
-        .map((v) => v.embedding);
-    } catch (error) {
-      throw new Error(`Embedding API error: ${error}`);
-    }
-
-    // const data = await response.json() as {
-    //   data: Array<{ embedding: number[]; index: number }>;
-    // };
-
-    // // Sort by index to ensure correct order
-    // const sorted = data.data.sort((a, b) => a.index - b.index);
-    // return sorted.map((item) => item.embedding);
-  }
-
-  resetTokenCount() {
-    this.totalUsedTokens = 0;
-  }
-}
-
-/**
  * Index Worker entry point.
  * Handles messages from the main thread and executes indexing operations.
  */
@@ -104,7 +48,7 @@ class IndexWorker {
   private projectRoot: string;
   private projectHash: string;
   private config: IndexConfig;
-  private llmClient: WorkerLlmClient | null = null;
+  private llmClient: EmbeddingLlmClient | null = null;
   private isInitialized = false;
 
   constructor(initData: WorkerInitData) {
@@ -113,7 +57,7 @@ class IndexWorker {
     this.config = { ...DEFAULT_INDEX_CONFIG, ...initData.config };
 
     if (initData.llmClientConfig) {
-      this.llmClient = new WorkerLlmClient(initData.llmClientConfig);
+      this.llmClient = new EmbeddingLlmClient(initData.llmClientConfig);
     }
   }
 
@@ -157,7 +101,7 @@ class IndexWorker {
           generateEmbedding: async (): Promise<number[][]> => {
             throw new Error('No LLM client configured for embeddings');
           },
-        } as unknown as WorkerLlmClient;
+        } as unknown as EmbeddingLlmClient;
       }
 
       // Initialize index manager
@@ -451,5 +395,5 @@ if (parentPort) {
   });
 }
 
-export { IndexWorker, WorkerLlmClient };
+export { IndexWorker };
 export type { WorkerInitData };

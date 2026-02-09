@@ -118,6 +118,8 @@ function createMockMetadataStore(): IMetadataStore {
       for (const p of paths) chunks.delete(p);
     }),
     searchFTS: vi.fn((): ScoredChunk[] => []),
+    getRecentChunks: vi.fn((): ScoredChunk[] => []),
+    getPrimaryLanguages: vi.fn((): string[] => ['typescript', 'javascript']),
     getEmbeddingCache: vi.fn((key: string) => embeddings.get(key) || null),
     setEmbeddingCache: vi.fn((key: string, embedding: number[]) => {
       embeddings.set(key, embedding);

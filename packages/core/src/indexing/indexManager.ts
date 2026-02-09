@@ -202,13 +202,13 @@ export class IndexManager {
       // Stop profiling and log report
       if (this.enableProfiling) {
         this.profiler.stop();
-        console.log(this.profiler.formatReport());
+        // console.log(this.profiler.formatReport());
       }
     } catch (error) {
       // Stop profiling on error
       if (this.enableProfiling && this.profiler.isActive()) {
         this.profiler.stop();
-        console.log(this.profiler.formatReport());
+        // console.log(this.profiler.formatReport());
       }
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.updateProgress({ status: 'error', error: errorMsg });
@@ -388,9 +388,7 @@ export class IndexManager {
    * Process a batch of files through the full pipeline.
    * Used by buildStreaming for both streaming and fallback modes.
    */
-  private async processBatchStreaming(
-    batch: FileMetadata[],
-  ): Promise<{
+  private async processBatchStreaming(batch: FileMetadata[]): Promise<{
     processedFiles: number;
     totalChunks: number;
     embeddedChunks: number;
@@ -617,7 +615,6 @@ export class IndexManager {
     let skipMode = !!resumeFromPath;
     const chunksNeedEmbed: Chunk[] = [];
 
-    const t = performance.now();
     for (const file of files) {
       // Skip files until we reach the resume point
       if (skipMode) {
@@ -654,9 +651,6 @@ export class IndexManager {
               this.progress.totalChunks) *
               100,
           );
-          console.log(
-            `Embedded chunks: ${resumeEmbeddedChunks + finishedChunks} / ${this.progress.totalChunks} (${phaseProgress}%)`,
-          );
           this.updateProgress({
             embeddedChunks: resumeEmbeddedChunks + finishedChunks,
             phaseProgress,
@@ -673,10 +667,6 @@ export class IndexManager {
     // Store to vector database
     await this.profiler.trackAsync('VectorStore.insertBatch', () =>
       this.vectorStore.insertBatch(chunkEmbeddings),
-    );
-
-    console.log(
-      `Embedded ${chunksNeedEmbed.length} chunks in ${performance.now() - t}ms`,
     );
   }
 

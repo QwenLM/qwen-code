@@ -7,21 +7,16 @@
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
 import { v4 as uuidv4 } from 'uuid';
-import type {
-  Chunk,
-  ChunkMetadata,
-  ChunkType,
-  IChunkingService,
-} from './types.js';
+import type { Chunk, ChunkType, IChunkingService } from './types.js';
 import {
   createParser,
   detectTreeSitterLanguage,
   type SupportedLanguage,
-  type SyntaxNode,
   type Parser,
   type Tree,
   type ParseResult,
 } from './treeSitterParser.js';
+import { codeChunker } from './codeChunker.js';
 
 /**
  * Configuration for the chunking service.
@@ -45,61 +40,6 @@ export const DEFAULT_CHUNKING_CONFIG: ChunkingConfig = {
   minChunkTokens: 100,
   overlapTokens: 50,
   maxChunkLines: 100,
-};
-
-/**
- * Node types that can be chunked for each language.
- */
-const CHUNKABLE_NODE_TYPES: Record<string, string[]> = {
-  typescript: [
-    'function_declaration',
-    'method_definition',
-    'class_declaration',
-    'interface_declaration',
-    'type_alias_declaration',
-    'export_statement',
-    'lexical_declaration', // const/let with arrow functions
-  ],
-  tsx: [
-    'function_declaration',
-    'method_definition',
-    'class_declaration',
-    'interface_declaration',
-    'type_alias_declaration',
-    'export_statement',
-    'lexical_declaration',
-  ],
-  javascript: [
-    'function_declaration',
-    'method_definition',
-    'class_declaration',
-    'export_statement',
-    'lexical_declaration',
-  ],
-  jsx: [
-    'function_declaration',
-    'method_definition',
-    'class_declaration',
-    'export_statement',
-    'lexical_declaration',
-  ],
-  python: ['function_definition', 'class_definition', 'decorated_definition'],
-};
-
-/**
- * Mapping from AST node types to chunk types.
- */
-const NODE_TYPE_TO_CHUNK_TYPE: Record<string, ChunkType> = {
-  function_declaration: 'function',
-  function_definition: 'function',
-  method_definition: 'method',
-  class_declaration: 'class',
-  class_definition: 'class',
-  interface_declaration: 'interface',
-  type_alias_declaration: 'interface',
-  export_statement: 'module',
-  lexical_declaration: 'function',
-  decorated_definition: 'function',
 };
 
 /**
@@ -358,111 +298,122 @@ export class ChunkingService implements IChunkingService {
   }
 
   /**
-   * Performs AST-based chunking with a pre-parsed tree.
+   * Performs AST-based chunking with a pre-parsed tree using smart collapse strategy.
+   *
+   * Uses Continue's codeChunker approach:
+   * - Small nodes are kept intact
+   * - Large classes are collapsed with method signatures preserved
+   * - Large functions are collapsed to signature + "{ ... }"
+   * - Children are recursively processed
    */
-  private astChunkWithTree(
+  private async astChunkWithTree(
     filepath: string,
     content: string,
     tree: Tree,
     language: SupportedLanguage,
-  ): Chunk[] {
+  ): Promise<Chunk[]> {
     const chunks: Chunk[] = [];
-    const nodeTypes = CHUNKABLE_NODE_TYPES[language] || [];
 
-    // Collect all chunkable nodes
-    const chunkableNodes: SyntaxNode[] = [];
-    this.collectChunkableNodes(tree.rootNode, nodeTypes, chunkableNodes);
+    // Use the Continue-style code chunker
+    let index = 0;
+    for await (const chunkWithoutId of codeChunker(
+      tree.rootNode,
+      content,
+      this.config.maxChunkTokens,
+    )) {
+      // Skip empty chunks
+      if (!chunkWithoutId.content.trim()) {
+        continue;
+      }
 
-    // If no chunkable nodes found, treat the whole file as one chunk
-    if (chunkableNodes.length === 0) {
+      // Create full chunk with ID and metadata
+      const chunk: Chunk = {
+        id: uuidv4(),
+        filepath,
+        content: chunkWithoutId.content,
+        startLine: chunkWithoutId.startLine + 1, // Convert to 1-based
+        endLine: chunkWithoutId.endLine + 1, // Convert to 1-based
+        index,
+        contentHash: this.computeHash(chunkWithoutId.content),
+        type: this.detectChunkType(chunkWithoutId.content),
+        metadata: {
+          language,
+          signature: this.extractSignature(chunkWithoutId.content),
+        },
+      };
+
+      chunks.push(chunk);
+      index++;
+    }
+
+    // If no chunks were generated, fall back to line-based chunking
+    if (chunks.length === 0) {
       return this.lineBasedChunk(filepath, content, language);
     }
 
-    // Sort nodes by start position
-    chunkableNodes.sort((a, b) => a.startIndex - b.startIndex);
-
-    // Process each node
-    let lastEndIndex = 0;
-    for (const node of chunkableNodes) {
-      // Add any content between nodes as a block chunk
-      if (node.startIndex > lastEndIndex) {
-        const betweenContent = content.slice(lastEndIndex, node.startIndex);
-        const trimmed = betweenContent.trim();
-        if (
-          trimmed.length > 0 &&
-          this.countTokens(trimmed) >= this.config.minChunkTokens
-        ) {
-          const betweenChunk = this.createBlockChunk(
-            filepath,
-            betweenContent,
-            this.getLineNumber(content, lastEndIndex),
-            this.getLineNumber(content, node.startIndex - 1),
-            language,
-            chunks.length,
-          );
-          chunks.push(betweenChunk);
-        }
-      }
-
-      // Process the node
-      const nodeContent = content.slice(node.startIndex, node.endIndex);
-      const tokenCount = this.countTokens(nodeContent);
-
-      if (tokenCount <= this.config.maxChunkTokens) {
-        // Node fits in a single chunk
-        const chunk = this.createAstChunk(
-          filepath,
-          node,
-          nodeContent,
-          content,
-          language,
-          chunks.length,
-        );
-        chunks.push(chunk);
-      } else {
-        // Node too large, split it
-        const subChunks = this.splitLargeNode(
-          filepath,
-          node,
-          content,
-          language,
-          chunks.length,
-        );
-        chunks.push(...subChunks);
-      }
-
-      lastEndIndex = node.endIndex;
-    }
-
-    // Handle remaining content after last node
-    if (lastEndIndex < content.length) {
-      const remainingContent = content.slice(lastEndIndex);
-      const trimmed = remainingContent.trim();
-      if (
-        trimmed.length > 0 &&
-        this.countTokens(trimmed) >= this.config.minChunkTokens
-      ) {
-        const remainingChunk = this.createBlockChunk(
-          filepath,
-          remainingContent,
-          this.getLineNumber(content, lastEndIndex),
-          this.getLineNumber(content, content.length - 1),
-          language,
-          chunks.length,
-        );
-        chunks.push(remainingChunk);
-      }
-    }
-
-    // Merge small adjacent chunks
-    const mergedChunks = this.mergeSmallChunks(chunks);
-
-    // Re-index chunks
-    return mergedChunks.map((chunk, index) => ({ ...chunk, index }));
+    return chunks;
   }
 
   /**
-   * Performs AST-based chunking.
+   * Detects the chunk type from content.
+   */
+  private detectChunkType(content: string): ChunkType {
+    const firstLine = content.split('\n')[0] || '';
+    const trimmed = firstLine.trim();
+
+    if (trimmed.startsWith('class ') || trimmed.includes(' class ')) {
+      return 'class';
+    }
+    if (trimmed.startsWith('interface ') || trimmed.includes(' interface ')) {
+      return 'interface';
+    }
+    if (
+      trimmed.startsWith('function ') ||
+      trimmed.includes(' function ') ||
+      trimmed.includes('=>') ||
+      trimmed.startsWith('async function')
+    ) {
+      return 'function';
+    }
+    if (
+      trimmed.includes('(') &&
+      (trimmed.startsWith('public ') ||
+        trimmed.startsWith('private ') ||
+        trimmed.startsWith('protected ') ||
+        trimmed.startsWith('async ') ||
+        trimmed.startsWith('static '))
+    ) {
+      return 'method';
+    }
+    if (trimmed.startsWith('def ') || trimmed.startsWith('async def ')) {
+      return 'function';
+    }
+
+    return 'block';
+  }
+
+  /**
+   * Extracts signature (first meaningful line) from content.
+   */
+  private extractSignature(content: string): string | undefined {
+    const lines = content.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (
+        trimmed &&
+        !trimmed.startsWith('//') &&
+        !trimmed.startsWith('#') &&
+        !trimmed.startsWith('/*') &&
+        !trimmed.startsWith('*')
+      ) {
+        return trimmed;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Performs AST-based chunking using smart collapse strategy.
    */
   private async astChunk(
     filepath: string,
@@ -477,249 +428,7 @@ export class ChunkingService implements IChunkingService {
       return this.lineBasedChunk(filepath, content, language);
     }
 
-    const chunks: Chunk[] = [];
-    const nodeTypes = CHUNKABLE_NODE_TYPES[language] || [];
-
-    // Collect all chunkable nodes
-    const chunkableNodes: SyntaxNode[] = [];
-    this.collectChunkableNodes(tree.rootNode, nodeTypes, chunkableNodes);
-
-    // If no chunkable nodes found, treat the whole file as one chunk
-    if (chunkableNodes.length === 0) {
-      return this.lineBasedChunk(filepath, content, language);
-    }
-
-    // Sort nodes by start position
-    chunkableNodes.sort((a, b) => a.startIndex - b.startIndex);
-
-    // Process each node
-    let lastEndIndex = 0;
-    for (const node of chunkableNodes) {
-      // Add any content between nodes as a block chunk
-      if (node.startIndex > lastEndIndex) {
-        const betweenContent = content.slice(lastEndIndex, node.startIndex);
-        const trimmed = betweenContent.trim();
-        if (
-          trimmed.length > 0 &&
-          this.countTokens(trimmed) >= this.config.minChunkTokens
-        ) {
-          const betweenChunk = this.createBlockChunk(
-            filepath,
-            betweenContent,
-            this.getLineNumber(content, lastEndIndex),
-            this.getLineNumber(content, node.startIndex - 1),
-            language,
-            chunks.length,
-          );
-          chunks.push(betweenChunk);
-        }
-      }
-
-      // Process the node
-      const nodeContent = content.slice(node.startIndex, node.endIndex);
-      const tokenCount = this.countTokens(nodeContent);
-
-      if (tokenCount <= this.config.maxChunkTokens) {
-        // Node fits in a single chunk
-        const chunk = this.createAstChunk(
-          filepath,
-          node,
-          nodeContent,
-          content,
-          language,
-          chunks.length,
-        );
-        chunks.push(chunk);
-      } else {
-        // Node too large, split it
-        const subChunks = this.splitLargeNode(
-          filepath,
-          node,
-          content,
-          language,
-          chunks.length,
-        );
-        chunks.push(...subChunks);
-      }
-
-      lastEndIndex = node.endIndex;
-    }
-
-    // Handle remaining content after last node
-    if (lastEndIndex < content.length) {
-      const remainingContent = content.slice(lastEndIndex);
-      const trimmed = remainingContent.trim();
-      if (
-        trimmed.length > 0 &&
-        this.countTokens(trimmed) >= this.config.minChunkTokens
-      ) {
-        const remainingChunk = this.createBlockChunk(
-          filepath,
-          remainingContent,
-          this.getLineNumber(content, lastEndIndex),
-          this.getLineNumber(content, content.length - 1),
-          language,
-          chunks.length,
-        );
-        chunks.push(remainingChunk);
-      }
-    }
-
-    // Merge small adjacent chunks
-    const mergedChunks = this.mergeSmallChunks(chunks);
-
-    // Re-index chunks
-    return mergedChunks.map((chunk, index) => ({ ...chunk, index }));
-  }
-
-  /**
-   * Recursively collects chunkable nodes from the AST.
-   */
-  private collectChunkableNodes(
-    node: SyntaxNode,
-    nodeTypes: string[],
-    result: SyntaxNode[],
-  ): void {
-    if (nodeTypes.includes(node.type)) {
-      result.push(node);
-      // Don't recurse into chunkable nodes to avoid duplication
-      return;
-    }
-
-    for (const child of node.children) {
-      if (child) {
-        this.collectChunkableNodes(child, nodeTypes, result);
-      }
-    }
-  }
-
-  /**
-   * Creates a chunk from an AST node.
-   */
-  private createAstChunk(
-    filepath: string,
-    node: SyntaxNode,
-    nodeContent: string,
-    fullContent: string,
-    language: string,
-    index: number,
-  ): Chunk {
-    const chunkType = NODE_TYPE_TO_CHUNK_TYPE[node.type] || 'block';
-    const metadata = this.extractMetadata(
-      node,
-      nodeContent,
-      fullContent,
-      language,
-    );
-
-    return {
-      id: uuidv4(),
-      filepath,
-      content: nodeContent,
-      startLine: node.startPosition.row + 1,
-      endLine: node.endPosition.row + 1,
-      index,
-      contentHash: this.computeHash(nodeContent),
-      type: chunkType,
-      metadata,
-    };
-  }
-
-  /**
-   * Creates a block chunk for non-AST content.
-   */
-  private createBlockChunk(
-    filepath: string,
-    content: string,
-    startLine: number,
-    endLine: number,
-    language: string,
-    index: number,
-  ): Chunk {
-    return {
-      id: uuidv4(),
-      filepath,
-      content,
-      startLine,
-      endLine,
-      index,
-      contentHash: this.computeHash(content),
-      type: 'block',
-      metadata: { language },
-    };
-  }
-
-  /**
-   * Splits a large AST node into smaller chunks.
-   */
-  private splitLargeNode(
-    filepath: string,
-    node: SyntaxNode,
-    fullContent: string,
-    language: string,
-    startIndex: number,
-  ): Chunk[] {
-    const nodeContent = fullContent.slice(node.startIndex, node.endIndex);
-    const lines = nodeContent.split('\n');
-    const chunks: Chunk[] = [];
-
-    let currentLines: string[] = [];
-    let currentTokens = 0;
-    let chunkStartLine = node.startPosition.row + 1;
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const lineTokens = this.countTokens(line);
-
-      if (
-        currentTokens + lineTokens > this.config.maxChunkTokens &&
-        currentLines.length > 0
-      ) {
-        // Save current chunk
-        const chunkContent = currentLines.join('\n');
-        chunks.push({
-          id: uuidv4(),
-          filepath,
-          content: chunkContent,
-          startLine: chunkStartLine,
-          endLine: chunkStartLine + currentLines.length - 1,
-          index: startIndex + chunks.length,
-          contentHash: this.computeHash(chunkContent),
-          type: NODE_TYPE_TO_CHUNK_TYPE[node.type] || 'block',
-          metadata: { language },
-        });
-
-        // Start new chunk with overlap
-        const overlapLines = this.getOverlapLines(
-          currentLines,
-          this.config.overlapTokens,
-        );
-        currentLines = [...overlapLines, line];
-        chunkStartLine = node.startPosition.row + 1 + i - overlapLines.length;
-        currentTokens = this.countTokens(currentLines.join('\n'));
-      } else {
-        currentLines.push(line);
-        currentTokens += lineTokens;
-      }
-    }
-
-    // Save last chunk
-    if (currentLines.length > 0) {
-      const chunkContent = currentLines.join('\n');
-      chunks.push({
-        id: uuidv4(),
-        filepath,
-        content: chunkContent,
-        startLine: chunkStartLine,
-        endLine: chunkStartLine + currentLines.length - 1,
-        index: startIndex + chunks.length,
-        contentHash: this.computeHash(chunkContent),
-        type: NODE_TYPE_TO_CHUNK_TYPE[node.type] || 'block',
-        metadata: { language },
-      });
-    }
-
-    return chunks;
+    return this.astChunkWithTree(filepath, content, tree, language);
   }
 
   /**
@@ -740,6 +449,10 @@ export class ChunkingService implements IChunkingService {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       const lineTokens = this.countTokens(line);
+
+      if (lineTokens > this.config.maxChunkTokens) {
+        continue; // Skip lines that are too long
+      }
 
       if (
         tokenCount + lineTokens > this.config.maxChunkTokens &&
@@ -793,128 +506,6 @@ export class ChunkingService implements IChunkingService {
   }
 
   /**
-   * Merges adjacent small chunks.
-   */
-  private mergeSmallChunks(chunks: Chunk[]): Chunk[] {
-    if (chunks.length <= 1) return chunks;
-
-    const result: Chunk[] = [];
-    let current: Chunk | null = null;
-
-    for (const chunk of chunks) {
-      const chunkTokens = this.countTokens(chunk.content);
-
-      if (!current) {
-        current = chunk;
-        continue;
-      }
-
-      const currentTokens = this.countTokens(current.content);
-
-      // Merge if both are small and combined size is acceptable
-      if (
-        chunkTokens < this.config.minChunkTokens &&
-        currentTokens < this.config.minChunkTokens &&
-        currentTokens + chunkTokens <= this.config.maxChunkTokens &&
-        current.filepath === chunk.filepath
-      ) {
-        // Merge chunks
-        current = {
-          ...current,
-          content: current.content + '\n' + chunk.content,
-          endLine: chunk.endLine,
-          contentHash: this.computeHash(current.content + '\n' + chunk.content),
-        };
-      } else {
-        // Save current and start new
-        result.push(current);
-        current = chunk;
-      }
-    }
-
-    if (current) {
-      result.push(current);
-    }
-
-    return result;
-  }
-
-  /**
-   * Extracts metadata from an AST node.
-   * @param node - The AST node
-   * @param nodeContent - Pre-computed content of the node (for signature extraction)
-   * @param fullContent - Full file content (for name extraction using indices)
-   * @param language - The programming language
-   */
-  private extractMetadata(
-    node: SyntaxNode,
-    nodeContent: string,
-    fullContent: string,
-    language: string,
-  ): ChunkMetadata {
-    const metadata: ChunkMetadata = { language };
-
-    // Extract name based on node type (use fullContent for index-based extraction)
-    const nameNode = node.childForFieldName('name');
-    if (nameNode) {
-      const name = fullContent.slice(nameNode.startIndex, nameNode.endIndex);
-
-      if (
-        node.type === 'function_declaration' ||
-        node.type === 'function_definition'
-      ) {
-        metadata.functionName = name;
-      } else if (
-        node.type === 'class_declaration' ||
-        node.type === 'class_definition'
-      ) {
-        metadata.className = name;
-      } else if (node.type === 'method_definition') {
-        metadata.functionName = name;
-        // Try to get class name from parent
-        const parentClass = this.findParentOfType(node, [
-          'class_declaration',
-          'class_definition',
-        ]);
-        if (parentClass) {
-          const classNameNode = parentClass.childForFieldName('name');
-          if (classNameNode) {
-            metadata.className = fullContent.slice(
-              classNameNode.startIndex,
-              classNameNode.endIndex,
-            );
-          }
-        }
-      }
-    }
-
-    // Extract signature (first line) - use pre-computed nodeContent
-    const firstLine = nodeContent.split('\n')[0];
-    if (firstLine) {
-      metadata.signature = firstLine.trim();
-    }
-
-    return metadata;
-  }
-
-  /**
-   * Finds a parent node of specific types.
-   */
-  private findParentOfType(
-    node: SyntaxNode,
-    types: string[],
-  ): SyntaxNode | null {
-    let current = node.parent;
-    while (current) {
-      if (types.includes(current.type)) {
-        return current;
-      }
-      current = current.parent;
-    }
-    return null;
-  }
-
-  /**
    * Gets or creates a parser for a language.
    */
   private async getParser(language: SupportedLanguage): Promise<Parser> {
@@ -951,14 +542,6 @@ export class ChunkingService implements IChunkingService {
     }
 
     return result;
-  }
-
-  /**
-   * Gets line number from character index.
-   */
-  private getLineNumber(content: string, charIndex: number): number {
-    const prefix = content.slice(0, charIndex);
-    return prefix.split('\n').length;
   }
 
   /**

@@ -255,6 +255,8 @@ export class VectorStore implements IVectorStore {
       chunkId: (doc.fields?.['chunk_id'] as string) ?? '',
       filePath: (doc.fields?.['file_path'] as string) ?? '',
       content: (doc.fields?.['chunk_content'] as string) ?? '',
+      startLine: (doc.fields?.['start_line'] as number) ?? 0,
+      endLine: (doc.fields?.['end_line'] as number) ?? 0,
       score: doc.score ?? 0,
       rank: index + 1,
     }));

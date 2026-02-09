@@ -81,6 +81,20 @@ export interface IMetadataStore {
   getChunksByFilePath(filePath: string): Chunk[];
   deleteChunksByFilePath(filePaths: string[]): void;
   searchFTS(query: string, limit: number): ScoredChunk[];
+  /**
+   * Gets the first chunk from the most recently modified files.
+   * Optimized for recent files retrieval without loading all file metadata.
+   * @param limit Maximum number of chunks to return.
+   * @returns Array of scored chunks from recent files.
+   */
+  getRecentChunks(limit: number): ScoredChunk[];
+  /**
+   * Gets the primary programming languages in the repository.
+   * Returns languages sorted by file count (most common first).
+   * Excludes null/undefined languages.
+   * @returns Array of language names, e.g., ['typescript', 'javascript', 'python'].
+   */
+  getPrimaryLanguages(): string[];
   getEmbeddingCache(cacheKey: string): number[] | null;
   setEmbeddingCache(cacheKey: string, embedding: number[]): void;
   getIndexStatus(): IndexingProgress;
@@ -225,6 +239,8 @@ export interface ChunkMetadata {
   exports?: string[];
   /** Function/method signature. */
   signature?: string;
+  /** Whether the chunk content is collapsed (body replaced with "{ ... }"). */
+  collapsed?: boolean;
 }
 
 /**
@@ -363,6 +379,10 @@ export interface VectorSearchResult {
   score: number;
   /** Rank in results. */
   rank: number;
+  /** Starting line number. */
+  startLine: number;
+  /** Ending line number. */
+  endLine: number;
 }
 
 /**

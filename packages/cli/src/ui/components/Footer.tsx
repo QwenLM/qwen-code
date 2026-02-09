@@ -13,6 +13,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
+import { IndexStatusIndicator } from './IndexStatusIndicator.js';
 
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -88,6 +89,11 @@ export const Footer: React.FC = () => {
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
     });
   }
+  // Index status indicator (only renders when indexing is active)
+  rightItems.push({
+    key: 'index',
+    node: <IndexStatusIndicator />,
+  });
   if (promptTokenCount > 0) {
     rightItems.push({
       key: 'context',
