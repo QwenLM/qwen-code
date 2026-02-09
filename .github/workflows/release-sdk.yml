@@ -41,8 +41,11 @@ on:
         type: 'boolean'
         default: false
 
+permissions:
+  contents: 'read'
+
 concurrency:
-  group: '${{ github.workflow }}-${{ github.event.inputs.ref || github.sha }}'
+  group: '${{ github.workflow }}-${{ github.event.inputs.ref || github.sha }}-${{ github.event.inputs.create_nightly_release }}-${{ github.event.inputs.create_preview_release }}'
   cancel-in-progress: "${{ github.event.inputs.create_nightly_release == 'true' || github.event.inputs.create_preview_release == 'true' }}"
 
 jobs:
@@ -95,17 +98,19 @@ jobs:
           fi
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
+      - name: 'Validate force_skip_tests for stable releases'
+        env:
+          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          FORCE_SKIP_TESTS: '${{ github.event.inputs.force_skip_tests }}'
+        run: |
+          set -euo pipefail
+          if [[ "${IS_NIGHTLY}" == "false" && "${IS_PREVIEW}" == "false" && "${FORCE_SKIP_TESTS}" == "true" ]]; then
+            echo "::warning::force_skip_tests is enabled for a stable release. Tests SHOULD be run for production releases."
+          fi
 
-      - name: 'Install Dependencies'
-        run: |-
-          npm ci
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
 
       - name: 'Get the version'
         id: 'version'
@@ -132,13 +137,11 @@ jobs:
           NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)
           PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)
 
-          # 输出到 GITHUB_OUTPUT
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=${NPM_TAG}" >> "$GITHUB_OUTPUT"
           echo "PREVIOUS_RELEASE_TAG=${PREVIOUS_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
-          # 打印版本信息到日志
           echo "========================================"
           echo "SDK Release Version Info"
           echo "========================================"
@@ -185,16 +188,8 @@ jobs:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
-      - name: 'Install Dependencies'
-        run: 'npm ci'
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
 
       # ----- CLI from npm -----
       - name: 'Get CLI version from npm'
@@ -231,11 +226,11 @@ jobs:
 
       - name: 'Upload CLI package artifact'
         if: "needs.prepare.outputs.CLI_SOURCE_MODE == 'npm_latest'"
-        uses: 'actions/upload-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/upload-artifact@v4
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # ratchet:actions/upload-artifact@v4
         with:
           name: 'cli-bundle'
           path: '${{ steps.cli_download.outputs.CLI_TMP_DIR }}/package'
-          retention-days: 1
+          retention-days: 3
 
       # ----- CLI from source -----
       - name: 'Build CLI from source'
@@ -260,14 +255,14 @@ jobs:
 
       - name: 'Upload CLI dist artifact'
         if: "needs.prepare.outputs.CLI_SOURCE_MODE == 'build_from_source'"
-        uses: 'actions/upload-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/upload-artifact@v4
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # ratchet:actions/upload-artifact@v4
         with:
           name: 'cli-bundle'
           path: |
             dist/cli.js
             dist/vendor/
             dist/locales/
-          retention-days: 1
+          retention-days: 3
 
   # =============================================================================
   # Phase 2b: Build SDK - Compile TypeScript SDK
@@ -285,16 +280,8 @@ jobs:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
-      - name: 'Install Dependencies'
-        run: 'npm ci'
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
 
       - name: 'Set SDK package version'
         env:
@@ -308,11 +295,11 @@ jobs:
         run: 'npm run build'
 
       - name: 'Upload SDK dist artifact'
-        uses: 'actions/upload-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/upload-artifact@v4
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # ratchet:actions/upload-artifact@v4
         with:
           name: 'sdk-dist'
           path: 'packages/sdk-typescript/dist/'
-          retention-days: 1
+          retention-days: 3
 
   # =============================================================================
   # Phase 3: Bundle - Combine CLI into SDK
@@ -330,25 +317,17 @@ jobs:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
-      - name: 'Install Dependencies'
-        run: 'npm ci'
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
 
       - name: 'Download CLI artifact'
-        uses: 'actions/download-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/download-artifact@v4
+        uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # ratchet:actions/download-artifact@v4
         with:
           name: 'cli-bundle'
           path: 'cli-bundle/'
 
       - name: 'Download SDK artifact'
-        uses: 'actions/download-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/download-artifact@v4
+        uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # ratchet:actions/download-artifact@v4
         with:
           name: 'sdk-dist'
           path: 'packages/sdk-typescript/dist/'
@@ -370,18 +349,15 @@ jobs:
           fi
 
       - name: 'Upload bundled SDK artifact'
-        uses: 'actions/upload-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/upload-artifact@v4
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # ratchet:actions/upload-artifact@v4
         with:
           name: 'sdk-with-cli'
           path: 'packages/sdk-typescript/dist/'
-          retention-days: 1
+          retention-days: 3
 
   # =============================================================================
   # Phase 4a: Unit Tests
   # =============================================================================
-  # SECURITY NOTE: OPENAI secrets are exposed to test jobs.
-  # TODO: Consider using GitHub Environment Secrets with protection rules
-  # to limit access to required reviewers for additional security.
   test-unit:
     name: 'Unit Tests'
     runs-on: 'ubuntu-latest'
@@ -396,16 +372,8 @@ jobs:
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
-      - name: 'Install Dependencies'
-        run: 'npm ci'
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
 
       - name: 'Run Unit Tests'
         working-directory: 'packages/sdk-typescript'
@@ -418,9 +386,6 @@ jobs:
   # =============================================================================
   # Phase 4b: Integration Tests (Matrix)
   # =============================================================================
-  # SECURITY NOTE: OPENAI secrets are exposed to matrix tests across multiple OS/Node versions.
-  # TODO: Consider using mock/stub for integration tests to avoid real API calls,
-  # or restrict to a single test job with environment protection rules.
   test-integration:
     name: 'Integration Test (${{ matrix.os }}, Node ${{ matrix.node-version }}, ${{ matrix.sandbox }})'
     runs-on: '${{ matrix.os }}'
@@ -469,37 +434,24 @@ jobs:
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
 
-      - name: 'Setup Node.js ${{ matrix.node-version }}'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
         with:
           node-version: '${{ matrix.node-version }}'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
-      - name: 'Install Dependencies'
-        run: 'npm ci'
 
       - name: 'Set up Docker'
         if: "matrix.sandbox == 'docker'"
         uses: 'docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435' # ratchet:docker/setup-buildx-action@v3
 
       - name: 'Download bundled SDK artifact'
-        uses: 'actions/download-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/download-artifact@v4
+        uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # ratchet:actions/download-artifact@v4
         with:
           name: 'sdk-with-cli'
           path: 'packages/sdk-typescript/dist/'
 
       - name: 'Run Integration Tests'
-        run: |
-          set -euo pipefail
-          if [[ "${SANDBOX}" == "docker" ]]; then
-            npm run test:integration:sdk:sandbox:docker
-          else
-            npm run test:integration:sdk:sandbox:none
-          fi
+        run: 'npm run ${{ matrix.test-command }}'
         env:
-          SANDBOX: '${{ matrix.sandbox }}'
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
@@ -510,8 +462,18 @@ jobs:
   publish-npm:
     name: 'Publish to NPM'
     runs-on: 'ubuntu-latest'
-    needs: ['prepare', 'build-cli', 'bundle-cli-into-sdk', 'test-integration']
-    if: "github.repository == 'QwenLM/qwen-code'"
+    needs:
+      [
+        'prepare',
+        'build-cli',
+        'bundle-cli-into-sdk',
+        'test-unit',
+        'test-integration',
+      ]
+    if: |
+      github.repository == 'QwenLM/qwen-code' &&
+      (needs.test-unit.result == 'success' || needs.test-unit.result == 'skipped') &&
+      (needs.test-integration.result == 'success' || needs.test-integration.result == 'skipped')
     environment:
       name: 'production-release'
       url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/sdk-typescript-${{ needs.prepare.outputs.RELEASE_TAG }}'
@@ -522,16 +484,18 @@ jobs:
         with:
           ref: '${{ github.event.inputs.ref || github.sha }}'
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
+
+      - name: 'Set SDK package version'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.RELEASE_VERSION }}'
+        run: |
+          set -euo pipefail
+          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
 
       - name: 'Download bundled SDK artifact'
-        uses: 'actions/download-artifact@b4b15b8c7c6ac15eaab7bd0ec3505b7d0b7b8b8b' # ratchet:actions/download-artifact@v4
+        uses: 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' # ratchet:actions/download-artifact@v4
         with:
           name: 'sdk-with-cli'
           path: 'packages/sdk-typescript/dist/'
@@ -578,43 +542,38 @@ jobs:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
+      - name: 'Generate SDK release notes'
+        id: 'release_notes'
+        uses: './.github/actions/generate-release-notes'
+        with:
+          release-tag: '${{ needs.prepare.outputs.RELEASE_TAG }}'
+          previous-release-tag: '${{ needs.prepare.outputs.PREVIOUS_RELEASE_TAG }}'
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          cli-version: '${{ needs.build-cli.outputs.CLI_VERSION }}'
+          cli-source-mode: '${{ needs.prepare.outputs.CLI_SOURCE_MODE }}'
+
       - name: 'Create GitHub Release and Tag'
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.RELEASE_TAG }}'
-          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.PREVIOUS_RELEASE_TAG }}'
           IS_NIGHTLY: '${{ needs.prepare.outputs.IS_NIGHTLY }}'
           IS_PREVIEW: '${{ needs.prepare.outputs.IS_PREVIEW }}'
           REF: '${{ github.event.inputs.ref || github.sha }}'
-          CLI_VERSION: '${{ needs.build-cli.outputs.CLI_VERSION }}'
-          CLI_SOURCE_MODE: '${{ needs.prepare.outputs.CLI_SOURCE_MODE }}'
+          NOTES_FILE: '${{ steps.release_notes.outputs.notes-file }}'
         run: |
           set -euo pipefail
-          # For nightly/preview, use the current ref; for stable, we'll use the release branch created later
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             TARGET="${REF}"
             PRERELEASE_FLAG="--prerelease"
           else
-            # For stable releases, use the ref for now (release branch will be created in post-release)
             TARGET="${REF}"
             PRERELEASE_FLAG=""
           fi
 
-          # Determine CLI source description
-          if [[ "${CLI_SOURCE_MODE}" == "npm_latest" ]]; then
-            CLI_SOURCE_DESC="latest stable CLI from npm"
-          else
-            CLI_SOURCE_DESC="CLI built from source (same branch/ref as SDK)"
-          fi
-
-          # Create release notes with CLI version info
-          NOTES="## Bundled CLI Version\n\nThis SDK release bundles CLI version: \`${CLI_VERSION}\`\n\nSource: ${CLI_SOURCE_DESC}\n\n---\n\n"
-
           gh release create "sdk-typescript-${RELEASE_TAG}" \
             --target "${TARGET}" \
             --title "SDK TypeScript Release ${RELEASE_TAG}" \
-            --notes-start-tag "sdk-typescript-${PREVIOUS_RELEASE_TAG}" \
-            --notes "${NOTES}$(gh release view "sdk-typescript-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')" \
+            --notes-file "${NOTES_FILE}" \
             ${PRERELEASE_FLAG}
 
   # =============================================================================
@@ -629,6 +588,8 @@ jobs:
       needs.prepare.outputs.IS_DRY_RUN == 'false' &&
       needs.prepare.outputs.IS_NIGHTLY == 'false' &&
       needs.prepare.outputs.IS_PREVIEW == 'false'
+    environment:
+      name: 'production-release'
     permissions:
       contents: 'write'
       pull-requests: 'write'
@@ -640,76 +601,18 @@ jobs:
           ref: '${{ github.event.inputs.ref || github.sha }}'
           fetch-depth: 0
 
-      - name: 'Setup Node.js'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+      - name: 'Setup SDK Environment'
+        uses: './.github/actions/setup-sdk-env'
         with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
+          install-deps: 'false'
 
-      - name: 'Configure Git User'
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: 'Set SDK package version'
-        env:
-          RELEASE_VERSION: '${{ needs.prepare.outputs.RELEASE_VERSION }}'
-        run: |
-          set -euo pipefail
-          npm version -w @qwen-code/sdk "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
-
-      - name: 'Create and switch to release branch'
-        env:
-          RELEASE_TAG: '${{ needs.prepare.outputs.RELEASE_TAG }}'
-        run: |
-          set -euo pipefail
-          BRANCH_NAME="release/sdk-typescript/${RELEASE_TAG}"
-          git switch -c "${BRANCH_NAME}"
-          echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_ENV}"
-
-      - name: 'Commit and push package version'
-        env:
-          RELEASE_TAG: '${{ needs.prepare.outputs.RELEASE_TAG }}'
-        run: |
-          set -euo pipefail
-          git add packages/sdk-typescript/package.json package-lock.json
-          if git diff --staged --quiet; then
-            echo "No version changes to commit"
-          else
-            git commit -m "chore(release): sdk-typescript ${RELEASE_TAG}"
-          fi
-          git push --set-upstream origin "${BRANCH_NAME}" --follow-tags
-
-      - name: 'Create PR to merge release branch into main'
-        id: 'pr'
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          RELEASE_BRANCH: '${{ env.BRANCH_NAME }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.RELEASE_TAG }}'
-        run: |
-          set -euo pipefail
-
-          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
-          if [[ -z "${pr_url}" ]]; then
-            pr_url="$(gh pr create \
-              --base main \
-              --head "${RELEASE_BRANCH}" \
-              --title "chore(release): sdk-typescript ${RELEASE_TAG}" \
-              --body "Automated release PR for sdk-typescript ${RELEASE_TAG}.")"
-          fi
-
-          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
-
-      - name: 'Enable auto-merge for release PR'
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
-        run: |
-          set -euo pipefail
-          gh pr merge "${PR_URL}" --merge --auto --delete-branch
+      - name: 'Create release branch and PR'
+        uses: './.github/actions/post-release-pr'
+        with:
+          release-version: '${{ needs.prepare.outputs.RELEASE_VERSION }}'
+          release-tag: '${{ needs.prepare.outputs.RELEASE_TAG }}'
+          workspace-package: '@qwen-code/sdk'
+          github-token: '${{ secrets.CI_BOT_PAT }}'
 
   # =============================================================================
   # Phase 7: Failure Notification
@@ -732,8 +635,7 @@ jobs:
     if: |
       failure() &&
       github.repository == 'QwenLM/qwen-code' &&
-      needs.prepare.result == 'success' &&
-      needs.prepare.outputs.IS_DRY_RUN == 'false'
+      github.event.inputs.dry_run != 'true'
     permissions:
       issues: 'write'
 

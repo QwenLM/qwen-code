@@ -1,0 +1,43 @@
+# Copyright 2025 Qwen Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: 'Setup SDK Environment'
+description: 'Setup Node.js and optionally install dependencies for SDK release workflows.'
+
+inputs:
+  node-version:
+    description: 'Explicit Node.js version. If empty, reads from .nvmrc.'
+    required: false
+    default: ''
+  install-deps:
+    description: 'Whether to run npm ci to install dependencies.'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Setup Node.js'
+      uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+      with:
+        node-version: '${{ inputs.node-version }}'
+        node-version-file: "${{ inputs.node-version == '' && '.nvmrc' || '' }}"
+        cache: 'npm'
+        registry-url: 'https://registry.npmjs.org'
+        scope: '@qwen-code'
+
+    - name: 'Install Dependencies'
+      if: "inputs.install-deps == 'true'"
+      shell: 'bash'
+      run: 'npm ci'
