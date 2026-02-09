@@ -33,7 +33,7 @@ CRITICAL GUIDELINES:
 
 export const PROMPT_IMPRESSIVE_WORKFLOWS = `Analyze this Qwen Code usage data and identify what's working well for this user. Use second person ("you").
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "intro": "1 sentence of context",
   "impressive_workflows": [
@@ -45,7 +45,7 @@ Include 3 impressive workflows.`;
 
 export const PROMPT_PROJECT_AREAS = `Analyze this Qwen Code usage data and identify project areas.
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "areas": [
     {"name": "Area name", "session_count": N, "description": "2-3 sentences about what was worked on and how Qwen Code was used."}
@@ -56,7 +56,7 @@ Include 4-5 areas. Skip internal QC operations.`;
 
 export const PROMPT_FUTURE_OPPORTUNITIES = `Analyze this Qwen Code usage data and identify future opportunities.
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "intro": "1 sentence about evolving AI-assisted development",
   "opportunities": [
@@ -68,7 +68,7 @@ Include 3 opportunities. Think BIG - autonomous workflows, parallel agents, iter
 
 export const PROMPT_FRICTION_POINTS = `Analyze this Qwen Code usage data and identify friction points for this user. Use second person ("you").
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "intro": "1 sentence summarizing friction patterns",
   "categories": [
@@ -80,7 +80,7 @@ Include 3 friction categories with 2 examples each.`;
 
 export const PROMPT_MEMORABLE_MOMENT = `Analyze this Qwen Code usage data and find a memorable moment.
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "headline": "A memorable QUALITATIVE moment from the transcripts - not a statistic. Something human, funny, or surprising.",
   "detail": "Brief context about when/where this happened"
@@ -92,29 +92,29 @@ export const PROMPT_IMPROVEMENTS = `Analyze this Qwen Code usage data and sugges
 
 ## QC FEATURES REFERENCE (pick from these for features_to_try):
 1. **MCP Servers**: Connect Qwen to external tools, databases, and APIs via Model Context Protocol.
-   - How to use: Run \`Qwen mcp add <server-name> -- <command>\`
+   - How to use: Run \`qwen mcp add <server-name> -- <command>\`
    - Good for: database queries, Slack integration, GitHub issue lookup, connecting to internal APIs
 
 2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.
-   - How to use: Create \`.Qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
+   - How to use: Create \`.qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
    - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows
 
 3. **Hooks**: Shell commands that auto-run at specific lifecycle events.
-   - How to use: Add to \`.Qwen/settings.json\` under "hooks" key.
+   - How to use: Add to \`.qwen/settings.json\` under "hooks" key.
    - Good for: auto-formatting code, running type checks, enforcing conventions
 
 4. **Headless Mode**: Run Qwen non-interactively from scripts and CI/CD.
-   - How to use: \`Qwen -p "fix lint errors" --allowedTools "Edit,Read,Bash"\`
+   - How to use: \`qwen -p "fix lint errors" --allowedTools "Edit,Read,Bash"\`
    - Good for: CI/CD integration, batch code fixes, automated reviews
 
 5. **Task Agents**: Qwen spawns focused sub-agents for complex exploration or parallel work.
    - How to use: Qwen auto-invokes when helpful, or ask "use an agent to explore X"
    - Good for: codebase exploration, understanding complex systems
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "Qwen_md_additions": [
-    {"addition": "A specific line or block to add to Qwen.md based on workflow patterns. E.g., 'Always run tests after modifying auth-related files'", "why": "1 sentence explaining why this would help based on actual sessions", "prompt_scaffold": "Instructions for where to add this in Qwen.md. E.g., 'Add under ## Testing section'"}
+    {"addition": "A specific line or block to add to QWEN.md based on workflow patterns. E.g., 'Always run tests after modifying auth-related files'", "why": "1 sentence explaining why this would help based on actual sessions", "prompt_scaffold": "Instructions for where to add this in QWEN.md. E.g., 'Add under ## Testing section'"}
   ],
   "features_to_try": [
     {"feature": "Feature name from QC FEATURES REFERENCE above", "one_liner": "What it does", "why_for_you": "Why this would help YOU based on your sessions", "example_code": "Actual command or config to copy"}
@@ -130,7 +130,7 @@ IMPORTANT for features_to_try: Pick 2-3 from the QC FEATURES REFERENCE above. In
 
 export const PROMPT_INTERACTION_STYLE = `Analyze this Qwen Code usage data and describe the user's interaction style.
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "narrative": "2-3 paragraphs analyzing HOW the user interacts with Qwen Code. Use second person 'you'. Describe patterns: iterate quickly vs detailed upfront specs? Interrupt often or let Qwen run? Include specific examples. Use **bold** for key insights.",
   "key_pattern": "One sentence summary of most distinctive interaction style"
@@ -151,7 +151,7 @@ Use this 4-part structure:
 
 Keep each section to 2-3 not-too-long sentences. Don't overwhelm the user. Don't mention specific numerical stats or underlined_categories from the session data below. Use a coaching tone.
 
-RESPOND WITH ONLY A VALID JSON OBJECT:
+Call respond_in_schema function with A VALID JSON OBJECT as argument:
 {
   "whats_working": "(refer to instructions above)",
   "whats_hindering": "(refer to instructions above)",

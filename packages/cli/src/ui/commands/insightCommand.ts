@@ -12,6 +12,9 @@ import { t } from '../../i18n/index.js';
 import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const logger = createDebugLogger('DataProcessor');
 
 // Open file in default browser
 async function openFileInBrowser(filePath: string): Promise<void> {
@@ -118,7 +121,7 @@ export const insightCommand: SlashCommand = {
           Date.now(),
         );
       } catch (browserError) {
-        console.error('Failed to open browser automatically:', browserError);
+        logger.error('Failed to open browser automatically:', browserError);
 
         context.ui.addItem(
           {
@@ -149,7 +152,7 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      console.error('Insight generation error:', error);
+      logger.error('Insight generation error:', error);
     }
   },
 };

@@ -1,9 +1,7 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import { InsightData } from './types';
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-import React, { useRef, useEffect } from 'react';
-const Chart = (window as any).Chart;
+import React from 'react';
 
 // -----------------------------------------------------------------------------
 // Existing Components
@@ -14,60 +12,14 @@ export function DashboardCards({ insights }: { insights: InsightData }) {
   const cardClass = 'glass-card p-6';
   const sectionTitleClass =
     'text-lg font-semibold tracking-tight text-slate-900';
-  const captionClass = 'text-sm font-medium text-slate-500';
 
   return (
-    <div className="grid gap-4 md:grid-cols-3 md:gap-6">
-      <StreakCard
-        currentStreak={insights.currentStreak}
-        longestStreak={insights.longestStreak}
-        cardClass={cardClass}
-        captionClass={captionClass}
-      />
+    <div className="grid gap-4 md:grid-cols-2 md:gap-6">
       <ActiveHoursChart
         activeHours={insights.activeHours}
         cardClass={cardClass}
         sectionTitleClass={sectionTitleClass}
       />
-      <WorkSessionCard
-        longestWorkDuration={insights.longestWorkDuration}
-        longestWorkDate={insights.longestWorkDate}
-        latestActiveTime={insights.latestActiveTime}
-        cardClass={cardClass}
-        sectionTitleClass={sectionTitleClass}
-      />
-    </div>
-  );
-}
-
-// Streak Card Component
-export function StreakCard({
-  currentStreak,
-  longestStreak,
-  cardClass,
-  captionClass,
-}: {
-  currentStreak: number;
-  longestStreak: number;
-  cardClass: string;
-  captionClass: string;
-}) {
-  return (
-    <div className={`${cardClass} h-full`}>
-      <div className="flex items-start justify-between">
-        <div>
-          <p className={captionClass}>Current Streak</p>
-          <p className="mt-1 text-4xl font-bold text-slate-900">
-            {currentStreak}
-            <span className="ml-2 text-base font-semibold text-slate-500">
-              days
-            </span>
-          </p>
-        </div>
-        <span className="rounded-full bg-emerald-50 px-4 py-2 text-sm font-semibold text-emerald-700">
-          Longest {longestStreak}d
-        </span>
-      </div>
     </div>
   );
 }
@@ -82,118 +34,82 @@ export function ActiveHoursChart({
   cardClass: string;
   sectionTitleClass: string;
 }) {
-  const chartRef = useRef<HTMLCanvasElement | null>(null);
-  const chartInstance = useRef<any>(null);
+  const phases = [
+    {
+      label: 'Morning',
+      time: '06:00 - 12:00',
+      hours: [6, 7, 8, 9, 10, 11],
+      color: '#fbbf24', // amber-400
+    },
+    {
+      label: 'Afternoon',
+      time: '12:00 - 18:00',
+      hours: [12, 13, 14, 15, 16, 17],
+      color: '#0ea5e9', // sky-500
+    },
+    {
+      label: 'Evening',
+      time: '18:00 - 00:00',
+      hours: [18, 19, 20, 21, 22, 23],
+      color: '#6366f1', // indigo-500
+    },
+    {
+      label: 'Night',
+      time: '00:00 - 06:00',
+      hours: [0, 1, 2, 3, 4, 5],
+      color: '#475569', // slate-600
+    },
+  ];
 
-  useEffect(() => {
-    if (chartInstance.current) {
-      chartInstance.current.destroy();
-    }
+  const data = phases.map((phase) => {
+    const total = phase.hours.reduce(
+      (acc, hour) => acc + (activeHours[hour] || 0),
+      0,
+    );
+    return { ...phase, total };
+  });
 
-    const canvas = chartRef.current;
-    if (!canvas || !window.Chart) return;
-
-    const labels = Array.from({ length: 24 }, (_, i) => `${i}:00`);
-    const data = labels.map((_, i) => activeHours[i] || 0);
-
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    chartInstance.current = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels,
-        datasets: [
-          {
-            label: 'Activity per Hour',
-            data,
-            backgroundColor: 'rgba(52, 152, 219, 0.7)',
-            borderColor: 'rgba(52, 152, 219, 1)',
-            borderWidth: 1,
-          },
-        ],
-      },
-      options: {
-        indexAxis: 'y',
-        responsive: true,
-        maintainAspectRatio: false,
-        scales: {
-          x: {
-            beginAtZero: true,
-          },
-        },
-        plugins: {
-          legend: {
-            display: false,
-          },
-        },
-      },
-    });
-
-    return () => {
-      if (chartInstance.current) {
-        chartInstance.current.destroy();
-      }
-    };
-  }, [activeHours]);
+  const maxTotal = Math.max(...data.map((d) => d.total));
 
   return (
-    <div className={`${cardClass} h-full`}>
-      <div className="flex items-center justify-between">
+    <div className={`${cardClass} h-full flex flex-col min-h-[320px]`}>
+      <div className="flex items-center justify-between mb-4">
         <h3 className={sectionTitleClass}>Active Hours</h3>
-        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-          24h
-        </span>
       </div>
-      <div className="mt-4 h-56 w-full">
-        <canvas ref={chartRef} className="w-full h-56" />
-      </div>
-    </div>
-  );
-}
-
-// Work Session Card Component
-function WorkSessionCard({
-  longestWorkDuration,
-  longestWorkDate,
-  latestActiveTime,
-  cardClass,
-  sectionTitleClass,
-}: {
-  longestWorkDuration: number;
-  longestWorkDate: string | null;
-  latestActiveTime: string | null;
-  cardClass: string;
-  sectionTitleClass: string;
-}) {
-  return (
-    <div className={`${cardClass} h-full space-y-3`}>
-      <h3 className={sectionTitleClass}>Work Session</h3>
-      <div className="grid grid-cols-2 gap-3 text-sm text-slate-700">
-        <div className="rounded-xl bg-slate-50 px-3 py-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Longest
-          </p>
-          <p className="mt-1 text-lg font-semibold text-slate-900">
-            {longestWorkDuration}m
-          </p>
-        </div>
-        <div className="rounded-xl bg-slate-50 px-3 py-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Date
-          </p>
-          <p className="mt-1 text-lg font-semibold text-slate-900">
-            {longestWorkDate || '-'}
-          </p>
-        </div>
-        <div className="col-span-2 rounded-xl bg-slate-50 px-3 py-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Last Active
-          </p>
-          <p className="mt-1 text-lg font-semibold text-slate-900">
-            {latestActiveTime || '-'}
-          </p>
-        </div>
+      <div className="flex-1 flex flex-col justify-center gap-4">
+        {data.map((item) => (
+          <div key={item.label} className="space-y-2">
+            <div className="flex justify-between items-center text-sm">
+              <div className="flex items-center gap-2">
+                <span
+                  className="rounded-full"
+                  style={{
+                    width: '12px',
+                    height: '12px',
+                    backgroundColor: item.color,
+                  }}
+                ></span>
+                <span className="font-medium text-slate-700">{item.label}</span>
+                <span className="text-xs text-slate-400 hidden xl:inline">
+                  {item.time}
+                </span>
+              </div>
+              <span className="font-semibold text-slate-900">{item.total}</span>
+            </div>
+            <div
+              className="w-full rounded-full overflow-hidden"
+              style={{ height: '12px', backgroundColor: '#e2e8f0' }}
+            >
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${maxTotal > 0 ? (item.total / maxTotal) * 100 : 0}%`,
+                  backgroundColor: item.color,
+                }}
+              />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -210,13 +126,13 @@ export function HeatmapSection({
     'text-lg font-semibold tracking-tight text-slate-900';
 
   return (
-    <div className={`${cardClass} mt-4 space-y-4 md:mt-6`}>
+    <div className={`${cardClass} mt-4 md:mt-6`}>
       <div className="flex items-center justify-between">
         <h3 className={sectionTitleClass}>Activity Heatmap</h3>
         <span className="text-xs font-semibold text-slate-500">Past year</span>
       </div>
       <div className="heatmap-container">
-        <div className="min-w-[720px] rounded-xl border border-slate-100 bg-white/70 p-4 shadow-inner shadow-slate-100">
+        <div className="min-w-[720px] rounded-xl bg-white/70">
           <ActivityHeatmap heatmapData={heatmap} />
         </div>
       </div>
@@ -258,7 +174,6 @@ function ActivityHeatmap({
     return colors[1];
   }
 
-  const weeksInYear = Math.ceil(dates.length / 7);
   const startX = 50;
   const startY = 20;
 
@@ -277,24 +192,36 @@ function ActivityHeatmap({
     'Dec',
   ];
 
+  // Calculate start day of week (0 = Sunday, 1 = Monday, etc.)
+  const startDayOfWeek = oneYearAgo.getDay();
+
   // Generate month labels
-  const monthLabels = [];
-  let currentMonth = oneYearAgo.getMonth();
-  let monthX = startX;
+  const monthLabels: { x: number; text: string }[] = [];
+  let lastMonth = -1;
+  let lastX = -100; // Initialize with a value far to the left
 
-  for (let week = 0; week < weeksInYear; week++) {
-    const weekDate = new Date(oneYearAgo);
-    weekDate.setDate(weekDate.getDate() + week * 7);
+  dates.forEach((date, index) => {
+    // Calculate position
+    const adjustedIndex = index + startDayOfWeek;
+    const week = Math.floor(adjustedIndex / 7);
+    const x = startX + week * (cellSize + cellPadding);
 
-    if (weekDate.getMonth() !== currentMonth) {
-      currentMonth = weekDate.getMonth();
-      monthLabels.push({
-        x: monthX,
-        text: months[currentMonth],
-      });
-      monthX = startX + week * (cellSize + cellPadding);
+    const currentMonth = date.getMonth();
+
+    // Add month label if month changes
+    if (currentMonth !== lastMonth) {
+      // Only add label if there is enough space from the previous one
+      // Approximate width of a month label is about 25-30px
+      if (x - lastX > 30) {
+        monthLabels.push({
+          x: x,
+          text: months[currentMonth],
+        });
+        lastX = x;
+      }
+      lastMonth = currentMonth;
     }
-  }
+  });
 
   return (
     <svg
@@ -305,8 +232,10 @@ function ActivityHeatmap({
     >
       {/* Render heatmap cells */}
       {dates.map((date, index) => {
-        const week = Math.floor(index / 7);
-        const day = index % 7;
+        // Calculate grid position based on calendar week and day
+        const adjustedIndex = index + startDayOfWeek;
+        const week = Math.floor(adjustedIndex / 7);
+        const day = date.getDay(); // 0 (Sun) to 6 (Sat)
 
         const x = startX + week * (cellSize + cellPadding);
         const y = startY + day * (cellSize + cellPadding);
