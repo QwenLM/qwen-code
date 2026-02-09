@@ -7,7 +7,7 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
-import { getProjectHash } from '../utils/paths.js';
+import { getProjectHash, getLegacyProjectHash } from '../utils/paths.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -90,7 +90,25 @@ export class Storage {
   getProjectTempDir(): string {
     const hash = getProjectHash(this.getProjectRoot());
     const tempDir = Storage.getGlobalTempDir();
-    return path.join(tempDir, hash);
+    const targetDir = path.join(tempDir, hash);
+
+    // Backward compatibility: On Windows, check if legacy directory exists
+    // and migrate it to the new normalized path
+    if (os.platform() === 'win32' && !fs.existsSync(targetDir)) {
+      const legacyHash = getLegacyProjectHash(this.getProjectRoot());
+      const legacyDir = path.join(tempDir, legacyHash);
+
+      if (fs.existsSync(legacyDir) && legacyHash !== hash) {
+        try {
+          // Attempt to rename/migrate the directory
+          fs.renameSync(legacyDir, targetDir);
+        } catch (_error) {
+          // Silent fallback: if migration fails, continue with the new path
+        }
+      }
+    }
+
+    return targetDir;
   }
 
   ensureProjectTempDirExists(): void {
@@ -108,7 +126,25 @@ export class Storage {
   getHistoryDir(): string {
     const hash = getProjectHash(this.getProjectRoot());
     const historyDir = path.join(Storage.getGlobalQwenDir(), 'history');
-    return path.join(historyDir, hash);
+    const targetDir = path.join(historyDir, hash);
+
+    // Backward compatibility: On Windows, check if legacy directory exists
+    // and migrate it to the new normalized path
+    if (os.platform() === 'win32' && !fs.existsSync(targetDir)) {
+      const legacyHash = getLegacyProjectHash(this.getProjectRoot());
+      const legacyDir = path.join(historyDir, legacyHash);
+
+      if (fs.existsSync(legacyDir) && legacyHash !== hash) {
+        try {
+          // Attempt to rename/migrate the directory
+          fs.renameSync(legacyDir, targetDir);
+        } catch (_error) {
+          // Silent fallback: if migration fails, continue with the new path
+        }
+      }
+    }
+
+    return targetDir;
   }
 
   getWorkspaceSettingsPath(): string {

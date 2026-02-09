@@ -8,7 +8,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
-import * as crypto from 'crypto';
+import {
+  getProjectHash,
+  getLegacyProjectHash,
+} from '@qwen-code/qwen-code-core/src/utils/paths.js';
 
 export interface QwenMessage {
   id: string;
@@ -58,8 +61,35 @@ export class QwenSessionReader {
 
       if (!allProjects && workingDir) {
         // Current project only
-        const projectHash = await this.getProjectHash(workingDir);
+        const projectHash = getProjectHash(workingDir);
         const chatsDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
+
+        // Backward compatibility: On Windows, try legacy hash if new directory doesn't exist
+        if (os.platform() === 'win32' && !fs.existsSync(chatsDir)) {
+          const legacyHash = getLegacyProjectHash(workingDir);
+          const legacyChatsDir = path.join(
+            this.qwenDir,
+            'tmp',
+            legacyHash,
+            'chats',
+          );
+
+          if (fs.existsSync(legacyChatsDir) && legacyHash !== projectHash) {
+            try {
+              // Migrate parent directory
+              const newParentDir = path.join(this.qwenDir, 'tmp', projectHash);
+              const legacyParentDir = path.join(
+                this.qwenDir,
+                'tmp',
+                legacyHash,
+              );
+              fs.renameSync(legacyParentDir, newParentDir);
+            } catch (_error) {
+              // Silent fallback
+            }
+          }
+        }
+
         const projectSessions = await this.readSessionsFromDir(chatsDir);
         sessions.push(...projectSessions);
       } else {
@@ -178,19 +208,6 @@ export class QwenSessionReader {
   }
 
   /**
-   * Calculate project hash (needs to be consistent with Qwen CLI)
-   * Qwen CLI uses SHA256 hash of project path.
-   * On Windows, paths are case-insensitive, so we normalize to lowercase
-   * to ensure the same physical path always produces the same hash.
-   */
-  private async getProjectHash(workingDir: string): Promise<string> {
-    // On Windows, normalize path to lowercase for case-insensitive matching
-    const normalizedPath =
-      os.platform() === 'win32' ? workingDir.toLowerCase() : workingDir;
-    return crypto.createHash('sha256').update(normalizedPath).digest('hex');
-  }
-
-  /**
    * Get session title (based on first user message)
    */
   getSessionTitle(session: QwenSession): string {
@@ -294,7 +311,7 @@ export class QwenSessionReader {
       }
 
       const projectHash = cwd
-        ? await this.getProjectHash(cwd)
+        ? getProjectHash(cwd)
         : path.basename(path.dirname(path.dirname(filePath)));
 
       return {

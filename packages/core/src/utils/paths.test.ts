@@ -18,6 +18,7 @@ import {
   shortenPath,
   tildeifyPath,
   getProjectHash,
+  getLegacyProjectHash,
 } from './paths.js';
 import type { Config } from '../config/config.js';
 
@@ -844,6 +845,58 @@ describe('getProjectHash', () => {
       const hash2 = getProjectHash(path2);
       expect(hash1).toBe(hash2);
     }
+
+    platformSpy.mockRestore();
+  });
+});
+
+describe('getLegacyProjectHash', () => {
+  it('should always be case-sensitive regardless of platform', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+
+    // Test on Windows - should still be case-sensitive
+    platformSpy.mockReturnValue('win32');
+    const lowerCaseHash = getLegacyProjectHash('c:\\users\\test\\project');
+    const upperCaseHash = getLegacyProjectHash('C:\\USERS\\TEST\\PROJECT');
+    expect(lowerCaseHash).not.toBe(upperCaseHash);
+
+    // Test on Linux - should be case-sensitive
+    platformSpy.mockReturnValue('linux');
+    const lowerCaseHashLinux = getLegacyProjectHash('/home/user/project');
+    const upperCaseHashLinux = getLegacyProjectHash('/HOME/USER/PROJECT');
+    expect(lowerCaseHashLinux).not.toBe(upperCaseHashLinux);
+
+    platformSpy.mockRestore();
+  });
+
+  it('should generate different hash than getProjectHash on Windows with mixed case', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+    platformSpy.mockReturnValue('win32');
+
+    const mixedCasePath = 'C:\\Users\\Test\\Project';
+    const legacyHash = getLegacyProjectHash(mixedCasePath);
+    const newHash = getProjectHash(mixedCasePath);
+
+    // They should be different because getProjectHash normalizes to lowercase
+    expect(legacyHash).not.toBe(newHash);
+
+    // But both lowercase paths should match the new hash
+    const lowercaseNewHash = getProjectHash(mixedCasePath.toLowerCase());
+    expect(newHash).toBe(lowercaseNewHash);
+
+    platformSpy.mockRestore();
+  });
+
+  it('should match getProjectHash on non-Windows platforms', () => {
+    const platformSpy = vi.spyOn(os, 'platform');
+    platformSpy.mockReturnValue('linux');
+
+    const testPath = '/home/user/project';
+    const legacyHash = getLegacyProjectHash(testPath);
+    const newHash = getProjectHash(testPath);
+
+    // On non-Windows platforms, both should be identical
+    expect(legacyHash).toBe(newHash);
 
     platformSpy.mockRestore();
   });

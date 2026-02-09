@@ -203,6 +203,17 @@ export function getProjectHash(projectRoot: string): string {
 }
 
 /**
+ * Generates a hash using the legacy algorithm (without case normalization).
+ * This is used for backward compatibility to locate session directories
+ * created before the case-insensitive fix on Windows.
+ * @param projectRoot The absolute path to the project's root directory.
+ * @returns A SHA256 hash of the project root path without normalization.
+ */
+export function getLegacyProjectHash(projectRoot: string): string {
+  return crypto.createHash('sha256').update(projectRoot).digest('hex');
+}
+
+/**
  * Checks if a path is a subpath of another path.
  * @param parentPath The parent path.
  * @param childPath The child path.
