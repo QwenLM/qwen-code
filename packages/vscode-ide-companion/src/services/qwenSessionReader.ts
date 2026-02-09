@@ -179,10 +179,15 @@ export class QwenSessionReader {
 
   /**
    * Calculate project hash (needs to be consistent with Qwen CLI)
-   * Qwen CLI uses SHA256 hash of project path
+   * Qwen CLI uses SHA256 hash of project path.
+   * On Windows, paths are case-insensitive, so we normalize to lowercase
+   * to ensure the same physical path always produces the same hash.
    */
   private async getProjectHash(workingDir: string): Promise<string> {
-    return crypto.createHash('sha256').update(workingDir).digest('hex');
+    // On Windows, normalize path to lowercase for case-insensitive matching
+    const normalizedPath =
+      os.platform() === 'win32' ? workingDir.toLowerCase() : workingDir;
+    return crypto.createHash('sha256').update(normalizedPath).digest('hex');
   }
 
   /**

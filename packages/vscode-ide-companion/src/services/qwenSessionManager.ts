@@ -29,10 +29,15 @@ export class QwenSessionManager {
 
   /**
    * Calculate project hash (same as CLI)
-   * Qwen CLI uses SHA256 hash of the project path
+   * Qwen CLI uses SHA256 hash of the project path.
+   * On Windows, paths are case-insensitive, so we normalize to lowercase
+   * to ensure the same physical path always produces the same hash.
    */
   private getProjectHash(workingDir: string): string {
-    return crypto.createHash('sha256').update(workingDir).digest('hex');
+    // On Windows, normalize path to lowercase for case-insensitive matching
+    const normalizedPath =
+      os.platform() === 'win32' ? workingDir.toLowerCase() : workingDir;
+    return crypto.createHash('sha256').update(normalizedPath).digest('hex');
   }
 
   /**
