@@ -62,10 +62,13 @@ function NavToc() {
   );
 }
 
-function ProjectAreas({ qualitative }) {
+function ProjectAreas({ qualitative, topGoals, topTools }) {
   const { projectAreas } = qualitative;
-  if (!Array.isArray(projectAreas?.areas) || !projectAreas.areas.length)
-    return null;
+
+  // Convert topTools (array of tuples) to object for chart if needed
+  const topToolsObj = Array.isArray(topTools)
+    ? Object.fromEntries(topTools)
+    : topTools;
 
   return (
     <>
@@ -75,18 +78,47 @@ function ProjectAreas({ qualitative }) {
       >
         What You Work On
       </h2>
-      <div className="project-areas">
-        {projectAreas.areas.map((area, idx) => (
-          <div key={idx} className="project-area">
-            <div className="area-header">
-              <span className="area-name">{area.name}</span>
-              <span className="area-count">~{area.session_count} sessions</span>
+
+      {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
+        <div className="project-areas mb-6">
+          {projectAreas.areas.map((area, idx) => (
+            <div key={idx} className="project-area">
+              <div className="area-header">
+                <span className="area-name">{area.name}</span>
+                <span className="area-count">
+                  ~{area.session_count} sessions
+                </span>
+              </div>
+              <div className="area-desc">
+                <MarkdownText>{area.description}</MarkdownText>
+              </div>
             </div>
-            <div className="area-desc">
-              <MarkdownText>{area.description}</MarkdownText>
-            </div>
-          </div>
-        ))}
+          ))}
+        </div>
+      )}
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gap: '24px',
+          marginBottom: '24px',
+        }}
+      >
+        {topGoals && Object.keys(topGoals).length > 0 && (
+          <HorizontalBarChart
+            data={topGoals}
+            title="What You Wanted"
+            color="#0ea5e9"
+          />
+        )}
+        {topToolsObj && Object.keys(topToolsObj).length > 0 && (
+          <HorizontalBarChart
+            data={topToolsObj}
+            title="Top Tools Used"
+            color="#6366f1"
+          />
+        )}
       </div>
     </>
   );
@@ -119,7 +151,7 @@ function InteractionStyle({ qualitative }) {
   );
 }
 
-function ImpressiveWorkflows({ qualitative }) {
+function ImpressiveWorkflows({ qualitative, primarySuccess, outcomes }) {
   const { impressiveWorkflows } = qualitative;
   if (!impressiveWorkflows) return null;
 
@@ -147,12 +179,55 @@ function ImpressiveWorkflows({ qualitative }) {
             </div>
           ))}
       </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gap: '24px',
+          marginTop: '24px',
+          marginBottom: '24px',
+        }}
+      >
+        {primarySuccess && Object.keys(primarySuccess).length > 0 && (
+          <HorizontalBarChart
+            data={primarySuccess}
+            title="What Helped Most (Qwen's Capabilities)"
+            color="#3b82f6"
+            allowedKeys={[
+              'fast_accurate_search',
+              'correct_code_edits',
+              'good_explanations',
+              'proactive_help',
+              'multi_file_changes',
+              'good_debugging',
+            ]}
+          />
+        )}
+        {outcomes && Object.keys(outcomes).length > 0 && (
+          <HorizontalBarChart
+            data={outcomes}
+            title="Outcomes"
+            color="#8b5cf6"
+            allowedKeys={[
+              'fully_achieved',
+              'mostly_achieved',
+              'partially_achieved',
+              'not_achieved',
+              'unclear_from_transcript',
+            ]}
+          />
+        )}
+      </div>
     </>
   );
 }
 
 // Format label for display (capitalize and replace underscores with spaces)
 function formatLabel(label) {
+  if (label === 'unclear_from_transcript') {
+    return 'Unclear';
+  }
   return label
     .split('_')
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -197,6 +272,7 @@ function HorizontalBarChart({
           fontSize: '13px',
           fontWeight: 700,
           color: '#64748b',
+          marginTop: 0,
           marginBottom: '16px',
           textTransform: 'uppercase',
           letterSpacing: '0.5px',
@@ -324,7 +400,8 @@ function FrictionPoints({ qualitative, satisfaction, friction }) {
       {/* Facets Data Charts */}
       <div
         style={{
-          display: 'flex',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
           gap: '24px',
           marginTop: '24px',
           marginBottom: '24px',

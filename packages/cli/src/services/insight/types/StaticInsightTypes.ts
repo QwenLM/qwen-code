@@ -28,6 +28,9 @@ export interface InsightData {
   qualitative?: QualitativeInsights;
   satisfaction?: Record<string, number>;
   friction?: Record<string, number>;
+  primarySuccess?: Record<string, number>;
+  outcomes?: Record<string, number>;
+  topGoals?: Record<string, number>;
 }
 
 export interface StreakData {

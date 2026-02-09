@@ -281,8 +281,14 @@ export class DataProcessor {
     if (onProgress) onProgress('Generating qualitative insights', 80);
     const qualitative = await this.generateQualitativeInsights(metrics, facets);
 
-    // Aggregate satisfaction and friction data from facets
-    const { satisfactionAgg, frictionAgg } = this.aggregateFacetsData(facets);
+    // Aggregate satisfaction, friction, success and outcome data from facets
+    const {
+      satisfactionAgg,
+      frictionAgg,
+      primarySuccessAgg,
+      outcomesAgg,
+      goalsAgg,
+    } = this.aggregateFacetsData(facets);
 
     if (onProgress) onProgress('Finalizing report', 100);
 
@@ -291,6 +297,9 @@ export class DataProcessor {
       qualitative,
       satisfaction: satisfactionAgg,
       friction: frictionAgg,
+      primarySuccess: primarySuccessAgg,
+      outcomes: outcomesAgg,
+      topGoals: goalsAgg,
     };
   }
 
@@ -298,9 +307,15 @@ export class DataProcessor {
   private aggregateFacetsData(facets: SessionFacets[]): {
     satisfactionAgg: Record<string, number>;
     frictionAgg: Record<string, number>;
+    primarySuccessAgg: Record<string, number>;
+    outcomesAgg: Record<string, number>;
+    goalsAgg: Record<string, number>;
   } {
     const satisfactionAgg: Record<string, number> = {};
     const frictionAgg: Record<string, number> = {};
+    const primarySuccessAgg: Record<string, number> = {};
+    const outcomesAgg: Record<string, number> = {};
+    const goalsAgg: Record<string, number> = {};
 
     facets.forEach((facet) => {
       // Aggregate satisfaction
@@ -312,9 +327,31 @@ export class DataProcessor {
       Object.entries(facet.friction_counts).forEach(([fric, count]) => {
         frictionAgg[fric] = (frictionAgg[fric] || 0) + count;
       });
+
+      // Aggregate primary success
+      if (facet.primary_success && facet.primary_success !== 'none') {
+        primarySuccessAgg[facet.primary_success] =
+          (primarySuccessAgg[facet.primary_success] || 0) + 1;
+      }
+
+      // Aggregate outcomes
+      if (facet.outcome) {
+        outcomesAgg[facet.outcome] = (outcomesAgg[facet.outcome] || 0) + 1;
+      }
+
+      // Aggregate goals
+      Object.entries(facet.goal_categories).forEach(([goal, count]) => {
+        goalsAgg[goal] = (goalsAgg[goal] || 0) + count;
+      });
     });
 
-    return { satisfactionAgg, frictionAgg };
+    return {
+      satisfactionAgg,
+      frictionAgg,
+      primarySuccessAgg,
+      outcomesAgg,
+      goalsAgg,
+    };
   }
 
   private async generateQualitativeInsights(

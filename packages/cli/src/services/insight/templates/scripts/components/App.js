@@ -40,7 +40,11 @@ function InsightApp({ data }) {
 
       {data.qualitative && (
         <>
-          <ProjectAreas qualitative={data.qualitative} />
+          <ProjectAreas
+            qualitative={data.qualitative}
+            topGoals={data.topGoals}
+            topTools={data.topTools}
+          />
         </>
       )}
 
@@ -54,7 +58,11 @@ function InsightApp({ data }) {
 
       {data.qualitative && (
         <>
-          <ImpressiveWorkflows qualitative={data.qualitative} />
+          <ImpressiveWorkflows
+            qualitative={data.qualitative}
+            primarySuccess={data.primarySuccess}
+            outcomes={data.outcomes}
+          />
           <FrictionPoints
             qualitative={data.qualitative}
             satisfaction={data.satisfaction}

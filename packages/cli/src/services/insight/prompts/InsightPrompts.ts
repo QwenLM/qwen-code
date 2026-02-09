@@ -5,7 +5,15 @@ CRITICAL GUIDELINES:
 1. **goal_categories**: Count ONLY what the USER explicitly asked for.
    - DO NOT count Qwen's autonomous codebase exploration
    - DO NOT count work Qwen decided to do on its own
-   - ONLY count when user says "can you...", "please...", "I need...", "let's..."
+   - ONLY count when user says "can you...", "please...", "I need...", "let's...
+   - POSSIBLE CATEGORIES (but be open to others that appear in the data):
+      - bug_fix
+      - feature_request
+      - debugging
+      - test_creation
+      - code_refactoring
+      - documentation_update
+   "
 
 2. **user_satisfaction_counts**: Base ONLY on explicit user signals.
    - "Yay!", "great!", "perfect!" → happy
