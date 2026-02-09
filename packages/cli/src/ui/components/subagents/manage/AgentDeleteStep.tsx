@@ -6,6 +6,7 @@
 
 import { Box, Text } from 'ink';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { StepNavigationProps } from '../types.js';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
@@ -15,6 +16,8 @@ interface AgentDeleteStepProps extends StepNavigationProps {
   selectedAgent: SubagentConfig | null;
   onDelete: (agent: SubagentConfig) => Promise<void>;
 }
+
+const debugLogger = createDebugLogger('AGENT_DELETE_STEP');
 
 export function AgentDeleteStep({
   selectedAgent,
@@ -30,7 +33,7 @@ export function AgentDeleteStep({
           await onDelete(selectedAgent);
           // Navigation will be handled by the parent component after successful deletion
         } catch (error) {
-          console.error('Failed to delete agent:', error);
+          debugLogger.error('Failed to delete agent:', error);
         }
       } else if (key.name === 'n') {
         onNavigateBack();

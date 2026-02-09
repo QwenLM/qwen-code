@@ -49,6 +49,8 @@ export interface ToolCallStartParams {
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   /** Optional subagent metadata */
   subagentMeta?: SubagentMeta;
+  /** Server-side timestamp (ISO string or ms) for message ordering */
+  timestamp?: string | number;
 }
 
 /**
@@ -71,6 +73,8 @@ export interface ToolCallResultParams {
   args?: Record<string, unknown>;
   /** Optional subagent metadata */
   subagentMeta?: SubagentMeta;
+  /** Server-side timestamp (ISO string or ms) for message ordering */
+  timestamp?: string | number;
 }
 
 /**

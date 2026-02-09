@@ -24,6 +24,8 @@ import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { OutputFormat } from '@qwen-code/qwen-code-core';
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
   constructor(readonly code?: string | number | null | undefined) {
@@ -77,6 +79,12 @@ vi.mock('./utils/events.js', async (importOriginal) => {
 vi.mock('./utils/sandbox.js', () => ({
   sandbox_command: vi.fn(() => ''), // Default to no sandbox command
   start_sandbox: vi.fn(() => Promise.resolve()), // Mock as an async function that resolves
+}));
+
+vi.mock('./utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStdoutLine: vi.fn(),
+  clearScreen: vi.fn(),
 }));
 
 vi.mock('./utils/relaunch.js', () => ({
@@ -449,7 +457,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       prompt: undefined,
       promptInteractive: undefined,
       query: undefined,
-      allFiles: undefined,
       yolo: undefined,
       approvalMode: undefined,
       telemetry: undefined,
@@ -463,7 +470,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       allowedTools: undefined,
       acp: undefined,
       experimentalAcp: undefined,
-      experimentalSkills: undefined,
       extensions: undefined,
       listExtensions: undefined,
       openaiLogging: undefined,
@@ -478,7 +484,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       webSearchDefault: undefined,
       screenReader: undefined,
       vlmSwitchMode: undefined,
-      useSmartEdit: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
       includePartialMessages: undefined,
@@ -501,34 +506,28 @@ describe('gemini.tsx main function kitty protocol', () => {
 });
 
 describe('validateDnsResolutionOrder', () => {
-  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
-
   beforeEach(() => {
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    consoleWarnSpy.mockRestore();
+    mockWriteStderrLine.mockClear();
   });
 
   it('should return "ipv4first" when the input is "ipv4first"', () => {
     expect(validateDnsResolutionOrder('ipv4first')).toBe('ipv4first');
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
 
   it('should return "verbatim" when the input is "verbatim"', () => {
     expect(validateDnsResolutionOrder('verbatim')).toBe('verbatim');
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
 
   it('should return the default "ipv4first" when the input is undefined', () => {
     expect(validateDnsResolutionOrder(undefined)).toBe('ipv4first');
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
 
   it('should return the default "ipv4first" and log a warning for an invalid string', () => {
     expect(validateDnsResolutionOrder('invalid-value')).toBe('ipv4first');
-    expect(consoleWarnSpy).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'Invalid value for dnsResolutionOrder in settings: "invalid-value". Using default "ipv4first".',
     );
   });
@@ -643,8 +642,19 @@ describe('startInteractiveUI', () => {
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
   });
 
-  it('should not check for updates when update nag is disabled', async () => {
+  it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
     const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+
+    const settingsWithAutoUpdateDisabled = {
+      merged: {
+        general: {
+          enableAutoUpdate: false,
+        },
+        ui: {
+          hideWindowTitle: false,
+        },
+      },
+    } as LoadedSettings;
 
     const mockInitializationResult = {
       authError: null,
@@ -653,26 +663,17 @@ describe('startInteractiveUI', () => {
       geminiMdFileCount: 0,
     };
 
-    const settingsWithUpdateNagDisabled = {
-      merged: {
-        general: {
-          disableUpdateNag: true,
-        },
-        ui: {
-          hideWindowTitle: false,
-        },
-      },
-    } as LoadedSettings;
-
     await startInteractiveUI(
       mockConfig,
-      settingsWithUpdateNagDisabled,
+      settingsWithAutoUpdateDisabled,
       mockStartupWarnings,
       mockWorkspaceRoot,
       mockInitializationResult,
     );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // checkForUpdates should NOT be called when enableAutoUpdate is false
     expect(checkForUpdates).not.toHaveBeenCalled();
   });
 });

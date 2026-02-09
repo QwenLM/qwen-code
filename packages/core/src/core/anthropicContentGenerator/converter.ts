@@ -34,16 +34,16 @@ type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 export class AnthropicContentConverter {
   private model: string;
   private schemaCompliance: SchemaComplianceMode;
-  private disableCacheControl: boolean;
+  private enableCacheControl: boolean;
 
   constructor(
     model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
-    disableCacheControl: boolean = false,
+    enableCacheControl: boolean = true,
   ) {
     this.model = model;
     this.schemaCompliance = schemaCompliance;
-    this.disableCacheControl = disableCacheControl;
+    this.enableCacheControl = enableCacheControl;
   }
 
   convertGeminiRequestToAnthropic(request: GenerateContentParameters): {
@@ -58,11 +58,11 @@ export class AnthropicContentConverter {
 
     this.processContents(request.contents, messages);
 
-    // Add cache_control to enable prompt caching (if not disabled)
-    const system = this.disableCacheControl
-      ? systemText
-      : this.buildSystemWithCacheControl(systemText);
-    if (!this.disableCacheControl) {
+    // Add cache_control to enable prompt caching (if enabled)
+    const system = this.enableCacheControl
+      ? this.buildSystemWithCacheControl(systemText)
+      : systemText;
+    if (this.enableCacheControl) {
       this.addCacheControlToMessages(messages);
     }
 
@@ -119,8 +119,8 @@ export class AnthropicContentConverter {
       }
     }
 
-    // Add cache_control to the last tool for prompt caching (if not disabled)
-    if (!this.disableCacheControl && tools.length > 0) {
+    // Add cache_control to the last tool for prompt caching (if enabled)
+    if (this.enableCacheControl && tools.length > 0) {
       const lastToolIndex = tools.length - 1;
       tools[lastToolIndex] = {
         ...tools[lastToolIndex],

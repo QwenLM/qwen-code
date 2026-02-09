@@ -59,6 +59,7 @@ export interface UsageMetadata {
 export interface SessionUpdateMeta {
   usage?: UsageMetadata | null;
   durationMs?: number | null;
+  timestamp?: number | null;
 }
 
 export type AcpMeta = Record<string, unknown>;
@@ -81,6 +82,7 @@ export interface UserMessageChunkUpdate extends BaseSessionUpdate {
   update: {
     sessionUpdate: 'user_message_chunk';
     content: ContentBlock;
+    _meta?: SessionUpdateMeta;
   };
 }
 
@@ -131,6 +133,7 @@ export interface ToolCallUpdate extends BaseSessionUpdate {
       path: string;
       line?: number | null;
     }>;
+    _meta?: SessionUpdateMeta;
   };
 }
 
@@ -156,6 +159,7 @@ export interface ToolCallStatusUpdate extends BaseSessionUpdate {
       path: string;
       line?: number | null;
     }>;
+    _meta?: SessionUpdateMeta;
   };
 }
 

@@ -814,12 +814,12 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
-  describe('disableCacheControl', () => {
+  describe('enableCacheControl', () => {
     it('does not add cache_control to system when disabled', () => {
       const noCacheConverter = new AnthropicContentConverter(
         'test-model',
         'auto',
-        true,
+        false,
       );
       const { system } = noCacheConverter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -834,7 +834,7 @@ describe('AnthropicContentConverter', () => {
       const noCacheConverter = new AnthropicContentConverter(
         'test-model',
         'auto',
-        true,
+        false,
       );
       const { messages } = noCacheConverter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -853,7 +853,7 @@ describe('AnthropicContentConverter', () => {
       const noCacheConverter = new AnthropicContentConverter(
         'test-model',
         'auto',
-        true,
+        false,
       );
       const tools = [
         {

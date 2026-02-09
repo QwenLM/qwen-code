@@ -43,6 +43,12 @@ vi.mock('@qwen-code/qwen-code-core', () => {
   return {
     isNodeError: (err: unknown): err is NodeJS.ErrnoException =>
       typeof err === 'object' && err !== null && 'code' in err,
+    createDebugLogger: () => ({
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    }),
     Storage,
   };
 });

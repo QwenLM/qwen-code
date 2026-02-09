@@ -17,6 +17,9 @@ import type {
   LspServerConfig,
   LspSocketOptions,
 } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LSP');
 
 export class LspConfigLoader {
   constructor(private readonly workspaceRoot: string) {}
@@ -36,7 +39,7 @@ export class LspConfigLoader {
       const data = JSON.parse(configContent);
       return this.parseConfigSource(data, lspConfigPath);
     } catch (error) {
-      console.warn('Failed to load user .lsp.json config:', error);
+      debugLogger.warn('Failed to load user .lsp.json config:', error);
       return [];
     }
   }
@@ -62,7 +65,9 @@ export class LspConfigLoader {
           lspServers,
         );
         if (!fs.existsSync(configPath)) {
-          console.warn(`LSP config not found for ${originBase}: ${configPath}`);
+          debugLogger.warn(
+            `LSP config not found for ${originBase}: ${configPath}`,
+          );
           continue;
         }
 
@@ -77,7 +82,7 @@ export class LspConfigLoader {
             ),
           );
         } catch (error) {
-          console.warn(
+          debugLogger.warn(
             `Failed to load extension LSP config from ${configPath}:`,
             error,
           );
@@ -91,7 +96,7 @@ export class LspConfigLoader {
           ...this.parseConfigSource(hydrated, `${originBase} (lspServers)`),
         );
       } else {
-        console.warn(
+        debugLogger.warn(
           `LSP config for ${originBase} must be an object or a JSON file path.`,
         );
       }
@@ -316,12 +321,14 @@ export class LspConfigLoader {
     const socket = this.normalizeSocketOptions(spec);
 
     if (transport === 'stdio' && !command) {
-      console.warn(`LSP config error in ${origin}: ${name} missing command`);
+      debugLogger.warn(
+        `LSP config error in ${origin}: ${name} missing command`,
+      );
       return null;
     }
 
     if (transport !== 'stdio' && !socket) {
-      console.warn(
+      debugLogger.warn(
         `LSP config error in ${origin}: ${name} missing socket info`,
       );
       return null;
@@ -485,7 +492,7 @@ export class LspConfigLoader {
       return resolved;
     }
 
-    console.warn(
+    debugLogger.warn(
       `LSP workspaceFolder must be within ${this.workspaceRoot}; using workspace root instead.`,
     );
     return this.workspaceRoot;

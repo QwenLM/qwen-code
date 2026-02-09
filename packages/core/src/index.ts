@@ -59,12 +59,92 @@ export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/tokenLimits.js';
 export * from './core/turn.js';
+export * from './core/geminiRequest.js';
+export * from './core/coreToolScheduler.js';
+export * from './core/nonInteractiveToolExecutor.js';
+export * from './tools/tool-names.js';
 
 // ============================================================================
 // Tools
 // ============================================================================
 
-// Base tool system
+// Export utilities
+export * from './utils/paths.js';
+export * from './utils/schemaValidator.js';
+export * from './utils/errors.js';
+export * from './utils/debugLogger.js';
+export * from './utils/getFolderStructure.js';
+export * from './utils/memoryDiscovery.js';
+export * from './utils/gitIgnoreParser.js';
+export * from './utils/gitUtils.js';
+export * from './utils/editor.js';
+export * from './utils/quotaErrorDetection.js';
+export * from './utils/fileUtils.js';
+export * from './utils/retry.js';
+export * from './utils/shell-utils.js';
+export * from './utils/tool-utils.js';
+export * from './utils/terminalSerializer.js';
+export * from './utils/systemEncoding.js';
+export * from './utils/textUtils.js';
+export * from './utils/formatters.js';
+export * from './utils/generateContentResponseUtilities.js';
+export * from './utils/ripgrepUtils.js';
+export * from './utils/filesearch/fileSearch.js';
+export * from './utils/errorParsing.js';
+export * from './utils/workspaceContext.js';
+export * from './utils/ignorePatterns.js';
+export * from './utils/partUtils.js';
+export * from './utils/subagentGenerator.js';
+export * from './utils/projectSummary.js';
+export * from './utils/promptIdContext.js';
+export * from './utils/thoughtUtils.js';
+export * from './utils/toml-to-markdown-converter.js';
+export * from './utils/yaml-parser.js';
+
+// Config resolution utilities
+export * from './utils/configResolver.js';
+
+// Export services
+export * from './services/fileDiscoveryService.js';
+export * from './services/gitService.js';
+export * from './services/chatRecordingService.js';
+export * from './services/sessionService.js';
+export * from './services/fileSystemService.js';
+
+// Export IDE specific logic
+export * from './ide/ide-client.js';
+export * from './ide/ideContext.js';
+export * from './ide/ide-installer.js';
+export { IDE_DEFINITIONS, type IdeInfo } from './ide/detect-ide.js';
+export * from './ide/constants.js';
+export * from './ide/types.js';
+
+// Export Shell Execution Service
+export * from './services/shellExecutionService.js';
+
+// Export base tool definitions
+export * from './tools/tools.js';
+export * from './tools/tool-error.js';
+export * from './tools/tool-registry.js';
+
+// Export subagents (Phase 1)
+export * from './subagents/index.js';
+
+// Export skills
+export * from './skills/index.js';
+
+// Export extension
+export * from './extension/index.js';
+
+// Export prompt logic
+export * from './prompts/mcp-prompts.js';
+
+// Export specific tool logic
+export * from './tools/read-file.js';
+export * from './tools/ls.js';
+export * from './tools/grep.js';
+export * from './tools/ripGrep.js';
+export * from './tools/glob.js';
 export * from './tools/edit.js';
 export * from './tools/exitPlanMode.js';
 export * from './tools/glob.js';
@@ -76,7 +156,6 @@ export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';
 export * from './tools/read-file.js';
-export * from './tools/read-many-files.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
 export * from './tools/shell.js';
@@ -102,20 +181,8 @@ export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 
 // ============================================================================
-// IDE & LSP Support
+// LSP Support
 // ============================================================================
-
-// IDE integration
-export * from './ide/constants.js';
-export {
-  IDE_DEFINITIONS,
-  type IdeInfo,
-  detectIdeFromEnv,
-} from './ide/detect-ide.js';
-export * from './ide/ide-client.js';
-export * from './ide/ide-installer.js';
-export * from './ide/ideContext.js';
-export * from './ide/types.js';
 
 // LSP support
 export * from './lsp/constants.js';
@@ -150,7 +217,6 @@ export type {
 // Telemetry
 // ============================================================================
 
-export { ClearcutLogger } from './telemetry/clearcut-logger/clearcut-logger.js';
 export { QwenLogger } from './telemetry/qwen-logger/qwen-logger.js';
 export * from './telemetry/index.js';
 export {
@@ -204,6 +270,7 @@ export * from './utils/paths.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/projectSummary.js';
 export * from './utils/quotaErrorDetection.js';
+export * from './utils/readManyFiles.js';
 export * from './utils/request-tokenizer/supportedImageFormats.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';

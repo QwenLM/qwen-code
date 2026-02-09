@@ -6,9 +6,11 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { execCommand } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, execCommand } from '@qwen-code/qwen-code-core';
 
 const MACOS_CLIPBOARD_TIMEOUT_MS = 1500;
+
+const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
 /**
  * Checks if the system clipboard contains an image (macOS only for now)
@@ -115,7 +117,7 @@ export async function saveClipboardImage(
     // No format worked
     return null;
   } catch (error) {
-    console.error('Error saving clipboard image:', error);
+    debugLogger.error('Error saving clipboard image:', error);
     return null;
   }
 }

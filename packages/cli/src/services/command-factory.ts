@@ -10,6 +10,7 @@
  */
 
 import path from 'node:path';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
   SlashCommand,
@@ -36,6 +37,8 @@ export interface CommandDefinition {
   prompt: string;
   description?: string;
 }
+
+const debugLogger = createDebugLogger('COMMAND_FACTORY');
 
 /**
  * Creates a SlashCommand from a parsed command definition.
@@ -113,7 +116,7 @@ export function createSlashCommandFromDefinition(
       _args: string,
     ): Promise<SlashCommandActionReturn> => {
       if (!context.invocation) {
-        console.error(
+        debugLogger.error(
           `[FileCommandLoader] Critical error: Command '${baseCommandName}' was executed without invocation context.`,
         );
         return {

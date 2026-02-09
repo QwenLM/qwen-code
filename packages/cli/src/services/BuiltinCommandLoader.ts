@@ -18,6 +18,7 @@ import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
+import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
@@ -42,7 +43,7 @@ import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 
 /**
  * Loads the core, hard-coded slash commands that are an integral part
- * of the Gemini CLI application.
+ * of the Qwen Code application.
  */
 export class BuiltinCommandLoader implements ICommandLoader {
   constructor(private config: Config | null) {}
@@ -67,6 +68,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       docsCommand,
       directoryCommand,
       editorCommand,
+      exportCommand,
       extensionsCommand,
       helpCommand,
       await ideCommand(),
@@ -79,7 +81,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       quitCommand,
       restoreCommand(this.config),
       resumeCommand,
-      ...(this.config?.getExperimentalSkills?.() ? [skillsCommand] : []),
+      skillsCommand,
       statsCommand,
       summaryCommand,
       themeCommand,

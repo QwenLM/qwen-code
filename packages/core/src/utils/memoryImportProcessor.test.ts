@@ -119,7 +119,7 @@ describe('memoryImportProcessor', () => {
       mockedFs.access.mockResolvedValue(undefined);
       mockedFs.readFile.mockResolvedValue(importedContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       // Use marked to find HTML comments (import markers)
       const comments = findMarkdownComments(result.content);
@@ -153,7 +153,7 @@ describe('memoryImportProcessor', () => {
       mockedFs.access.mockResolvedValue(undefined);
       mockedFs.readFile.mockResolvedValue(importedContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       // Use marked to find import comments
       const comments = findMarkdownComments(result.content);
@@ -200,7 +200,7 @@ describe('memoryImportProcessor', () => {
         currentFile: testPath('test', 'path', 'main.md'), // Simulate we're processing main.md
       };
 
-      const result = await processImports(content, basePath, true, importState);
+      const result = await processImports(content, basePath, importState);
 
       // The circular import should be detected when processing the nested import
       expect(result.content).toContain(
@@ -219,7 +219,7 @@ describe('memoryImportProcessor', () => {
         }),
       );
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       // Content should be preserved as-is when file doesn't exist
       expect(result.content).toBe(content);
@@ -236,16 +236,13 @@ describe('memoryImportProcessor', () => {
         Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
       );
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       // Should show error comment for non-ENOENT errors
       expect(result.content).toContain(
         '<!-- Import failed: ./permission-denied.md - Permission denied -->',
       );
-      expect(console.error).toHaveBeenCalledWith(
-        '[ERROR] [ImportProcessor]',
-        'Failed to import ./permission-denied.md: Permission denied',
-      );
+      expect(console.error).not.toHaveBeenCalled();
     });
 
     it('should respect max depth limit', async () => {
@@ -262,12 +259,9 @@ describe('memoryImportProcessor', () => {
         currentDepth: 1,
       };
 
-      const result = await processImports(content, basePath, true, importState);
+      const result = await processImports(content, basePath, importState);
 
-      expect(console.warn).toHaveBeenCalledWith(
-        '[WARN] [ImportProcessor]',
-        'Maximum import depth (1) reached. Stopping import processing.',
-      );
+      expect(console.warn).not.toHaveBeenCalled();
       expect(result.content).toBe(content);
     });
 
@@ -282,7 +276,7 @@ describe('memoryImportProcessor', () => {
         .mockResolvedValueOnce(nestedContent)
         .mockResolvedValueOnce(innerContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       expect(result.content).toContain('<!-- Imported from: ./nested.md -->');
       expect(result.content).toContain('<!-- Imported from: ./inner.md -->');
@@ -297,7 +291,7 @@ describe('memoryImportProcessor', () => {
       mockedFs.access.mockResolvedValue(undefined);
       mockedFs.readFile.mockResolvedValue(importedContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       expect(result.content).toContain(
         '<!-- Import failed: /absolute/path/file.md - Path traversal attempt -->',
@@ -315,7 +309,7 @@ describe('memoryImportProcessor', () => {
         .mockResolvedValueOnce(firstContent)
         .mockResolvedValueOnce(secondContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       expect(result.content).toContain('<!-- Imported from: ./first.md -->');
       expect(result.content).toContain('<!-- Imported from: ./second.md -->');
@@ -343,7 +337,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -383,7 +376,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -432,7 +424,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -458,7 +449,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -488,7 +478,7 @@ describe('memoryImportProcessor', () => {
         ); // 中文路径 doesn't exist
       mockedFs.readFile.mockResolvedValue(importedContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       // Should import valid.md
       expect(result.content).toContain(importedContent);
@@ -509,7 +499,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -533,7 +522,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -548,7 +536,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
       );
@@ -571,7 +558,7 @@ describe('memoryImportProcessor', () => {
         .mockResolvedValueOnce(simpleContent)
         .mockResolvedValueOnce(innerContent);
 
-      const result = await processImports(content, basePath, true);
+      const result = await processImports(content, basePath);
 
       // Use marked to find and validate import comments
       const comments = findMarkdownComments(result.content);
@@ -639,7 +626,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
         'flat',
@@ -715,7 +701,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true, // followImports
         undefined, // allowedPaths
         projectRoot,
         'flat', // outputFormat
@@ -747,7 +732,6 @@ describe('memoryImportProcessor', () => {
       const result = await processImports(
         content,
         basePath,
-        true,
         undefined,
         projectRoot,
         'flat',

@@ -92,8 +92,9 @@ describe('DiscoveredMCPTool', () => {
 
   describe('constructor', () => {
     it('should set properties correctly', () => {
-      expect(tool.name).toBe(serverToolName);
-      expect(tool.schema.name).toBe(serverToolName);
+      const expectedName = `mcp__${serverName}__${serverToolName}`;
+      expect(tool.name).toBe(expectedName);
+      expect(tool.schema.name).toBe(expectedName);
       expect(tool.schema.description).toBe(baseDescription);
       expect(tool.schema.parameters).toBeUndefined();
       expect(tool.schema.parametersJsonSchema).toEqual(inputSchema);

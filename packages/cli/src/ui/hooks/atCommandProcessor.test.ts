@@ -10,10 +10,7 @@ import { handleAtCommand } from './atCommandProcessor.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   FileDiscoveryService,
-  GlobTool,
-  ReadManyFilesTool,
   StandardFileSystemService,
-  ToolRegistry,
   COMMON_IGNORE_PATTERNS,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
@@ -26,7 +23,6 @@ import * as path from 'node:path';
 describe('handleAtCommand', () => {
   let testRootDir: string;
   let mockConfig: Config;
-  let registry: ToolRegistry;
 
   const mockAddItem: Mock<UseHistoryManagerReturn['addItem']> = vi.fn();
   const mockOnDebugMessage: Mock<(message: string) => void> = vi.fn();
@@ -48,13 +44,10 @@ describe('handleAtCommand', () => {
 
     abortController = new AbortController();
 
-    const getToolRegistry = vi.fn();
-
     mockConfig = {
-      getToolRegistry,
       getTargetDir: () => testRootDir,
+      getProjectRoot: () => testRootDir,
       isSandboxed: () => false,
-      isTrustedFolder: () => true,
       getFileService: () => new FileDiscoveryService(testRootDir),
       getFileFilteringRespectGitIgnore: () => true,
       getFileFilteringRespectQwenIgnore: () => true,
@@ -85,11 +78,6 @@ describe('handleAtCommand', () => {
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
     } as unknown as Config;
-
-    registry = new ToolRegistry(mockConfig);
-    registry.registerTool(new ReadManyFilesTool(mockConfig));
-    registry.registerTool(new GlobTool(mockConfig));
-    getToolRegistry.mockReturnValue(registry);
   });
 
   afterEach(async () => {
@@ -103,13 +91,12 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 123,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [{ text: query }],
       shouldProceed: true,
     });
@@ -121,13 +108,12 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query: queryWithSpaces,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 124,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [{ text: queryWithSpaces }],
       shouldProceed: true,
     });
@@ -147,344 +133,59 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 125,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
-      processedQuery: [
-        { text: `@${filePath}` },
-        { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${filePath}:\n` },
-        { text: fileContent },
-        { text: '\n--- End of content ---' },
-      ],
-      shouldProceed: true,
-    });
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
-      }),
-      125,
-    );
+    expect(result.processedQuery).toEqual([
+      { text: `@${filePath}` },
+      { text: '\n--- Content from referenced files ---' },
+      { text: `\nContent from ${filePath}:\n` },
+      { text: fileContent },
+      { text: '\n--- End of content ---' },
+    ]);
+    expect(result.shouldProceed).toBe(true);
+    // toolDisplays should be returned for caller to add to UI history
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
-  it('should process a valid directory path and convert to glob', async () => {
-    const fileContent = 'This is the file content.';
+  it('should process a valid directory path', async () => {
     const filePath = await createTestFile(
       path.join(testRootDir, 'path', 'to', 'file.txt'),
-      fileContent,
+      'This is the file content.',
     );
     const dirPath = path.dirname(filePath);
     const query = `@${dirPath}`;
-    const resolvedGlob = `${dirPath}/**`;
 
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 126,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
-      processedQuery: [
-        { text: `@${resolvedGlob}` },
-        { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${filePath}:\n` },
-        { text: fileContent },
-        { text: '\n--- End of content ---' },
-      ],
-      shouldProceed: true,
-    });
+    const processedText = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+          .map((part) =>
+            typeof part === 'string'
+              ? part
+              : 'text' in part
+                ? part.text
+                : JSON.stringify(part),
+          )
+          .join('')
+      : '';
+
+    expect(processedText).toContain(`@${dirPath}`);
+    expect(processedText).toContain(`Content from ${dirPath}:`);
+    expect(processedText).toContain('Showing up to');
+    expect(result.shouldProceed).toBe(true);
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
-      `Path ${dirPath} resolved to directory, using glob: ${resolvedGlob}`,
-    );
-  });
-
-  it('should expand an MCP resource reference in @server: resource format', async () => {
-    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
-      () =>
-        ({
-          github: {},
-        }) as unknown;
-
-    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
-      contents: [
-        {
-          uri: 'github://repos/owner/repo/issues',
-          mimeType: 'application/json',
-          text: '{"ok":true}',
-        },
-      ],
-    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
-
-    const query = 'Show me the data from @github: repos/owner/repo/issues';
-
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      addItem: mockAddItem,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 1000,
-      signal: abortController.signal,
-    });
-
-    expect(result).toEqual({
-      processedQuery: [
-        { text: 'Show me the data from @github:repos/owner/repo/issues' },
-        { text: '\n--- Content from referenced MCP resources ---' },
-        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
-        { text: '{"ok":true}' },
-        { text: '\n--- End of MCP resource content ---' },
-      ],
-      shouldProceed: true,
-    });
-    expect(registry.readMcpResource).toHaveBeenCalledWith(
-      'github',
-      'github://repos/owner/repo/issues',
-      expect.objectContaining({ signal: abortController.signal }),
-    );
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
-      }),
-      1000,
-    );
-  });
-
-  it('should expand an MCP resource reference in @server:resource format', async () => {
-    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
-      () =>
-        ({
-          github: {},
-        }) as unknown;
-
-    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
-      contents: [
-        {
-          uri: 'github://repos/owner/repo/issues',
-          mimeType: 'application/json',
-          text: '{"ok":true}',
-        },
-      ],
-    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
-
-    const query = 'Show me the data from @github:repos/owner/repo/issues';
-
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      addItem: mockAddItem,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 1001,
-      signal: abortController.signal,
-    });
-
-    expect(result).toEqual({
-      processedQuery: [
-        { text: query },
-        { text: '\n--- Content from referenced MCP resources ---' },
-        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
-        { text: '{"ok":true}' },
-        { text: '\n--- End of MCP resource content ---' },
-      ],
-      shouldProceed: true,
-    });
-    expect(registry.readMcpResource).toHaveBeenCalledWith(
-      'github',
-      'github://repos/owner/repo/issues',
-      expect.objectContaining({ signal: abortController.signal }),
-    );
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
-      }),
-      1001,
-    );
-  });
-
-  it('should expand an MCP resource reference with a leading slash', async () => {
-    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
-      () =>
-        ({
-          github: {},
-        }) as unknown;
-
-    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
-      contents: [
-        {
-          uri: 'github://repos/owner/repo/issues',
-          mimeType: 'application/json',
-          text: '{"ok":true}',
-        },
-      ],
-    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
-
-    const query = 'Show me the data from @github:/repos/owner/repo/issues';
-
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      addItem: mockAddItem,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 1002,
-      signal: abortController.signal,
-    });
-
-    expect(result).toEqual({
-      processedQuery: [
-        { text: 'Show me the data from @github:repos/owner/repo/issues' },
-        { text: '\n--- Content from referenced MCP resources ---' },
-        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
-        { text: '{"ok":true}' },
-        { text: '\n--- End of MCP resource content ---' },
-      ],
-      shouldProceed: true,
-    });
-    expect(registry.readMcpResource).toHaveBeenCalledWith(
-      'github',
-      'github://repos/owner/repo/issues',
-      expect.objectContaining({ signal: abortController.signal }),
-    );
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
-      }),
-      1002,
-    );
-  });
-
-  it('should ignore @server: when no MCP resource is provided', async () => {
-    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
-      () =>
-        ({
-          github: {},
-        }) as unknown;
-
-    const readMcpResourceSpy = vi.spyOn(registry, 'readMcpResource');
-    const query = 'Show me the data from @github:';
-
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      addItem: mockAddItem,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 1003,
-      signal: abortController.signal,
-    });
-
-    expect(result).toEqual({
-      processedQuery: [{ text: query }],
-      shouldProceed: true,
-    });
-    expect(readMcpResourceSpy).not.toHaveBeenCalled();
-    expect(mockAddItem).not.toHaveBeenCalled();
-  });
-
-  it('should not expand MCP resources in untrusted folders', async () => {
-    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
-      () =>
-        ({
-          github: {},
-        }) as unknown;
-    const configWithTrust = mockConfig as unknown as {
-      isTrustedFolder: () => boolean;
-    };
-    configWithTrust.isTrustedFolder = () => false;
-
-    const readMcpResourceSpy = vi.spyOn(registry, 'readMcpResource');
-
-    const query = 'Show me the data from @github: repos/owner/repo/issues';
-
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      addItem: mockAddItem,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 1004,
-      signal: abortController.signal,
-    });
-
-    expect(result).toEqual({
-      processedQuery: null,
-      shouldProceed: false,
-    });
-    expect(readMcpResourceSpy).toHaveBeenCalledWith(
-      'github',
-      'github://repos/owner/repo/issues',
-      expect.objectContaining({ signal: abortController.signal }),
-    );
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [
-          expect.objectContaining({
-            status: ToolCallStatus.Error,
-            resultDisplay: expect.stringContaining('untrusted'),
-          }),
-        ],
-      }),
-      1004,
-    );
-  });
-
-  it('should preserve trailing punctuation after an MCP resource reference', async () => {
-    (mockConfig as unknown as { getMcpServers: () => unknown }).getMcpServers =
-      () =>
-        ({
-          github: {},
-        }) as unknown;
-
-    vi.spyOn(registry, 'readMcpResource').mockResolvedValue({
-      contents: [
-        {
-          uri: 'github://repos/owner/repo/issues',
-          mimeType: 'application/json',
-          text: '{"ok":true}',
-        },
-      ],
-    } as unknown as Awaited<ReturnType<ToolRegistry['readMcpResource']>>);
-
-    const query = 'Show me the data from @github: repos/owner/repo/issues.';
-
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      addItem: mockAddItem,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 1005,
-      signal: abortController.signal,
-    });
-
-    expect(result).toEqual({
-      processedQuery: [
-        { text: 'Show me the data from @github:repos/owner/repo/issues.' },
-        { text: '\n--- Content from referenced MCP resources ---' },
-        { text: '\nContent from @github:repos/owner/repo/issues:\n' },
-        { text: '{"ok":true}' },
-        { text: '\n--- End of MCP resource content ---' },
-      ],
-      shouldProceed: true,
-    });
-    expect(registry.readMcpResource).toHaveBeenCalledWith(
-      'github',
-      'github://repos/owner/repo/issues',
-      expect.objectContaining({ signal: abortController.signal }),
-    );
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
-      }),
-      1005,
+      `Path ${dirPath} resolved to directory.`,
     );
   });
 
@@ -501,17 +202,16 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 128,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [
         { text: `${textBefore}@${filePath}${textAfter}` },
         { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${filePath}:\n` },
+        { text: `\nContent from ${filePath}:\n` },
         { text: fileContent },
         { text: '\n--- End of content ---' },
       ],
@@ -531,29 +231,23 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 125,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
-      processedQuery: [
-        { text: `@${filePath}` },
-        { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${filePath}:\n` },
-        { text: fileContent },
-        { text: '\n--- End of content ---' },
-      ],
-      shouldProceed: true,
-    });
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: 'tool_group',
-        tools: [expect.objectContaining({ status: ToolCallStatus.Success })],
-      }),
-      125,
-    );
+    expect(result.processedQuery).toEqual([
+      { text: `@${filePath}` },
+      { text: '\n--- Content from referenced files ---' },
+      { text: `\nContent from ${filePath}:\n` },
+      { text: fileContent },
+      { text: '\n--- End of content ---' },
+    ]);
+    expect(result.shouldProceed).toBe(true);
+    // toolDisplays should be returned for caller to add to UI history
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 
   it('should handle multiple @file references', async () => {
@@ -572,19 +266,18 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 130,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [
         { text: query },
         { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${file1Path}:\n` },
+        { text: `\nContent from ${file1Path}:\n` },
         { text: content1 },
-        { text: `\nContent from @${file2Path}:\n` },
+        { text: `\nContent from ${file2Path}:\n` },
         { text: content2 },
         { text: '\n--- End of content ---' },
       ],
@@ -611,19 +304,18 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 131,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [
         { text: query },
         { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${file1Path}:\n` },
+        { text: `\nContent from ${file1Path}:\n` },
         { text: content1 },
-        { text: `\nContent from @${file2Path}:\n` },
+        { text: `\nContent from ${file2Path}:\n` },
         { text: content2 },
         { text: '\n--- End of content ---' },
       ],
@@ -648,31 +340,27 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 132,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [
         {
           text: `Look at @${file1Path} then @${invalidFile} and also just @ symbol, then @${file2Path}`,
         },
         { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${file2Path}:\n` },
-        { text: content2 },
-        { text: `\nContent from @${file1Path}:\n` },
+        { text: `\nContent from ${file1Path}:\n` },
         { text: content1 },
+        { text: `\nContent from ${file2Path}:\n` },
+        { text: content2 },
         { text: '\n--- End of content ---' },
       ],
       shouldProceed: true,
     });
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
-      `Path ${invalidFile} not found directly, attempting glob search.`,
-    );
-    expect(mockOnDebugMessage).toHaveBeenCalledWith(
-      `Glob search for '**/*${invalidFile}*' found no files or an error. Path ${invalidFile} will be skipped.`,
+      `Path ${invalidFile} not found. Path ${invalidFile} will be skipped.`,
     );
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       'Lone @ detected, will be treated as text in the modified query.',
@@ -685,13 +373,12 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 133,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [{ text: 'Check @nonexistent.txt and @ also' }],
       shouldProceed: true,
     });
@@ -719,13 +406,12 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 200,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [{ text: query }],
         shouldProceed: true,
       });
@@ -752,17 +438,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 201,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `@${validFile}` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${validFile}:\n` },
+          { text: `\nContent from ${validFile}:\n` },
           { text: 'console.log("Hello world");' },
           { text: '\n--- End of content ---' },
         ],
@@ -785,17 +470,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 202,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `@${validFile} @${gitIgnoredFile}` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${validFile}:\n` },
+          { text: `\nContent from ${validFile}:\n` },
           { text: '# Project README' },
           { text: '\n--- End of content ---' },
         ],
@@ -819,13 +503,12 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 203,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [{ text: query }],
         shouldProceed: true,
       });
@@ -835,32 +518,6 @@ describe('handleAtCommand', () => {
       expect(mockOnDebugMessage).toHaveBeenCalledWith(
         `Ignored 1 files:\nGit-ignored: ${gitFile}`,
       );
-    });
-  });
-
-  describe('when recursive file search is disabled', () => {
-    beforeEach(() => {
-      vi.mocked(mockConfig.getEnableRecursiveFileSearch).mockReturnValue(false);
-    });
-
-    it('should not use glob search for a nonexistent file', async () => {
-      const invalidFile = 'nonexistent.txt';
-      const query = `@${invalidFile}`;
-
-      const result = await handleAtCommand({
-        query,
-        config: mockConfig,
-        addItem: mockAddItem,
-        onDebugMessage: mockOnDebugMessage,
-        messageId: 300,
-        signal: abortController.signal,
-      });
-
-      expect(mockOnDebugMessage).toHaveBeenCalledWith(
-        `Glob tool not found. Path ${invalidFile} will be skipped.`,
-      );
-      expect(result.processedQuery).toEqual([{ text: query }]);
-      expect(result.shouldProceed).toBe(true);
     });
   });
 
@@ -879,13 +536,12 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 204,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [{ text: query }],
         shouldProceed: true,
       });
@@ -911,17 +567,16 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 205,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [
         { text: `@${validFile}` },
         { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${validFile}:\n` },
+        { text: `\nContent from ${validFile}:\n` },
         { text: 'console.log("Hello world");' },
         { text: '\n--- End of content ---' },
       ],
@@ -947,17 +602,16 @@ describe('handleAtCommand', () => {
     const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 206,
       signal: abortController.signal,
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       processedQuery: [
         { text: `@${validFile} @${qwenIgnoredFile}` },
         { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from @${validFile}:\n` },
+        { text: `\nContent from ${validFile}:\n` },
         { text: '// Main application entry' },
         { text: '\n--- End of content ---' },
       ],
@@ -1075,17 +729,16 @@ describe('handleAtCommand', () => {
         const result = await handleAtCommand({
           query,
           config: mockConfig,
-          addItem: mockAddItem,
           onDebugMessage: mockOnDebugMessage,
           messageId,
           signal: abortController.signal,
         });
 
-        expect(result).toEqual({
+        expect(result).toMatchObject({
           processedQuery: [
             { text: query },
             { text: '\n--- Content from referenced files ---' },
-            { text: `\nContent from @${filePath}:\n` },
+            { text: `\nContent from ${filePath}:\n` },
             { text: fileContent },
             { text: '\n--- End of content ---' },
           ],
@@ -1110,19 +763,18 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 411,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Compare @${file1Path}, @${file2Path}; what's different?` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${file1Path}:\n` },
+          { text: `\nContent from ${file1Path}:\n` },
           { text: content1 },
-          { text: `\nContent from @${file2Path}:\n` },
+          { text: `\nContent from ${file2Path}:\n` },
           { text: content2 },
           { text: '\n--- End of content ---' },
         ],
@@ -1142,17 +794,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 412,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Check @${filePath}, it has spaces.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1171,17 +822,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 413,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Analyze @${filePath} for type definitions.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1200,17 +850,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 414,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Check @${filePath}. This file contains settings.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1229,17 +878,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 415,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Review @${filePath}, then check dependencies.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1258,17 +906,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 416,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Check @${filePath} contains version information.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1287,17 +934,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 417,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Show me @${filePath}.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1316,17 +962,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 418,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Check @${filePath} for content.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1345,17 +990,16 @@ describe('handleAtCommand', () => {
       const result = await handleAtCommand({
         query,
         config: mockConfig,
-        addItem: mockAddItem,
         onDebugMessage: mockOnDebugMessage,
         messageId: 421,
         signal: abortController.signal,
       });
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         processedQuery: [
           { text: `Check @${filePath} please.` },
           { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from @${filePath}:\n` },
+          { text: `\nContent from ${filePath}:\n` },
           { text: fileContent },
           { text: '\n--- End of content ---' },
         ],
@@ -1364,7 +1008,7 @@ describe('handleAtCommand', () => {
     });
   });
 
-  it("should not add the user's turn to history, as that is the caller's responsibility", async () => {
+  it("should not add any items to history, as that is the caller's responsibility", async () => {
     // Arrange
     const fileContent = 'This is the file content.';
     const filePath = await createTestFile(
@@ -1374,26 +1018,119 @@ describe('handleAtCommand', () => {
     const query = `A query with @${filePath}`;
 
     // Act
-    await handleAtCommand({
+    const result = await handleAtCommand({
       query,
       config: mockConfig,
-      addItem: mockAddItem,
       onDebugMessage: mockOnDebugMessage,
       messageId: 999,
       signal: abortController.signal,
     });
 
     // Assert
-    // It SHOULD be called for the tool_group
-    expect(mockAddItem).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'tool_group' }),
-      999,
-    );
+    // handleAtCommand should NOT call addItem at all - it returns data for caller to add
+    expect(mockAddItem).not.toHaveBeenCalled();
 
-    // It should NOT have been called for the user turn
-    const userTurnCalls = mockAddItem.mock.calls.filter(
-      (call) => call[0].type === 'user',
-    );
-    expect(userTurnCalls).toHaveLength(0);
+    // Instead, it returns toolDisplays for the caller to add to UI history
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays!.length).toBeGreaterThan(0);
+  });
+
+  describe('chat recording', () => {
+    it('should return tool result info for each file read', async () => {
+      const content1 = 'Content file1';
+      const file1Path = await createTestFile(
+        path.join(testRootDir, 'file1.txt'),
+        content1,
+      );
+      const content2 = 'Content file2';
+      const file2Path = await createTestFile(
+        path.join(testRootDir, 'file2.txt'),
+        content2,
+      );
+      const query = `@${file1Path} @${file2Path}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 500,
+        signal: abortController.signal,
+      });
+
+      // Should return toolDisplays (one summary for all files)
+      expect(result.toolDisplays).toBeDefined();
+      expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should return toolDisplays for UI and function parts in processedQuery', async () => {
+      const fileContent = 'Test content';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'test.txt'),
+        fileContent,
+      );
+      const query = `@${filePath}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 501,
+        signal: abortController.signal,
+      });
+
+      // Should return toolDisplays for UI
+      expect(result.toolDisplays).toBeDefined();
+      expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
+
+      // processedQuery should include file content sections
+      expect(result.processedQuery).toBeDefined();
+      const parts = Array.isArray(result.processedQuery)
+        ? result.processedQuery
+        : [result.processedQuery];
+      const flattened = parts
+        .map((part) =>
+          typeof part === 'string'
+            ? part
+            : (part as { text?: string }).text || '',
+        )
+        .join('');
+      expect(flattened).toContain('Content from ');
+      expect(flattened).toContain(fileContent);
+    });
+
+    it('should not return tool result infos when no files are read', async () => {
+      const query = 'query without any @ commands';
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 502,
+        signal: abortController.signal,
+      });
+
+      expect(result.toolDisplays).toBeUndefined();
+    });
+
+    it('should include file path in tool display result', async () => {
+      const fileContent = 'File content here';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'specific-file.txt'),
+        fileContent,
+      );
+      const query = `@${filePath}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 503,
+        signal: abortController.signal,
+      });
+
+      expect(result.toolDisplays).toBeDefined();
+      expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
+      expect(result.toolDisplays![0].description).toContain('file.txt');
+    });
   });
 });

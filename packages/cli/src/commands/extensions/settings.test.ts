@@ -4,14 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { settingsCommand } from './settings.js';
 import yargs from 'yargs';
 
@@ -19,6 +12,13 @@ const mockGetLoadedExtensions = vi.hoisted(() => vi.fn());
 const mockGetScopedEnvContents = vi.hoisted(() => vi.fn());
 const mockUpdateSetting = vi.hoisted(() => vi.fn());
 const mockPromptForSetting = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: vi.fn(),
+  clearScreen: vi.fn(),
+}));
 
 vi.mock('./utils.js', () => ({
   getExtensionManager: vi.fn().mockResolvedValue({
@@ -89,10 +89,7 @@ describe('extensions settings command', () => {
 });
 
 describe('settings set handler', () => {
-  let consoleLogSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 
@@ -123,7 +120,7 @@ describe('settings set handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings set my-extension API_KEY');
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "my-extension" not found.',
     );
     expect(mockUpdateSetting).not.toHaveBeenCalled();
@@ -173,10 +170,7 @@ describe('settings set handler', () => {
 });
 
 describe('settings list handler', () => {
-  let consoleLogSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 
@@ -207,7 +201,7 @@ describe('settings list handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings list my-extension');
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "my-extension" not found.',
     );
   });
@@ -224,7 +218,7 @@ describe('settings list handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings list my-extension');
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "my-extension" has no settings to configure.',
     );
   });
@@ -257,10 +251,16 @@ describe('settings list handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings list my-extension');
 
-    expect(consoleLogSpy).toHaveBeenCalledWith('Settings for "my-extension":');
-    expect(consoleLogSpy).toHaveBeenCalledWith('\n- API Key (API_KEY)');
-    expect(consoleLogSpy).toHaveBeenCalledWith('  Description: Your API key');
-    expect(consoleLogSpy).toHaveBeenCalledWith('  Value: my-api-key (user)');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      'Settings for "my-extension":',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('\n- API Key (API_KEY)');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '  Description: Your API key',
+    );
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+      '  Value: my-api-key (user)',
+    );
   });
 
   it('should show workspace scope for workspace-scoped settings', async () => {
@@ -286,7 +286,7 @@ describe('settings list handler', () => {
     await parser.parseAsync('settings list my-extension');
 
     // Workspace should override user, and show (workspace) scope
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       '  Value: workspace-value (workspace)',
     );
   });
@@ -313,7 +313,7 @@ describe('settings list handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings list my-extension');
 
-    expect(consoleLogSpy).toHaveBeenCalledWith('  Value: [not set]');
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('  Value: [not set]');
   });
 
   it('should show [value stored in keychain] for sensitive settings', async () => {
@@ -338,7 +338,7 @@ describe('settings list handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings list my-extension');
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       '  Value: [value stored in keychain] (user)',
     );
   });

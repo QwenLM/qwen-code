@@ -23,6 +23,9 @@ import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
 export interface ClaudePluginConfig {
   name: string;
@@ -274,7 +277,7 @@ ${systemPrompt}
 
       await fs.promises.writeFile(filePath, newContent, 'utf-8');
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `[Claude Converter] Failed to convert agent file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -299,7 +302,7 @@ export function convertClaudeToQwenConfig(
   if (claudeConfig.mcpServers) {
     if (typeof claudeConfig.mcpServers === 'string') {
       // TODO: Load from file path
-      console.warn(
+      debugLogger.warn(
         `[Claude Converter] MCP servers path not yet supported: ${claudeConfig.mcpServers}`,
       );
     } else {
@@ -309,12 +312,12 @@ export function convertClaudeToQwenConfig(
 
   // Warn about unsupported fields
   if (claudeConfig.hooks) {
-    console.warn(
+    debugLogger.warn(
       `[Claude Converter] Hooks are not yet supported in ${claudeConfig.name}`,
     );
   }
   if (claudeConfig.outputStyles) {
-    console.warn(
+    debugLogger.warn(
       `[Claude Converter] Output styles are not yet supported in ${claudeConfig.name}`,
     );
   }
@@ -414,7 +417,7 @@ export async function convertClaudePluginPackage(
           MCPServerConfig
         >;
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `Failed to parse MCP servers file ${mcpServersPath}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -514,7 +517,7 @@ async function collectResources(
       : path.join(pluginRoot, resourcePath);
 
     if (!fs.existsSync(resolvedPath)) {
-      console.warn(`Resource path not found: ${resolvedPath}`);
+      debugLogger.warn(`Resource path not found: ${resolvedPath}`);
       continue;
     }
 
@@ -528,7 +531,7 @@ async function collectResources(
       // If the directory is already named as the destination folder (e.g., 'commands')
       // and it's at the plugin root level, skip it
       if (dirName === destFolderName && parentDir === pluginRoot) {
-        console.log(
+        debugLogger.debug(
           `Skipping ${resolvedPath} as it's already in the correct location`,
         );
         continue;
@@ -565,7 +568,7 @@ async function collectResources(
       // e.g., 'commands/test1.md' or 'commands/me/test.md' should be skipped
       const segments = relativePath.split(path.sep);
       if (segments.length > 0 && segments[0] === destFolderName) {
-        console.log(
+        debugLogger.debug(
           `Skipping ${resolvedPath} as it's already in ${destFolderName}/`,
         );
         continue;
@@ -699,6 +702,7 @@ async function resolvePluginSource(
       const installMetadata: ExtensionInstallMetadata = {
         source,
         type: 'git',
+        originSource: 'Claude',
       };
       try {
         await downloadFromGitHubRelease(installMetadata, pluginDir);

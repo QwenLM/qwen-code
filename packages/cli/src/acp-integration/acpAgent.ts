@@ -11,6 +11,7 @@ import {
   APPROVAL_MODES,
   AuthType,
   clearCachedCredentialFile,
+  createDebugLogger,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCPServerConfig,
@@ -22,6 +23,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ApprovalModeValue } from './schema.js';
 import * as acp from './acp.js';
+import { buildAuthMethods } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Readable, Writable } from 'node:stream';
 import type { LoadedSettings } from '../config/settings.js';
@@ -32,6 +34,9 @@ import { loadCliConfig } from '../config/config.js';
 
 // Import the modular Session class
 import { Session } from './session/Session.js';
+import { formatAcpModelId } from '../utils/acpModelUtils.js';
+
+const debugLogger = createDebugLogger('ACP_AGENT');
 
 export async function runAcpAgent(
   config: Config,
@@ -69,20 +74,7 @@ class GeminiAgent {
     args: acp.InitializeRequest,
   ): Promise<acp.InitializeResponse> {
     this.clientCapabilities = args.clientCapabilities;
-    const authMethods = [
-      {
-        id: AuthType.USE_OPENAI,
-        name: 'Use OpenAI API key',
-        description:
-          'Requires setting the `OPENAI_API_KEY` environment variable',
-      },
-      {
-        id: AuthType.QWEN_OAUTH,
-        name: 'Qwen OAuth',
-        description:
-          'OAuth authentication for Qwen models with 2000 daily requests',
-      },
-    ];
+    const authMethods = buildAuthMethods();
 
     // Get current approval mode from config
     const currentApprovalMode = this.config.getApprovalMode();
@@ -286,7 +278,7 @@ class GeminiAgent {
         `Session not found for id: ${params.sessionId}`,
       );
     }
-    return session.setModel(params);
+    return await session.setModel(params);
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {
@@ -294,6 +286,7 @@ class GeminiAgent {
     if (!selectedType) {
       throw acp.RequestError.authRequired(
         'Use Qwen Code CLI to authenticate first.',
+        this.pickAuthMethodsForAuthRequired(),
       );
     }
 
@@ -301,11 +294,56 @@ class GeminiAgent {
       // Use true for the second argument to ensure only cached credentials are used
       await config.refreshAuth(selectedType, true);
     } catch (e) {
-      console.error(`Authentication failed: ${e}`);
+      debugLogger.error(`Authentication failed: ${e}`);
       throw acp.RequestError.authRequired(
         'Authentication failed: ' + (e as Error).message,
+        this.pickAuthMethodsForAuthRequired(selectedType, e),
       );
     }
+  }
+
+  private pickAuthMethodsForAuthRequired(
+    selectedType?: AuthType | string,
+    error?: unknown,
+  ): acp.AuthMethod[] {
+    const authMethods = buildAuthMethods();
+    const errorMessage = this.extractErrorMessage(error);
+    if (
+      errorMessage?.includes('qwen-oauth') ||
+      errorMessage?.includes('Qwen OAuth')
+    ) {
+      const qwenOAuthMethods = authMethods.filter(
+        (method) => method.id === AuthType.QWEN_OAUTH,
+      );
+      return qwenOAuthMethods.length ? qwenOAuthMethods : authMethods;
+    }
+
+    if (selectedType) {
+      const matchedMethods = authMethods.filter(
+        (method) => method.id === selectedType,
+      );
+      return matchedMethods.length ? matchedMethods : authMethods;
+    }
+
+    return authMethods;
+  }
+
+  private extractErrorMessage(error?: unknown): string | undefined {
+    if (error instanceof Error) {
+      return error.message;
+    }
+    if (
+      typeof error === 'object' &&
+      error != null &&
+      'message' in error &&
+      typeof error.message === 'string'
+    ) {
+      return error.message;
+    }
+    if (typeof error === 'string') {
+      return error;
+    }
+    return undefined;
   }
 
   private setupFileSystem(config: Config): void {
@@ -367,42 +405,58 @@ class GeminiAgent {
   private buildAvailableModels(
     config: Config,
   ): acp.NewSessionResponse['models'] {
-    const currentModelId = (
+    const rawCurrentModelId = (
       config.getModel() ||
       this.config.getModel() ||
       ''
     ).trim();
-    const availableModels = config.getAvailableModels();
+    const currentAuthType = config.getAuthType();
+    const allConfiguredModels = config.getAllConfiguredModels();
 
-    const mappedAvailableModels = availableModels.map((model) => ({
-      modelId: model.id,
-      name: model.label,
-      description: model.description ?? null,
-      _meta: {
-        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-      },
-    }));
+    // Check if current model is a runtime model
+    // Runtime models use $runtime|${authType}|${modelId} format
+    const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
+    const currentModelId = activeRuntimeSnapshot
+      ? formatAcpModelId(
+          activeRuntimeSnapshot.id,
+          activeRuntimeSnapshot.authType,
+        )
+      : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
 
-    if (
-      currentModelId &&
-      !mappedAvailableModels.some((model) => model.modelId === currentModelId)
-    ) {
-      const currentContextWindowSize =
-        config.getContentGeneratorConfig()?.contextWindowSize ??
-        tokenLimit(currentModelId);
-      mappedAvailableModels.unshift({
-        modelId: currentModelId,
-        name: currentModelId,
-        description: null,
+    const availableModels = allConfiguredModels;
+
+    const mappedAvailableModels = availableModels.map((model) => {
+      // For runtime models, use runtimeSnapshotId as modelId for ACP protocol
+      // This allows ACP clients to correctly identify and switch to runtime models
+      const effectiveModelId =
+        model.isRuntimeModel && model.runtimeSnapshotId
+          ? model.runtimeSnapshotId
+          : model.id;
+
+      return {
+        modelId: formatAcpModelId(effectiveModelId, model.authType),
+        name: model.label,
+        description: model.description ?? null,
         _meta: {
-          contextLimit: currentContextWindowSize,
+          contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
         },
-      });
-    }
+      };
+    });
 
     return {
       currentModelId,
       availableModels: mappedAvailableModels,
     };
+  }
+
+  private formatCurrentModelId(
+    baseModelId: string,
+    authType?: AuthType,
+  ): string {
+    if (!baseModelId) {
+      return baseModelId;
+    }
+
+    return authType ? formatAcpModelId(baseModelId, authType) : baseModelId;
   }
 }

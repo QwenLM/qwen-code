@@ -9,6 +9,9 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('RIPGREP');
 
 const RIPGREP_COMMAND = 'rg';
 const RIPGREP_BUFFER_LIMIT = 20_000_000; // Keep buffers aligned with the original bundle.
@@ -298,7 +301,7 @@ export async function runRipgrep(
 
         // Log warnings for abnormal exits (except syntax errors)
         if (!syntaxError && truncated) {
-          console.warn(
+          debugLogger.warn(
             `ripgrep exited abnormally (signal=${error.signal} code=${error.code}) with stderr:\n${stderr.trim() || '(empty)'}`,
           );
         }

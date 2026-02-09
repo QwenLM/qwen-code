@@ -7,10 +7,12 @@
 import { Box, Static } from 'ink';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
+import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
+import { DebugModeNotification } from './DebugModeNotification.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -35,6 +37,8 @@ export const MainContent = () => {
         key={uiState.historyRemountKey}
         items={[
           <AppHeader key="app-header" version={version} />,
+          <DebugModeNotification key="debug-notification" />,
+          <Notifications key="notifications" />,
           ...uiState.history.map((h) => (
             <HistoryItemDisplay
               terminalWidth={terminalWidth}

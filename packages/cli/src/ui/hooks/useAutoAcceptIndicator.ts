@@ -18,12 +18,14 @@ export interface UseAutoAcceptIndicatorArgs {
   config: Config;
   addItem?: (item: HistoryItemWithoutId, timestamp: number) => void;
   onApprovalModeChange?: (mode: ApprovalMode) => void;
+  shouldBlockTab?: () => boolean;
 }
 
 export function useAutoAcceptIndicator({
   config,
   addItem,
   onApprovalModeChange,
+  shouldBlockTab,
 }: UseAutoAcceptIndicatorArgs): ApprovalMode {
   const currentConfigValue = config.getApprovalMode();
   const [showAutoAcceptIndicator, setShowAutoAcceptIndicator] =
@@ -46,6 +48,12 @@ export function useAutoAcceptIndicator({
         !key.meta;
 
       if (isShiftTab || isWindowsTab) {
+        // On Windows, check if we should block Tab key when autocomplete is active
+        if (isWindowsTab && shouldBlockTab?.()) {
+          // Don't cycle approval mode when autocomplete is showing
+          return;
+        }
+
         const currentMode = config.getApprovalMode();
         const currentIndex = APPROVAL_MODES.indexOf(currentMode);
         const nextIndex =

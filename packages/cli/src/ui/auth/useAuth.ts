@@ -30,6 +30,7 @@ export const useAuthCommand = (
   settings: LoadedSettings,
   config: Config,
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  onAuthChange?: () => void,
 ) => {
   const unAuthenticated = config.getAuthType() === undefined;
 
@@ -136,11 +137,10 @@ export const useAuthCommand = (
       setIsAuthDialogOpen(false);
       setIsAuthenticating(false);
 
-      // Log authentication success
-      const authEvent = new AuthEvent(authType, 'manual', 'success');
-      logAuth(config, authEvent);
+      // Trigger UI refresh to update header information
+      onAuthChange?.();
 
-      // Show success message
+      // Add success message to history
       addItem(
         {
           type: MessageType.INFO,
@@ -150,8 +150,12 @@ export const useAuthCommand = (
         },
         Date.now(),
       );
+
+      // Log authentication success
+      const authEvent = new AuthEvent(authType, 'manual', 'success');
+      logAuth(config, authEvent);
     },
-    [settings, handleAuthFailure, config, addItem],
+    [settings, handleAuthFailure, config, addItem, onAuthChange],
   );
 
   const performAuth = useCallback(

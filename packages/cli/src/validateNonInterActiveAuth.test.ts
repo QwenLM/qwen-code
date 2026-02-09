@@ -14,6 +14,14 @@ import * as JsonOutputAdapterModule from './nonInteractive/io/JsonOutputAdapter.
 import * as StreamJsonOutputAdapterModule from './nonInteractive/io/StreamJsonOutputAdapter.js';
 import * as cleanupModule from './utils/cleanup.js';
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('./utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStdoutLine: vi.fn(),
+  clearScreen: vi.fn(),
+}));
+
 type ModelsConfig = ReturnType<Config['getModelsConfig']>;
 
 // Helper to create a mock Config with modelsConfig
@@ -42,7 +50,6 @@ describe('validateNonInterActiveAuth', () => {
   let originalEnvQwenOauth: string | undefined;
   let originalEnvGoogleApiKey: string | undefined;
   let originalEnvAnthropicApiKey: string | undefined;
-  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
   let processExitSpy: ReturnType<typeof vi.spyOn<[code?: number], never>>;
   let refreshAuthMock: ReturnType<typeof vi.fn>;
   let mockSettings: LoadedSettings;
@@ -62,7 +69,7 @@ describe('validateNonInterActiveAuth', () => {
     delete process.env['QWEN_OAUTH'];
     delete process.env['GOOGLE_API_KEY'];
     delete process.env['ANTHROPIC_API_KEY'];
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockWriteStderrLine.mockClear();
     processExitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
       throw new Error(`process.exit(${code}) called`);
     }) as ReturnType<typeof vi.spyOn<[code?: number], never>>;
@@ -149,7 +156,7 @@ describe('validateNonInterActiveAuth', () => {
     } catch (e) {
       expect((e as Error).message).toContain('process.exit(1) called');
     }
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Missing API key'),
     );
     expect(processExitSpy).toHaveBeenCalledWith(1);
@@ -204,7 +211,7 @@ describe('validateNonInterActiveAuth', () => {
     } catch (e) {
       expect((e as Error).message).toContain('process.exit(1) called');
     }
-    expect(consoleErrorSpy).toHaveBeenCalledWith('Auth error!');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('Auth error!');
     expect(processExitSpy).toHaveBeenCalledWith(1);
   });
 
@@ -226,7 +233,7 @@ describe('validateNonInterActiveAuth', () => {
     );
 
     expect(validateAuthMethodSpy).not.toHaveBeenCalled();
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
+    expect(mockWriteStderrLine).not.toHaveBeenCalled();
     expect(processExitSpy).not.toHaveBeenCalled();
     // refreshAuth is called with the authType from config.getModelsConfig().getCurrentAuthType()
     expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.QWEN_OAUTH);
@@ -272,7 +279,7 @@ describe('validateNonInterActiveAuth', () => {
     } catch (e) {
       expect((e as Error).message).toContain('process.exit(1) called');
     }
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       'The configured auth type is qwen-oauth, but the current auth type is openai. Please re-authenticate with the correct type.',
     );
     expect(processExitSpy).toHaveBeenCalledWith(1);
@@ -330,7 +337,7 @@ describe('validateNonInterActiveAuth', () => {
       });
       expect(runExitCleanupMock).toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(1);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
     });
 
     it('emits error result and exits when enforced auth mismatches current auth', async () => {
@@ -369,7 +376,7 @@ describe('validateNonInterActiveAuth', () => {
       });
       expect(runExitCleanupMock).toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(1);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
     });
 
     it('emits error result and exits when API key validation fails', async () => {
@@ -406,7 +413,7 @@ describe('validateNonInterActiveAuth', () => {
       });
       expect(runExitCleanupMock).toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(1);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
     });
   });
 
@@ -466,7 +473,7 @@ describe('validateNonInterActiveAuth', () => {
       });
       expect(runExitCleanupMock).toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(1);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
     });
 
     it('emits error result and exits when enforced auth mismatches current auth', async () => {
@@ -506,7 +513,7 @@ describe('validateNonInterActiveAuth', () => {
       });
       expect(runExitCleanupMock).toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(1);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
     });
 
     it('emits error result and exits when API key validation fails', async () => {
@@ -544,7 +551,7 @@ describe('validateNonInterActiveAuth', () => {
       });
       expect(runExitCleanupMock).toHaveBeenCalled();
       expect(processExitSpy).toHaveBeenCalledWith(1);
-      expect(consoleErrorSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
     });
   });
 });
