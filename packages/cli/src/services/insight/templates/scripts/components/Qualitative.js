@@ -124,7 +124,7 @@ function ProjectAreas({ qualitative, topGoals, topTools }) {
   );
 }
 
-function InteractionStyle({ qualitative }) {
+function InteractionStyle({ qualitative, insights }) {
   const { interactionStyle } = qualitative;
   if (!interactionStyle) return null;
 
@@ -147,6 +147,9 @@ function InteractionStyle({ qualitative }) {
           </div>
         )}
       </div>
+
+      <DashboardCards insights={insights} />
+      <HeatmapSection heatmap={insights.heatmap} />
     </>
   );
 }

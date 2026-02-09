@@ -36,8 +36,6 @@ function InsightApp({ data }) {
 
       <StatsRow data={data} />
 
-      <DashboardCards insights={data} />
-
       {data.qualitative && (
         <>
           <ProjectAreas
@@ -48,11 +46,9 @@ function InsightApp({ data }) {
         </>
       )}
 
-      <HeatmapSection heatmap={data.heatmap} />
-
       {data.qualitative && (
         <>
-          <InteractionStyle qualitative={data.qualitative} />
+          <InteractionStyle qualitative={data.qualitative} insights={data} />
         </>
       )}
 
