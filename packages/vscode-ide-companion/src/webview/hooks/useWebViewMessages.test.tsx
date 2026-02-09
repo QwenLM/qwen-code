@@ -278,8 +278,10 @@ describe('useWebViewMessages', () => {
   it('records inbound messages when test array is present', async () => {
     const { unmount } = await setup();
     const holder = globalThis as typeof globalThis & {
+      __qwenTestMode?: boolean;
       __qwenReceivedMessages?: unknown[];
     };
+    holder.__qwenTestMode = true;
     holder.__qwenReceivedMessages = [];
 
     const payload = { type: 'authState', data: { authenticated: true } };
@@ -291,6 +293,7 @@ describe('useWebViewMessages', () => {
     expect(holder.__qwenReceivedMessages).toEqual([payload]);
 
     delete holder.__qwenReceivedMessages;
+    delete holder.__qwenTestMode;
     unmount();
   });
 

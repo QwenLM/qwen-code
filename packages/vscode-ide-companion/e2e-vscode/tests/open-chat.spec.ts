@@ -12,6 +12,11 @@ test('opens Qwen Code webview via command palette', async ({
 }) => {
   await page.addInitScript(() => {
     (window as typeof window & {
+      __qwenTestMode?: boolean;
+      __qwenPostedMessages?: unknown[];
+      __qwenReceivedMessages?: unknown[];
+    }).__qwenTestMode = true;
+    (window as typeof window & {
       __qwenPostedMessages?: unknown[];
       __qwenReceivedMessages?: unknown[];
     }).__qwenPostedMessages = [];

@@ -20,8 +20,12 @@ let vscodeApiInstance: VSCodeAPI | null = null;
 
 function recordPostedMessage(message: unknown): void {
   const holder = globalThis as typeof globalThis & {
+    __qwenTestMode?: boolean;
     __qwenPostedMessages?: unknown[];
   };
+  if (holder.__qwenTestMode !== true) {
+    return;
+  }
   if (Array.isArray(holder.__qwenPostedMessages)) {
     holder.__qwenPostedMessages.push(message);
   }

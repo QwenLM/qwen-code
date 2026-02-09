@@ -586,38 +586,6 @@ export class LspServerManager {
         console.warn('TypeScript LSP warm-up failed:', error);
       }
     }
-
-    // Warm up Java server (jdtls) by opening a workspace file to trigger project build
-    if (
-      config.name.includes('java') ||
-      (config.command?.includes('jdtls') ?? false)
-    ) {
-      try {
-        const javaFile = this.findFirstJavaFile();
-        if (javaFile) {
-          const uri = pathToFileURL(javaFile).toString();
-          const text = fs.readFileSync(javaFile, 'utf-8');
-          connection.connection.send({
-            jsonrpc: '2.0',
-            method: 'textDocument/didOpen',
-            params: {
-              textDocument: {
-                uri,
-                languageId: 'java',
-                version: 1,
-                text,
-              },
-            },
-          });
-          // Wait for jdtls to build the project
-          await new Promise((resolve) =>
-            setTimeout(resolve, DEFAULT_LSP_WARMUP_DELAY_MS),
-          );
-        }
-      } catch (error) {
-        console.warn('Java LSP warm-up failed:', error);
-      }
-    }
   }
 
   /**
@@ -721,43 +689,6 @@ export class LspServerManager {
       '**/.git/**',
       '**/dist/**',
       '**/build/**',
-    ];
-
-    for (const root of this.workspaceContext.getDirectories()) {
-      for (const pattern of patterns) {
-        try {
-          const matches = globSync(pattern, {
-            cwd: root,
-            ignore: excludePatterns,
-            absolute: true,
-            nodir: true,
-          });
-          for (const file of matches) {
-            if (this.fileDiscoveryService.shouldIgnoreFile(file)) {
-              continue;
-            }
-            return file;
-          }
-        } catch (_error) {
-          // ignore glob errors
-        }
-      }
-    }
-
-    return undefined;
-  }
-
-  /**
-   * Find a representative Java file to warm up jdtls.
-   */
-  private findFirstJavaFile(): string | undefined {
-    const patterns = ['**/*.java'];
-    const excludePatterns = [
-      '**/node_modules/**',
-      '**/.git/**',
-      '**/target/**',
-      '**/build/**',
-      '**/out/**',
     ];
 
     for (const root of this.workspaceContext.getDirectories()) {

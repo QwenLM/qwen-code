@@ -3,17 +3,17 @@ name: 'VSCode Extension Tests'
 on:
   push:
     branches:
-      # - 'main'
-      # - 'release/**'
-      - feat/ide-test-ci
+      - 'main'
+      - 'release/**'
+      - feat/ide-test-ci # TODO: remove after branch validation
     paths:
       - 'packages/vscode-ide-companion/**'
       - '.github/workflows/vscode-extension-test.yml'
   pull_request:
     branches:
-      # - 'main'
-      # - 'release/**'
-      - feat/ide-test-ci
+      - 'main'
+      - 'release/**'
+      - feat/ide-test-ci # TODO: remove after branch validation
     paths:
       - 'packages/vscode-ide-companion/**'
       - '.github/workflows/vscode-extension-test.yml'
@@ -99,9 +99,23 @@ jobs:
         run: 'node scripts/prepackage.js'
         working-directory: 'packages/vscode-ide-companion'
 
+      - name: 'Check auth env'
+        id: 'auth'
+        run: |
+          if [[ -n "${{ secrets.QWEN_OAUTH }}" || ( -n "${{ secrets.OPENAI_API_KEY }}" && -n "${{ secrets.OPENAI_BASE_URL }}" && -n "${{ secrets.OPENAI_MODEL }}" ) ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 'Run integration tests'
+        if: steps.auth.outputs.ready == 'true'
         run: 'xvfb-run -a npm run test:integration'
         working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Skip integration tests (missing auth)'
+        if: steps.auth.outputs.ready != 'true'
+        run: 'echo "Skipping integration tests because auth env is missing."'
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
@@ -188,7 +202,17 @@ jobs:
         run: 'node scripts/prepackage.js'
         working-directory: 'packages/vscode-ide-companion'
 
+      - name: 'Check auth env'
+        id: 'auth'
+        run: |
+          if [[ -n "${{ secrets.QWEN_OAUTH }}" || ( -n "${{ secrets.OPENAI_API_KEY }}" && -n "${{ secrets.OPENAI_BASE_URL }}" && -n "${{ secrets.OPENAI_MODEL }}" ) ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 'Run VSCode E2E tests'
+        if: steps.auth.outputs.ready == 'true'
         run: 'xvfb-run -a npm run test:e2e:vscode'
         working-directory: 'packages/vscode-ide-companion'
         env:
@@ -196,6 +220,10 @@ jobs:
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           QWEN_OAUTH: '${{ secrets.QWEN_OAUTH }}'
+
+      - name: 'Skip VSCode E2E tests (missing auth)'
+        if: steps.auth.outputs.ready != 'true'
+        run: 'echo "Skipping VSCode E2E tests because auth env is missing."'
 
       - name: 'Upload VSCode E2E test results'
         if: always()

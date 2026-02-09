@@ -26,8 +26,12 @@ const FORCE_CLEAR_STREAM_END_REASONS = new Set([
 
 const recordReceivedMessage = (message: unknown): void => {
   const holder = globalThis as typeof globalThis & {
+    __qwenTestMode?: boolean;
     __qwenReceivedMessages?: unknown[];
   };
+  if (holder.__qwenTestMode !== true) {
+    return;
+  }
   if (Array.isArray(holder.__qwenReceivedMessages)) {
     holder.__qwenReceivedMessages.push(message);
   }

@@ -78,6 +78,7 @@ storybook-static
 .vscode-test/
 test-results/
 e2e-vscode/
+playwright-report/
 
 # git worktrees
 .worktrees/
