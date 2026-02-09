@@ -174,7 +174,7 @@ jobs:
   # Phase 2a: Build CLI - Download from npm or build from source
   # =============================================================================
   build-cli:
-    name: 'Build CLI (${{ needs.prepare.outputs.CLI_SOURCE_MODE }})'
+    name: 'Build CLI'
     runs-on: 'ubuntu-latest'
     needs: 'prepare'
     if: "github.repository == 'QwenLM/qwen-code'"
@@ -387,7 +387,7 @@ jobs:
   # Phase 4b: Integration Tests (Matrix)
   # =============================================================================
   test-integration:
-    name: 'Integration Test (${{ matrix.os }}, Node ${{ matrix.node-version }}, ${{ matrix.sandbox }})'
+    name: 'Integration Tests'
     runs-on: '${{ matrix.os }}'
     needs: ['prepare', 'bundle-cli-into-sdk', 'test-unit']
     if: |
