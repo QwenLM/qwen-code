@@ -20,6 +20,15 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStdoutLine: mockWriteStdoutLine,
+  clearScreen: vi.fn(),
+}));
+
 const createNativeLspServiceInstance = () => ({
   discoverAndPrepare: vi.fn(),
   start: vi.fn(),
@@ -107,11 +116,20 @@ vi.mock('read-package-up', () => ({
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualServer = await importOriginal<typeof ServerConfig>();
+  const SkillManagerMock = vi.fn();
+  SkillManagerMock.prototype.startWatching = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.stopWatching = vi.fn();
+  SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
+  SkillManagerMock.prototype.addChangeListener = vi.fn();
+  SkillManagerMock.prototype.removeChangeListener = vi.fn();
   return {
     ...actualServer,
     NativeLspService: vi
       .fn()
       .mockImplementation(() => createNativeLspServiceInstance()),
+    SkillManager: SkillManagerMock,
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
         getConnectionStatus: vi.fn(),
@@ -158,23 +176,17 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --prompt (-p) and --prompt-interactive (-i) together',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should throw an error when using short flags -p and -i together', async () => {
@@ -190,28 +202,22 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --prompt (-p) and --prompt-interactive (-i) together',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should allow --prompt without --prompt-interactive', async () => {
     process.argv = ['node', 'script.js', '--prompt', 'test prompt'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.prompt).toBe('test prompt');
     expect(argv.promptInteractive).toBeUndefined();
   });
@@ -223,33 +229,33 @@ describe('parseArguments', () => {
       '--prompt-interactive',
       'interactive prompt',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.promptInteractive).toBe('interactive prompt');
     expect(argv.prompt).toBeUndefined();
   });
 
   it('should allow -i flag as alias for --prompt-interactive', async () => {
     process.argv = ['node', 'script.js', '-i', 'interactive prompt'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.promptInteractive).toBe('interactive prompt');
     expect(argv.prompt).toBeUndefined();
   });
 
   it('should allow -r flag as alias for --resume', async () => {
     process.argv = ['node', 'script.js', '-r', 'session-123'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.resume).toBe('session-123');
   });
 
   it('should allow -c flag as alias for --continue', async () => {
     process.argv = ['node', 'script.js', '-c'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.continue).toBe(true);
   });
 
   it('should convert positional query argument to prompt by default', async () => {
     process.argv = ['node', 'script.js', 'Hi Gemini'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.query).toBe('Hi Gemini');
     expect(argv.prompt).toBe('Hi Gemini');
     expect(argv.promptInteractive).toBeUndefined();
@@ -257,7 +263,7 @@ describe('parseArguments', () => {
 
   it('should map @path to prompt (one-shot) when it starts with @', async () => {
     process.argv = ['node', 'script.js', '@path ./file.md'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.query).toBe('@path ./file.md');
     expect(argv.prompt).toBe('@path ./file.md');
     expect(argv.promptInteractive).toBeUndefined();
@@ -273,7 +279,7 @@ describe('parseArguments', () => {
       '--model',
       'gemini-1.5-pro',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.query).toBe('@path ./file.md');
     expect(argv.prompt).toBe('@path ./file.md'); // Should map to one-shot
     expect(argv.promptInteractive).toBeUndefined();
@@ -283,7 +289,7 @@ describe('parseArguments', () => {
   it('maps unquoted positional @path + arg to prompt (one-shot)', async () => {
     // Simulate: gemini @path ./file.md
     process.argv = ['node', 'script.js', '@path', './file.md'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     // After normalization, query is a single string
     expect(argv.query).toBe('@path ./file.md');
     // And it's mapped to one-shot prompt when no -p/-i flags are set
@@ -301,7 +307,7 @@ describe('parseArguments', () => {
       '@path',
       './file2.md',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     // After normalization, all arguments are joined with spaces
     expect(argv.query).toBe('@path ./file1.md @path ./file2.md');
     // And it's mapped to one-shot prompt
@@ -319,7 +325,7 @@ describe('parseArguments', () => {
       './file2.md',
       'additional text',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     // After normalization, all arguments are joined with spaces
     expect(argv.query).toBe(
       '@path ./file1.md @path ./file2.md additional text',
@@ -341,7 +347,7 @@ describe('parseArguments', () => {
       '--debug',
       '--telemetry',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.query).toBe('@path ./file.md');
     expect(argv.prompt).toBe('@path ./file.md'); // Should map to one-shot
     expect(argv.promptInteractive).toBeUndefined();
@@ -361,7 +367,7 @@ describe('parseArguments', () => {
 
     for (const testQuery of testCases) {
       process.argv = ['node', 'script.js', testQuery];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       expect(argv.query).toBe(testQuery);
       expect(argv.prompt).toBe(testQuery);
       expect(argv.promptInteractive).toBeUndefined();
@@ -371,7 +377,7 @@ describe('parseArguments', () => {
   it('should handle @command with leading whitespace', async () => {
     // Test that trim() + routing handles leading whitespace correctly
     process.argv = ['node', 'script.js', '  @path ./file.md'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.query).toBe('  @path ./file.md');
     expect(argv.prompt).toBe('  @path ./file.md');
     expect(argv.promptInteractive).toBeUndefined();
@@ -389,23 +395,17 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should throw an error when using short flags -y and --approval-mode together', async () => {
@@ -414,23 +414,17 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both --yolo (-y) and --approval-mode together. Use --approval-mode=yolo instead.',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should throw an error when include-partial-messages is used without stream-json output', async () => {
@@ -439,23 +433,17 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         '--include-partial-messages requires --output-format stream-json',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should parse stream-json formats and include-partial-messages flag', async () => {
@@ -469,7 +457,7 @@ describe('parseArguments', () => {
       '--include-partial-messages',
     ];
 
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
 
     expect(argv.outputFormat).toBe('stream-json');
     expect(argv.inputFormat).toBe('stream-json');
@@ -478,14 +466,14 @@ describe('parseArguments', () => {
 
   it('should allow --approval-mode without --yolo', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'auto-edit'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.approvalMode).toBe('auto-edit');
     expect(argv.yolo).toBe(false);
   });
 
   it('should allow --yolo without --approval-mode', async () => {
     process.argv = ['node', 'script.js', '--yolo'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.yolo).toBe(true);
     expect(argv.approvalMode).toBeUndefined();
   });
@@ -496,21 +484,15 @@ describe('parseArguments', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Invalid values:'),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should support comma-separated values for --allowed-tools', async () => {
@@ -520,7 +502,7 @@ describe('parseArguments', () => {
       '--allowed-tools',
       'read_file,ShellTool(git status)',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.allowedTools).toEqual(['read_file', 'ShellTool(git status)']);
   });
 
@@ -531,13 +513,13 @@ describe('parseArguments', () => {
       '--allowed-mcp-server-names',
       'server1,server2',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.allowedMcpServerNames).toEqual(['server1', 'server2']);
   });
 
   it('should support comma-separated values for --extensions', async () => {
     process.argv = ['node', 'script.js', '--extensions', 'ext1,ext2'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.extensions).toEqual(['ext1', 'ext2']);
   });
 });
@@ -571,7 +553,7 @@ describe('loadCliConfig', () => {
       'stream-json',
       '--include-partial-messages',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
 
@@ -582,7 +564,7 @@ describe('loadCliConfig', () => {
 
   it('should initialize native LSP service when enabled', async () => {
     process.argv = ['node', 'script.js', '--experimental-lsp'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
 
     const config = await loadCliConfig(settings, argv);
@@ -624,7 +606,7 @@ describe('loadCliConfig', () => {
 
     it(`should leave proxy to empty by default`, async () => {
       process.argv = ['node', 'script.js'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const settings: Settings = {};
       const config = await loadCliConfig(settings, argv);
       expect(config.getProxy()).toBeFalsy();
@@ -665,7 +647,7 @@ describe('loadCliConfig', () => {
       it(`should set proxy to ${expected} according to environment variable [${input.env_name}]`, async () => {
         vi.stubEnv(input.env_name, input.proxy_url);
         process.argv = ['node', 'script.js'];
-        const argv = await parseArguments({} as Settings);
+        const argv = await parseArguments();
         const settings: Settings = {};
         const config = await loadCliConfig(settings, argv);
         expect(config.getProxy()).toBe(expected);
@@ -674,7 +656,7 @@ describe('loadCliConfig', () => {
 
     it('should set proxy when --proxy flag is present', async () => {
       process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const settings: Settings = {};
       const config = await loadCliConfig(settings, argv);
       expect(config.getProxy()).toBe('http://localhost:7890');
@@ -683,7 +665,7 @@ describe('loadCliConfig', () => {
     it('should prioritize CLI flag over environment variable for proxy (CLI http://localhost:7890, environment variable http://localhost:7891)', async () => {
       vi.stubEnv('http_proxy', 'http://localhost:7891');
       process.argv = ['node', 'script.js', '--proxy', 'http://localhost:7890'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const settings: Settings = {};
       const config = await loadCliConfig(settings, argv);
       expect(config.getProxy()).toBe('http://localhost:7890');
@@ -708,7 +690,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should set telemetry to false by default when no flag or setting is present', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(false);
@@ -716,7 +698,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should set telemetry to true when --telemetry flag is present', async () => {
     process.argv = ['node', 'script.js', '--telemetry'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(true);
@@ -724,7 +706,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should set telemetry to false when --no-telemetry flag is present', async () => {
     process.argv = ['node', 'script.js', '--no-telemetry'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(false);
@@ -732,7 +714,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use telemetry value from settings if CLI flag is not present (settings true)', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(true);
@@ -740,7 +722,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use telemetry value from settings if CLI flag is not present (settings false)', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: false } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(false);
@@ -748,7 +730,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should prioritize --telemetry CLI flag (true) over settings (false)', async () => {
     process.argv = ['node', 'script.js', '--telemetry'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: false } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(true);
@@ -756,7 +738,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should prioritize --no-telemetry CLI flag (false) over settings (true)', async () => {
     process.argv = ['node', 'script.js', '--no-telemetry'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(false);
@@ -764,7 +746,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use telemetry OTLP endpoint from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { otlpEndpoint: 'http://settings.example.com' },
     };
@@ -781,7 +763,7 @@ describe('loadCliConfig telemetry', () => {
       '--telemetry-otlp-endpoint',
       'http://cli.example.com',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { otlpEndpoint: 'http://settings.example.com' },
     };
@@ -791,7 +773,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use default endpoint if no OTLP endpoint is provided via CLI or settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryOtlpEndpoint()).toBe('http://localhost:4317');
@@ -799,7 +781,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use telemetry target from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { target: ServerConfig.DEFAULT_TELEMETRY_TARGET },
     };
@@ -811,7 +793,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should prioritize --telemetry-target CLI flag over settings', async () => {
     process.argv = ['node', 'script.js', '--telemetry-target', 'gcp'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { target: ServerConfig.DEFAULT_TELEMETRY_TARGET },
     };
@@ -821,7 +803,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use default target if no target is provided via CLI or settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryTarget()).toBe(
@@ -831,7 +813,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use telemetry log prompts from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { logPrompts: false } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
@@ -839,7 +821,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should prioritize --telemetry-log-prompts CLI flag (true) over settings (false)', async () => {
     process.argv = ['node', 'script.js', '--telemetry-log-prompts'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { logPrompts: false } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
@@ -847,7 +829,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should prioritize --no-telemetry-log-prompts CLI flag (false) over settings (true)', async () => {
     process.argv = ['node', 'script.js', '--no-telemetry-log-prompts'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { logPrompts: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
@@ -855,7 +837,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use default log prompts (true) if no value is provided via CLI or settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
@@ -863,7 +845,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { otlpProtocol: 'http' },
     };
@@ -873,7 +855,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should prioritize --telemetry-otlp-protocol CLI flag over settings', async () => {
     process.argv = ['node', 'script.js', '--telemetry-otlp-protocol', 'http'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { otlpProtocol: 'grpc' },
     };
@@ -883,7 +865,7 @@ describe('loadCliConfig telemetry', () => {
 
   it('should use default protocol if no OTLP protocol is provided via CLI or settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryOtlpProtocol()).toBe('grpc');
@@ -900,21 +882,15 @@ describe('loadCliConfig telemetry', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Invalid values:'),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 });
 
@@ -934,7 +910,7 @@ describe('mergeExcludeTools', () => {
     process.stdin.isTTY = true;
     const settings: Settings = {};
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getExcludeTools()).toEqual([]);
   });
@@ -943,14 +919,14 @@ describe('mergeExcludeTools', () => {
     process.stdin.isTTY = false;
     const settings: Settings = {};
     process.argv = ['node', 'script.js', '-p', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getExcludeTools()).toEqual(defaultExcludes);
   });
 
   it('should handle settings with excludeTools but no extensions', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { tools: { exclude: ['tool1', 'tool2'] } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getExcludeTools()).toEqual(
@@ -977,7 +953,7 @@ describe('Approval mode tool exclusion logic', () => {
 
   it('should exclude all interactive tools in non-interactive mode with default approval mode', async () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
 
@@ -996,7 +972,7 @@ describe('Approval mode tool exclusion logic', () => {
       '-p',
       'test',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
 
@@ -1015,7 +991,7 @@ describe('Approval mode tool exclusion logic', () => {
       '-p',
       'test',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
 
     const config = await loadCliConfig(settings, argv, undefined, []);
@@ -1028,7 +1004,7 @@ describe('Approval mode tool exclusion logic', () => {
 
   it('should not exclude a tool explicitly allowed in tools.allowed', async () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       tools: {
         allowed: [ShellTool.Name],
@@ -1045,7 +1021,7 @@ describe('Approval mode tool exclusion logic', () => {
 
   it('should not exclude a tool explicitly allowed in tools.core', async () => {
     process.argv = ['node', 'script.js', '-p', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       tools: {
         core: [ShellTool.Name],
@@ -1069,7 +1045,7 @@ describe('Approval mode tool exclusion logic', () => {
       '-p',
       'test',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
 
     const config = await loadCliConfig(settings, argv, undefined, []);
@@ -1089,7 +1065,7 @@ describe('Approval mode tool exclusion logic', () => {
       '-p',
       'test',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
 
     const config = await loadCliConfig(settings, argv, undefined, []);
@@ -1102,7 +1078,7 @@ describe('Approval mode tool exclusion logic', () => {
 
   it('should exclude no interactive tools in non-interactive mode with legacy yolo flag', async () => {
     process.argv = ['node', 'script.js', '--yolo', '-p', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
 
     const config = await loadCliConfig(settings, argv, undefined, []);
@@ -1127,7 +1103,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     for (const testCase of testCases) {
       process.argv = testCase.args;
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const settings: Settings = {};
 
       const config = await loadCliConfig(settings, argv, undefined, []);
@@ -1148,7 +1124,7 @@ describe('Approval mode tool exclusion logic', () => {
       '-p',
       'test',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { tools: { exclude: ['custom_tool'] } };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
@@ -1202,7 +1178,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
 
   it('should allow all MCP servers if the flag is not provided', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv, undefined, []);
     expect(config.getMcpServers()).toEqual(baseSettings.mcpServers);
   });
@@ -1214,7 +1190,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       '--allowed-mcp-server-names',
       'server1',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv, undefined, []);
     expect(config.getMcpServers()).toEqual({
       server1: { url: 'http://localhost:8080' },
@@ -1230,7 +1206,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       '--allowed-mcp-server-names',
       'server3',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv, undefined, []);
     expect(config.getMcpServers()).toEqual({
       server1: { url: 'http://localhost:8080' },
@@ -1247,7 +1223,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       '--allowed-mcp-server-names',
       'server4',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv, undefined, []);
     expect(config.getMcpServers()).toEqual({
       server1: { url: 'http://localhost:8080' },
@@ -1256,14 +1232,14 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
 
   it('should allow no MCP servers if the flag is provided but empty', async () => {
     process.argv = ['node', 'script.js', '--allowed-mcp-server-names', ''];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(baseSettings, argv, undefined, []);
     expect(config.getMcpServers()).toEqual({});
   });
 
   it('should read allowMCPServers from settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ...baseSettings,
       mcp: { allowed: ['server1', 'server2'] },
@@ -1277,7 +1253,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
 
   it('should read excludeMCPServers from settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ...baseSettings,
       mcp: { excluded: ['server1', 'server2'] },
@@ -1290,7 +1266,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
 
   it('should override allowMCPServers with excludeMCPServers if overlapping', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ...baseSettings,
       mcp: {
@@ -1311,7 +1287,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       '--allowed-mcp-server-names',
       'server1',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ...baseSettings,
       mcp: {
@@ -1334,7 +1310,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
       '--allowed-mcp-server-names',
       'server3',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ...baseSettings,
       mcp: {
@@ -1353,7 +1329,7 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
 describe('loadCliConfig model selection', () => {
   it.skip('selects a model from settings.json if provided', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       {
         model: {
@@ -1370,7 +1346,7 @@ describe('loadCliConfig model selection', () => {
 
   it.skip('uses the default gemini model if nothing is set', async () => {
     process.argv = ['node', 'script.js']; // No model set.
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       {
         // No model set.
@@ -1392,7 +1368,7 @@ describe('loadCliConfig model selection', () => {
       '--model',
       'qwen3-coder-plus',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       {
         model: {
@@ -1416,7 +1392,7 @@ describe('loadCliConfig model selection', () => {
       '--model',
       'qwen3-coder-plus',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       {
         // No model provided via settings.
@@ -1454,14 +1430,14 @@ describe('loadCliConfig folderTrust', () => {
         },
       },
     };
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
   });
 
   it('should be true when folderTrust is true', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       security: {
         folderTrust: {
@@ -1475,7 +1451,7 @@ describe('loadCliConfig folderTrust', () => {
 
   it('should be false by default', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getFolderTrust()).toBe(false);
@@ -1508,7 +1484,7 @@ describe('loadCliConfig with includeDirectories', () => {
       '--include-directories',
       `${path.resolve(path.sep, 'cli', 'path1')},${path.join(mockCwd, 'cli', 'path2')}`,
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       context: {
         includeDirectories: [
@@ -1553,7 +1529,7 @@ describe('loadCliConfig chatCompression', () => {
 
   it('should pass chatCompression settings to the core config', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       model: {
         chatCompression: {
@@ -1569,7 +1545,7 @@ describe('loadCliConfig chatCompression', () => {
 
   it('should have undefined chatCompression if not in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getChatCompression()).toBeUndefined();
@@ -1593,7 +1569,7 @@ describe('loadCliConfig useRipgrep', () => {
 
   it('should be true by default when useRipgrep is not set in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseRipgrep()).toBe(true);
@@ -1601,7 +1577,7 @@ describe('loadCliConfig useRipgrep', () => {
 
   it('should be false when useRipgrep is set to false in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { tools: { useRipgrep: false } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseRipgrep()).toBe(false);
@@ -1609,7 +1585,7 @@ describe('loadCliConfig useRipgrep', () => {
 
   it('should be true when useRipgrep is explicitly set to true in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { tools: { useRipgrep: true } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseRipgrep()).toBe(true);
@@ -1633,7 +1609,7 @@ describe('loadCliConfig useBuiltinRipgrep', () => {
 
   it('should be true by default when useBuiltinRipgrep is not set in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseBuiltinRipgrep()).toBe(true);
@@ -1641,7 +1617,7 @@ describe('loadCliConfig useBuiltinRipgrep', () => {
 
   it('should be false when useBuiltinRipgrep is set to false in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { tools: { useBuiltinRipgrep: false } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseBuiltinRipgrep()).toBe(false);
@@ -1649,7 +1625,7 @@ describe('loadCliConfig useBuiltinRipgrep', () => {
 
   it('should be true when useBuiltinRipgrep is explicitly set to true in settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { tools: { useBuiltinRipgrep: true } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getUseBuiltinRipgrep()).toBe(true);
@@ -1673,7 +1649,7 @@ describe('screenReader configuration', () => {
 
   it('should use screenReader value from settings if CLI flag is not present (settings true)', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ui: { accessibility: { screenReader: true } },
     };
@@ -1683,7 +1659,7 @@ describe('screenReader configuration', () => {
 
   it('should use screenReader value from settings if CLI flag is not present (settings false)', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ui: { accessibility: { screenReader: false } },
     };
@@ -1693,7 +1669,7 @@ describe('screenReader configuration', () => {
 
   it('should prioritize --screen-reader CLI flag (true) over settings (false)', async () => {
     process.argv = ['node', 'script.js', '--screen-reader'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       ui: { accessibility: { screenReader: false } },
     };
@@ -1703,7 +1679,7 @@ describe('screenReader configuration', () => {
 
   it('should be false by default when no flag or setting is present', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getScreenReader()).toBe(false);
@@ -1735,7 +1711,7 @@ describe('loadCliConfig tool exclusions', () => {
   it('should not exclude interactive tools in interactive mode without YOLO', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getExcludeTools()).not.toContain('run_shell_command');
     expect(config.getExcludeTools()).not.toContain('replace');
@@ -1745,7 +1721,7 @@ describe('loadCliConfig tool exclusions', () => {
   it('should not exclude interactive tools in interactive mode with YOLO', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js', '--yolo'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getExcludeTools()).not.toContain('run_shell_command');
     expect(config.getExcludeTools()).not.toContain('replace');
@@ -1755,7 +1731,7 @@ describe('loadCliConfig tool exclusions', () => {
   it('should exclude interactive tools in non-interactive mode without YOLO', async () => {
     process.stdin.isTTY = false;
     process.argv = ['node', 'script.js', '-p', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getExcludeTools()).toContain('run_shell_command');
     expect(config.getExcludeTools()).toContain('edit');
@@ -1765,7 +1741,7 @@ describe('loadCliConfig tool exclusions', () => {
   it('should not exclude interactive tools in non-interactive mode with YOLO', async () => {
     process.stdin.isTTY = false;
     process.argv = ['node', 'script.js', '-p', 'test', '--yolo'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getExcludeTools()).not.toContain('run_shell_command');
     expect(config.getExcludeTools()).not.toContain('replace');
@@ -1794,7 +1770,7 @@ describe('loadCliConfig interactive', () => {
   it('should be interactive if isTTY and no prompt', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
   });
@@ -1802,7 +1778,7 @@ describe('loadCliConfig interactive', () => {
   it('should be interactive if prompt-interactive is set', async () => {
     process.stdin.isTTY = false;
     process.argv = ['node', 'script.js', '--prompt-interactive', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
   });
@@ -1810,7 +1786,7 @@ describe('loadCliConfig interactive', () => {
   it('should not be interactive if not isTTY and no prompt', async () => {
     process.stdin.isTTY = false;
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
   });
@@ -1818,7 +1794,7 @@ describe('loadCliConfig interactive', () => {
   it('should not be interactive if prompt is set', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js', '--prompt', 'test'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
   });
@@ -1826,7 +1802,7 @@ describe('loadCliConfig interactive', () => {
   it('should not be interactive if positional prompt words are provided with other flags', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js', '--model', 'gemini-1.5-pro', 'Hello'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
   });
@@ -1841,7 +1817,7 @@ describe('loadCliConfig interactive', () => {
       '--yolo',
       'Hello world',
     ];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(false);
     // Verify the question is preserved for one-shot execution
@@ -1852,7 +1828,7 @@ describe('loadCliConfig interactive', () => {
   it('should be interactive if no positional prompt words are provided with flags', async () => {
     process.stdin.isTTY = true;
     process.argv = ['node', 'script.js', '--model', 'gemini-1.5-pro'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.isInteractive()).toBe(true);
   });
@@ -1880,56 +1856,56 @@ describe('loadCliConfig approval mode', () => {
 
   it('should default to DEFAULT approval mode when no flags are set', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
   });
 
   it('should set PLAN approval mode when --approval-mode=plan', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'plan'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
   });
 
   it('should set YOLO approval mode when --yolo flag is used', async () => {
     process.argv = ['node', 'script.js', '--yolo'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.YOLO);
   });
 
   it('should set YOLO approval mode when -y flag is used', async () => {
     process.argv = ['node', 'script.js', '-y'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.YOLO);
   });
 
   it('should set DEFAULT approval mode when --approval-mode=default', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'default'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
   });
 
   it('should set AUTO_EDIT approval mode when --approval-mode=auto-edit', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'auto-edit'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.AUTO_EDIT);
   });
 
   it('should set YOLO approval mode when --approval-mode=yolo', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.YOLO);
   });
 
   it('should use approval mode from settings when CLI flags are not provided', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     // Using string value to test normalization
     const settings = { tools: { approvalMode: 'plan' } } as unknown as Settings;
     const config = await loadCliConfig(settings, argv, undefined, []);
@@ -1938,7 +1914,7 @@ describe('loadCliConfig approval mode', () => {
 
   it('should normalize approval mode values from settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       tools: { approvalMode: ServerConfig.ApprovalMode.AUTO_EDIT },
     };
@@ -1948,7 +1924,7 @@ describe('loadCliConfig approval mode', () => {
 
   it('should throw when approval mode in settings is invalid', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings = {
       tools: { approvalMode: 'invalid_mode' },
     } as unknown as Settings;
@@ -1961,7 +1937,7 @@ describe('loadCliConfig approval mode', () => {
     // Note: This test documents the intended behavior, but in practice the validation
     // prevents both flags from being used together
     process.argv = ['node', 'script.js', '--approval-mode', 'default'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     // Manually set yolo to true to simulate what would happen if validation didn't prevent it
     argv.yolo = true;
     const config = await loadCliConfig({}, argv, undefined, []);
@@ -1970,7 +1946,7 @@ describe('loadCliConfig approval mode', () => {
 
   it('should fall back to --yolo behavior when --approval-mode is not set', async () => {
     process.argv = ['node', 'script.js', '--yolo'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.YOLO);
   });
@@ -1986,35 +1962,35 @@ describe('loadCliConfig approval mode', () => {
 
     it('should override --approval-mode=yolo to DEFAULT', async () => {
       process.argv = ['node', 'script.js', '--approval-mode', 'yolo'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
     });
 
     it('should override --approval-mode=auto-edit to DEFAULT', async () => {
       process.argv = ['node', 'script.js', '--approval-mode', 'auto-edit'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
     });
 
     it('should override --yolo flag to DEFAULT', async () => {
       process.argv = ['node', 'script.js', '--yolo'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
     });
 
     it('should remain DEFAULT when --approval-mode=default', async () => {
       process.argv = ['node', 'script.js', '--approval-mode', 'default'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
     });
 
     it('should allow PLAN approval mode in untrusted folders', async () => {
       process.argv = ['node', 'script.js', '--approval-mode', 'plan'];
-      const argv = await parseArguments({} as Settings);
+      const argv = await parseArguments();
       const config = await loadCliConfig({}, argv, undefined, []);
       expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
     });
@@ -2045,13 +2021,13 @@ describe('loadCliConfig fileFiltering', () => {
     value: boolean;
   }> = [
     {
-      property: 'disableFuzzySearch',
-      getter: (c) => c.getFileFilteringDisableFuzzySearch(),
+      property: 'enableFuzzySearch',
+      getter: (c) => c.getFileFilteringEnableFuzzySearch(),
       value: true,
     },
     {
-      property: 'disableFuzzySearch',
-      getter: (c) => c.getFileFilteringDisableFuzzySearch(),
+      property: 'enableFuzzySearch',
+      getter: (c) => c.getFileFilteringEnableFuzzySearch(),
       value: false,
     },
     {
@@ -2094,7 +2070,7 @@ describe('loadCliConfig fileFiltering', () => {
           fileFiltering: { [property]: value },
         },
       };
-      const argv = await parseArguments(settings);
+      const argv = await parseArguments();
       const config = await loadCliConfig(settings, argv, undefined, []);
       expect(getter(config)).toBe(value);
     },
@@ -2104,14 +2080,14 @@ describe('loadCliConfig fileFiltering', () => {
 describe('Output format', () => {
   it('should default to TEXT', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getOutputFormat()).toBe(OutputFormat.TEXT);
   });
 
   it('should use the format from settings', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       { output: { format: OutputFormat.JSON } },
       argv,
@@ -2123,7 +2099,7 @@ describe('Output format', () => {
 
   it('should prioritize the format from argv', async () => {
     process.argv = ['node', 'script.js', '--output-format', 'json'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       { output: { format: OutputFormat.JSON } },
       argv,
@@ -2138,17 +2114,12 @@ describe('Output format', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    mockWriteStderrLine.mockClear();
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Invalid values:'),
     );
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 });
 
@@ -2172,28 +2143,22 @@ describe('parseArguments with positional prompt', () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
+    mockWriteStderrLine.mockClear();
 
-    const mockConsoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
 
-    await expect(parseArguments({} as Settings)).rejects.toThrow(
-      'process.exit called',
-    );
-
-    expect(mockConsoleError).toHaveBeenCalledWith(
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         'Cannot use both a positional prompt and the --prompt (-p) flag together',
       ),
     );
 
     mockExit.mockRestore();
-    mockConsoleError.mockRestore();
   });
 
   it('should correctly parse a positional prompt to query field', async () => {
     process.argv = ['node', 'script.js', 'positional', 'prompt'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.query).toBe('positional prompt');
     // Since no explicit prompt flags are set and query doesn't start with @, should map to prompt (one-shot)
     expect(argv.prompt).toBe('positional prompt');
@@ -2202,7 +2167,7 @@ describe('parseArguments with positional prompt', () => {
 
   it('should correctly parse a prompt from the --prompt flag', async () => {
     process.argv = ['node', 'script.js', '--prompt', 'test prompt'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     expect(argv.prompt).toBe('test prompt');
   });
 });
@@ -2211,7 +2176,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should prioritize GEMINI_TELEMETRY_ENABLED over settings', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', 'true');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: false } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryEnabled()).toBe(true);
@@ -2220,7 +2185,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should prioritize GEMINI_TELEMETRY_TARGET over settings', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_TARGET', 'gcp');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { target: 'local' },
     } as unknown as Settings;
@@ -2231,7 +2196,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should throw when GEMINI_TELEMETRY_TARGET is invalid', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_TARGET', 'bogus');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { target: 'gcp' },
     } as unknown as Settings;
@@ -2245,7 +2210,7 @@ describe('Telemetry configuration via environment variables', () => {
     vi.stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', 'http://default.env.com');
     vi.stubEnv('GEMINI_TELEMETRY_OTLP_ENDPOINT', 'http://gemini.env.com');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { otlpEndpoint: 'http://settings.com' },
     };
@@ -2256,7 +2221,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should prioritize GEMINI_TELEMETRY_OTLP_PROTOCOL over settings', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_OTLP_PROTOCOL', 'http');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { otlpProtocol: 'grpc' } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryOtlpProtocol()).toBe('http');
@@ -2265,7 +2230,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should prioritize GEMINI_TELEMETRY_LOG_PROMPTS over settings', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_LOG_PROMPTS', 'false');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { logPrompts: true } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
@@ -2274,7 +2239,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should prioritize GEMINI_TELEMETRY_OUTFILE over settings', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { outfile: '/settings/telemetry.log' },
     };
@@ -2285,7 +2250,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should prioritize GEMINI_TELEMETRY_USE_COLLECTOR over settings', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_USE_COLLECTOR', 'true');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { useCollector: false } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryUseCollector()).toBe(true);
@@ -2294,7 +2259,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should use settings value when GEMINI_TELEMETRY_ENABLED is not set', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', undefined);
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryEnabled()).toBe(true);
@@ -2303,7 +2268,7 @@ describe('Telemetry configuration via environment variables', () => {
   it('should use settings value when GEMINI_TELEMETRY_TARGET is not set', async () => {
     vi.stubEnv('GEMINI_TELEMETRY_TARGET', undefined);
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const settings: Settings = {
       telemetry: { target: 'local' },
     } as unknown as Settings;
@@ -2314,7 +2279,7 @@ describe('Telemetry configuration via environment variables', () => {
   it("should treat GEMINI_TELEMETRY_ENABLED='1' as true", async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', '1');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getTelemetryEnabled()).toBe(true);
   });
@@ -2322,7 +2287,7 @@ describe('Telemetry configuration via environment variables', () => {
   it("should treat GEMINI_TELEMETRY_ENABLED='0' as false", async () => {
     vi.stubEnv('GEMINI_TELEMETRY_ENABLED', '0');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       { telemetry: { enabled: true } },
       argv,
@@ -2335,7 +2300,7 @@ describe('Telemetry configuration via environment variables', () => {
   it("should treat GEMINI_TELEMETRY_LOG_PROMPTS='1' as true", async () => {
     vi.stubEnv('GEMINI_TELEMETRY_LOG_PROMPTS', '1');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
   });
@@ -2343,7 +2308,7 @@ describe('Telemetry configuration via environment variables', () => {
   it("should treat GEMINI_TELEMETRY_LOG_PROMPTS='false' as false", async () => {
     vi.stubEnv('GEMINI_TELEMETRY_LOG_PROMPTS', 'false');
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
+    const argv = await parseArguments();
     const config = await loadCliConfig(
       { telemetry: { logPrompts: true } },
       argv,

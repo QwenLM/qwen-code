@@ -19,28 +19,26 @@ import type {
   SubAgentEventEmitter,
 } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   ApprovalMode,
   convertToFunctionResponse,
+  createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
   ToolConfirmationOutcome,
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  isWithinRoot,
-  isNodeError,
   TaskTool,
   UserPromptEvent,
   TodoWriteTool,
   ExitPlanModeTool,
+  readManyFiles,
 } from '@qwen-code/qwen-code-core';
 
 import * as acp from '../acp.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { z } from 'zod';
-import { getErrorMessage } from '../../utils/errors.js';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
   handleSlashCommand,
@@ -58,6 +56,10 @@ import type {
   CurrentModeUpdate,
 } from '../schema.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import {
+  formatAcpModelId,
+  parseAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 
 // Import modular session components
 import type { SessionContext, ToolCallStartParams } from './types.js';
@@ -66,6 +68,8 @@ import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
+
+const debugLogger = createDebugLogger('SESSION');
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -318,7 +322,7 @@ export class Session implements SessionContext {
       await this.sendUpdate(update);
     } catch (error) {
       // Log error but don't fail session creation
-      console.error('Error sending available commands update:', error);
+      debugLogger.error('Error sending available commands update:', error);
     }
   }
 
@@ -355,23 +359,37 @@ export class Session implements SessionContext {
    * Validates the model ID and switches the model via Config.
    */
   async setModel(params: SetModelRequest): Promise<SetModelResponse> {
-    const modelId = params.modelId.trim();
+    const rawModelId = params.modelId.trim();
 
-    if (!modelId) {
+    if (!rawModelId) {
       throw acp.RequestError.invalidParams('modelId cannot be empty');
     }
 
-    // Attempt to set the model using config
-    await this.config.setModel(modelId, {
-      reason: 'user_request_acp',
-      context: 'session/set_model',
-    });
+    const parsed = parseAcpModelOption(rawModelId);
+    const previousAuthType = this.config.getAuthType?.();
+    const selectedAuthType = parsed.authType ?? previousAuthType;
+
+    if (!selectedAuthType) {
+      throw acp.RequestError.invalidParams(
+        `authType cannot be determined for modelId "${parsed.modelId}"`,
+      );
+    }
+
+    await this.config.switchModel(
+      selectedAuthType,
+      parsed.modelId,
+      selectedAuthType !== previousAuthType &&
+        selectedAuthType === AuthType.QWEN_OAUTH
+        ? { requireCachedCredentials: true }
+        : undefined,
+    );
 
     // Get updated model info
     const currentModel = this.config.getModel();
+    const currentAuthType = this.config.getAuthType?.() ?? selectedAuthType;
 
     return {
-      modelId: currentModel,
+      modelId: formatAcpModelId(currentModel, currentAuthType),
     };
   }
 
@@ -831,120 +849,11 @@ export class Session implements SessionContext {
       return parts;
     }
 
-    const atPathToResolvedSpecMap = new Map<string, string>();
-
-    // Get centralized file discovery service
-    const fileDiscovery = this.config.getFileService();
-    const respectGitIgnore = this.config.getFileFilteringRespectGitIgnore();
-
-    const pathSpecsToRead: string[] = [];
-    const contentLabelsForDisplay: string[] = [];
-    const ignoredPaths: string[] = [];
-
-    const toolRegistry = this.config.getToolRegistry();
-    const readManyFilesTool = toolRegistry.getTool('read_many_files');
-    const globTool = toolRegistry.getTool('glob');
-
-    if (!readManyFilesTool) {
-      throw new Error('Error: read_many_files tool not found.');
-    }
-
-    for (const atPathPart of atPathCommandParts) {
-      const pathName = atPathPart.fileData!.fileUri;
-      // Check if path should be ignored by git
-      if (fileDiscovery.shouldGitIgnoreFile(pathName)) {
-        ignoredPaths.push(pathName);
-        const reason = respectGitIgnore
-          ? 'git-ignored and will be skipped'
-          : 'ignored by custom patterns';
-        console.warn(`Path ${pathName} is ${reason}.`);
-        continue;
-      }
-      let currentPathSpec = pathName;
-      let resolvedSuccessfully = false;
-      try {
-        const absolutePath = path.resolve(this.config.getTargetDir(), pathName);
-        if (isWithinRoot(absolutePath, this.config.getTargetDir())) {
-          const stats = await fs.stat(absolutePath);
-          if (stats.isDirectory()) {
-            currentPathSpec = pathName.endsWith('/')
-              ? `${pathName}**`
-              : `${pathName}/**`;
-            this.debug(
-              `Path ${pathName} resolved to directory, using glob: ${currentPathSpec}`,
-            );
-          } else {
-            this.debug(`Path ${pathName} resolved to file: ${currentPathSpec}`);
-          }
-          resolvedSuccessfully = true;
-        } else {
-          this.debug(
-            `Path ${pathName} is outside the project directory. Skipping.`,
-          );
-        }
-      } catch (error) {
-        if (isNodeError(error) && error.code === 'ENOENT') {
-          if (this.config.getEnableRecursiveFileSearch() && globTool) {
-            this.debug(
-              `Path ${pathName} not found directly, attempting glob search.`,
-            );
-            try {
-              const globResult = await globTool.buildAndExecute(
-                {
-                  pattern: `**/*${pathName}*`,
-                  path: this.config.getTargetDir(),
-                },
-                abortSignal,
-              );
-              if (
-                globResult.llmContent &&
-                typeof globResult.llmContent === 'string' &&
-                !globResult.llmContent.startsWith('No files found') &&
-                !globResult.llmContent.startsWith('Error:')
-              ) {
-                const lines = globResult.llmContent.split('\n');
-                if (lines.length > 1 && lines[1]) {
-                  const firstMatchAbsolute = lines[1].trim();
-                  currentPathSpec = path.relative(
-                    this.config.getTargetDir(),
-                    firstMatchAbsolute,
-                  );
-                  this.debug(
-                    `Glob search for ${pathName} found ${firstMatchAbsolute}, using relative path: ${currentPathSpec}`,
-                  );
-                  resolvedSuccessfully = true;
-                } else {
-                  this.debug(
-                    `Glob search for '**/*${pathName}*' did not return a usable path. Path ${pathName} will be skipped.`,
-                  );
-                }
-              } else {
-                this.debug(
-                  `Glob search for '**/*${pathName}*' found no files or an error. Path ${pathName} will be skipped.`,
-                );
-              }
-            } catch (globError) {
-              console.error(
-                `Error during glob search for ${pathName}: ${getErrorMessage(globError)}`,
-              );
-            }
-          } else {
-            this.debug(
-              `Glob tool not found. Path ${pathName} will be skipped.`,
-            );
-          }
-        } else {
-          console.error(
-            `Error stating path ${pathName}. Path ${pathName} will be skipped.`,
-          );
-        }
-      }
-      if (resolvedSuccessfully) {
-        pathSpecsToRead.push(currentPathSpec);
-        atPathToResolvedSpecMap.set(pathName, currentPathSpec);
-        contentLabelsForDisplay.push(pathName);
-      }
-    }
+    // Extract paths from @ commands - pass directly to readManyFiles without filtering
+    // since this is user-triggered behavior, not LLM-triggered
+    const pathSpecsToRead: string[] = atPathCommandParts.map(
+      (part) => part.fileData!.fileUri,
+    );
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
@@ -952,70 +861,49 @@ export class Session implements SessionContext {
       const chunk = parts[i];
       if ('text' in chunk) {
         initialQueryText += chunk.text;
-      } else {
-        // type === 'atPath'
-        const resolvedSpec =
-          chunk.fileData && atPathToResolvedSpecMap.get(chunk.fileData.fileUri);
+      } else if ('fileData' in chunk) {
+        const pathName = chunk.fileData!.fileUri;
         if (
           i > 0 &&
           initialQueryText.length > 0 &&
-          !initialQueryText.endsWith(' ') &&
-          resolvedSpec
+          !initialQueryText.endsWith(' ')
         ) {
-          // Add space if previous part was text and didn't end with space, or if previous was @path
-          const prevPart = parts[i - 1];
-          if (
-            'text' in prevPart ||
-            ('fileData' in prevPart &&
-              atPathToResolvedSpecMap.has(prevPart.fileData!.fileUri))
-          ) {
-            initialQueryText += ' ';
-          }
+          initialQueryText += ' ';
         }
-        // Append the resolved path spec for display purposes
-        if (resolvedSpec) {
-          initialQueryText += `@${resolvedSpec}`;
-        }
+        initialQueryText += `@${pathName}`;
       }
-    }
-
-    // Handle ignored paths message
-    let ignoredPathsMessage = '';
-    if (ignoredPaths.length > 0) {
-      const pathList = ignoredPaths.map((p) => `- ${p}`).join('\n');
-      ignoredPathsMessage = `Note: The following paths were skipped because they are ignored:\n${pathList}\n\n`;
     }
 
     const processedQueryParts: Part[] = [];
 
-    // Read files using read_many_files tool
+    // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {
-      const readResult = await readManyFilesTool.buildAndExecute(
-        {
-          paths: pathSpecsToRead,
-        },
-        abortSignal,
-      );
+      const readResult = await readManyFiles(this.config, {
+        paths: pathSpecsToRead,
+        signal: abortSignal,
+      });
 
-      const contentForLlm =
-        typeof readResult.llmContent === 'string'
-          ? readResult.llmContent
-          : JSON.stringify(readResult.llmContent);
+      const contentParts = Array.isArray(readResult.contentParts)
+        ? readResult.contentParts
+        : [readResult.contentParts];
 
-      // Combine content label, ignored paths message, file content, and user query
-      const combinedText = `${ignoredPathsMessage}${contentForLlm}`.trim();
-      processedQueryParts.push({ text: combinedText });
+      // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
+
+      // Then add content parts (preserving binary files as inlineData)
+      for (const part of contentParts) {
+        if (typeof part === 'string') {
+          processedQueryParts.push({ text: part });
+        } else {
+          processedQueryParts.push(part);
+        }
+      }
     } else if (embeddedContext.length > 0) {
       // No @path files to read, but we have embedded context
-      processedQueryParts.push({
-        text: `${ignoredPathsMessage}${initialQueryText}`.trim(),
-      });
+      processedQueryParts.push({ text: initialQueryText.trim() });
     } else {
-      // No @path files found or resolved
-      processedQueryParts.push({
-        text: `${ignoredPathsMessage}${initialQueryText}`.trim(),
-      });
+      // No @path files found
+      processedQueryParts.push({ text: initialQueryText.trim() });
     }
 
     // Process embedded context from resource blocks
@@ -1042,7 +930,7 @@ export class Session implements SessionContext {
 
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
-      console.warn(msg);
+      debugLogger.warn(msg);
     }
   }
 }

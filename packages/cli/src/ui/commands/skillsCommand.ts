@@ -14,6 +14,9 @@ import { MessageType, type HistoryItemSkillsList } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { AsyncFzf } from 'fzf';
 import type { SkillConfig } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('SKILLS_COMMAND');
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -123,7 +126,7 @@ async function getSkillMatches(
       .map((result) => skillMap.get(result.item))
       .filter((skill): skill is SkillConfig => !!skill);
   } catch (error) {
-    console.error('[skillsCommand] Fuzzy match failed:', error);
+    debugLogger.error('[skillsCommand] Fuzzy match failed:', error);
     const lowerQuery = query.toLowerCase();
     return skills.filter((skill) =>
       skill.name.toLowerCase().startsWith(lowerQuery),

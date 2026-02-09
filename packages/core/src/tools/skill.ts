@@ -12,6 +12,9 @@ import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
 import path from 'path';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
 
 export interface SkillParams {
   skill: string;
@@ -53,7 +56,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       false, // canUpdateOutput
     );
 
-    this.skillManager = config.getSkillManager()!;
+    const skillManager = config.getSkillManager();
+    if (!skillManager) {
+      throw new Error('SkillManager not available');
+    }
+    this.skillManager = skillManager;
     this.skillManager.addChangeListener(() => {
       void this.refreshSkills();
     });
@@ -71,7 +78,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.availableSkills = await this.skillManager.listSkills();
       this.updateDescriptionAndSchema();
     } catch (error) {
-      console.warn('Failed to load skills for Skills tool:', error);
+      debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
       this.updateDescriptionAndSchema();
     } finally {
@@ -251,7 +258,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(`[SkillsTool] Error using skill: ${errorMessage}`);
+      debugLogger.error(`[SkillsTool] Error using skill: ${errorMessage}`);
 
       // Log failed skill launch
       logSkillLaunch(

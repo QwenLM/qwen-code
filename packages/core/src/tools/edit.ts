@@ -35,12 +35,15 @@ import type {
 } from './modifiable-tool.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   countOccurrences,
   extractEditSnippet,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+
+const debugLogger = createDebugLogger('EDIT');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -257,12 +260,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         throw error;
       }
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.log(`Error preparing edit: ${errorMsg}`);
+      debugLogger.warn(`Error preparing edit: ${errorMsg}`);
       return false;
     }
 
     if (editData.error) {
-      console.log(`Error: ${editData.error.display}`);
+      debugLogger.warn(`Error: ${editData.error.display}`);
       return false;
     }
 

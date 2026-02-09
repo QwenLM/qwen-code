@@ -6,6 +6,9 @@
 
 import { execSync } from 'node:child_process';
 import { ProxyAgent } from 'undici';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('GIT');
 
 /**
  * Checks if a directory is within a git repository hosted on GitHub.
@@ -24,7 +27,7 @@ export const isGitHubRepository = (): boolean => {
     return pattern.test(remotes);
   } catch (_error) {
     // If any filesystem error occurs, assume not a git repo
-    console.debug(`Failed to get git remote:`, _error);
+    debugLogger.debug(`Failed to get git remote:`, _error);
     return false;
   }
 };
@@ -83,7 +86,7 @@ export const getLatestGitHubRelease = async (
     }
     return releaseTag;
   } catch (_error) {
-    console.debug(
+    debugLogger.debug(
       `Failed to determine latest qwen-code-action release:`,
       _error,
     );

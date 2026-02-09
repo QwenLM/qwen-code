@@ -2,18 +2,27 @@ import type { SkillConfig, SkillValidationResult } from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL_LOAD');
 
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
 export async function loadSkillsFromDir(
   baseDir: string,
 ): Promise<SkillConfig[]> {
+  debugLogger.debug(`Loading skills from directory (skill-load): ${baseDir}`);
   try {
     const entries = await fs.readdir(baseDir, { withFileTypes: true });
     const skills: SkillConfig[] = [];
+    debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
+
     for (const entry of entries) {
       // Only process directories (each skill is a directory)
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory()) {
+        debugLogger.warn(`Skipping non-directory entry: ${entry.name}`);
+        continue;
+      }
 
       const skillDir = path.join(baseDir, entry.name);
       const skillManifest = path.join(skillDir, SKILL_MANIFEST_FILE);
@@ -26,15 +35,23 @@ export async function loadSkillsFromDir(
         const config = parseSkillContent(content, skillManifest);
         skills.push(config);
       } catch (error) {
-        console.warn(
-          `Failed to parse skill at ${skillDir}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error';
+        debugLogger.error(
+          `Failed to parse skill at ${skillDir}: ${errorMessage}`,
         );
         continue;
       }
     }
+
     return skills;
-  } catch (_error) {
+  } catch (error) {
     // Directory doesn't exist or can't be read
+    const errorMessage =
+      error instanceof Error ? error.message : 'Unknown error';
+    debugLogger.debug(
+      `Cannot read skills directory ${baseDir}: ${errorMessage}`,
+    );
     return [];
   }
 }
@@ -58,6 +75,8 @@ export function parseSkillContent(
   content: string,
   filePath: string,
 ): SkillConfig {
+  debugLogger.debug(`Parsing skill content from: ${filePath}`);
+
   // Normalize content to handle BOM and CRLF line endings
   const normalizedContent = normalizeSkillFileContent(content);
 
@@ -118,6 +137,7 @@ export function parseSkillContent(
     throw new Error(`Validation failed: ${validation.errors.join(', ')}`);
   }
 
+  debugLogger.debug(`Successfully parsed skill: ${name} from ${filePath}`);
   return config;
 }
 

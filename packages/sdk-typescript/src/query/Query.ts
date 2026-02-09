@@ -91,7 +91,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   ) {
     this.transport = transport;
     this.options = options;
-    this.sessionId = randomUUID();
+    this.sessionId = options.resume ?? randomUUID();
     this.inputStream = new Stream<SDKMessage>();
     this.abortController = options.abortController ?? new AbortController();
     this.isSingleTurn = singleTurn;

@@ -39,6 +39,9 @@ import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getSpecificMimeType } from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('WRITE_FILE');
 
 /**
  * Parameters for the WriteFile tool
@@ -197,6 +200,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
+
     const correctedContentResult = await getCorrectedFileContent(
       this.config,
       file_path,
@@ -294,12 +298,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       const extension = path.extname(file_path);
       const operation = isNewFile ? FileOperation.CREATE : FileOperation.UPDATE;
 
+      const lineCount = fileContent.split('\n').length;
       logFileOperation(
         this.config,
         new FileOperationEvent(
           WriteFileTool.Name,
           operation,
-          fileContent.split('\n').length,
+          lineCount,
           mimetype,
           extension,
           programmingLanguage,
@@ -341,7 +346,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
 
         // Include stack trace in debug mode for better troubleshooting
         if (this.config.getDebugMode() && error.stack) {
-          console.error('Write file error stack:', error.stack);
+          debugLogger.debug('Write file error stack:', error.stack);
         }
       } else if (error instanceof Error) {
         errorMsg = `Error writing to file: ${error.message}`;
