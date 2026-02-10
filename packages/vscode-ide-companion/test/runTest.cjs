@@ -21,19 +21,19 @@ async function main() {
 
   if (!fs.existsSync(bundledCliEntry)) {
     throw new Error(
-      `Bundled CLI entry not found at ${bundledCliEntry}. Run \"node scripts/prepackage.js\" first.`,
+      `Bundled CLI entry not found at ${bundledCliEntry}. Run "node scripts/prepackage.js" first.`,
     );
   }
 
   const hasQwenOauth = !!process.env.QWEN_OAUTH;
-  const hasOpenAiEnv =
-    !!process.env.OPENAI_API_KEY &&
-    !!process.env.OPENAI_BASE_URL &&
-    !!process.env.OPENAI_MODEL;
+  const hasTestEnv =
+    !!process.env.QWEN_TEST_API_KEY &&
+    !!process.env.QWEN_TEST_BASE_URL &&
+    !!process.env.QWEN_TEST_MODEL;
 
-  if (!hasQwenOauth && !hasOpenAiEnv) {
+  if (!hasQwenOauth && !hasTestEnv) {
     throw new Error(
-      'Missing auth env for integration tests. Set QWEN_OAUTH or OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL.',
+      'Missing auth env for integration tests. Set QWEN_OAUTH or QWEN_TEST_API_KEY, QWEN_TEST_BASE_URL, and QWEN_TEST_MODEL.',
     );
   }
 
@@ -41,14 +41,15 @@ async function main() {
   const extensionTestsEnv = {
     QWEN_CODE_TEST: '1',
   };
-  if (process.env.OPENAI_API_KEY) {
-    extensionTestsEnv.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  // Map test env vars to the ones CLI expects
+  if (process.env.QWEN_TEST_API_KEY) {
+    extensionTestsEnv.OPENAI_API_KEY = process.env.QWEN_TEST_API_KEY;
   }
-  if (process.env.OPENAI_BASE_URL) {
-    extensionTestsEnv.OPENAI_BASE_URL = process.env.OPENAI_BASE_URL;
+  if (process.env.QWEN_TEST_BASE_URL) {
+    extensionTestsEnv.OPENAI_BASE_URL = process.env.QWEN_TEST_BASE_URL;
   }
-  if (process.env.OPENAI_MODEL) {
-    extensionTestsEnv.OPENAI_MODEL = process.env.OPENAI_MODEL;
+  if (process.env.QWEN_TEST_MODEL) {
+    extensionTestsEnv.OPENAI_MODEL = process.env.QWEN_TEST_MODEL;
   }
   if (process.env.QWEN_OAUTH) {
     extensionTestsEnv.QWEN_OAUTH = process.env.QWEN_OAUTH;
