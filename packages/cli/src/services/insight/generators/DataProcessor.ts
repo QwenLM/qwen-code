@@ -45,6 +45,8 @@ import {
 
 const logger = createDebugLogger('DataProcessor');
 
+const CONCURRENCY_LIMIT = 2;
+
 export class DataProcessor {
   constructor(private config: Config) {}
 
@@ -565,7 +567,7 @@ export class DataProcessor {
       ],
     };
 
-    const limit = pLimit(2);
+    const limit = pLimit(CONCURRENCY_LIMIT);
 
     try {
       const [
@@ -969,7 +971,7 @@ None captured`;
     logger.info(`Analyzing ${recentFiles.length} recent sessions with LLM...`);
 
     // Create a limit function with concurrency of 4 to avoid 429 errors
-    const limit = pLimit(2);
+    const limit = pLimit(CONCURRENCY_LIMIT);
 
     let completed = 0;
     const total = recentFiles.length;

@@ -187,15 +187,9 @@ export const useSlashCommandProcessor = (
           progress: message.progress,
         };
       } else {
-        // At this point message should be of type { type: INFO|ERROR|USER, content: string }
-        // We cast to be sure or check existence of content
-        const msg = message as {
-          type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
-          content: string;
-        };
         historyItemContent = {
-          type: msg.type,
-          text: msg.content,
+          type: message.type,
+          text: message.content,
         };
       }
       addItem(historyItemContent, message.timestamp.getTime());
