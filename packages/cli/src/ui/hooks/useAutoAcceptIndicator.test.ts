@@ -482,4 +482,80 @@ describe('useAutoAcceptIndicator', () => {
       ApprovalMode.YOLO,
     );
   });
+
+  it('should not cycle approval mode on Windows when shouldBlockTab returns true', () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+    });
+
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+    const mockShouldBlockTab = vi.fn(() => true);
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: vi.fn(),
+        shouldBlockTab: mockShouldBlockTab,
+      }),
+    );
+
+    // Simulate Tab key press on Windows
+    act(() => {
+      capturedUseKeypressHandler({
+        name: 'tab',
+        shift: false,
+        ctrl: false,
+        meta: false,
+      } as Key);
+    });
+
+    // Should call shouldBlockTab to check if autocomplete is active
+    expect(mockShouldBlockTab).toHaveBeenCalled();
+    // Should NOT cycle approval mode when shouldBlockTab returns true
+    expect(mockConfigInstance.setApprovalMode).not.toHaveBeenCalled();
+
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+    });
+  });
+
+  it('should cycle approval mode on Windows when shouldBlockTab returns false', () => {
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+    });
+
+    mockConfigInstance.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
+    const mockShouldBlockTab = vi.fn(() => false);
+
+    renderHook(() =>
+      useAutoAcceptIndicator({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: vi.fn(),
+        shouldBlockTab: mockShouldBlockTab,
+      }),
+    );
+
+    // Simulate Tab key press on Windows
+    act(() => {
+      capturedUseKeypressHandler({
+        name: 'tab',
+        shift: false,
+        ctrl: false,
+        meta: false,
+      } as Key);
+    });
+
+    // Should call shouldBlockTab to check if autocomplete is active
+    expect(mockShouldBlockTab).toHaveBeenCalled();
+    // Should cycle approval mode when shouldBlockTab returns false
+    expect(mockConfigInstance.setApprovalMode).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+    });
+  });
 });

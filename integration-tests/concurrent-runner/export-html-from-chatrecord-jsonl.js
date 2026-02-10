@@ -581,6 +581,54 @@ function normalizeRawInput(value) {
   return undefined;
 }
 
+/**
+ * Extract locations from rawInput or toolCallResult for file-related tool calls.
+ * This ensures the exported data matches ACP format, enabling file links in UI.
+ *
+ * @param {object|undefined} rawInput - The raw input arguments of the tool call
+ * @param {object|undefined} toolCallResult - The tool call result object
+ * @returns {Array<{path: string, line?: number}>|undefined} - Locations array or undefined
+ */
+function extractLocations(rawInput, toolCallResult) {
+  const locations = [];
+
+  // Extract from rawInput - common path field names used by various tools
+  if (rawInput && typeof rawInput === 'object') {
+    // read_file, write_file use absolute_path
+    if (typeof rawInput.absolute_path === 'string' && rawInput.absolute_path) {
+      locations.push({ path: rawInput.absolute_path });
+    }
+    // edit tool uses file_path
+    else if (typeof rawInput.file_path === 'string' && rawInput.file_path) {
+      locations.push({ path: rawInput.file_path });
+    }
+    // some tools use just 'path'
+    else if (typeof rawInput.path === 'string' && rawInput.path) {
+      locations.push({ path: rawInput.path });
+    }
+    // glob/grep tools use 'pattern' with optional 'path' as search root
+    else if (typeof rawInput.pattern === 'string' && rawInput.pattern) {
+      // For search tools, the pattern itself isn't a file path, skip
+    }
+    // run_shell_command might have 'command' but no file path
+  }
+
+  // Extract from toolCallResult.resultDisplay if available
+  if (toolCallResult && typeof toolCallResult === 'object') {
+    const display = toolCallResult.resultDisplay;
+    if (display && typeof display === 'object') {
+      if (typeof display.fileName === 'string' && display.fileName) {
+        // Avoid duplicates
+        if (!locations.some((loc) => loc.path === display.fileName)) {
+          locations.push({ path: display.fileName });
+        }
+      }
+    }
+  }
+
+  return locations.length > 0 ? locations : undefined;
+}
+
 function extractDiffContent(resultDisplay) {
   if (!resultDisplay || typeof resultDisplay !== 'object') return null;
   const display = resultDisplay;
@@ -799,6 +847,7 @@ function convertChatRecordsToSessionData(records) {
               typeof fc.id === 'string' && fc.id
                 ? fc.id
                 : `${toolName || 'tool'}-${record.uuid}`;
+            const rawInput = normalizeRawInput(fc.args);
             const toolCallMessage = {
               uuid: record.uuid,
               parentUuid: record.parentUuid,
@@ -810,7 +859,8 @@ function convertChatRecordsToSessionData(records) {
                 kind: resolveToolKind(toolName),
                 title: resolveToolTitle(toolName),
                 status: 'in_progress',
-                rawInput: normalizeRawInput(fc.args),
+                rawInput,
+                locations: extractLocations(rawInput, undefined),
                 timestamp: Date.parse(record.timestamp),
               },
             };
@@ -845,6 +895,7 @@ function convertChatRecordsToSessionData(records) {
             status: toolCallResult.error ? 'failed' : 'completed',
             rawInput,
             content,
+            locations: extractLocations(rawInput, toolCallResult),
             timestamp: Date.parse(record.timestamp),
           },
         };

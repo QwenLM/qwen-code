@@ -29,7 +29,7 @@ import {
 } from '../../utils/settingsUtils.js';
 import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
-import { type Config } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import chalk from 'chalk';
 import { cpSlice, cpLen, stripUnsafeCharacters } from '../utils/textUtils.js';
@@ -45,6 +45,8 @@ interface SettingsDialogProps {
   availableTerminalHeight?: number;
   config?: Config;
 }
+
+const debugLogger = createDebugLogger('SETTINGS_DIALOG');
 
 const maxItemsToShow = 8;
 
@@ -162,7 +164,7 @@ export function SettingsDialog({
               {} as Settings,
             );
 
-            console.log(
+            debugLogger.debug(
               `[DEBUG SettingsDialog] Saving ${key} immediately with value:`,
               newValue,
             );
@@ -177,7 +179,7 @@ export function SettingsDialog({
             if (key === 'general.vimMode' && newValue !== vimEnabled) {
               // Call toggleVimEnabled to sync the VimModeContext local state
               toggleVimEnabled().catch((error) => {
-                console.error('Failed to toggle vim mode:', error);
+                debugLogger.error('Failed to toggle vim mode:', error);
               });
             }
 
@@ -189,7 +191,7 @@ export function SettingsDialog({
               try {
                 config?.setApprovalMode(settings.merged.tools.approvalMode);
               } catch (error) {
-                console.error(
+                debugLogger.error(
                   'Failed to apply approval mode to current session:',
                   error,
                 );
@@ -663,7 +665,7 @@ export function SettingsDialog({
                 try {
                   config?.setApprovalMode(settings.merged.tools.approvalMode);
                 } catch (error) {
-                  console.error(
+                  debugLogger.error(
                     'Failed to apply approval mode to current session:',
                     error,
                   );

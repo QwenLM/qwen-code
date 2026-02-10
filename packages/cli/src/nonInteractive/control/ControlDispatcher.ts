@@ -38,6 +38,9 @@ import type {
   ControlResponse,
   ControlRequestPayload,
 } from '../types.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('CONTROL_DISPATCHER');
 
 /**
  * Tracks an incoming request from SDK awaiting CLI response
@@ -135,11 +138,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     const pending = this.pendingOutgoingRequests.get(requestId);
     if (!pending) {
       // No pending request found - may have timed out or been cancelled
-      if (this.context.debugMode) {
-        console.error(
-          `[ControlDispatcher] No pending outgoing request for: ${requestId}`,
-        );
-      }
+      debugLogger.debug(
+        `[ControlDispatcher] No pending outgoing request for: ${requestId}`,
+      );
       return;
     }
 
@@ -181,11 +182,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
         this.deregisterIncomingRequest(requestId);
         this.sendErrorResponse(requestId, 'Request cancelled');
 
-        if (this.context.debugMode) {
-          console.error(
-            `[ControlDispatcher] Cancelled incoming request: ${requestId}`,
-          );
-        }
+        debugLogger.debug(
+          `[ControlDispatcher] Cancelled incoming request: ${requestId}`,
+        );
       }
     } else {
       // Cancel ALL pending incoming requests
@@ -199,11 +198,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
         }
       }
 
-      if (this.context.debugMode) {
-        console.error(
-          `[ControlDispatcher] Cancelled all ${requestIds.length} pending incoming requests`,
-        );
-      }
+      debugLogger.debug(
+        `[ControlDispatcher] Cancelled all ${requestIds.length} pending incoming requests`,
+      );
     }
   }
 
@@ -222,7 +219,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     const requestIds = Array.from(this.pendingOutgoingRequests.keys());
 
     if (this.context.debugMode) {
-      console.error(
+      debugLogger.debug(
         `[ControlDispatcher] Input closed, rejecting ${requestIds.length} pending outgoing requests`,
       );
     }
@@ -241,9 +238,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
    * Stops all pending requests and cleans up all controllers
    */
   shutdown(): void {
-    if (this.context.debugMode) {
-      console.error('[ControlDispatcher] Shutting down');
-    }
+    debugLogger.debug('[ControlDispatcher] Shutting down');
 
     // Cancel all incoming requests
     for (const [
@@ -354,18 +349,16 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
     while (this.pendingIncomingRequests.size > 0) {
       if (Date.now() - startTime > timeoutMs) {
-        if (this.context.debugMode) {
-          console.error(
-            `[ControlDispatcher] Timeout waiting for ${this.pendingIncomingRequests.size} pending incoming requests`,
-          );
-        }
+        debugLogger.warn(
+          `[ControlDispatcher] Timeout waiting for ${this.pendingIncomingRequests.size} pending incoming requests`,
+        );
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
-    if (this.context.debugMode && this.pendingIncomingRequests.size === 0) {
-      console.error('[ControlDispatcher] All incoming requests completed');
+    if (this.pendingIncomingRequests.size === 0) {
+      debugLogger.debug('[ControlDispatcher] All incoming requests completed');
     }
   }
 

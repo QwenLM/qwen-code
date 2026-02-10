@@ -116,6 +116,19 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
+  // Environment variables fallback
+  env: {
+    type: 'object',
+    label: 'Environment Variables',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, string>,
+    description:
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.env.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   general: {
     type: 'object',
     label: 'General',
@@ -143,23 +156,15 @@ const SETTINGS_SCHEMA = {
         description: 'Enable Vim keybindings',
         showInDialog: true,
       },
-      disableAutoUpdate: {
+      enableAutoUpdate: {
         type: 'boolean',
-        label: 'Disable Auto Update',
+        label: 'Enable Auto Update',
         category: 'General',
         requiresRestart: false,
-        default: false,
-        description: 'Disable automatic updates',
+        default: true,
+        description:
+          'Enable automatic update checks and installations on startup.',
         showInDialog: true,
-      },
-      disableUpdateNag: {
-        type: 'boolean',
-        label: 'Disable Update Nag',
-        category: 'General',
-        requiresRestart: false,
-        default: false,
-        description: 'Disable update notification prompts.',
-        showInDialog: false,
       },
       gitCoAuthor: {
         type: 'boolean',
@@ -396,14 +401,14 @@ const SETTINGS_SCHEMA = {
         description: 'Accessibility settings.',
         showInDialog: false,
         properties: {
-          disableLoadingPhrases: {
+          enableLoadingPhrases: {
             type: 'boolean',
-            label: 'Disable Loading Phrases',
+            label: 'Enable Loading Phrases',
             category: 'UI',
             requiresRestart: true,
-            default: false,
-            description: 'Disable loading phrases for accessibility',
-            showInDialog: false,
+            default: true,
+            description: 'Enable loading phrases (disable for accessibility)',
+            showInDialog: true,
           },
           screenReader: {
             type: 'boolean',
@@ -623,14 +628,13 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
-          disableCacheControl: {
+          enableCacheControl: {
             type: 'boolean',
-            label: 'Disable Cache Control',
+            label: 'Enable Cache Control',
             category: 'Generation Configuration',
             requiresRestart: false,
-            default: false,
-            description:
-              'Disable cache control for Anthropic and DashScope providers.',
+            default: true,
+            description: 'Enable cache control for DashScope providers.',
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -748,14 +752,14 @@ const SETTINGS_SCHEMA = {
             description: 'Enable recursive file search functionality',
             showInDialog: false,
           },
-          disableFuzzySearch: {
+          enableFuzzySearch: {
             type: 'boolean',
-            label: 'Disable Fuzzy Search',
+            label: 'Enable Fuzzy Search',
             category: 'Context',
             requiresRestart: true,
-            default: false,
-            description: 'Disable fuzzy search when searching for files.',
-            showInDialog: false,
+            default: true,
+            description: 'Enable fuzzy search when searching for files.',
+            showInDialog: true,
           },
         },
       },
@@ -983,15 +987,6 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
-  useSmartEdit: {
-    type: 'boolean',
-    label: 'Use Smart Edit',
-    category: 'Advanced',
-    requiresRestart: false,
-    default: false,
-    description: 'Enable the smart-edit tool instead of the replace tool.',
-    showInDialog: false,
-  },
   security: {
     type: 'object',
     label: 'Security',
@@ -1168,16 +1163,6 @@ const SETTINGS_SCHEMA = {
     description: 'Setting to enable experimental features',
     showInDialog: false,
     properties: {
-      skills: {
-        type: 'boolean',
-        label: 'Experimental: Skills',
-        category: 'Experimental',
-        requiresRestart: true,
-        default: false,
-        description:
-          'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
-        showInDialog: true,
-      },
       visionModelPreview: {
         type: 'boolean',
         label: 'Vision Model Preview',

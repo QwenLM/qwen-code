@@ -4,14 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { updateCommand, handleUpdate } from './update.js';
 import yargs from 'yargs';
 import { ExtensionUpdateState } from '../../ui/state/extensions.js';
@@ -21,6 +14,8 @@ const mockUpdateExtension = vi.hoisted(() => vi.fn());
 const mockCheckForAllExtensionUpdates = vi.hoisted(() => vi.fn());
 const mockUpdateAllUpdatableExtensions = vi.hoisted(() => vi.fn());
 const mockCheckForExtensionUpdate = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('./utils.js', () => ({
   getExtensionManager: vi.fn().mockResolvedValue({
@@ -45,6 +40,12 @@ vi.mock('../../ui/state/extensions.js', () => ({
     UP_TO_DATE: 'up to date',
     ERROR: 'error',
   },
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
 }));
 
 describe('extensions update command', () => {
@@ -80,12 +81,7 @@ describe('extensions update command', () => {
 });
 
 describe('handleUpdate', () => {
-  let consoleLogSpy: MockInstance;
-  let consoleErrorSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.clearAllMocks();
   });
 
@@ -95,7 +91,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ name: 'non-existent-extension' });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "non-existent-extension" not found.',
       );
     });
@@ -107,7 +103,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ name: 'test-extension' });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Unable to install extension "test-extension" due to missing install metadata',
       );
     });
@@ -124,7 +120,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ name: 'test-extension' });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "test-extension" is already up to date.',
       );
     });
@@ -151,7 +147,7 @@ describe('handleUpdate', () => {
         ExtensionUpdateState.UPDATE_AVAILABLE,
         expect.any(Function),
       );
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "test-extension" successfully updated: 1.0.0 → 2.0.0.',
       );
     });
@@ -173,7 +169,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ name: 'test-extension' });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "test-extension" is already up to date.',
       );
     });
@@ -190,7 +186,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ name: 'test-extension' });
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Update check failed');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith('Update check failed');
     });
   });
 
@@ -201,7 +197,9 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ all: true });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith('No extensions to update.');
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        'No extensions to update.',
+      );
     });
 
     it('should update all extensions with updates available', async () => {
@@ -221,7 +219,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ all: true });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "extension-1" successfully updated: 1.0.0 → 2.0.0.\n' +
           'Extension "extension-2" successfully updated: 1.0.0 → 1.5.0.',
       );
@@ -244,7 +242,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ all: true });
 
-      expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
         'Extension "extension-1" successfully updated: 1.0.0 → 2.0.0.',
       );
     });
@@ -256,7 +254,7 @@ describe('handleUpdate', () => {
 
       await handleUpdate({ all: true });
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Update all failed');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith('Update all failed');
     });
   });
 });

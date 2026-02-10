@@ -7,6 +7,9 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClipboardManager } from '@teddyzhu/clipboard';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
 
 /**
  * Checks if the system clipboard contains an image
@@ -17,9 +20,7 @@ export async function clipboardHasImage(): Promise<boolean> {
     const clipboard = new ClipboardManager();
     return clipboard.hasFormat('image');
   } catch (error) {
-    if (process.env['DEBUG']) {
-      console.error('Error checking clipboard for image:', error);
-    }
+    debugLogger.error('Error checking clipboard for image:', error);
     return false;
   }
 }
@@ -61,9 +62,7 @@ export async function saveClipboardImage(
 
     return tempFilePath;
   } catch (error) {
-    if (process.env['DEBUG']) {
-      console.error('Error saving clipboard image:', error);
-    }
+    debugLogger.error('Error saving clipboard image:', error);
     return null;
   }
 }

@@ -7,7 +7,6 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
-import { ConsoleSummaryDisplay } from './ConsoleSummaryDisplay.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
@@ -25,19 +24,10 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
 
-  const {
-    errorCount,
-    showErrorDetails,
-    promptTokenCount,
-    showAutoAcceptIndicator,
-  } = {
-    errorCount: uiState.errorCount,
-    showErrorDetails: uiState.showErrorDetails,
+  const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
     showAutoAcceptIndicator: uiState.showAutoAcceptIndicator,
   };
-
-  const showErrorIndicator = !showErrorDetails && errorCount > 0;
 
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
@@ -103,13 +93,6 @@ export const Footer: React.FC = () => {
       ),
     });
   }
-  if (showErrorIndicator) {
-    rightItems.push({
-      key: 'errors',
-      node: <ConsoleSummaryDisplay errorCount={errorCount} />,
-    });
-  }
-
   return (
     <Box
       justifyContent="space-between"

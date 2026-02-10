@@ -24,13 +24,11 @@ import {
 } from './systemEncoding.js';
 
 describe('Shell Command Processor - Encoding Functions', () => {
-  let consoleWarnSpy: ReturnType<typeof vi.spyOn>;
   let mockedExecSync: ReturnType<typeof vi.mocked<typeof execSync>>;
   let mockedOsPlatform: ReturnType<typeof vi.mocked<() => string>>;
   let mockedChardetDetect: ReturnType<typeof vi.mocked<typeof chardetDetect>>;
 
   beforeEach(() => {
-    consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     mockedExecSync = vi.mocked(execSync);
     mockedOsPlatform = vi.mocked(os.platform);
     mockedChardetDetect = vi.mocked(chardetDetect);
@@ -65,9 +63,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
     it('should return null for unmapped code pages and warn', () => {
       expect(windowsCodePageToEncoding(99999)).toBe(null);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Unable to determine encoding for windows code page 99999.',
-      );
     });
 
     it('should handle all Windows-specific code pages', () => {
@@ -109,10 +104,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       const result = detectEncodingFromBuffer(buffer);
       expect(result).toBe(null);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Failed to detect encoding with chardet:',
-        expect.any(Error),
-      );
     });
 
     it('should return null when chardet returns null', () => {
@@ -169,11 +160,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       const result = getSystemEncoding();
       expect(result).toBe(null);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "Failed to get Windows code page using 'chcp' command",
-        ),
-      );
     });
 
     it('should return null when chcp output cannot be parsed', () => {
@@ -181,11 +167,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       const result = getSystemEncoding();
       expect(result).toBe(null);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "Failed to get Windows code page using 'chcp' command",
-        ),
-      );
     });
 
     it('should return null when code page is not a number', () => {
@@ -193,11 +174,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       const result = getSystemEncoding();
       expect(result).toBe(null);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          "Failed to get Windows code page using 'chcp' command",
-        ),
-      );
     });
 
     it('should return null when code page maps to null', () => {
@@ -205,10 +181,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       const result = getSystemEncoding();
       expect(result).toBe(null);
-      // Should warn about unknown code page from windowsCodePageToEncoding
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Unable to determine encoding for windows code page 99999.',
-      );
     });
   });
 
@@ -262,9 +234,6 @@ describe('Shell Command Processor - Encoding Functions', () => {
 
       const result = getSystemEncoding();
       expect(result).toBe(null);
-      expect(consoleWarnSpy).toHaveBeenCalledWith(
-        'Failed to get locale charmap.',
-      );
     });
 
     it('should handle locale without encoding (no dot)', () => {

@@ -12,11 +12,14 @@ import fs from 'node:fs';
 import * as Diff from 'diff';
 import { DEFAULT_DIFF_OPTIONS } from './diffOptions.js';
 import { isNodeError } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   AnyDeclarativeTool,
   DeclarativeTool,
   ToolResult,
 } from './tools.js';
+
+const debugLogger = createDebugLogger('MODIFIABLE_TOOL');
 
 /**
  * A declarative tool that supports a modify operation.
@@ -128,13 +131,13 @@ function deleteTempFiles(oldPath: string, newPath: string): void {
   try {
     fs.unlinkSync(oldPath);
   } catch {
-    console.error(`Error deleting temp diff file: ${oldPath}`);
+    debugLogger.warn(`Error deleting temp diff file: ${oldPath}`);
   }
 
   try {
     fs.unlinkSync(newPath);
   } catch {
-    console.error(`Error deleting temp diff file: ${newPath}`);
+    debugLogger.warn(`Error deleting temp diff file: ${newPath}`);
   }
 }
 

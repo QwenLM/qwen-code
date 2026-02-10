@@ -44,7 +44,7 @@ describe('telemetry', () => {
   afterEach(async () => {
     // Ensure we shut down telemetry even if a test fails.
     if (isTelemetrySdkInitialized()) {
-      await shutdownTelemetry(mockConfig);
+      await shutdownTelemetry();
     }
   });
 
@@ -56,7 +56,7 @@ describe('telemetry', () => {
 
   it('should shutdown the telemetry service', async () => {
     initializeTelemetry(mockConfig);
-    await shutdownTelemetry(mockConfig);
+    await shutdownTelemetry();
 
     expect(mockNodeSdk.shutdown).toHaveBeenCalled();
   });

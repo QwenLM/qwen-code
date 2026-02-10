@@ -24,6 +24,9 @@ import type {
   ModifyContext,
 } from './modifiable-tool.js';
 import { ToolErrorType } from './tool-error.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MEMORY_TOOL');
 
 const memoryToolSchemaData: FunctionDeclaration = {
   name: 'save_memory',
@@ -361,7 +364,7 @@ Project: ${projectPath} (current project only)`;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      console.error(
+      debugLogger.error(
         `[MemoryTool] Error executing save_memory for fact "${fact}" in ${scope}: ${errorMessage}`,
       );
 
@@ -435,7 +438,7 @@ export class MemoryTool
 
       await fsAdapter.writeFile(memoryFilePath, newContent, 'utf-8');
     } catch (error) {
-      console.error(
+      debugLogger.error(
         `[MemoryTool] Error adding memory entry to ${memoryFilePath}:`,
         error,
       );

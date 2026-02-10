@@ -756,7 +756,7 @@ export const App: React.FC = () => {
     const inProgressTools = inProgressToolCalls.map((toolCall) => ({
       type: 'in-progress-tool-call' as const,
       data: toolCall,
-      timestamp: toolCall.timestamp || Date.now(),
+      timestamp: toolCall.timestamp ?? 0,
     }));
 
     // Completed tool calls
@@ -765,7 +765,7 @@ export const App: React.FC = () => {
       .map((toolCall) => ({
         type: 'completed-tool-call' as const,
         data: toolCall,
-        timestamp: toolCall.timestamp || Date.now(),
+        timestamp: toolCall.timestamp ?? 0,
       }));
 
     // Merge and sort by timestamp to ensure messages and tool calls are interleaved

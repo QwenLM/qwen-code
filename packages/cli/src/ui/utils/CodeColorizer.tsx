@@ -21,9 +21,11 @@ import {
   MINIMUM_MAX_HEIGHT,
 } from '../components/shared/MaxSizedBox.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 // Configure theming and parsing utilities.
 const lowlight = createLowlight(common);
+const debugLogger = createDebugLogger('CODE_COLORIZER');
 
 function renderHastNode(
   node: Root | Element | HastText | RootContent,
@@ -188,7 +190,7 @@ export function colorizeCode(
       </MaxSizedBox>
     );
   } catch (error) {
-    console.error(
+    debugLogger.error(
       `[colorizeCode] Error highlighting code for language "${language}":`,
       error,
     );

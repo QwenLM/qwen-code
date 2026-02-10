@@ -18,6 +18,9 @@ import type {
   AnyToolInvocation,
   ChatRecordingService,
 } from '../index.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
   ApprovalMode,
@@ -187,12 +190,26 @@ export function convertToFunctionResponse(
   }
 
   if (Array.isArray(contentToProcess)) {
-    const functionResponse = createFunctionResponsePart(
-      callId,
-      toolName,
-      'Tool execution succeeded.',
-    );
-    return [functionResponse, ...toParts(contentToProcess)];
+    // Extract text and media from all parts so that EVERYTHING is inside
+    // the FunctionResponse.
+    const textParts: string[] = [];
+    const mediaParts: FunctionResponsePart[] = [];
+
+    for (const part of toParts(contentToProcess)) {
+      if (part.text !== undefined) {
+        textParts.push(part.text);
+      } else if (part.inlineData) {
+        mediaParts.push({ inlineData: part.inlineData });
+      } else if (part.fileData) {
+        mediaParts.push({ fileData: part.fileData });
+      }
+      // Other exotic part types (e.g. functionCall) are intentionally
+      // dropped here – they should not appear inside tool results.
+    }
+
+    const output =
+      textParts.length > 0 ? textParts.join('\n') : 'Tool execution succeeded.';
+    return [createFunctionResponsePart(callId, toolName, output, mediaParts)];
   }
 
   // After this point, contentToProcess is a single Part object.
@@ -1327,7 +1344,7 @@ export class CoreToolScheduler {
           this.setStatusInternal(pendingTool.request.callId, 'scheduled');
         }
       } catch (error) {
-        console.error(
+        debugLogger.error(
           `Error checking confirmation for tool ${pendingTool.request.callId}:`,
           error,
         );

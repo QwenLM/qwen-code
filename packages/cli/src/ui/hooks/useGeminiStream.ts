@@ -19,6 +19,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
+  createDebugLogger,
   getErrorMessage,
   isNodeError,
   MessageSenderType,
@@ -64,6 +65,8 @@ import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { useKeypress } from './useKeypress.js';
 import type { LoadedSettings } from '../../config/settings.js';
+
+const debugLogger = createDebugLogger('GEMINI_STREAM');
 
 enum StreamProcessingStatus {
   Completed,
@@ -336,7 +339,7 @@ export const useGeminiStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
-        onDebugMessage(`User query: '${trimmedQuery}'`);
+        onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
 
         // Handle UI-only commands first
@@ -382,34 +385,28 @@ export const useGeminiStream = (
           return { queryToSend: null, shouldProceed: false };
         }
 
+        localQueryToSendToGemini = trimmedQuery;
+
+        addItem(
+          { type: MessageType.USER, text: trimmedQuery },
+          userMessageTimestamp,
+        );
+
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
           const atCommandResult = await handleAtCommand({
             query: trimmedQuery,
             config,
-            addItem,
             onDebugMessage,
             messageId: userMessageTimestamp,
             signal: abortSignal,
+            addItem,
           });
-
-          // Add user's turn after @ command processing is done.
-          addItem(
-            { type: MessageType.USER, text: trimmedQuery },
-            userMessageTimestamp,
-          );
 
           if (!atCommandResult.shouldProceed) {
             return { queryToSend: null, shouldProceed: false };
           }
           localQueryToSendToGemini = atCommandResult.processedQuery;
-        } else {
-          // Normal query for Gemini
-          addItem(
-            { type: MessageType.USER, text: trimmedQuery },
-            userMessageTimestamp,
-          );
-          localQueryToSendToGemini = trimmedQuery;
         }
       } else {
         // It's a function response (PartListUnion that isn't a string)
@@ -981,6 +978,7 @@ export const useGeminiStream = (
             prompt_id!,
             options,
           );
+
           const processingStatus = await processGeminiStreamEvents(
             stream,
             userMessageTimestamp,
@@ -990,7 +988,7 @@ export const useGeminiStream = (
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
             // Restore original model if it was temporarily overridden
             restoreOriginalModel().catch((error) => {
-              console.error('Failed to restore original model:', error);
+              debugLogger.error('Failed to restore original model:', error);
             });
             isSubmittingQueryRef.current = false;
             return;
@@ -1007,12 +1005,12 @@ export const useGeminiStream = (
 
           // Restore original model if it was temporarily overridden
           restoreOriginalModel().catch((error) => {
-            console.error('Failed to restore original model:', error);
+            debugLogger.error('Failed to restore original model:', error);
           });
         } catch (error: unknown) {
           // Restore original model if it was temporarily overridden
           restoreOriginalModel().catch((error) => {
-            console.error('Failed to restore original model:', error);
+            debugLogger.error('Failed to restore original model:', error);
           });
 
           if (error instanceof UnauthorizedError) {
@@ -1082,7 +1080,7 @@ export const useGeminiStream = (
                 ToolConfirmationOutcome.ProceedOnce,
               );
             } catch (error) {
-              console.error(
+              debugLogger.error(
                 `Failed to auto-approve tool call ${call.request.callId}:`,
                 error,
               );

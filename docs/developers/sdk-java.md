@@ -245,7 +245,6 @@ The `TransportOptions` class allows configuration of how the SDK communicates wi
 - `allowedTools`: List of tools that are pre-approved for use without additional confirmation
 - `authType`: Authentication type to use for the session
 - `includePartialMessages`: Enables receiving partial messages during streaming responses
-- `skillsEnable`: Enables or disables skills functionality for the session
 - `turnTimeout`: Timeout for a complete turn of conversation
 - `messageTimeout`: Timeout for individual messages within a turn
 - `resumeSessionId`: ID of a previous session to resume

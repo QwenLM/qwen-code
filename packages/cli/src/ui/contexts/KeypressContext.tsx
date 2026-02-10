@@ -8,6 +8,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   KittySequenceOverflowEvent,
   logKittySequenceOverflow,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import { useStdin } from 'ink';
 import type React from 'react';
@@ -62,11 +63,13 @@ export type KeypressHandler = (key: Key) => void;
 interface KeypressContextValue {
   subscribe: (handler: KeypressHandler) => void;
   unsubscribe: (handler: KeypressHandler) => void;
+  pasteWorkaround: boolean;
 }
 
 const KeypressContext = createContext<KeypressContextValue | undefined>(
   undefined,
 );
+const debugLogger = createDebugLogger('KEYPRESS');
 
 export function useKeypressContext() {
   const context = useContext(KeypressContext);
@@ -502,7 +505,7 @@ export function KeypressProvider({
         key.sequence === `${ESC}${KITTY_CTRL_C}`
       ) {
         if (kittySequenceBuffer && debugKeystrokeLogging) {
-          console.log(
+          debugLogger.debug(
             '[DEBUG] Kitty buffer cleared on Ctrl+C:',
             kittySequenceBuffer,
           );
@@ -536,7 +539,7 @@ export function KeypressProvider({
           kittySequenceBuffer += key.sequence;
 
           if (debugKeystrokeLogging) {
-            console.log(
+            debugLogger.debug(
               '[DEBUG] Kitty buffer accumulating:',
               kittySequenceBuffer,
             );
@@ -554,7 +557,7 @@ export function KeypressProvider({
               const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
               if (nextStart > 0) {
                 if (debugKeystrokeLogging) {
-                  console.log(
+                  debugLogger.debug(
                     '[DEBUG] Skipping incomplete/invalid CSI prefix:',
                     kittySequenceBuffer.slice(0, nextStart),
                   );
@@ -570,12 +573,12 @@ export function KeypressProvider({
                 parsed.length,
               );
               if (kittySequenceBuffer.length > parsed.length) {
-                console.log(
+                debugLogger.debug(
                   '[DEBUG] Kitty sequence parsed successfully (prefix):',
                   parsedSequence,
                 );
               } else {
-                console.log(
+                debugLogger.debug(
                   '[DEBUG] Kitty sequence parsed successfully:',
                   parsedSequence,
                 );
@@ -592,12 +595,12 @@ export function KeypressProvider({
             const codes = Array.from(kittySequenceBuffer).map((ch) =>
               ch.charCodeAt(0),
             );
-            console.warn('Kitty sequence buffer has char codes:', codes);
+            debugLogger.warn('Kitty sequence buffer has char codes:', codes);
           }
 
           if (kittySequenceBuffer.length > MAX_KITTY_SEQUENCE_LENGTH) {
             if (debugKeystrokeLogging) {
-              console.log(
+              debugLogger.debug(
                 '[DEBUG] Kitty buffer overflow, clearing:',
                 kittySequenceBuffer,
               );
@@ -816,7 +819,9 @@ export function KeypressProvider({
   ]);
 
   return (
-    <KeypressContext.Provider value={{ subscribe, unsubscribe }}>
+    <KeypressContext.Provider
+      value={{ subscribe, unsubscribe, pasteWorkaround }}
+    >
       {children}
     </KeypressContext.Provider>
   );

@@ -7,6 +7,8 @@
 import { Buffer } from 'buffer';
 import * as https from 'https';
 import * as os from 'node:os';
+import fs from 'node:fs';
+import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 
 import type {
@@ -54,6 +56,10 @@ import type {
   RumOS,
 } from './event-types.js';
 import type { Config } from '../../config/config.js';
+import {
+  createDebugLogger,
+  type DebugLogger,
+} from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
@@ -69,6 +75,11 @@ const RUN_APP_ID = 'gb4w8c3ygj@851d5d500f08f92';
  * Interval in which buffered events are sent to RUM.
  */
 const FLUSH_INTERVAL_MS = 1000 * 60;
+
+/**
+ * Minimum interval between logging network errors to avoid log spam.
+ */
+const ERROR_LOG_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 /**
  * Maximum amount of events to keep in memory. Events added after this amount
@@ -91,6 +102,7 @@ export interface LogResponse {
 export class QwenLogger {
   private static instance: QwenLogger;
   private config?: Config;
+  private debugLogger: DebugLogger;
   private readonly installationManager: InstallationManager;
 
   /**
@@ -109,6 +121,12 @@ export class QwenLogger {
   private sessionId: string;
 
   /**
+   * Cached source information read from source.json.
+   * Only read once at session start to avoid repeated file I/O.
+   */
+  private sourceInfo: string = '';
+
+  /**
    * The value is true when there is a pending flush happening. This prevents
    * concurrent flush operations.
    */
@@ -119,12 +137,20 @@ export class QwenLogger {
    */
   private pendingFlush: boolean = false;
 
+  /**
+   * Timestamp of the last network error log to prevent log spam.
+   */
+  private lastErrorLogTime: number = 0;
+
   private constructor(config: Config) {
     this.config = config;
+    this.debugLogger = createDebugLogger('QWEN_LOGGER');
     this.events = new FixedDeque<RumEvent>(Array, MAX_EVENTS);
     this.installationManager = new InstallationManager();
     this.userId = this.generateUserId();
     this.sessionId = config.getSessionId();
+    // Read source info once during initialization
+    this.sourceInfo = this.readSourceInfo();
   }
 
   private generateUserId(): string {
@@ -154,15 +180,13 @@ export class QwenLogger {
 
       this.events.push(event);
 
-      if (wasAtCapacity && this.config?.getDebugMode()) {
-        console.debug(
+      if (wasAtCapacity) {
+        this.debugLogger.debug(
           `QwenLogger: Dropped old event to prevent memory leak (queue size: ${this.events.size})`,
         );
       }
     } catch (error) {
-      if (this.config?.getDebugMode()) {
-        console.error('QwenLogger: Failed to enqueue log event.', error);
-      }
+      this.debugLogger.error('QwenLogger: Failed to enqueue log event.', error);
     }
   }
 
@@ -225,12 +249,14 @@ export class QwenLogger {
     const version = this.config?.getCliVersion() || 'unknown';
     const osMetadata = this.getOsMetadata();
 
+    // Use cached source information
     return {
       app: {
         id: RUN_APP_ID,
         env: process.env['DEBUG'] ? 'dev' : 'prod',
         version: version || 'unknown',
         type: 'cli',
+        channel: this.sourceInfo || undefined,
       },
       user: {
         id: this.userId,
@@ -265,28 +291,40 @@ export class QwenLogger {
       return;
     }
 
-    this.flushToRum().catch((error) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
+    void this.flushToRum();
+  }
+
+  readSourceInfo(): string {
+    try {
+      const sourceJsonPath = path.join(os.homedir(), '.qwen', 'source.json');
+      if (fs.existsSync(sourceJsonPath)) {
+        const sourceJsonContent = fs.readFileSync(sourceJsonPath, 'utf8');
+        const sourceData = JSON.parse(sourceJsonContent);
+        if (
+          sourceData &&
+          typeof sourceData === 'object' &&
+          sourceData.source &&
+          sourceData.source !== 'unknown'
+        ) {
+          return sourceData.source;
+        }
       }
-    });
+    } catch (_error) {
+      // Ignore errors when reading source.json - continue without source info
+    }
+    return '';
   }
 
   async flushToRum(): Promise<LogResponse> {
     if (this.isFlushInProgress) {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          'QwenLogger: Flush already in progress, marking pending flush.',
-        );
-      }
+      this.debugLogger.debug(
+        'QwenLogger: Flush already in progress, marking pending flush.',
+      );
       this.pendingFlush = true;
       return Promise.resolve({});
     }
     this.isFlushInProgress = true;
 
-    if (this.config?.getDebugMode()) {
-      console.log('Flushing log events to RUM.');
-    }
     if (this.events.size === 0) {
       this.isFlushInProgress = false;
       return {};
@@ -338,8 +376,11 @@ export class QwenLogger {
       this.lastFlushTime = Date.now();
       return {};
     } catch (error) {
-      if (this.config?.getDebugMode()) {
-        console.error('RUM flush failed.', error);
+      // Only log network errors if sufficient time has passed to avoid spam
+      const now = Date.now();
+      if (now - this.lastErrorLogTime > ERROR_LOG_INTERVAL_MS) {
+        this.debugLogger.error('RUM flush failed.', error);
+        this.lastErrorLogTime = now;
       }
 
       // Re-queue failed events for retry
@@ -352,11 +393,7 @@ export class QwenLogger {
       if (this.pendingFlush) {
         this.pendingFlush = false;
         // Fire and forget the pending flush
-        this.flushToRum().catch((error) => {
-          if (this.config?.getDebugMode()) {
-            console.debug('Error in pending flush to RUM:', error);
-          }
-        });
+        void this.flushToRum();
       }
     }
   }
@@ -365,20 +402,16 @@ export class QwenLogger {
   async logStartSessionEvent(event: StartSessionEvent): Promise<void> {
     // Flush all pending events with the old session ID first.
     // If flush fails, discard the pending events to avoid mixing sessions.
-    await this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          'Error flushing pending events before session start:',
-          error,
-        );
-      }
-    });
+    await this.flushToRum();
 
     // Clear any remaining events (discard if flush failed)
     this.events.clear();
 
     // Now set the new session ID
     this.sessionId = event.session_id;
+
+    // Re-read source info at the start of each new session
+    this.sourceInfo = this.readSourceInfo();
 
     const applicationEvent = this.createViewEvent('session', 'session_start', {
       properties: {
@@ -401,11 +434,7 @@ export class QwenLogger {
 
     // Flush start event immediately
     this.enqueueLogEvent(applicationEvent);
-    this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
-    });
+    void this.flushToRum();
   }
 
   logEndSessionEvent(_event: EndSessionEvent): void {
@@ -413,11 +442,7 @@ export class QwenLogger {
 
     // Flush immediately on session end.
     this.enqueueLogEvent(applicationEvent);
-    this.flushToRum().catch((error: unknown) => {
-      if (this.config?.getDebugMode()) {
-        console.debug('Error flushing to RUM:', error);
-      }
-    });
+    void this.flushToRum();
   }
 
   logConversationFinishedEvent(event: ConversationFinishedEvent): void {
@@ -917,8 +942,8 @@ export class QwenLogger {
     const eventsToRetry = eventsToSend.slice(-MAX_RETRY_EVENTS); // Keep only the most recent events
 
     // Log a warning if we're dropping events
-    if (eventsToSend.length > MAX_RETRY_EVENTS && this.config?.getDebugMode()) {
-      console.warn(
+    if (eventsToSend.length > MAX_RETRY_EVENTS) {
+      this.debugLogger.warn(
         `QwenLogger: Dropping ${
           eventsToSend.length - MAX_RETRY_EVENTS
         } events due to retry queue limit. Total events: ${
@@ -932,11 +957,6 @@ export class QwenLogger {
     const numEventsToRequeue = Math.min(eventsToRetry.length, availableSpace);
 
     if (numEventsToRequeue === 0) {
-      if (this.config?.getDebugMode()) {
-        console.debug(
-          `QwenLogger: No events re-queued (queue size: ${this.events.size})`,
-        );
-      }
       return;
     }
 
@@ -955,11 +975,9 @@ export class QwenLogger {
       this.events.pop();
     }
 
-    if (this.config?.getDebugMode()) {
-      console.debug(
-        `QwenLogger: Re-queued ${numEventsToRequeue} events for retry (queue size: ${this.events.size})`,
-      );
-    }
+    this.debugLogger.debug(
+      `QwenLogger: Re-queued ${numEventsToRequeue} events for retry (queue size: ${this.events.size})`,
+    );
   }
 }
 

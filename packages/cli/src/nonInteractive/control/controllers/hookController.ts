@@ -42,9 +42,9 @@ export class HookController extends BaseController {
   private async handleHookCallback(
     payload: CLIHookCallbackRequest,
   ): Promise<Record<string, unknown>> {
-    if (this.context.debugMode) {
-      console.error(`[HookController] Hook callback: ${payload.callback_id}`);
-    }
+    this.debugLogger.debug(
+      `[HookController] Hook callback: ${payload.callback_id}`,
+    );
 
     // Hook callback processing not yet implemented
     return {

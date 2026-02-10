@@ -57,9 +57,9 @@ export function useWelcomeBack(
       }
     } catch (error) {
       // Silently ignore errors - welcome back is not critical
-      console.debug('Welcome back check failed:', error);
+      config.getDebugLogger().debug('Welcome back check failed:', error);
     }
-  }, [settings.ui?.enableWelcomeBack]);
+  }, [config, settings.ui?.enableWelcomeBack]);
 
   // Handle welcome back dialog selection
   const handleWelcomeBackSelection = useCallback(

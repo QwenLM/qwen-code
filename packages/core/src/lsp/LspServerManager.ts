@@ -28,6 +28,9 @@ import type {
   LspServerStatus,
   LspSocketOptions,
 } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LSP');
 
 export interface LspServerManagerOptions {
   requireTrustedWorkspace: boolean;
@@ -137,7 +140,7 @@ export class LspServerManager {
       handle.warmedUp = true;
     } catch (error) {
       // Do not set warmedUp to true on failure, allowing retry
-      console.warn('TypeScript server warm-up failed:', error);
+      debugLogger.warn('TypeScript server warm-up failed:', error);
     }
   }
 
@@ -197,7 +200,7 @@ export class LspServerManager {
       (this.requireTrustedWorkspace || handle.config.trustRequired) &&
       !workspaceTrusted
     ) {
-      console.log(
+      debugLogger.warn(
         `LSP server ${name} requires trusted workspace, skipping startup`,
       );
       handle.status = 'FAILED';
@@ -211,7 +214,7 @@ export class LspServerManager {
       workspaceTrusted,
     );
     if (!consent) {
-      console.log(`User declined to start LSP server ${name}`);
+      debugLogger.info(`User declined to start LSP server ${name}`);
       handle.status = 'FAILED';
       return;
     }
@@ -226,7 +229,7 @@ export class LspServerManager {
           commandCwd,
         ))
       ) {
-        console.warn(
+        debugLogger.warn(
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
@@ -237,7 +240,7 @@ export class LspServerManager {
       if (
         !this.isPathSafe(handle.config.command, this.workspaceRoot, commandCwd)
       ) {
-        console.warn(
+        debugLogger.warn(
           `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
@@ -260,11 +263,11 @@ export class LspServerManager {
 
       handle.status = 'READY';
       this.attachRestartHandler(name, handle);
-      console.log(`LSP server ${name} started successfully`);
+      debugLogger.info(`LSP server ${name} started successfully`);
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
-      console.error(`LSP server ${name} failed to start:`, error);
+      debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
 
@@ -281,7 +284,7 @@ export class LspServerManager {
       try {
         await this.shutdownConnection(handle);
       } catch (error) {
-        console.error(`Error closing LSP server ${name}:`, error);
+        debugLogger.error(`Error closing LSP server ${name}:`, error);
       }
     } else if (handle.process && handle.process.exitCode === null) {
       handle.process.kill();
@@ -333,14 +336,14 @@ export class LspServerManager {
       }
       const attempts = handle.restartAttempts ?? 0;
       if (attempts >= maxRestarts) {
-        console.warn(
+        debugLogger.warn(
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.status = 'FAILED';
         return;
       }
       handle.restartAttempts = attempts + 1;
-      console.warn(
+      debugLogger.warn(
         `LSP server ${name} exited (code ${code ?? 'unknown'}), restarting (${handle.restartAttempts}/${maxRestarts})`,
       );
       this.resetHandle(handle);
@@ -583,7 +586,7 @@ export class LspServerManager {
           });
         }
       } catch (error) {
-        console.warn('TypeScript LSP warm-up failed:', error);
+        debugLogger.warn('TypeScript LSP warm-up failed:', error);
       }
     }
   }
@@ -667,13 +670,13 @@ export class LspServerManager {
     }
 
     if (this.requireTrustedWorkspace || serverConfig.trustRequired) {
-      console.log(
+      debugLogger.warn(
         `Workspace not trusted, skipping LSP server ${serverName} (${serverConfig.command ?? serverConfig.transport})`,
       );
       return false;
     }
 
-    console.log(
+    debugLogger.info(
       `Untrusted workspace, but LSP server ${serverName} has trustRequired=false, attempting cautious startup`,
     );
     return true;

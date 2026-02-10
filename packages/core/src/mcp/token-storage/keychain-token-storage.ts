@@ -7,6 +7,9 @@
 import * as crypto from 'node:crypto';
 import { BaseTokenStorage } from './base-token-storage.js';
 import type { OAuthCredentials } from './types.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('MCP_KEYCHAIN');
 
 interface Keytar {
   getPassword(service: string, account: string): Promise<string | null>;
@@ -43,7 +46,7 @@ export class KeychainTokenStorage extends BaseTokenStorage {
       const module = await import(moduleName);
       this.keytarModule = module.default || module;
     } catch (error) {
-      console.error(error);
+      debugLogger.error(`Failed to load keytar module: ${error}`);
     }
     return this.keytarModule;
   }
@@ -141,7 +144,7 @@ export class KeychainTokenStorage extends BaseTokenStorage {
         .filter((cred) => !cred.account.startsWith(SECRET_PREFIX))
         .map((cred: { account: string }) => cred.account);
     } catch (error) {
-      console.error('Failed to list servers from keychain:', error);
+      debugLogger.error(`Failed to list servers from keychain: ${error}`);
       return [];
     }
   }
@@ -169,14 +172,15 @@ export class KeychainTokenStorage extends BaseTokenStorage {
             result.set(cred.account, data);
           }
         } catch (error) {
-          console.error(
-            `Failed to parse credentials for ${cred.account}:`,
-            error,
+          debugLogger.error(
+            `Failed to parse credentials for ${cred.account}: ${error}`,
           );
         }
       }
     } catch (error) {
-      console.error('Failed to get all credentials from keychain:', error);
+      debugLogger.error(
+        `Failed to get all credentials from keychain: ${error}`,
+      );
     }
 
     return result;
@@ -304,7 +308,7 @@ export class KeychainTokenStorage extends BaseTokenStorage {
         .filter((cred) => cred.account.startsWith(SECRET_PREFIX))
         .map((cred) => cred.account.substring(SECRET_PREFIX.length));
     } catch (error) {
-      console.error('Failed to list secrets from keychain:', error);
+      debugLogger.error(`Failed to list secrets from keychain: ${error}`);
       return [];
     }
   }

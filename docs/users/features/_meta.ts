@@ -1,7 +1,7 @@
 export default {
   commands: 'Commands',
   'sub-agents': 'SubAgents',
-  skills: 'Skills (Experimental)',
+  skills: 'Skills',
   headless: 'Headless Mode',
   checkpointing: {
     display: 'hidden',
