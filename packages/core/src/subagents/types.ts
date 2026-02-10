@@ -40,6 +40,12 @@ export interface SubagentConfig {
   tools?: string[];
 
   /**
+  * Optional list of skills names that this subagent is allowed to use.
+  * If omitted, the subagent inherits all avaiable skills.
+  */
+  skills?: string[];
+
+  /**
    * System prompt content that defines the subagent's behavior.
    * Supports ${variable} templating via ContextState.
    */
