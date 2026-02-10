@@ -17,17 +17,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  statSync,
-  readdirSync,
-  chmodSync,
-} from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
+import fs from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -62,7 +56,7 @@ console.log('\n✅ All bundle assets copied to dist/');
 /**
  * Recursively copy directory
  */
-export function copyRecursiveSync(src, dest) {
+function copyRecursiveSync(src, dest) {
   if (!existsSync(src)) {
     return;
   }
@@ -74,7 +68,7 @@ export function copyRecursiveSync(src, dest) {
       mkdirSync(dest, { recursive: true });
     }
 
-    const entries = readdirSync(src);
+    const entries = fs.readdirSync(src);
     for (const entry of entries) {
       // Skip .DS_Store files
       if (entry === '.DS_Store') {
@@ -90,7 +84,7 @@ export function copyRecursiveSync(src, dest) {
     // Preserve execute permissions for binaries
     const srcStats = statSync(src);
     if (srcStats.mode & 0o111) {
-      chmodSync(dest, srcStats.mode);
+      fs.chmodSync(dest, srcStats.mode);
     }
   }
 }
