@@ -92,22 +92,18 @@ export const PROMPT_IMPROVEMENTS = `Analyze this Qwen Code usage data and sugges
 
 ## QC FEATURES REFERENCE (pick from these for features_to_try):
 1. **MCP Servers**: Connect Qwen to external tools, databases, and APIs via Model Context Protocol.
-   - How to use: Run \`qwen mcp add <server-name> -- <command>\`
+   - How to use: Run \`qwen mcp add --transport http <server-name> <http-url>\`
    - Good for: database queries, Slack integration, GitHub issue lookup, connecting to internal APIs
 
 2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.
    - How to use: Create \`.qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
    - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows
 
-3. **Hooks**: Shell commands that auto-run at specific lifecycle events.
-   - How to use: Add to \`.qwen/settings.json\` under "hooks" key.
-   - Good for: auto-formatting code, running type checks, enforcing conventions
-
-4. **Headless Mode**: Run Qwen non-interactively from scripts and CI/CD.
-   - How to use: \`qwen -p "fix lint errors" --allowedTools "Edit,Read,Bash"\`
+3. **Headless Mode**: Run Qwen non-interactively from scripts and CI/CD.
+   - How to use: \`qwen -p "fix lint errors"\`
    - Good for: CI/CD integration, batch code fixes, automated reviews
 
-5. **Task Agents**: Qwen spawns focused sub-agents for complex exploration or parallel work.
+4. **Task Agents**: Qwen spawns focused sub-agents for complex exploration or parallel work.
    - How to use: Qwen auto-invokes when helpful, or ask "use an agent to explore X"
    - Good for: codebase exploration, understanding complex systems
 
