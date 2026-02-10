@@ -7,7 +7,7 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
-import { getProjectHash, getLegacyProjectHash } from '../utils/paths.js';
+import { getProjectHash } from '../utils/paths.js';
 
 export const QWEN_DIR = '.qwen';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -91,23 +91,6 @@ export class Storage {
     const hash = getProjectHash(this.getProjectRoot());
     const tempDir = Storage.getGlobalTempDir();
     const targetDir = path.join(tempDir, hash);
-
-    // Backward compatibility: On Windows, check if legacy directory exists
-    // and migrate it to the new normalized path
-    if (os.platform() === 'win32' && !fs.existsSync(targetDir)) {
-      const legacyHash = getLegacyProjectHash(this.getProjectRoot());
-      const legacyDir = path.join(tempDir, legacyHash);
-
-      if (fs.existsSync(legacyDir) && legacyHash !== hash) {
-        try {
-          // Attempt to rename/migrate the directory
-          fs.renameSync(legacyDir, targetDir);
-        } catch (_error) {
-          // Silent fallback: if migration fails, continue with the new path
-        }
-      }
-    }
-
     return targetDir;
   }
 
@@ -127,23 +110,6 @@ export class Storage {
     const hash = getProjectHash(this.getProjectRoot());
     const historyDir = path.join(Storage.getGlobalQwenDir(), 'history');
     const targetDir = path.join(historyDir, hash);
-
-    // Backward compatibility: On Windows, check if legacy directory exists
-    // and migrate it to the new normalized path
-    if (os.platform() === 'win32' && !fs.existsSync(targetDir)) {
-      const legacyHash = getLegacyProjectHash(this.getProjectRoot());
-      const legacyDir = path.join(historyDir, legacyHash);
-
-      if (fs.existsSync(legacyDir) && legacyHash !== hash) {
-        try {
-          // Attempt to rename/migrate the directory
-          fs.renameSync(legacyDir, targetDir);
-        } catch (_error) {
-          // Silent fallback: if migration fails, continue with the new path
-        }
-      }
-    }
-
     return targetDir;
   }
 
@@ -176,6 +142,8 @@ export class Storage {
   }
 
   private sanitizeCwd(cwd: string): string {
-    return cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    // On Windows, normalize to lowercase for case-insensitive matching
+    const normalizedCwd = os.platform() === 'win32' ? cwd.toLowerCase() : cwd;
+    return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
   }
 }

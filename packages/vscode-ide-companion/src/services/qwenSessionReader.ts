@@ -8,10 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
-import {
-  getProjectHash,
-  getLegacyProjectHash,
-} from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
 
 export interface QwenMessage {
   id: string;
@@ -63,33 +60,6 @@ export class QwenSessionReader {
         // Current project only
         const projectHash = getProjectHash(workingDir);
         const chatsDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
-
-        // Backward compatibility: On Windows, try legacy hash if new directory doesn't exist
-        if (os.platform() === 'win32' && !fs.existsSync(chatsDir)) {
-          const legacyHash = getLegacyProjectHash(workingDir);
-          const legacyChatsDir = path.join(
-            this.qwenDir,
-            'tmp',
-            legacyHash,
-            'chats',
-          );
-
-          if (fs.existsSync(legacyChatsDir) && legacyHash !== projectHash) {
-            try {
-              // Migrate parent directory
-              const newParentDir = path.join(this.qwenDir, 'tmp', projectHash);
-              const legacyParentDir = path.join(
-                this.qwenDir,
-                'tmp',
-                legacyHash,
-              );
-              fs.renameSync(legacyParentDir, newParentDir);
-            } catch (_error) {
-              // Silent fallback
-            }
-          }
-        }
-
         const projectSessions = await this.readSessionsFromDir(chatsDir);
         sessions.push(...projectSessions);
       } else {

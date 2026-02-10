@@ -8,10 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import {
-  getProjectHash,
-  getLegacyProjectHash,
-} from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
 import type { QwenSession, QwenMessage } from './qwenSessionReader.js';
 
 /**
@@ -37,30 +34,6 @@ export class QwenSessionManager {
   private getSessionDir(workingDir: string): string {
     const projectHash = getProjectHash(workingDir);
     const sessionDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
-
-    // Backward compatibility: On Windows, check if legacy directory exists
-    // and migrate it to the new normalized path
-    if (os.platform() === 'win32' && !fs.existsSync(sessionDir)) {
-      const legacyHash = getLegacyProjectHash(workingDir);
-      const legacySessionDir = path.join(
-        this.qwenDir,
-        'tmp',
-        legacyHash,
-        'chats',
-      );
-
-      if (fs.existsSync(legacySessionDir) && legacyHash !== projectHash) {
-        try {
-          // Migrate parent directory (hash directory, not just chats)
-          const newParentDir = path.join(this.qwenDir, 'tmp', projectHash);
-          const legacyParentDir = path.join(this.qwenDir, 'tmp', legacyHash);
-          fs.renameSync(legacyParentDir, newParentDir);
-        } catch (_error) {
-          // Silent fallback: if migration fails, continue with the new path
-        }
-      }
-    }
-
     return sessionDir;
   }
 
