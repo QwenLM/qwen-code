@@ -6,10 +6,31 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { ClipboardManager } from '@teddyzhu/clipboard';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ClipboardModule = any;
+
+let cachedClipboardModule: ClipboardModule | null = null;
+let clipboardLoadAttempted = false;
+
+async function getClipboardModule(): Promise<ClipboardModule | null> {
+  if (clipboardLoadAttempted) return cachedClipboardModule;
+  clipboardLoadAttempted = true;
+
+  try {
+    const modName = '@teddyzhu/clipboard';
+    cachedClipboardModule = await import(modName);
+    return cachedClipboardModule;
+  } catch (_e) {
+    debugLogger.error(
+      'Failed to load @teddyzhu/clipboard native module. Clipboard image features will be unavailable.',
+    );
+    return null;
+  }
+}
 
 /**
  * Checks if the system clipboard contains an image
@@ -17,7 +38,9 @@ const debugLogger = createDebugLogger('CLIPBOARD_UTILS');
  */
 export async function clipboardHasImage(): Promise<boolean> {
   try {
-    const clipboard = new ClipboardManager();
+    const mod = await getClipboardModule();
+    if (!mod) return false;
+    const clipboard = new mod.ClipboardManager();
     return clipboard.hasFormat('image');
   } catch (error) {
     debugLogger.error('Error checking clipboard for image:', error);
@@ -34,7 +57,9 @@ export async function saveClipboardImage(
   targetDir?: string,
 ): Promise<string | null> {
   try {
-    const clipboard = new ClipboardManager();
+    const mod = await getClipboardModule();
+    if (!mod) return null;
+    const clipboard = new mod.ClipboardManager();
 
     if (!clipboard.hasFormat('image')) {
       return null;

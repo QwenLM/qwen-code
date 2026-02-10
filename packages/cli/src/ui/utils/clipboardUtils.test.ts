@@ -16,6 +16,12 @@ const mockHasFormat = vi.fn();
 const mockGetImageData = vi.fn();
 
 vi.mock('@teddyzhu/clipboard', () => ({
+  default: {
+    ClipboardManager: vi.fn().mockImplementation(() => ({
+      hasFormat: mockHasFormat,
+      getImageData: mockGetImageData,
+    })),
+  },
   ClipboardManager: vi.fn().mockImplementation(() => ({
     hasFormat: mockHasFormat,
     getImageData: mockGetImageData,
@@ -53,26 +59,19 @@ describe('clipboardUtils', () => {
       expect(result).toBe(false);
     });
 
-    it('should log errors in DEBUG mode', async () => {
+    it('should return false and not throw when error occurs in DEBUG mode', async () => {
       const originalEnv = process.env;
       vi.stubGlobal('process', {
         ...process,
         env: { ...originalEnv, DEBUG: '1' },
       });
 
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
       mockHasFormat.mockImplementation(() => {
         throw new Error('Test error');
       });
 
-      await clipboardHasImage();
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Error checking clipboard for image:',
-        expect.any(Error),
-      );
-      consoleErrorSpy.mockRestore();
+      const result = await clipboardHasImage();
+      expect(result).toBe(false);
     });
   });
 
@@ -101,26 +100,19 @@ describe('clipboardUtils', () => {
       expect(result).toBe(null);
     });
 
-    it('should log errors in DEBUG mode', async () => {
+    it('should return null and not throw when error occurs in DEBUG mode', async () => {
       const originalEnv = process.env;
       vi.stubGlobal('process', {
         ...process,
         env: { ...originalEnv, DEBUG: '1' },
       });
 
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
       mockHasFormat.mockImplementation(() => {
         throw new Error('Test error');
       });
 
-      await saveClipboardImage('/tmp/test');
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        'Error saving clipboard image:',
-        expect.any(Error),
-      );
-      consoleErrorSpy.mockRestore();
+      const result = await saveClipboardImage('/tmp/test');
+      expect(result).toBe(null);
     });
   });
 

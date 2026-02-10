@@ -41,7 +41,6 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
     "@qwen-code/qwen-code-core": "file:../core",
-    "@teddyzhu/clipboard": "^0.0.5",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
     "command-exists": "^1.2.9",
@@ -95,6 +94,15 @@
     "react-dom": "^19.1.0",
     "typescript": "^5.3.3",
     "vitest": "^3.1.1"
+  },
+  "optionalDependencies": {
+    "@teddyzhu/clipboard": "^0.0.5",
+    "@teddyzhu/clipboard-darwin-arm64": "0.0.5",
+    "@teddyzhu/clipboard-darwin-x64": "0.0.5",
+    "@teddyzhu/clipboard-linux-x64-gnu": "0.0.5",
+    "@teddyzhu/clipboard-linux-arm64-gnu": "0.0.5",
+    "@teddyzhu/clipboard-win32-x64-msvc": "0.0.5",
+    "@teddyzhu/clipboard-win32-arm64-msvc": "0.0.5"
   },
   "engines": {
     "node": ">=20"
