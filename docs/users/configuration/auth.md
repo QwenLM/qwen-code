@@ -57,7 +57,40 @@ When you select the OpenAI-compatible option in the CLI, enter these values:
 - **Base URL**: `https://coding.dashscope.aliyuncs.com/v1`
 - **Model**: `qwen3-coder-plus`
 
-> **Note**: Coding Plan API keys have the format `sk-sp-xxxxx`, which is different from standard Alibaba Cloud API keys.
+> [!note]
+>
+> Coding Plan API keys have the format `sk-sp-xxxxx`, which is different from standard Alibaba Cloud API keys.
+
+
+#### Configure via settings.json modelProviders
+
+You can add support for multiple models in the settings.json file and then use the `/model` command in Qwen Code to switch between them. The supported models are listed below:
+
+```json
+
+"modelProviders": {
+  "openai": [
+    {
+      "id": "qwen3-coder-plus",
+      "name": "[Dashscope] qwen3-coder-plus",
+      "envKey": "OPENAI_API_KEY",
+      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
+    },
+    {
+      "id": "qwen3-max",
+      "name": "[Dashscope] qwen3-coder-plus",
+      "envKey": "OPENAI_API_KEY",
+      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
+    }
+  ]
+}
+```
+
+Then enter the command below in your terminal to add your API key:
+
+```bash
+export OPENAI_API_KEY="your-coding-plan-api-key"  # Format: sk-sp-xxxxx
+```
 
 #### Configure via Environment Variables
 
