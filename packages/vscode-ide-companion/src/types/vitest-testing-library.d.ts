@@ -13,7 +13,10 @@ declare global {
       toBeEmptyDOMElement(): Vi.Assertion;
 
       // Content matchers
-      toHaveTextContent(text: string | RegExp, options?: { normalizeWhitespace: boolean }): Vi.Assertion;
+      toHaveTextContent(
+        text: string | RegExp,
+        options?: { normalizeWhitespace: boolean },
+      ): Vi.Assertion;
       toHaveAttribute(name: string, value?: string): Vi.Assertion;
 
       // Class and style matchers
@@ -37,15 +40,13 @@ declare global {
 
       // Value matchers
       toHaveValue(value?: unknown): Vi.Assertion;
-      toHaveDisplayValue(value: string | RegExp | (string | RegExp)[]): Vi.Assertion;
+      toHaveDisplayValue(
+        value: string | RegExp | Array<string | RegExp>,
+      ): Vi.Assertion;
 
       // Event matchers
       toBeChecked(): Vi.Assertion;
       toBePartiallyChecked(): Vi.Assertion;
-    }
-
-    interface ExpectStatic {
-      // Add any additional expect matchers needed
     }
   }
 }
