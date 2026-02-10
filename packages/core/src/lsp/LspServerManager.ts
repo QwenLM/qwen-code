@@ -29,6 +29,7 @@ import type {
   LspSocketOptions,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { resolveCommandPath } from '../utils/shell-utils.js';
 
 const debugLogger = createDebugLogger('LSP');
 
@@ -651,10 +652,32 @@ export class LspServerManager {
       ? path.resolve(command)
       : path.resolve(basePath, command);
 
-    return (
+    if (
       resolvedPath.startsWith(resolvedWorkspacePath + path.sep) ||
       resolvedPath === resolvedWorkspacePath
-    );
+    ) {
+      return true;
+    }
+
+    // Allow absolute paths when they resolve from PATH to the same executable.
+    if (path.isAbsolute(command)) {
+      const commandName = path.basename(command);
+      const { path: resolvedFromPath } = resolveCommandPath(commandName);
+      if (resolvedFromPath) {
+        const normalize = (value: string) => {
+          try {
+            return fs.realpathSync(value);
+          } catch {
+            return path.resolve(value);
+          }
+        };
+        if (normalize(resolvedFromPath) === normalize(resolvedPath)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   /**
