@@ -1,22 +1,13 @@
 name: 'VSCode Extension Tests'
 
 on:
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
-      - feat/ide-test-ci # TODO: remove after branch validation
-    paths:
-      - 'packages/vscode-ide-companion/**'
-      - '.github/workflows/vscode-extension-test.yml'
-  pull_request:
-    branches:
-      - 'main'
-      - 'release/**'
-      - feat/ide-test-ci # TODO: remove after branch validation
-    paths:
-      - 'packages/vscode-ide-companion/**'
-      - '.github/workflows/vscode-extension-test.yml'
+  # push:
+  #   branches:
+  #     - 'main'
+  #     - 'release/**'
+  #   paths:
+  #     - 'packages/vscode-ide-companion/**'
+  #     - '.github/workflows/vscode-extension-test.yml'
   workflow_dispatch:
 
 concurrency:
