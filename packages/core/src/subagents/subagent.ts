@@ -291,7 +291,7 @@ export class SubAgentScope {
       let visible_skills = this.toolConfig.skills?.length>0;
       
       const asStrings = this.toolConfig.tools.filter(
-        (t): t is string => typeof t === 'string' && (!visible_skills || t !== "skills"),
+        (t): t is string => typeof t === 'string' && (!visible_skills || t !== SkillTool.Name),
       );
       const hasWildcard = asStrings.includes('*');
       const onlyInlineDecls = this.toolConfig.tools.filter(
