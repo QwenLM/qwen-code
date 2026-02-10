@@ -402,6 +402,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingAuthType,
     qwenAuthState,
     handleAuthSelect,
+    handleCodingPlanSubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -1508,6 +1509,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1552,6 +1554,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setAuthState,
       onAuthError,
       cancelAuthentication,
+      handleCodingPlanSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,

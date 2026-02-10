@@ -17,7 +17,12 @@ import {
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthState } from '../types.js';
 import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
-import { type OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
+// OpenAICredentials type (previously imported from OpenAIKeyPrompt)
+export interface OpenAICredentials {
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+}
 
 export interface UIActions {
   openThemeDialog: () => void;
@@ -35,6 +40,7 @@ export interface UIActions {
     authType: AuthType | undefined,
     credentials?: OpenAICredentials,
   ) => Promise<void>;
+  handleCodingPlanSubmit: (apiKey: string) => Promise<void>;
   setAuthState: (state: AuthState) => void;
   onAuthError: (error: string) => void;
   cancelAuthentication: () => void;

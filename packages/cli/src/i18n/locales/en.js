@@ -1362,4 +1362,41 @@ export default {
     'Opening extensions page in your browser: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Failed to open browser. Check out the extensions gallery at {{url}}',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'Please enter your API key:': 'Please enter your API key:',
+  'API key cannot be empty.': 'API key cannot be empty.',
+  'API key is stored in settings.env. You can migrate it to a .env file for better security.':
+    'API key is stored in settings.env. You can migrate it to a .env file for better security.',
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'For advanced users who want to configure models manually.',
+  'Please configure your models in settings.json:':
+    'Please configure your models in settings.json:',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    'Set API key via environment variable (e.g., OPENAI_API_KEY)',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "Add model configuration to modelProviders['openai'] (or other auth types)",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig',
+  'Use /model command to select your preferred model from the configured list':
+    'Use /model command to select your preferred model from the configured list',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'API-KEY': 'API-KEY',
+  'Coding Plan': 'Coding Plan',
+  Custom: 'Custom',
+  'Select API-KEY configuration mode:': 'Select API-KEY configuration mode:',
+  '(Press Escape to go back)': '(Press Escape to go back)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Press Enter to submit, Escape to cancel)',
 };

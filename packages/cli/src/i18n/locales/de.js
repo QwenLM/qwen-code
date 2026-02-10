@@ -1371,4 +1371,22 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Shift+Tab oder /approval-mode wechseln.',
   'You can switch permission mode quickly with Tab or /approval-mode.':
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'Für fortgeschrittene Benutzer, die Modelle manuell konfigurieren möchten.',
+  'Please configure your models in settings.json:':
+    'Bitte konfigurieren Sie Ihre Modelle in settings.json:',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    'API-Schlüssel über Umgebungsvariable setzen (z.B. OPENAI_API_KEY)',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "Modellkonfiguration zu modelProviders['openai'] (oder anderen Authentifizierungstypen) hinzufügen",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    'Jeder Anbieter benötigt: id, envKey (erforderlich), plus optionale baseUrl, generationConfig',
+  'Use /model command to select your preferred model from the configured list':
+    'Verwenden Sie den /model-Befehl, um Ihr bevorzugtes Modell aus der konfigurierten Liste auszuwählen',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'Unterstützte Authentifizierungstypen: openai, anthropic, gemini, vertex-ai, usw.',
 };

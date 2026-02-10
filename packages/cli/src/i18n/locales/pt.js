@@ -1385,4 +1385,22 @@ export default {
     'Abrindo página de extensões no seu navegador: {{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     'Falha ao abrir o navegador. Confira a galeria de extensões em {{url}}',
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'Para usuários avançados que desejam configurar modelos manualmente.',
+  'Please configure your models in settings.json:':
+    'Por favor, configure seus modelos em settings.json:',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    'Defina a chave de API via variável de ambiente (ex: OPENAI_API_KEY)',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "Adicione a configuração do modelo a modelProviders['openai'] (ou outros tipos de autenticação)",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    'Cada provedor precisa de: id, envKey (obrigatório), além de baseUrl e generationConfig opcionais',
+  'Use /model command to select your preferred model from the configured list':
+    'Use o comando /model para selecionar seu modelo preferido da lista configurada',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'Tipos de autenticação suportados: openai, anthropic, gemini, vertex-ai, etc.',
 };
