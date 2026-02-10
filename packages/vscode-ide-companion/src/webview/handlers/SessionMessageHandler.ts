@@ -9,8 +9,20 @@ import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { ACP_ERROR_CODES } from '../../constants/acpSchema.js';
+import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 
 const AUTH_REQUIRED_CODE_PATTERN = `(code: ${ACP_ERROR_CODES.AUTH_REQUIRED})`;
+const ACP_ERROR_DATA_PREFIX = '\nData: ';
+const AUTH_REQUIRED_FRIENDLY_MESSAGE =
+  'Authentication required. Please login to switch models.';
+
+const stripAcpErrorData = (message: string): string => {
+  const idx = message.indexOf(ACP_ERROR_DATA_PREFIX);
+  if (idx === -1) {
+    return message;
+  }
+  return message.slice(0, idx).trim();
+};
 
 /**
  * Session message handler
@@ -246,6 +258,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
     },
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
+
+    const trimmedText = text.replace(/\u200B/g, '').trim();
+    if (!trimmedText) {
+      console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
 
     // Format message with file context if present
     let formattedText = text;
@@ -1060,11 +1078,27 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
+      const cleanMsg = stripAcpErrorData(errorMsg);
+      const requiresAuth =
+        isAuthenticationRequiredError(error) ||
+        cleanMsg.includes(AUTH_REQUIRED_CODE_PATTERN);
+
       console.error('[SessionMessageHandler] Failed to set model:', error);
-      vscode.window.showErrorMessage(`Failed to switch model: ${errorMsg}`);
+      if (requiresAuth) {
+        await this.promptLogin(
+          'Your login session has expired or is invalid. Please login again to switch models.',
+        );
+        this.sendToWebView({
+          type: 'error',
+          data: { message: AUTH_REQUIRED_FRIENDLY_MESSAGE },
+        });
+        return;
+      }
+
+      vscode.window.showErrorMessage(`Failed to switch model: ${cleanMsg}`);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to set model: ${errorMsg}` },
+        data: { message: `Failed to set model: ${cleanMsg}` },
       });
     }
   }

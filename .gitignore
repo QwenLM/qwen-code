@@ -73,3 +73,12 @@ integration-tests/concurrent-runner/task-*
 # storybook
 *storybook.log
 storybook-static
+
+# vscode-ida-companion test files
+.vscode-test/
+test-results/
+e2e-vscode/
+playwright-report/
+
+# git worktrees
+.worktrees/

@@ -13,9 +13,13 @@ import * as http from 'node:http';
 import { IDEServer } from './ide-server.js';
 import type { DiffManager } from './diff-manager.js';
 
-vi.mock('node:crypto', () => ({
-  randomUUID: vi.fn(() => 'test-auth-token'),
-}));
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual: typeof import('crypto') = await importOriginal();
+  return {
+    ...actual,
+    randomUUID: () => 'test-auth-token',
+  };
+});
 
 const mocks = vi.hoisted(() => ({
   diffManager: {
@@ -117,7 +121,7 @@ describe('IDEServer', () => {
   });
 
   it('should set environment variables and workspace path on start with multiple folders', async () => {
-    await ideServer.start(mockContext);
+    await ideServer.start(mockContext, () => 'test-auth-token');
 
     const replaceMock = mockContext.environmentVariableCollection.replace;
     expect(replaceMock).toHaveBeenCalledTimes(2);
@@ -163,7 +167,7 @@ describe('IDEServer', () => {
   it('should set a single folder path', async () => {
     vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/foo/bar' } }];
 
-    await ideServer.start(mockContext);
+    await ideServer.start(mockContext, () => 'test-auth-token');
     const replaceMock = mockContext.environmentVariableCollection.replace;
 
     expect(replaceMock).toHaveBeenCalledWith(
@@ -195,7 +199,7 @@ describe('IDEServer', () => {
   it('should set an empty string if no folders are open', async () => {
     vscodeMock.workspace.workspaceFolders = [];
 
-    await ideServer.start(mockContext);
+    await ideServer.start(mockContext, () => 'test-auth-token');
     const replaceMock = mockContext.environmentVariableCollection.replace;
 
     expect(replaceMock).toHaveBeenCalledWith(
@@ -226,7 +230,7 @@ describe('IDEServer', () => {
 
   it('should update the path when workspace folders change', async () => {
     vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/foo/bar' } }];
-    await ideServer.start(mockContext);
+    await ideServer.start(mockContext, () => 'test-auth-token');
     const replaceMock = mockContext.environmentVariableCollection.replace;
 
     expect(replaceMock).toHaveBeenCalledWith(
@@ -292,7 +296,7 @@ describe('IDEServer', () => {
   });
 
   it('should clear env vars and delete lock file on stop', async () => {
-    await ideServer.start(mockContext);
+    await ideServer.start(mockContext, () => 'test-auth-token');
     const replaceMock = mockContext.environmentVariableCollection.replace;
     const port = getPortFromMock(replaceMock);
     const lockFile = path.join('/home/test', '.qwen', 'ide', `${port}.lock`);
@@ -312,7 +316,7 @@ describe('IDEServer', () => {
         { uri: { fsPath: 'd:\\baz\\qux' } },
       ];
 
-      await ideServer.start(mockContext);
+      await ideServer.start(mockContext, () => 'test-auth-token');
       const replaceMock = mockContext.environmentVariableCollection.replace;
       const expectedWorkspacePaths = 'c:\\foo\\bar;d:\\baz\\qux';
 
@@ -347,7 +351,7 @@ describe('IDEServer', () => {
     let port: number;
 
     beforeEach(async () => {
-      await ideServer.start(mockContext);
+      await ideServer.start(mockContext, () => 'test-auth-token');
       port = (ideServer as unknown as { port: number }).port;
     });
 
@@ -472,7 +476,7 @@ describe('IDEServer HTTP endpoints', () => {
         clear: vi.fn(),
       },
     } as unknown as vscode.ExtensionContext;
-    await ideServer.start(mockContext);
+    await ideServer.start(mockContext, () => 'test-auth-token');
     const replaceMock = mockContext.environmentVariableCollection.replace;
     port = getPortFromMock(replaceMock);
   });

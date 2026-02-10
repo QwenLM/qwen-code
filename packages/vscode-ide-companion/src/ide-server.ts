@@ -21,6 +21,11 @@ import express, {
 } from 'express';
 import cors from 'cors';
 import { randomUUID } from 'node:crypto';
+
+// Export for mocking in tests
+export const cryptoUtils = {
+  randomUUID,
+};
 import { type Server as HTTPServer } from 'node:http';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
@@ -145,10 +150,15 @@ export class IDEServer {
     this.diffManager = diffManager;
   }
 
-  start(context: vscode.ExtensionContext): Promise<void> {
+  start(
+    context: vscode.ExtensionContext,
+    tokenGenerator?: () => string,
+  ): Promise<void> {
     return new Promise((resolve) => {
       this.context = context;
-      this.authToken = randomUUID();
+      this.authToken = tokenGenerator
+        ? tokenGenerator()
+        : cryptoUtils.randomUUID();
       const sessionsWithInitialNotification = new Set<string>();
 
       const app = express();
@@ -232,7 +242,7 @@ export class IDEServer {
           transport = this.transports[sessionId];
         } else if (!sessionId && isInitializeRequest(req.body)) {
           transport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => randomUUID(),
+            sessionIdGenerator: () => cryptoUtils.randomUUID(),
             onsessioninitialized: (newSessionId) => {
               this.log(`New session initialized: ${newSessionId}`);
               this.transports[newSessionId] = transport;

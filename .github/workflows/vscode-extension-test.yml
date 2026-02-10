@@ -1,0 +1,330 @@
+name: 'VSCode Extension Tests'
+
+on:
+  # push:
+  #   branches:
+  #     - 'main'
+  #     - 'release/**'
+  #   paths:
+  #     - 'packages/vscode-ide-companion/**'
+  #     - '.github/workflows/vscode-extension-test.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: 'read'
+  checks: 'write'
+  pull-requests: 'write' # Needed to comment on PRs
+  issues: 'write' # Needed to create issues on push failures
+
+jobs:
+  unit-test:
+    name: 'Unit Tests'
+    runs-on: '${{ matrix.os }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - 'ubuntu-latest'
+          - 'macos-latest'
+          - 'windows-latest'
+        node-version:
+          - '20.x'
+          - '22.x'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '${{ matrix.node-version }}'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Build webui'
+        run: 'npm run build'
+        working-directory: 'packages/webui'
+
+      - name: 'Build project'
+        run: 'npm run build'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Run unit tests'
+        run: 'npm run test:ci'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Upload coverage'
+        if: matrix.os == 'ubuntu-latest' && matrix.node-version == '20.x'
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'coverage-unit-test'
+          path: 'packages/vscode-ide-companion/coverage'
+
+  integration-test:
+    name: 'Integration Tests'
+    runs-on: 'ubuntu-latest'
+    needs: 'unit-test'
+    if: needs.unit-test.result == 'success'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Build webui'
+        run: 'npm run build'
+        working-directory: 'packages/webui'
+
+      - name: 'Build project'
+        run: 'npm run build'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Bundle CLI'
+        run: 'node scripts/prepackage.js'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Check auth env'
+        id: 'auth'
+        run: |
+          if [[ -n "${{ secrets.QWEN_OAUTH }}" || ( -n "${{ secrets.OPENAI_API_KEY }}" && -n "${{ secrets.OPENAI_BASE_URL }}" && -n "${{ secrets.OPENAI_MODEL }}" ) ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Run integration tests'
+        if: steps.auth.outputs.ready == 'true'
+        run: 'xvfb-run -a npm run test:integration'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Skip integration tests (missing auth)'
+        if: steps.auth.outputs.ready != 'true'
+        run: 'echo "Skipping integration tests because auth env is missing."'
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          QWEN_OAUTH: '${{ secrets.QWEN_OAUTH }}'
+
+  e2e-test:
+    name: 'E2E Tests'
+    runs-on: 'ubuntu-latest'
+    needs: 'integration-test'
+    if: needs.integration-test.result == 'success'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Install Playwright browsers'
+        run: 'npx playwright install --with-deps chromium'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Build webui'
+        run: 'npm run build'
+        working-directory: 'packages/webui'
+
+      - name: 'Build project'
+        run: 'npm run build'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Bundle CLI'
+        run: 'node scripts/prepackage.js'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Run E2E tests'
+        run: 'xvfb-run -a npm run test:e2e'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Upload E2E test results'
+        if: always()
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'e2e-test-results'
+          path: 'packages/vscode-ide-companion/e2e/test-results'
+
+      - name: 'Upload Playwright report'
+        if: always()
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'playwright-report'
+          path: 'packages/vscode-ide-companion/e2e/playwright-report'
+
+  e2e-vscode-test:
+    name: 'VSCode E2E Tests'
+    runs-on: 'ubuntu-latest'
+    needs: 'e2e-test'
+    if: needs.e2e-test.result == 'success'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Install Playwright browsers'
+        run: 'npx playwright install --with-deps'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Build webui'
+        run: 'npm run build'
+        working-directory: 'packages/webui'
+
+      - name: 'Build project'
+        run: 'npm run build'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Bundle CLI'
+        run: 'node scripts/prepackage.js'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Check auth env'
+        id: 'auth'
+        run: |
+          if [[ -n "${{ secrets.QWEN_OAUTH }}" || ( -n "${{ secrets.OPENAI_API_KEY }}" && -n "${{ secrets.OPENAI_BASE_URL }}" && -n "${{ secrets.OPENAI_MODEL }}" ) ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 'Run VSCode E2E tests'
+        if: steps.auth.outputs.ready == 'true'
+        run: 'xvfb-run -a npm run test:e2e:vscode'
+        working-directory: 'packages/vscode-ide-companion'
+        env:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          QWEN_OAUTH: '${{ secrets.QWEN_OAUTH }}'
+
+      - name: 'Skip VSCode E2E tests (missing auth)'
+        if: steps.auth.outputs.ready != 'true'
+        run: 'echo "Skipping VSCode E2E tests because auth env is missing."'
+
+      - name: 'Upload VSCode E2E test results'
+        if: always()
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'vscode-e2e-test-results'
+          path: 'packages/vscode-ide-companion/e2e-vscode/test-results'
+
+      - name: 'Upload VSCode Playwright report'
+        if: always()
+        uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'vscode-playwright-report'
+          path: 'packages/vscode-ide-companion/e2e-vscode/playwright-report'
+
+  # Job to comment test results on PR if tests fail
+  comment-on-pr:
+    name: 'Comment PR with Test Results'
+    runs-on: 'ubuntu-latest'
+    needs: [unit-test, integration-test, e2e-test, e2e-vscode-test]
+    if: always() && github.event_name == 'pull_request' && (needs.unit-test.result == 'failure' || needs.integration-test.result == 'failure' || needs.e2e-test.result == 'failure' || needs.e2e-vscode-test.result == 'failure')
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Find Comment'
+        uses: 'peter-evans/find-comment@v3'
+        id: 'find-comment'
+        with:
+          issue-number: '${{ github.event.pull_request.number }}'
+          comment-author: 'github-actions[bot]'
+          body-includes: 'VSCode Extension Test Results'
+
+      - name: 'Comment on PR'
+        uses: 'peter-evans/create-or-update-comment@v4'
+        with:
+          comment-id: '${{ steps.find-comment.outputs.comment-id }}'
+          issue-number: '${{ github.event.pull_request.number }}'
+          edit-mode: 'replace'
+          body: |
+            ## VSCode Extension Test Results
+
+            Tests have failed for this pull request. Please check the following jobs:
+
+            - Unit Tests: `${{ needs.unit-test.result }}`
+            - Integration Tests: `${{ needs.integration-test.result }}`
+            - E2E Tests: `${{ needs.e2e-test.result }}`
+            - VSCode E2E Tests: `${{ needs.e2e-vscode-test.result }}`
+
+            [Check the workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+
+  # Job to create an issue if tests fail when not on a PR (e.g. direct push to main)
+  # FIXME: Disabled temporarily - do not create issues when tests fail
+  create-issue:
+    name: 'Create Issue for Failed Tests'
+    runs-on: 'ubuntu-latest'
+    needs: [unit-test, integration-test, e2e-test, e2e-vscode-test]
+    if: false
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Create Issue'
+        uses: 'actions/github-script@v7'
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const result = await github.rest.issues.create({
+              owner,
+              repo,
+              title: `VSCode Extension Tests Failed - ${context.sha.substring(0, 7)}`,
+              body: `VSCode Extension Tests failed on commit ${context.sha}\n\nResults:\n- Unit Tests: ${{ needs.unit-test.result }}\n- Integration Tests: ${{ needs.integration-test.result }}\n- E2E Tests: ${{ needs.e2e-test.result }}\n- VSCode E2E Tests: ${{ needs.e2e-vscode-test.result }}\n\nWorkflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+            });
+
+  # Summary job to pass/fail the entire workflow based on test results
+  vscode-extension-tests:
+    name: 'VSCode Extension Tests Summary'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'unit-test'
+      - 'integration-test'
+      - 'e2e-test'
+      - 'e2e-vscode-test'
+    if: always()
+    steps:
+      - name: 'Check test results'
+        run: |
+          if [[ "${{ needs.unit-test.result }}" == "failure" ]] || \
+             [[ "${{ needs.integration-test.result }}" == "failure" ]] || \
+             [[ "${{ needs.e2e-test.result }}" == "failure" ]] || \
+             [[ "${{ needs.e2e-vscode-test.result }}" == "failure" ]]; then
+            echo "One or more test jobs failed"
+            exit 1
+          fi
+          echo "All tests passed!"

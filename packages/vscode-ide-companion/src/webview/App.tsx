@@ -405,7 +405,12 @@ export const App: React.FC = () => {
     const raf = requestAnimationFrame(() => {
       const top = container.scrollHeight - container.clientHeight;
       // Use scrollTo to avoid cross-context issues with scrollIntoView.
-      container.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+      if (typeof container.scrollTo === 'function') {
+        container.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+      } else {
+        // jsdom doesn't implement Element.scrollTo; fall back to scrollTop.
+        container.scrollTop = top;
+      }
     });
     return () => cancelAnimationFrame(raf);
   }, [
@@ -442,7 +447,12 @@ export const App: React.FC = () => {
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         const top = container.scrollHeight - container.clientHeight;
-        container.scrollTo({ top });
+        if (typeof container.scrollTo === 'function') {
+          container.scrollTo({ top });
+        } else {
+          // jsdom doesn't implement Element.scrollTo; fall back to scrollTop.
+          container.scrollTop = top;
+        }
       });
     });
     ro.observe(lastItem);
@@ -729,7 +739,12 @@ export const App: React.FC = () => {
       const container = messagesContainerRef.current;
       if (container) {
         const top = container.scrollHeight - container.clientHeight;
-        container.scrollTo({ top });
+        if (typeof container.scrollTo === 'function') {
+          container.scrollTo({ top });
+        } else {
+          // jsdom doesn't implement Element.scrollTo; fall back to scrollTop.
+          container.scrollTop = top;
+        }
       }
 
       submitMessage(e);
