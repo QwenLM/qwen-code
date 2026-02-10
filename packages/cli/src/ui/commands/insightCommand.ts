@@ -13,43 +13,9 @@ import { join } from 'path';
 import os from 'os';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
-
-// Open file in default browser
-async function openFileInBrowser(filePath: string): Promise<void> {
-  const { exec } = await import('child_process');
-  const { promisify } = await import('util');
-  const execAsync = promisify(exec);
-
-  // Convert to file:// URL for cross-platform compatibility
-  const fileUrl = `file://${filePath.replace(/\\/g, '/')}`;
-
-  try {
-    switch (process.platform) {
-      case 'darwin': // macOS
-        await execAsync(`open "${fileUrl}"`);
-        break;
-      case 'win32': // Windows
-        await execAsync(`start "" "${fileUrl}"`);
-        break;
-      default: // Linux and others
-        await execAsync(`xdg-open "${fileUrl}"`);
-    }
-  } catch (_error) {
-    // If opening fails, try with local file path
-    switch (process.platform) {
-      case 'darwin': // macOS
-        await execAsync(`open "${filePath}"`);
-        break;
-      case 'win32': // Windows
-        await execAsync(`start "" "${filePath}"`);
-        break;
-      default: // Linux and others
-        await execAsync(`xdg-open "${filePath}"`);
-    }
-  }
-}
 
 export const insightCommand: SlashCommand = {
   name: 'insight',
@@ -109,7 +75,7 @@ export const insightCommand: SlashCommand = {
 
       // Open the file in the default browser
       try {
-        await openFileInBrowser(outputPath);
+        await open(outputPath);
 
         context.ui.addItem(
           {
