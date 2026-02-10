@@ -236,6 +236,10 @@ export interface ToolConfig {
    * that the subagent is permitted to use.
    */
   tools: Array<string | FunctionDeclaration>;
+  /**
+  * If skills is specified seperately, ignore skills in tools, but take `skills` field to be visible for the subagent.
+  */
+  skills: Array<string>;
 }
 
 /**
