@@ -265,23 +265,23 @@ jobs:
           comment-author: 'github-actions[bot]'
           body-includes: 'VSCode Extension Test Results'
 
-      - name: 'Comment on PR'
-        uses: 'peter-evans/create-or-update-comment@v4'
-        with:
-          comment-id: '${{ steps.find-comment.outputs.comment-id }}'
-          issue-number: '${{ github.event.pull_request.number }}'
-          edit-mode: 'replace'
-          body: |
-            ## VSCode Extension Test Results
+      # - name: 'Comment on PR'
+      #   uses: 'peter-evans/create-or-update-comment@v4'
+      #   with:
+      #     comment-id: '${{ steps.find-comment.outputs.comment-id }}'
+      #     issue-number: '${{ github.event.pull_request.number }}'
+      #     edit-mode: 'replace'
+      #     body: |
+      #       ## VSCode Extension Test Results
 
-            Tests have failed for this pull request. Please check the following jobs:
+      #       Tests have failed for this pull request. Please check the following jobs:
 
-            - Unit Tests: `${{ needs.unit-test.result }}`
-            - Integration Tests: `${{ needs.integration-test.result }}`
-            - E2E Tests: `${{ needs.e2e-test.result }}`
-            - VSCode E2E Tests: `${{ needs.e2e-vscode-test.result }}`
+      #       - Unit Tests: `${{ needs.unit-test.result }}`
+      #       - Integration Tests: `${{ needs.integration-test.result }}`
+      #       - E2E Tests: `${{ needs.e2e-test.result }}`
+      #       - VSCode E2E Tests: `${{ needs.e2e-vscode-test.result }}`
 
-            [Check the workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+      #       [Check the workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
 
   # Job to create an issue if tests fail when not on a PR (e.g. direct push to main)
   # FIXME: Disabled temporarily - do not create issues when tests fail
