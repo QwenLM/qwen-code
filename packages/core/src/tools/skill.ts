@@ -31,7 +31,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
 
-  constructor(private readonly config: Config, private readonly visiable_skills?: Array<string>) {
+  constructor(private readonly config: Config, private readonly visible_skills?: Array<string>) {
     // Initialize with a basic schema first
     const initialSchema = {
       type: 'object',
@@ -100,7 +100,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         'No skills are currently configured. Skills can be created by adding directories with SKILL.md files to .qwen/skills/ or ~/.qwen/skills/.';
     } else {
       skillDescriptions = this.availableSkills
-        .filter((skill) => (self.visiable_skills?.length>0) ? self.visiable_skills.includes(skill.name) : true)
+        .filter((skill) => (self.visible_skills?.length>0) ? self.visible_skills.includes(skill.name) : true)
         .map(
           (skill) => `<skill>
 <name>
