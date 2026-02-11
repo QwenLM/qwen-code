@@ -24,6 +24,8 @@ package-lock.json
 *.iml
 .cursor
 .qoder
+.claude
+CLAUDE.md
 
 # OS metadata
 .DS_Store
