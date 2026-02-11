@@ -11,7 +11,6 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import pLimit from 'p-limit';
-import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
   HeatMapData,
@@ -30,18 +29,11 @@ import type {
   InsightInteractionStyle,
   InsightAtAGlance,
 } from '../types/QualitativeInsightTypes.js';
-
 import {
-  PROMPT_IMPRESSIVE_WORKFLOWS,
-  PROMPT_PROJECT_AREAS,
-  PROMPT_FUTURE_OPPORTUNITIES,
-  PROMPT_FRICTION_POINTS,
-  PROMPT_MEMORABLE_MOMENT,
-  PROMPT_IMPROVEMENTS,
-  PROMPT_INTERACTION_STYLE,
-  PROMPT_AT_A_GLANCE,
-  ANALYSIS_PROMPT,
-} from '../prompts/InsightPrompts.js';
+  getInsightPrompt,
+  type Config,
+  type ChatRecord,
+} from '@qwen-code/qwen-code-core';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -181,7 +173,7 @@ export class DataProcessor {
     };
 
     const sessionText = this.formatRecordsForAnalysis(records);
-    const prompt = `${ANALYSIS_PROMPT}\n\nSESSION:\n${sessionText}`;
+    const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
 
     try {
       const result = await this.config.getBaseLlmClient().generateJson({
@@ -582,48 +574,51 @@ export class DataProcessor {
       ] = await Promise.all([
         limit(() =>
           generate<InsightImpressiveWorkflows>(
-            PROMPT_IMPRESSIVE_WORKFLOWS,
+            getInsightPrompt('impressive_workflows'),
             schemaImpressiveWorkflows,
           ),
         ),
         limit(() =>
           generate<InsightProjectAreas>(
-            PROMPT_PROJECT_AREAS,
+            getInsightPrompt('project_areas'),
             schemaProjectAreas,
           ),
         ),
         limit(() =>
           generate<InsightFutureOpportunities>(
-            PROMPT_FUTURE_OPPORTUNITIES,
+            getInsightPrompt('future_opportunities'),
             schemaFutureOpportunities,
           ),
         ),
         limit(() =>
           generate<InsightFrictionPoints>(
-            PROMPT_FRICTION_POINTS,
+            getInsightPrompt('friction_points'),
             schemaFrictionPoints,
           ),
         ),
         limit(() =>
           generate<InsightMemorableMoment>(
-            PROMPT_MEMORABLE_MOMENT,
+            getInsightPrompt('memorable_moment'),
             schemaMemorableMoment,
           ),
         ),
         limit(() =>
           generate<InsightImprovements>(
-            PROMPT_IMPROVEMENTS,
+            getInsightPrompt('improvements'),
             schemaImprovements,
           ),
         ),
         limit(() =>
           generate<InsightInteractionStyle>(
-            PROMPT_INTERACTION_STYLE,
+            getInsightPrompt('interaction_style'),
             schemaInteractionStyle,
           ),
         ),
         limit(() =>
-          generate<InsightAtAGlance>(PROMPT_AT_A_GLANCE, schemaAtAGlance),
+          generate<InsightAtAGlance>(
+            getInsightPrompt('at_a_glance'),
+            schemaAtAGlance,
+          ),
         ),
       ]);
 
