@@ -94,10 +94,31 @@ export const PROMPT_IMPROVEMENTS = `Analyze this Qwen Code usage data and sugges
 1. **MCP Servers**: Connect Qwen to external tools, databases, and APIs via Model Context Protocol.
    - How to use: Run \`qwen mcp add --transport http <server-name> <http-url>\`
    - Good for: database queries, Slack integration, GitHub issue lookup, connecting to internal APIs
+   - Example: "To connect to GitHub, run \`qwen mcp add --header "Authorization: Bearer your_github_mcp_pat" --transport http github https://api.githubcopilot.com/mcp/\` and set the AUTHORIZATION header with your PAT. Then you can ask Qwen to query issues, PRs, or repos."
 
 2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.
    - How to use: Create \`.qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
    - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows
+   - SKILL.md format:
+    \`\`\`
+    ---
+    name: skill-name
+    description: A description of what this skill does and when to use it.
+    ---
+
+    # Steps
+    1. First, do X.
+    2. Then do Y.
+    3. Finally, verify Z.
+
+    # Examples
+    - Input: "fix lint errors in src/" → Output: runs eslint --fix, commits changes
+    - Input: "review this PR" → Output: reads diff, posts inline comments
+
+    # Edge Cases
+    - If no files match, report "nothing to do" instead of failing.
+    - If the user didn't specify a branch, default to the current branch.
+    \`\`\`
 
 3. **Headless Mode**: Run Qwen non-interactively from scripts and CI/CD.
    - How to use: \`qwen -p "fix lint errors"\`

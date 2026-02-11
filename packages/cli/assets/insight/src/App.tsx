@@ -12,6 +12,7 @@ import {
   FutureOpportunities,
   MemorableMoment,
 } from './Qualitative';
+import { ShareCard } from './ShareCard';
 import './styles.css';
 import { InsightData } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -41,7 +42,10 @@ function InsightApp({ data }: { data: InsightData }) {
 
   return (
     <div>
-      <Header data={data} dateRangeStr={dateRangeStr} />
+      <div className="header-with-action">
+        <Header data={data} dateRangeStr={dateRangeStr} />
+        <ShareButton />
+      </div>
 
       {data.qualitative && (
         <>
@@ -86,58 +90,73 @@ function InsightApp({ data }: { data: InsightData }) {
         </>
       )}
 
-      <ExportButton />
+      <ShareCard data={data} />
     </div>
   );
 }
 
-// Export Button Component
-function ExportButton() {
+// Share Button Component
+function ShareButton() {
   const [isExporting, setIsExporting] = useState(false);
 
   const handleExport = async () => {
-    const container = document.getElementById('container');
-
-    if (!container || !window.html2canvas) {
+    const card = document.getElementById('share-card');
+    if (!card || !window.html2canvas) {
       alert('Export functionality is not available.');
       return;
     }
 
     setIsExporting(true);
-
     try {
-      const canvas = await window.html2canvas(container, {
+      // Clone the card off-screen so it renders but isn't visible
+      const clone = card.cloneNode(true) as HTMLElement;
+      clone.style.position = 'fixed';
+      clone.style.left = '-9999px';
+      clone.style.top = '0';
+      clone.style.pointerEvents = 'none';
+      document.body.appendChild(clone);
+
+      const canvas = await window.html2canvas(clone, {
         scale: 2,
         useCORS: true,
         logging: false,
+        width: 1200,
+        height: clone.scrollHeight,
       });
+
+      document.body.removeChild(clone);
 
       const imgData = canvas.toDataURL('image/png');
       const link = document.createElement('a');
       link.href = imgData;
-      link.download = `qwen-insights-${new Date().toISOString().slice(0, 10)}.png`;
+      link.download = `qwen-insights-card-${new Date().toISOString().slice(0, 10)}.png`;
       link.click();
     } catch (error) {
-      console.error('Export error:', error);
-      alert('Failed to export image. Please try again.');
+      console.error('Export card error:', error);
+      alert('Failed to export card. Please try again.');
     } finally {
       setIsExporting(false);
     }
   };
 
   return (
-    <div className="mt-6 flex justify-center">
-      <button
-        onClick={handleExport}
-        disabled={isExporting}
-        className="group inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white shadow-soft transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400 hover:-translate-y-[1px] hover:shadow-lg active:translate-y-[1px] disabled:opacity-50"
+    <button onClick={handleExport} disabled={isExporting} className="share-btn">
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       >
-        {isExporting ? 'Exporting...' : 'Export as Image'}
-        <span className="text-slate-200 transition group-hover:translate-x-0.5">
-          →
-        </span>
-      </button>
-    </div>
+        <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" />
+        <polyline points="16 6 12 2 8 6" />
+        <line x1="12" y1="2" x2="12" y2="15" />
+      </svg>
+      {isExporting ? 'Exporting...' : 'Share as Card'}
+    </button>
   );
 }
 

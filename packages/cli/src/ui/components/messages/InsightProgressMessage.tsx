@@ -17,7 +17,7 @@ interface InsightProgressMessageProps {
 export const InsightProgressMessage: React.FC<InsightProgressMessageProps> = ({
   progress,
 }) => {
-  const { stage, progress: percent, detail, isComplete, error } = progress;
+  const { stage, progress: percent, isComplete, error } = progress;
   const width = 30;
   const completedWidth = Math.round((percent / 100) * width);
   const remainingWidth = width - completedWidth;
@@ -56,11 +56,6 @@ export const InsightProgressMessage: React.FC<InsightProgressMessageProps> = ({
           {bar} {Math.round(percent)}%
         </Text>
       </Box>
-      {detail && (
-        <Box marginLeft={2}>
-          <Text color={theme.text.secondary}>{detail}</Text>
-        </Box>
-      )}
     </Box>
   );
 };

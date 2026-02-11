@@ -45,7 +45,7 @@ import {
 
 const logger = createDebugLogger('DataProcessor');
 
-const CONCURRENCY_LIMIT = 2;
+const CONCURRENCY_LIMIT = 4;
 
 export class DataProcessor {
   constructor(private config: Config) {}
@@ -189,7 +189,7 @@ export class DataProcessor {
         model: this.config.getModel(),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         schema: INSIGHT_SCHEMA,
-        abortSignal: AbortSignal.timeout(60000), // 1 minute timeout per session
+        abortSignal: AbortSignal.timeout(600000), // 10 minute timeout per session
       });
 
       if (!result || Object.keys(result).length === 0) {
@@ -383,7 +383,7 @@ export class DataProcessor {
           model: this.config.getModel(),
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           schema,
-          abortSignal: AbortSignal.timeout(60000),
+          abortSignal: AbortSignal.timeout(600000),
         });
         return result as T;
       } catch (error) {
@@ -626,6 +626,23 @@ export class DataProcessor {
           generate<InsightAtAGlance>(PROMPT_AT_A_GLANCE, schemaAtAGlance),
         ),
       ]);
+
+      logger.debug(
+        JSON.stringify(
+          {
+            impressiveWorkflows,
+            projectAreas,
+            futureOpportunities,
+            frictionPoints,
+            memorableMoment,
+            improvements,
+            interactionStyle,
+            atAGlance,
+          },
+          null,
+          2,
+        ),
+      );
 
       return {
         impressiveWorkflows,

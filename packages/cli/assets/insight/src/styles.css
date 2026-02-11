@@ -1130,3 +1130,48 @@ body {
     justify-content: center;
   }
 }
+
+/* Header with action button */
+.header-with-action {
+  position: relative;
+}
+
+/* Share Button */
+.share-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: #fff;
+  background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.2);
+}
+
+.share-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.3);
+  transform: translateY(-1px);
+}
+
+.share-btn:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.2);
+}
+
+.share-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.share-btn svg {
+  opacity: 0.8;
+}
