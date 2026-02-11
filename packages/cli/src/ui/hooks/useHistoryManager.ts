@@ -19,6 +19,7 @@ export interface UseHistoryManagerReturn {
     id: number,
     updates: Partial<Omit<HistoryItem, 'id'>> | HistoryItemUpdater,
   ) => void;
+  removeItemsById: (ids: Iterable<number>) => void;
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
 }
@@ -95,6 +96,16 @@ export function useHistory(): UseHistoryManagerReturn {
     [],
   );
 
+  const removeItemsById = useCallback((ids: Iterable<number>) => {
+    const idsToRemove = new Set(ids);
+    if (idsToRemove.size === 0) {
+      return;
+    }
+    setHistory((prevHistory) =>
+      prevHistory.filter((item) => !idsToRemove.has(item.id)),
+    );
+  }, []);
+
   // Clears the entire history state and resets the ID counter.
   const clearItems = useCallback(() => {
     setHistory([]);
@@ -105,6 +116,7 @@ export function useHistory(): UseHistoryManagerReturn {
     history,
     addItem,
     updateItem,
+    removeItemsById,
     clearItems,
     loadHistory,
   };
