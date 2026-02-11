@@ -1,3 +1,4 @@
+
 # Authentication
 
 Qwen Code supports two authentication methods. Pick the one that matches how you want to run the CLI:
@@ -24,63 +25,61 @@ qwen
 
 ## Option 2: OpenAI-compatible API (API key)
 
-Use this if you want to use OpenAI models or any provider that exposes an OpenAI-compatible API (e.g. OpenAI, Azure OpenAI, OpenRouter, ModelScope, Alibaba Cloud Bailian, or a self-hosted compatible endpoint).
+Use this if you want to use OpenAI models or any provider that exposes an OpenAI-compatible API (e.g. OpenAI, Alibaba Cloud Bailian, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted compatible endpoint).
 
 ### Recommended: Coding Plan (subscription-based) 🚀
 
 Use this if you want predictable costs with higher usage quotas for the qwen3-coder-plus model.
 
-> [!IMPORTANT]
->
-> Coding Plan is only available for users in China mainland (Beijing region).
+important
 
-- **How it works**: subscribe to the Coding Plan with a fixed monthly fee, then configure Qwen Code to use the dedicated endpoint and your subscription API key.
-- **Requirements**: an active Coding Plan subscription from [Alibaba Cloud Bailian](https://bailian.console.aliyun.com/cn-beijing/?tab=globalset#/efm/coding_plan).
-- **Benefits**: higher usage quotas, predictable monthly costs, access to latest qwen3-coder-plus model.
-- **Cost & quota**: varies by plan (see table below).
+Coding Plan is only available for users in China mainland (Beijing region).
 
-#### Coding Plan Pricing & Quotas
+- **How it works**: Subscribe to the Coding Plan with a fixed monthly fee, then configure Qwen Code to use the dedicated endpoint and your subscription API key.
+- **Requirements**: Obtain an active Coding Plan subscription from [Alibaba Cloud Bailian](https://bailian.console.aliyun.com/cn-beijing/?tab=globalset#/efm/coding_plan).
+- **Benefits**: Higher usage quotas, predictable monthly costs, access to the latest qwen3-coder-plus model.
+- **Cost & quota**: View [Alibaba Cloud Bailian Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
 
-| Feature             | Lite Basic Plan       | Pro Advanced Plan     |
-| :------------------ | :-------------------- | :-------------------- |
-| **Price**           | ¥40/month             | ¥200/month            |
-| **5-Hour Limit**    | Up to 1,200 requests  | Up to 6,000 requests  |
-| **Weekly Limit**    | Up to 9,000 requests  | Up to 45,000 requests |
-| **Monthly Limit**   | Up to 18,000 requests | Up to 90,000 requests |
-| **Supported Model** | qwen3-coder-plus      | qwen3-coder-plus      |
+#### Coding Plan Quick Setup
 
-#### Quick Setup for Coding Plan
+Enter `qwen` in the terminal to launch Qwen Code, then enter the `/auth` command and select `API-KEY`
 
-When you select the OpenAI-compatible option in the CLI, enter these values:
+![](https://gw.alicdn.com/imgextra/i4/O1CN01yXSXc91uYxJxhJXBF_!!6000000006050-2-tps-2372-916.png)
 
-- **API key**: `sk-sp-xxxxx`
-- **Base URL**: `https://coding.dashscope.aliyuncs.com/v1`
-- **Model**: `qwen3-coder-plus`
+After entering, select `Coding Plan`:
+
+![](https://gw.alicdn.com/imgextra/i4/O1CN01Irk0AD1ebfop69o0r_!!6000000003890-2-tps-2308-830.png)
+
+Enter your `sk-sp-xxxxxxxxx` key, then use the `/model` command to switch between all Bailian `Coding Plan` supported models:
+
+![](https://gw.alicdn.com/imgextra/i4/O1CN01fWArmf1kaCEgSmPln_!!6000000004699-2-tps-2304-1374.png)
 
 > [!note]
 >
-> Coding Plan API keys have the format `sk-sp-xxxxx`, which is different from standard Alibaba Cloud API keys.
+> Coding Plan API key format is `sk-sp-xxxxx`, which differs from standard Alibaba Cloud API keys.
+> - **API key**: `sk-sp-xxxxx`
+> - **Base URL**: `https://coding.dashscope.aliyuncs.com/v1`
 
+For more details about the Coding Plan, including subscription options and troubleshooting, see the [full Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
 
 #### Configure via settings.json modelProviders
 
 You can add support for multiple models in the settings.json file and then use the `/model` command in Qwen Code to switch between them. The supported models are listed below:
 
 ```json
-
 "modelProviders": {
   "openai": [
     {
-      "id": "qwen3-coder-plus",
-      "name": "[Dashscope] qwen3-coder-plus",
-      "envKey": "OPENAI_API_KEY",
-      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
+    "id": "qwen3-coder-plus",
+    "name": "qwen3-coder-plus",
+    "envKey": "OPENAI_API_KEY",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     },
     {
-      "id": "qwen3-max",
-      "name": "[Dashscope] qwen3-coder-plus",
-      "envKey": "OPENAI_API_KEY",
-      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1"
+    "id": "qwen3-max",
+    "name": "qwen3-max",
+    "envKey": "OPENAI_API_KEY",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
   ]
 }
@@ -89,20 +88,34 @@ You can add support for multiple models in the settings.json file and then use t
 Then enter the command below in your terminal to add your API key:
 
 ```bash
-export OPENAI_API_KEY="your-coding-plan-api-key"  # Format: sk-sp-xxxxx
+
+export OPENAI_API_KEY="your-coding-plan-api-key" # Format: sk-sp-xxxxx
+
 ```
+
+#### Direct Configuration via Qwen Code
+
+After launching Qwen Code, directly say in conversation:
+
+```
+Help me configure a third-party API model, Bailian API is: sk-xxxxxxxxxx, model is: qwen3-max
+```
+
+![](https://gw.alicdn.com/imgextra/i2/O1CN0123Tvau1bz5DPY6htQ_!!6000000003535-2-tps-2506-1252.png)
+
+After restarting Qwen Code, the configuration is successful:
+
+![](https://gw.alicdn.com/imgextra/i4/O1CN01AKq3Y61ybTy8KOdwD_!!6000000006597-2-tps-2496-796.png)
 
 #### Configure via Environment Variables
 
 Set these environment variables to use Coding Plan:
 
 ```bash
-export OPENAI_API_KEY="your-coding-plan-api-key"  # Format: sk-sp-xxxxx
+export OPENAI_API_KEY="your-coding-plan-api-key" # Format: sk-sp-xxxxx
 export OPENAI_BASE_URL="https://coding.dashscope.aliyuncs.com/v1"
 export OPENAI_MODEL="qwen3-coder-plus"
 ```
-
-For more details about Coding Plan, including subscription options and troubleshooting, see the [full Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
 
 ### Other OpenAI-compatible Providers
 
@@ -127,8 +140,8 @@ You can set these in your shell profile, CI, or an `.env` file:
 
 ```bash
 export OPENAI_API_KEY="your-api-key-here"
-export OPENAI_BASE_URL="https://api.openai.com/v1"  # optional
-export OPENAI_MODEL="gpt-4o"                        # optional
+export OPENAI_BASE_URL="https://api.openai.com/v1" # optional
+export OPENAI_MODEL="gpt-4o" # optional
 ```
 
 #### Persisting env vars with `.env` / `.qwen/.env`
@@ -138,11 +151,11 @@ Qwen Code will auto-load environment variables from the **first** `.env` file it
 Search order:
 
 1. From the **current directory**, walking upward toward `/`:
-   1. `.qwen/.env`
-   2. `.env`
-2. If nothing is found, it falls back to your **home directory**:
-   - `~/.qwen/.env`
-   - `~/.env`
+2. `.qwen/.env`
+3. `.env`
+4. If nothing is found, it falls back to your **home directory**:
+	- `~/.qwen/.env`
+	- `~/.env`
 
 `.qwen/.env` is recommended to keep Qwen Code variables isolated from other tools. Some variables (like `DEBUG` and `DEBUG_MODE`) are excluded from project `.env` files to avoid interfering with qwen-code behavior.
 
@@ -179,6 +192,7 @@ In the Qwen Code UI, run:
 ## Non-interactive / headless environments (CI, SSH, containers)
 
 In a non-interactive terminal you typically **cannot** complete the OAuth browser login flow.
+
 Use the OpenAI-compatible API method via environment variables:
 
 - Set at least `OPENAI_API_KEY`.
