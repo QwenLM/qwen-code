@@ -500,7 +500,7 @@ export class QueryEnhancer {
    * Unified query enhancement using a single LLM request with Chain-of-Thought.
    *
    * The LLM is instructed to:
-   * 1. FIRST classify the query intent
+   * 1. FIRST classify the query intent (Chain-of-Thought)
    * 2. THEN generate all other outputs based on the classified intent
    *
    * This ensures Intent Classification actually influences the generation:
@@ -512,7 +512,7 @@ export class QueryEnhancer {
    * - understanding: Focus on conceptual terms, generate explanatory code
    * - refactoring: Focus on best practices, generate improved code
    *
-   * Uses 2 LLM calls: 1 for intent classification, 1 for query enhancement.
+   * Uses a single LLM call that includes intent classification + all enhancements.
    */
   private async enhanceQueryUnified(params: {
     query: string;
@@ -533,126 +533,27 @@ export class QueryEnhancer {
   }> {
     const { query, isNonEnglish, isCJK, isComplex, primaryLanguages } = params;
 
-    // Step 1: Fast intent classification (separate call to avoid context pollution)
-    const intentResult = this.config.enableIntentClassification
-      ? await this.classifyIntent(query)
-      : null;
-
-    // Step 2: Generate all enhancements based on classified intent
+    // Single unified call: intent classification + all enhancements
     const result = await this.generateEnhancements({
       query,
-      intent: intentResult?.intent,
+      // No separate intent call — intent is generated within the same request
+      intent: undefined,
       isNonEnglish,
       isCJK,
       isComplex,
       primaryLanguages,
+      includeIntentClassification: this.config.enableIntentClassification,
     });
 
-    return {
-      intent: intentResult?.intent,
-      intentConfidence: intentResult?.confidence,
-      isTestRelated: intentResult?.isTestRelated,
-      ...result,
-    };
+    return result;
   }
 
   /**
-   * Fast intent classification using a lightweight LLM call.
-   * This is a separate call to avoid polluting the enhancement prompt with
-   * excessive intent-related context.
+   * Generate all query enhancements in a single LLM request.
    *
-   * Also detects if the query is test-related to avoid penalizing test files.
-   */
-  private async classifyIntent(
-    query: string,
-  ): Promise<{
-    intent: QueryIntent;
-    confidence: number;
-    isTestRelated: boolean;
-  } | null> {
-    if (!this.llmClient) return null;
-
-    try {
-      const response = await this.llmClient.generateJson({
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: `Classify the intent of this code search query:
-
-"${query}"
-
-Categories:
-- definitional: "What is X?" - seeking definitions
-- how-to: "How to do X?" - seeking implementation
-- debugging: Error messages or fixing issues
-- comparison: "X vs Y" - comparing approaches
-- finding: "Find X" - locating specific code
-- understanding: "Why does X?" - understanding behavior
-- refactoring: "How to improve X?" - best practices
-- general: General code search
-
-Also determine if the query is test-related (looking for unit tests, test files, test examples, mocking, testing patterns, etc.)`,
-              },
-            ],
-          },
-        ],
-        schema: {
-          type: 'object',
-          properties: {
-            intent: {
-              type: 'string',
-              enum: [
-                'definitional',
-                'how-to',
-                'debugging',
-                'comparison',
-                'finding',
-                'understanding',
-                'refactoring',
-                'general',
-              ],
-            },
-            confidence: {
-              type: 'number',
-              description:
-                'Confidence score for the intent classification (0-1)',
-            },
-            isTestRelated: {
-              type: 'boolean',
-              description:
-                'Whether the query is related to testing (unit tests, test files, mocking, test patterns, etc.)',
-            },
-          },
-          required: ['intent', 'confidence', 'isTestRelated'],
-        },
-        model: this.config.model || 'qwen-coder-plus-latest',
-        systemInstruction:
-          'Classify the query intent and detect if it is test-related. Be concise.',
-        abortSignal: AbortSignal.timeout(this.config.timeout / 3),
-      });
-
-      const intent = response['intent'] as QueryIntent | undefined;
-      const confidence = response['confidence'] as number | undefined;
-      const isTestRelated = response['isTestRelated'] as boolean | undefined;
-
-      if (intent && typeof confidence === 'number') {
-        return {
-          intent,
-          confidence: Math.min(1, Math.max(0, confidence)),
-          isTestRelated: isTestRelated === true,
-        };
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Generate all query enhancements based on the classified intent.
-   * Intent is passed in and used to guide generation.
+   * When includeIntentClassification is true, intent is generated as part of
+   * the same request via Chain-of-Thought: the LLM first classifies intent,
+   * then uses it to guide BM25 keywords, HyDE code, and semantic variations.
    */
   private async generateEnhancements(params: {
     query: string;
@@ -661,15 +562,26 @@ Also determine if the query is test-related (looking for unit tests, test files,
     isCJK: boolean;
     isComplex: boolean;
     primaryLanguages?: string[];
+    includeIntentClassification?: boolean;
   }): Promise<{
+    intent?: QueryIntent;
+    intentConfidence?: number;
+    isTestRelated?: boolean;
     bm25Queries: string[];
     hydeCode?: string;
     semanticVariations?: string[];
     subQueries?: string[];
     stepBackQuery?: string;
   }> {
-    const { query, intent, isNonEnglish, isCJK, isComplex, primaryLanguages } =
-      params;
+    const {
+      query,
+      intent,
+      isNonEnglish,
+      isCJK,
+      isComplex,
+      primaryLanguages,
+      includeIntentClassification = false,
+    } = params;
 
     // Build multilingual-aware guidance
     const multilingualGuidance =
@@ -696,8 +608,22 @@ You MUST generate code in one of these programming languages: ${primaryLanguages
 - Do NOT generate code in any other language.`
         : '';
 
-    // Intent-specific guidance (concise, only for the detected intent)
-    const intentGuidance = this.getIntentGuidance(intent);
+    // Intent-specific guidance
+    const intentGuidance = includeIntentClassification
+      ? `STEP 1 — Intent Classification (Chain-of-Thought):
+Before generating enhancements, classify the query intent into one of these categories:
+  definitional — "What is X?" seeking definitions, types, interfaces
+  how-to — "How to do X?" seeking implementation patterns
+  debugging — Error messages or fixing issues
+  comparison — "X vs Y" comparing approaches
+  finding — "Find X" locating specific code
+  understanding — "Why does X?" understanding behavior
+  refactoring — "How to improve X?" best practices
+  general — General code search
+Also determine if the query is test-related (unit tests, test files, mocking, test patterns).
+
+STEP 2 — Use the classified intent to guide your enhancement generation below.`
+      : this.getIntentGuidance(intent);
 
     const systemInstruction = `You are an expert code search query optimizer. Your task is to enhance search queries for hybrid retrieval (BM25 + vector search).
 
@@ -725,11 +651,17 @@ ${multilingualGuidance}`;
 5. stepBackQuery: One abstract/general query capturing high-level concept (3-8 words)`
       : '';
 
+    const intentPrompt = includeIntentClassification
+      ? `0. intent: Classify query intent (definitional/how-to/debugging/comparison/finding/understanding/refactoring/general). Also provide intentConfidence (0-1) and isTestRelated (boolean).
+
+`
+      : '';
+
     const userPrompt = `Query: "${query}"
 
 Generate:
 
-1. bm25Queries (${this.config.bm25QueryCount}): Space-separated keywords/identifiers. Example: "async fetchUser API handler", "getUserById AuthService database"
+${intentPrompt}1. bm25Queries (${this.config.bm25QueryCount}): Space-separated keywords/identifiers. Example: "async fetchUser API handler", "getUserById AuthService database"
 ${isNonEnglish ? '   Include English technical terms.' : ''}
 
 2. hydeCode: SHORT code snippet (5-15 lines) - NO comments, NO docstrings, just pure code.${primaryLanguages ? ` Use ${primaryLanguages[0]}.` : ''}
@@ -757,6 +689,33 @@ ${isNonEnglish ? '   Include one English version.' : ''}${complexGuidance}`;
     };
 
     const requiredFields = ['bm25Queries', 'hydeCode', 'semanticVariations'];
+
+    if (includeIntentClassification) {
+      schemaProperties['intent'] = {
+        type: 'string',
+        enum: [
+          'definitional',
+          'how-to',
+          'debugging',
+          'comparison',
+          'finding',
+          'understanding',
+          'refactoring',
+          'general',
+        ],
+        description: 'Classified intent of the search query',
+      };
+      schemaProperties['intentConfidence'] = {
+        type: 'number',
+        description: 'Confidence score for intent classification (0-1)',
+      };
+      schemaProperties['isTestRelated'] = {
+        type: 'boolean',
+        description:
+          'Whether the query is related to testing (unit tests, test files, mocking, test patterns)',
+      };
+      requiredFields.push('intent', 'intentConfidence', 'isTestRelated');
+    }
 
     if (isComplex) {
       schemaProperties['subQueries'] = {
@@ -802,7 +761,24 @@ ${isNonEnglish ? '   Include one English version.' : ''}${complexGuidance}`;
       ? (response['stepBackQuery'] as string | undefined)
       : undefined;
 
+    // Extract intent fields when classification was requested
+    const classifiedIntent = includeIntentClassification
+      ? (response['intent'] as QueryIntent | undefined)
+      : undefined;
+    const intentConfidence = includeIntentClassification
+      ? (response['intentConfidence'] as number | undefined)
+      : undefined;
+    const isTestRelated = includeIntentClassification
+      ? (response['isTestRelated'] as boolean | undefined)
+      : undefined;
+
     return {
+      intent: classifiedIntent,
+      intentConfidence:
+        typeof intentConfidence === 'number'
+          ? Math.min(1, Math.max(0, intentConfidence))
+          : undefined,
+      isTestRelated: isTestRelated === true ? true : undefined,
       bm25Queries: bm25Queries.slice(
         0,
         this.config.bm25QueryCount + (isNonEnglish ? 2 : 0),

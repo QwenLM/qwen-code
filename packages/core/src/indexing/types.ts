@@ -89,6 +89,13 @@ export interface IMetadataStore {
    */
   getRecentChunks(limit: number): ScoredChunk[];
   /**
+   * Get chunks by their IDs.
+   * Used by graph expansion to load related chunks discovered via traversal.
+   * @param chunkIds Array of chunk IDs to retrieve.
+   * @returns Array of chunks found (may be fewer than requested if some IDs don't exist).
+   */
+  getChunksByIds(chunkIds: string[]): Chunk[];
+  /**
    * Gets the primary programming languages in the repository.
    * Returns languages sorted by file count (most common first).
    * Excludes null/undefined languages.
@@ -122,20 +129,6 @@ export interface IVectorStore {
   deleteByChunkIds(chunkIds: string[]): Promise<void>;
   optimize(): void;
   destroy(): void;
-}
-
-/**
- * Interface for graph storage operations.
- */
-export interface IGraphStore {
-  initialize(): Promise<void>;
-  insertEntities(entities: GraphEntity[]): Promise<void>;
-  insertRelations(relations: GraphRelation[]): Promise<void>;
-  getEntitiesByChunkIds(chunkIds: string[]): Promise<string[]>;
-  query(cypher: string, params?: Record<string, unknown>): Promise<unknown[]>;
-  deleteByFilePath(filePath: string): Promise<void>;
-  getStats(): Promise<{ nodeCount: number; edgeCount: number }>;
-  close(): Promise<void>;
 }
 
 // ===== Configuration Types =====
@@ -399,96 +392,208 @@ export interface RetrievalResult extends ScoredChunk {
 export interface RetrievalResponse {
   /** Retrieved code chunks. */
   chunks: ScoredChunk[];
-  /** Extracted dependency subgraph. */
-  subgraph: GraphSubgraph | null;
+  /** @deprecated Legacy subgraph field, always null. */
+  subgraph: null;
+  /** Symbol-level graph expansion result. */
+  symbolExpansion?: GraphExpansionResult | null;
   /** Formatted text view of code. */
   textView: string;
-  /** Mermaid-formatted graph view. */
-  graphView: string | null;
+  /** @deprecated Legacy graph view field, always null. */
+  graphView: null;
 }
 
-// ===== Graph Types =====
+// ===== Symbol Graph Types (SQLite-based) =====
 
 /**
- * Type of code entity in the knowledge graph.
+ * Type of symbol extracted from source code.
  */
-export type EntityType =
-  | 'module'
-  | 'class'
+export type SymbolType =
   | 'function'
+  | 'class'
   | 'method'
   | 'interface'
-  | 'variable'
-  | 'type';
+  | 'type'
+  | 'variable';
 
 /**
- * Type of relationship between entities.
+ * Type of edge between symbols in the graph.
  */
-export type RelationType =
-  | 'IMPORTS'
-  | 'EXPORTS'
-  | 'CONTAINS'
+export type EdgeType =
   | 'CALLS'
+  | 'IMPORTS'
   | 'EXTENDS'
   | 'IMPLEMENTS'
-  | 'USES'
-  | 'DEFINES';
+  | 'CONTAINS';
 
 /**
- * A code entity node in the knowledge graph.
+ * A symbol definition extracted from source code.
  */
-export interface GraphEntity {
-  /** Unique identifier: `${filePath}#${name}`. */
+export interface SymbolDefinition {
+  /** Unique identifier: `${filePath}#${qualifiedName}`. */
   id: string;
-  /** Entity name. */
+  /** Simple symbol name (e.g., "myMethod"). */
   name: string;
-  /** Entity type. */
-  type: EntityType;
+  /** Qualified name including parent (e.g., "MyClass.myMethod"). */
+  qualifiedName: string;
+  /** Symbol type. */
+  type: SymbolType;
   /** Source file path. */
   filePath: string;
-  /** Starting line number. */
+  /** Starting line number (1-based). */
   startLine: number;
-  /** Ending line number. */
+  /** Ending line number (1-based). */
   endLine: number;
-  /** Function/class signature. */
-  signature?: string;
-  /** Documentation comment. */
-  docstring?: string;
-  /** Associated chunk ID. */
+  /** Associated chunk ID (mapped by line range overlap). */
   chunkId?: string;
+  /** Function/class signature (first line of definition). */
+  signature?: string;
+  /** Whether the symbol is exported. */
+  exported: boolean;
 }
 
 /**
- * A relationship edge in the knowledge graph.
+ * An edge between two symbols in the graph.
  */
-export interface GraphRelation {
-  /** Source entity ID. */
+export interface SymbolEdge {
+  /** Source symbol ID (or filePath#<module> for file-level edges). */
   sourceId: string;
-  /** Target entity ID. */
+  /** Target symbol ID. */
   targetId: string;
-  /** Relationship type. */
-  type: RelationType;
-  /** Additional metadata. */
-  metadata?: {
-    /** Line number where relation occurs. */
-    line?: number;
-    /** Import alias. */
-    alias?: string;
-  };
+  /** Edge type. */
+  type: EdgeType;
+  /** File where this edge occurs (for incremental deletion). */
+  filePath: string;
+  /** Line number where the reference occurs. */
+  line?: number;
 }
 
 /**
- * A subgraph extracted from the knowledge graph.
+ * An import mapping for reference resolution.
  */
-export interface GraphSubgraph {
-  /** Entities in the subgraph. */
-  entities: GraphEntity[];
-  /** Relations in the subgraph. */
-  relations: GraphRelation[];
-  /** Seed entity IDs. */
-  seedIds: string[];
-  /** Traversal depth. */
-  depth: number;
+export interface ImportMapping {
+  /** File containing the import statement. */
+  filePath: string;
+  /** Local binding name (e.g., import { Foo as Bar } → "Bar"). */
+  localName: string;
+  /** Source module path (e.g., "./utils"). */
+  sourceModule: string;
+  /** Original exported name (e.g., import { Foo as Bar } → "Foo", or "default" or "*"). */
+  originalName: string;
+  /** Resolved file path of the source module. */
+  resolvedPath?: string;
+}
+
+/**
+ * Options for graph expansion from seed chunks.
+ */
+export interface GraphExpansionOptions {
+  /** Maximum traversal depth (default: 2). */
+  maxDepth?: number;
+  /** Maximum number of related chunks to return (default: 30). */
+  maxChunks?: number;
+  /** Edge types to traverse (default: all). */
+  edgeTypes?: EdgeType[];
+  /** Whether to traverse both directions (default: true). */
+  bidirectional?: boolean;
+}
+
+/**
+ * Result of a graph expansion query.
+ */
+export interface GraphExpansionResult {
+  /** Related chunk IDs found via graph traversal, ordered by depth. */
+  relatedChunkIds: string[];
+  /** Symbols found during traversal (for optional Mermaid rendering). */
+  symbols: SymbolDefinition[];
+  /** Edges traversed (for optional Mermaid rendering). */
+  edges: SymbolEdge[];
+  /** Seed chunk IDs that started the expansion. */
+  seedChunkIds: string[];
+}
+
+/**
+ * Interface for SQLite-based symbol graph storage.
+ * Replaces the old IGraphStore with a simpler, SQLite-powered approach
+ * using adjacency tables + recursive CTEs for graph traversal.
+ */
+export interface ISymbolGraphStore {
+  /** Initialize the database tables. */
+  initialize(): void;
+
+  /** Insert symbol definitions. */
+  insertSymbols(symbols: SymbolDefinition[]): void;
+
+  /** Insert edges between symbols. */
+  insertEdges(edges: SymbolEdge[]): void;
+
+  /** Insert import mappings for reference resolution. */
+  insertImports(imports: ImportMapping[]): void;
+
+  /**
+   * Delete all graph data for a file (for incremental updates).
+   * This removes symbols, edges, and imports originating from the file.
+   */
+  deleteByFilePath(filePath: string): void;
+
+  /**
+   * Update chunk ID mappings for symbols in a file.
+   * Called after chunking to associate symbols with their containing chunks.
+   *
+   * @param filePath - File to update mappings for.
+   * @param chunkRanges - Array of { chunkId, startLine, endLine }.
+   */
+  updateChunkMappings(
+    filePath: string,
+    chunkRanges: Array<{ chunkId: string; startLine: number; endLine: number }>,
+  ): void;
+
+  /**
+   * Expand from seed chunk IDs to find related chunks via graph traversal.
+   * This is the primary query method - uses SQLite recursive CTEs.
+   *
+   * @param seedChunkIds - Chunk IDs from reranker output.
+   * @param options - Expansion options (depth, max chunks, edge types).
+   * @returns Related chunk IDs and traversal metadata.
+   */
+  expandFromChunks(
+    seedChunkIds: string[],
+    options?: GraphExpansionOptions,
+  ): GraphExpansionResult;
+
+  /**
+   * Get symbols by chunk IDs (for Mermaid graph building).
+   */
+  getSymbolsByChunkIds(chunkIds: string[]): SymbolDefinition[];
+
+  /**
+   * Get edges between a set of symbols (for Mermaid graph building).
+   */
+  getEdgesBetweenSymbols(symbolIds: string[]): SymbolEdge[];
+
+  /** Get statistics about the graph. */
+  getStats(): { symbolCount: number; edgeCount: number; importCount: number };
+
+  /**
+   * Batch-resolve deferred cross-file edges after all files are indexed.
+   *
+   * During per-file extraction, cross-file references are stored with
+   * placeholder target IDs like `?#symbolName`. This method resolves them
+   * by matching names globally against the symbols table.
+   *
+   * Resolution priority:
+   * 1. Import-guided: if the source file has an import for the name,
+   *    prefer the symbol from the imported file
+   * 2. Exported symbols: prefer exported over internal symbols
+   * 3. First match: if multiple candidates, pick the first one
+   *
+   * Unresolvable edges (no matching symbol anywhere) are removed.
+   *
+   * @returns Number of edges successfully resolved.
+   */
+  resolveEdgesByName(): number;
+
+  /** Close the database connection. */
+  close(): void;
 }
 
 // ===== Checkpoint Types =====

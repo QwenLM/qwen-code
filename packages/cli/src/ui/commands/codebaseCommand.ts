@@ -341,7 +341,7 @@ export const codebaseCommand: SlashCommand = {
       altNames: ['query', 'find'],
       get description() {
         return t(
-          'Search the codebase index. Usage: /codebase search <query> [--rerank] [--graph] [--top <n>]',
+          'Search the codebase index. Usage: /codebase search <query> [--rerank] [--graph] [--mermaid] [--top <n>]',
         );
       },
       kind: CommandKind.BUILT_IN,
@@ -386,7 +386,7 @@ export const codebaseCommand: SlashCommand = {
             {
               type: MessageType.WARNING,
               text: t(
-                'Usage: /codebase search <query> [--rerank] [--graph] [--top <n>]\n\nOptions:\n --rerank  Enable result reranking\n  --graph   Include dependency graph\n  --top <n> Number of results (default: 20)',
+                'Usage: /codebase search <query> [--rerank] [--graph] [--mermaid] [--top <n>]\n\nOptions:\n  --rerank   Enable result reranking\n  --graph    Include dependency graph\n  --mermaid  Output Mermaid diagram of dependency graph\n  --top <n>  Number of results (default: 10)',
               ),
             },
             Date.now(),
@@ -398,7 +398,8 @@ export const codebaseCommand: SlashCommand = {
         const queryParts: string[] = [];
         let enableRerank = false;
         let enableGraph = false;
-        let topK = 20;
+        let enableMermaid = false;
+        let topK = 10;
 
         for (let i = 0; i < args.length; i++) {
           const arg = args[i];
@@ -406,8 +407,11 @@ export const codebaseCommand: SlashCommand = {
             enableRerank = true;
           } else if (arg === '--graph') {
             enableGraph = true;
+          } else if (arg === '--mermaid') {
+            enableMermaid = true;
+            enableGraph = true; // Mermaid requires graph data
           } else if (arg === '--top' && i + 1 < args.length) {
-            topK = parseInt(args[i + 1] ?? '20', 20) || 20;
+            topK = parseInt(args[i + 1] ?? '10', 10) || 10;
             i++;
           } else if (!arg?.startsWith('--')) {
             queryParts.push(arg ?? '');
@@ -433,7 +437,8 @@ export const codebaseCommand: SlashCommand = {
               t('Searching codebase for: ') +
               `"${query}"` +
               (enableRerank ? ' [Rerank]' : '') +
-              (enableGraph ? ' [Graph]' : ''),
+              (enableGraph ? ' [Graph]' : '') +
+              (enableMermaid ? ' [Mermaid]' : ''),
           },
           Date.now(),
         );
@@ -501,14 +506,6 @@ export const codebaseCommand: SlashCommand = {
               `   ${preview.substring(0, 100)}${preview.length > 100 ? '...' : ''}`,
             );
             lines.push('');
-          }
-
-          // Add graph info if available
-          if (result.subgraph && result.subgraph.entities.length > 0) {
-            lines.push('');
-            lines.push(
-              `Dependency Graph: ${result.subgraph.entities.length} entities, ${result.subgraph.relations.length} relations`,
-            );
           }
 
           context.ui.addItem(

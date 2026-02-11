@@ -297,27 +297,44 @@ const collapsedNodeConstructors: {
 /**
  * Attempts to yield a chunk if the node fits within maxChunkSize.
  * Applies comment collapsing to reduce chunk size.
+ *
+ * Size gating strategy:
+ *   - Root node: yield if fits (no minimum — small files should become one chunk)
+ *   - Collapsed types (class/function declarations): yield if fits (no minimum — they
+ *     have dedicated collapse handling in the caller)
+ *   - All other nodes: yield if between minChunkSize and maxChunkSize.
+ *     This allows `it()` blocks, arrow functions, expression statements, etc. to
+ *     become chunks at the right granularity, while avoiding tiny leaf-node chunks.
  */
 async function maybeYieldChunk(
   node: SyntaxNode,
   code: string,
   maxChunkSize: number,
+  minChunkSize: number = 0,
   root: boolean = true,
 ): Promise<ChunkWithoutID | undefined> {
-  // Keep entire text if not over size
-  if (root || node.type in collapsedNodeConstructors) {
-    // First try with collapsed comments
-    const collapsedContent = collapseCommentsInContent(node.text);
-    const tokenCount = countTokens(collapsedContent);
-    if (tokenCount < maxChunkSize) {
-      return {
-        content: collapsedContent,
-        startLine: node.startPosition.row,
-        endLine: node.endPosition.row,
-      };
-    }
+  const collapsedContent = collapseCommentsInContent(node.text);
+  const tokenCount = countTokens(collapsedContent);
+
+  if (tokenCount >= maxChunkSize) {
+    return undefined; // Too big — caller will try collapse or recurse
   }
-  return undefined;
+
+  // Check minimum size: root and collapsed types are exempt
+  const meetsMinimum =
+    root ||
+    node.type in collapsedNodeConstructors ||
+    tokenCount >= minChunkSize;
+
+  if (!meetsMinimum) {
+    return undefined; // Too small — avoid fragmenting into tiny chunks
+  }
+
+  return {
+    content: collapsedContent,
+    startLine: node.startPosition.row,
+    endLine: node.endPosition.row,
+  };
 }
 
 /**
@@ -332,9 +349,16 @@ async function* getSmartCollapsedChunks(
   node: SyntaxNode,
   code: string,
   maxChunkSize: number,
+  minChunkSize: number = 0,
   root: boolean = true,
 ): AsyncGenerator<ChunkWithoutID> {
-  const chunk = await maybeYieldChunk(node, code, maxChunkSize, root);
+  const chunk = await maybeYieldChunk(
+    node,
+    code,
+    maxChunkSize,
+    minChunkSize,
+    root,
+  );
   if (chunk) {
     yield chunk;
     return;
@@ -357,7 +381,9 @@ async function* getSmartCollapsedChunks(
   // Recurse (because even if collapsed version was shown, want to show the children in full somewhere)
   const generators = node.children
     .filter((child): child is SyntaxNode => child !== null)
-    .map((child) => getSmartCollapsedChunks(child, code, maxChunkSize, false));
+    .map((child) =>
+      getSmartCollapsedChunks(child, code, maxChunkSize, minChunkSize, false),
+    );
   for (const generator of generators) {
     yield* generator;
   }
@@ -381,12 +407,13 @@ export async function* codeChunker(
   tree: SyntaxNode,
   contents: string,
   maxChunkSize: number,
+  minChunkSize: number = 0,
 ): AsyncGenerator<ChunkWithoutID> {
   if (contents.trim().length === 0) {
     return;
   }
 
-  yield* getSmartCollapsedChunks(tree, contents, maxChunkSize);
+  yield* getSmartCollapsedChunks(tree, contents, maxChunkSize, minChunkSize);
 }
 
 /**
@@ -396,9 +423,15 @@ export async function chunkCode(
   tree: SyntaxNode,
   contents: string,
   maxChunkSize: number,
+  minChunkSize: number = 0,
 ): Promise<ChunkWithoutID[]> {
   const chunks: ChunkWithoutID[] = [];
-  for await (const chunk of codeChunker(tree, contents, maxChunkSize)) {
+  for await (const chunk of codeChunker(
+    tree,
+    contents,
+    maxChunkSize,
+    minChunkSize,
+  )) {
     chunks.push(chunk);
   }
   return chunks;

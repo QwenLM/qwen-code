@@ -320,6 +320,7 @@ export class ChunkingService implements IChunkingService {
       tree.rootNode,
       content,
       this.config.maxChunkTokens,
+      this.config.minChunkTokens,
     )) {
       // Skip empty chunks
       if (!chunkWithoutId.content.trim()) {

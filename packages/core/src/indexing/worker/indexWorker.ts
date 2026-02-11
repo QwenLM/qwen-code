@@ -16,7 +16,7 @@ import type {
 } from '../types.js';
 import { MetadataStore } from '../stores/metadataStore.js';
 import { VectorStore } from '../stores/vectorStore.js';
-import { GraphStore } from '../stores/graphStore.js';
+import { SqliteGraphStore } from '../stores/sqliteGraphStore.js';
 import { IndexManager } from '../indexManager.js';
 import { CheckpointManager } from '../checkpointManager.js';
 import { DEFAULT_INDEX_CONFIG } from '../defaults.js';
@@ -44,7 +44,7 @@ class IndexWorker {
   private checkpointManager: CheckpointManager | null = null;
   private metadataStore: MetadataStore | null = null;
   private vectorStore: VectorStore | null = null;
-  private graphStore: GraphStore | null = null;
+  private symbolGraphStore: SqliteGraphStore | null = null;
   private projectRoot: string;
   private projectHash: string;
   private config: IndexConfig;
@@ -87,8 +87,15 @@ class IndexWorker {
       await this.vectorStore.initialize();
 
       if (this.config.enableGraph) {
-        this.graphStore = new GraphStore(this.projectHash);
-        await this.graphStore.initialize();
+        try {
+          this.symbolGraphStore = new SqliteGraphStore(this.projectHash);
+          this.symbolGraphStore.initialize();
+        } catch (error) {
+          console.warn(
+            'Failed to initialize SqliteGraphStore in worker:',
+            error,
+          );
+        }
       }
 
       // Initialize checkpoint manager
@@ -110,8 +117,8 @@ class IndexWorker {
         this.metadataStore,
         this.vectorStore,
         this.llmClient,
-        this.graphStore,
         this.config,
+        this.symbolGraphStore,
       );
 
       this.isInitialized = true;
@@ -358,8 +365,8 @@ class IndexWorker {
     this.checkpointManager?.stop();
     this.metadataStore?.close();
     this.vectorStore?.destroy();
-    if (this.graphStore) {
-      this.graphStore.close();
+    if (this.symbolGraphStore) {
+      this.symbolGraphStore.close();
     }
   }
 }

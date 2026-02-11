@@ -20,15 +20,12 @@ import { runRipgrep } from '../utils/ripgrepUtils.js';
 import type {
   IMetadataStore,
   IVectorStore,
-  IGraphStore,
   FileMetadata,
   Chunk,
   IndexingProgress,
   BuildCheckpoint,
   ScoredChunk,
   VectorSearchResult,
-  GraphEntity,
-  GraphRelation,
 } from './types.js';
 import type { ILlmClient } from './embeddingService.js';
 
@@ -119,6 +116,7 @@ function createMockMetadataStore(): IMetadataStore {
     }),
     searchFTS: vi.fn((): ScoredChunk[] => []),
     getRecentChunks: vi.fn((): ScoredChunk[] => []),
+    getChunksByIds: vi.fn((): Chunk[] => []),
     getPrimaryLanguages: vi.fn((): string[] => ['typescript', 'javascript']),
     getEmbeddingCache: vi.fn((key: string) => embeddings.get(key) || null),
     setEmbeddingCache: vi.fn((key: string, embedding: number[]) => {
@@ -169,40 +167,6 @@ function createMockVectorStore(): IVectorStore {
 }
 
 /**
- * Creates a mock GraphStore.
- */
-function createMockGraphStore(): IGraphStore {
-  const entities = new Map<string, GraphEntity>();
-  const relations: GraphRelation[] = [];
-
-  return {
-    initialize: vi.fn(async () => {}),
-    insertEntities: vi.fn(async (entityList) => {
-      for (const entity of entityList) {
-        entities.set(entity.id, entity);
-      }
-    }),
-    insertRelations: vi.fn(async (relationList) => {
-      relations.push(...relationList);
-    }),
-    getEntitiesByChunkIds: vi.fn(async () => []),
-    query: vi.fn(async () => []),
-    deleteByFilePath: vi.fn(async (filePath: string) => {
-      for (const [id, entity] of entities) {
-        if (entity.filePath === filePath) {
-          entities.delete(id);
-        }
-      }
-    }),
-    getStats: vi.fn(async () => ({
-      nodeCount: entities.size,
-      edgeCount: relations.length,
-    })),
-    close: vi.fn(async () => {}),
-  };
-}
-
-/**
  * Creates a mock LLM client.
  */
 function createMockLlmClient(): ILlmClient {
@@ -217,7 +181,6 @@ describe('IndexManager', () => {
   let testDir: string;
   let metadataStore: IMetadataStore;
   let vectorStore: IVectorStore;
-  let graphStore: IGraphStore;
   let llmClient: ILlmClient;
   let indexManager: IndexManager;
 
@@ -225,7 +188,6 @@ describe('IndexManager', () => {
     testDir = await createTestProject();
     metadataStore = createMockMetadataStore();
     vectorStore = createMockVectorStore();
-    graphStore = createMockGraphStore();
     llmClient = createMockLlmClient();
 
     // Mock ripgrep to return file list (runRipgrep returns { stdout, truncated, error? })
@@ -240,7 +202,6 @@ describe('IndexManager', () => {
       metadataStore,
       vectorStore,
       llmClient,
-      graphStore,
       { enableGraph: true },
     );
   });
@@ -271,7 +232,6 @@ describe('IndexManager', () => {
       expect(metadataStore.insertChunks).toHaveBeenCalled();
       expect(vectorStore.insertBatch).toHaveBeenCalled();
       expect(vectorStore.optimize).toHaveBeenCalled();
-      expect(graphStore.insertEntities).toHaveBeenCalled();
     });
 
     it('should report progress through all phases', async () => {
@@ -356,7 +316,6 @@ describe('IndexManager', () => {
         'old-file.ts',
       ]);
       expect(vectorStore.deleteByFilePath).toHaveBeenCalledWith('old-file.ts');
-      expect(graphStore.deleteByFilePath).toHaveBeenCalledWith('old-file.ts');
     });
 
     it('should handle modified files (delete then re-add)', async () => {
@@ -455,27 +414,20 @@ describe('IndexManager', () => {
   });
 
   describe('graph store integration', () => {
-    it('should extract entities when graph is enabled', async () => {
-      await indexManager.build();
-
-      expect(graphStore.insertEntities).toHaveBeenCalled();
-      expect(graphStore.insertRelations).toHaveBeenCalled();
-    });
-
-    it('should skip graph extraction when disabled', async () => {
+    it('should work without symbol graph store when graph is disabled', async () => {
       const managerNoGraph = new IndexManager(
         testDir,
         metadataStore,
         vectorStore,
         llmClient,
-        null, // No graph store
         { enableGraph: false },
       );
 
       await managerNoGraph.build();
 
-      // Graph store methods should not be called
-      expect(graphStore.insertEntities).not.toHaveBeenCalled();
+      // Build should complete without errors
+      const progress = managerNoGraph.getProgress();
+      expect(progress.status).toBe('done');
     });
   });
 });

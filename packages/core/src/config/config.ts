@@ -656,7 +656,7 @@ export class Config {
       chunkOverlapTokens: params.indexing?.chunkOverlapTokens ?? 50,
       embeddingBatchSize: params.indexing?.embeddingBatchSize ?? 10,
       streamThreshold: params.indexing?.streamThreshold ?? 50000,
-      enableGraph: params.indexing?.enableGraph ?? false,
+      enableGraph: params.indexing?.enableGraph ?? true,
     };
 
     if (params.contextFileName) {

@@ -365,7 +365,9 @@ export const CODE_SEARCH_INSTRUCT = `Given a code search query, retrieve relevan
 1. Directly implement or demonstrate the requested functionality
 2. Show the API usage or function signature being searched for
 3. Contain relevant documentation or comments explaining the concept
-Prioritize implementation code over test code unless the query specifically asks for tests.`;
+
+** Note that you can distinguish test code by its filename and content. Prioritize implementation code(file) over test code(file) unless the query specifically asks for tests **.
+`;
 
 /**
  * Creates a DashScopeReranker optimized for code search.

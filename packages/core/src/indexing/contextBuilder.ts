@@ -10,12 +10,7 @@
  * with token budget management and duplicate handling.
  */
 
-import type {
-  GraphEntity,
-  GraphSubgraph,
-  RelationType,
-  ScoredChunk,
-} from './types.js';
+import type { ScoredChunk } from './types.js';
 
 /**
  * Configuration for context building.
@@ -97,20 +92,6 @@ const LANGUAGE_MAP: Record<string, string> = {
 };
 
 /**
- * Arrow styles for different relation types in Mermaid diagrams.
- */
-const ARROW_STYLES: Record<RelationType, string> = {
-  CALLS: '-->|calls|',
-  IMPORTS: '-.->|imports|',
-  EXTENDS: '==>|extends|',
-  IMPLEMENTS: '-.->|implements|',
-  CONTAINS: '-->|contains|',
-  EXPORTS: '-->|exports|',
-  USES: '-->|uses|',
-  DEFINES: '-->|defines|',
-};
-
-/**
  * Context builder for formatting retrieval results into LLM context.
  * Handles token budgeting, deduplication, and various output formats.
  */
@@ -168,86 +149,15 @@ export class ContextBuilder {
   }
 
   /**
-   * Builds a Mermaid graph view of the dependency subgraph.
-   *
-   * @param subgraph Graph subgraph to visualize.
-   * @returns Mermaid-formatted graph string.
-   */
-  buildGraphView(subgraph: GraphSubgraph): string {
-    if (subgraph.entities.length === 0) {
-      return '';
-    }
-
-    const lines: string[] = ['## Dependency Graph\n', '```mermaid', 'graph LR'];
-
-    // Track which entities are seeds for styling
-    const seedSet = new Set(subgraph.seedIds);
-
-    // Add nodes
-    for (const entity of subgraph.entities) {
-      const nodeId = this.sanitizeMermaidId(entity.id);
-      const label = this.formatEntityLabel(entity);
-      const style = seedSet.has(entity.id) ? ':::seed' : '';
-      lines.push(`  ${nodeId}["${label}"]${style}`);
-    }
-
-    // Add edges
-    const addedEdges = new Set<string>();
-    for (const relation of subgraph.relations) {
-      const edgeKey = `${relation.sourceId}->${relation.targetId}`;
-      if (addedEdges.has(edgeKey)) continue;
-      addedEdges.add(edgeKey);
-
-      const sourceId = this.sanitizeMermaidId(relation.sourceId);
-      const targetId = this.sanitizeMermaidId(relation.targetId);
-      const arrow = ARROW_STYLES[relation.type] ?? '-->';
-
-      lines.push(`  ${sourceId} ${arrow} ${targetId}`);
-    }
-
-    // Add seed node styling
-    lines.push('  classDef seed fill:#f9f,stroke:#333');
-    lines.push('```');
-
-    return lines.join('\n');
-  }
-
-  /**
-   * Builds a combined context with both text and graph views.
+   * Builds a combined context with text view.
    *
    * @param chunks Scored chunks.
-   * @param subgraph Optional dependency subgraph.
    * @param maxTokens Token budget.
    * @returns Combined context string.
    */
-  buildCombinedContext(
-    chunks: ScoredChunk[],
-    subgraph: GraphSubgraph | null,
-    maxTokens?: number,
-  ): string {
+  buildCombinedContext(chunks: ScoredChunk[], maxTokens?: number): string {
     const budget = maxTokens ?? this.config.maxTokens;
-
-    // Allocate 80% to text, 20% to graph
-    const textBudget = Math.floor(budget * 0.8);
-    const graphBudget = Math.floor(budget * 0.2);
-
-    const parts: string[] = [];
-
-    // Add text view
-    const textView = this.buildTextView(chunks, textBudget);
-    if (textView) {
-      parts.push(textView);
-    }
-
-    // Add graph view if available and fits budget
-    if (subgraph && subgraph.entities.length > 0) {
-      const graphView = this.buildGraphView(subgraph);
-      if (graphView.length <= graphBudget * this.config.charsPerToken) {
-        parts.push(graphView);
-      }
-    }
-
-    return parts.join('\n\n');
+    return this.buildTextView(chunks, budget);
   }
 
   /**
@@ -265,12 +175,12 @@ export class ContextBuilder {
     }
 
     // Code block with language detection
-    const language = this.config.detectLanguage
-      ? this.detectLanguage(chunk.filePath)
-      : '';
-    lines.push('```' + language);
-    lines.push(chunk.content);
-    lines.push('```\n');
+    // const language = this.config.detectLanguage
+    //   ? this.detectLanguage(chunk.filePath)
+    //   : '';
+    // lines.push('```' + language);
+    // lines.push(chunk.content);
+    // lines.push('```\n');
 
     return lines;
   }
@@ -324,29 +234,6 @@ export class ContextBuilder {
   private detectLanguage(filePath: string): string {
     const ext = filePath.substring(filePath.lastIndexOf('.'));
     return LANGUAGE_MAP[ext.toLowerCase()] ?? '';
-  }
-
-  /**
-   * Formats an entity label for Mermaid display.
-   */
-  private formatEntityLabel(entity: GraphEntity): string {
-    const shortType = entity.type.charAt(0).toUpperCase();
-    const name =
-      entity.name.length > 30
-        ? entity.name.substring(0, 27) + '...'
-        : entity.name;
-    return `${shortType}:${name}`;
-  }
-
-  /**
-   * Sanitizes an ID for use in Mermaid diagrams.
-   * Replaces special characters with underscores.
-   */
-  private sanitizeMermaidId(id: string): string {
-    return id
-      .replace(/[^a-zA-Z0-9]/g, '_')
-      .replace(/_+/g, '_')
-      .substring(0, 50);
   }
 
   /**

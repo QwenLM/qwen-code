@@ -13,7 +13,6 @@ export type {
   ScoredChunk,
   RetrievalConfig,
   RetrievalResponse,
-  GraphSubgraph,
 } from './types.js';
 export {
   RetrievalService,
@@ -34,4 +33,3 @@ export {
   type EnhancedQuery,
 } from './queryEnhancer.js';
 export { ContextBuilder, type ContextBuilderConfig } from './contextBuilder.js';
-export { GraphTraverser, type GraphTraverserConfig } from './graphTraverser.js';

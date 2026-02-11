@@ -22,16 +22,15 @@
  */
 
 import type {
-  GraphSubgraph,
-  IGraphStore,
   IMetadataStore,
+  ISymbolGraphStore,
   IVectorStore,
+  GraphExpansionResult,
   RetrievalConfig,
   RetrievalResponse,
   ScoredChunk,
 } from './types.js';
 import { QueryEnhancer, type QueryEnhancerConfig } from './queryEnhancer.js';
-import { GraphTraverser } from './graphTraverser.js';
 import { ContextBuilder, type ContextBuilderConfig } from './contextBuilder.js';
 import type { EmbeddingLlmClient } from './embeddingLlmClient.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -138,7 +137,7 @@ export interface FusedScoredChunk extends ScoredChunk {
 export class RetrievalService {
   private readonly config: RetrievalConfig;
   private readonly queryEnhancer: QueryEnhancer;
-  private readonly graphTraverser: GraphTraverser;
+  private readonly symbolGraphStore: ISymbolGraphStore | null;
   private contextBuilder: ContextBuilder;
   private reranker?: IReranker;
 
@@ -147,24 +146,24 @@ export class RetrievalService {
    *
    * @param metadataStore Store for chunk metadata and FTS.
    * @param vectorStore Store for vector similarity search.
-   * @param graphStore Store for code dependency graph.
    * @param llmClient Client for query.
    * @param embeddingLlmClient Client for generating embeddings.
    * @param config Optional configuration overrides.
    * @param queryEnhancerConfig Optional query enhancer configuration.
+   * @param symbolGraphStore Optional symbol graph store for symbol-level expansion.
    */
   constructor(
     private readonly metadataStore: IMetadataStore,
     private readonly vectorStore: IVectorStore,
-    graphStore: IGraphStore,
     llmClient: BaseLlmClient,
     private readonly embeddingLlmClient: EmbeddingLlmClient,
     config: Partial<RetrievalConfig> = {},
     queryEnhancerConfig: Partial<QueryEnhancerConfig> = {},
+    symbolGraphStore: ISymbolGraphStore | null = null,
   ) {
     this.config = { ...DEFAULT_RETRIEVAL_CONFIG, ...config };
     this.queryEnhancer = new QueryEnhancer(queryEnhancerConfig, llmClient);
-    this.graphTraverser = new GraphTraverser(graphStore);
+    this.symbolGraphStore = symbolGraphStore;
     this.contextBuilder = new ContextBuilder();
 
     if (process.env['DASHSCOPE_API_KEY']) {
@@ -206,72 +205,91 @@ export class RetrievalService {
     // This ensures HyDE generates code in the correct language
     const primaryLanguages = this.metadataStore.getPrimaryLanguages();
 
-    // 1. Enhance the query using LLM-powered enhancement
-    const enhancedQuery = await this.queryEnhancer.enhance(query, {
+    // === Phase 1: Start original-query retrieval AND LLM enhancement in parallel ===
+    // This eliminates the latency of waiting for LLM enhancement before searching.
+    // Original-query searches begin immediately while the LLM generates enhanced queries.
+    const phase1BM25Promise = this.bm25Search(query, this.config.bm25TopK);
+    const phase1VectorPromise = this.vectorSearch(
+      query,
+      this.config.vectorTopK,
+    );
+    const phase1RecentPromise = this.recentFilesSearch(this.config.recentTopK);
+    const enhancePromise = this.queryEnhancer.enhance(query, {
       primaryLanguages,
     });
 
-    // 2. Execute parallel multi-path retrieval
-    const retrievalPromises: Array<Promise<ScoredChunk[]>> = [];
+    const [phase1BM25, phase1Vector, phase1Recent, enhancedQuery] =
+      await Promise.all([
+        phase1BM25Promise,
+        phase1VectorPromise,
+        phase1RecentPromise,
+        enhancePromise,
+      ]);
 
-    // BM25 searches with all keyword queries
+    // === Phase 2: Additional enhanced-query retrieval (excluding original query) ===
+    // Only search with queries that differ from the original to avoid duplication.
+    const phase2Promises: Array<{
+      promise: Promise<ScoredChunk[]>;
+      source: 'bm25' | 'vector';
+    }> = [];
+
     for (const bm25Query of enhancedQuery.bm25Queries) {
-      retrievalPromises.push(this.bm25Search(bm25Query, this.config.bm25TopK));
+      if (bm25Query !== query) {
+        phase2Promises.push({
+          promise: this.bm25Search(bm25Query, this.config.bm25TopK),
+          source: 'bm25',
+        });
+      }
     }
 
-    // Vector searches with all semantic queries (including HyDE)
     for (const vectorQuery of enhancedQuery.vectorQueries) {
-      retrievalPromises.push(
-        this.vectorSearch(vectorQuery, this.config.vectorTopK),
-      );
+      if (vectorQuery !== query) {
+        phase2Promises.push({
+          promise: this.vectorSearch(vectorQuery, this.config.vectorTopK),
+          source: 'vector',
+        });
+      }
     }
 
-    // Recent files search
-    retrievalPromises.push(this.recentFilesSearch(this.config.recentTopK));
+    const phase2Results = await Promise.all(
+      phase2Promises.map((p) => p.promise),
+    );
 
-    // Execute all retrievals in parallel
-    const allResults = await Promise.all(retrievalPromises);
-
-    // 3. Prepare sources for RRF fusion with query decay
-    // Query decay: later query variations get progressively lower weights
-    // This prioritizes primary query results while still benefiting from query expansion
+    // === Merge all sources for RRF fusion ===
     const sources: Array<{
       results: ScoredChunk[];
       weight: number;
       source: 'bm25' | 'vector' | 'recent';
     }> = [];
 
-    let resultIdx = 0;
-
-    // Add BM25 results with exponential decay for query variations
-    for (let i = 0; i < enhancedQuery.bm25Queries.length; i++) {
-      const weight = mergedWeights.bm25;
-      sources.push({
-        results: allResults[resultIdx] ?? [],
-        weight,
-        source: 'bm25',
-      });
-      resultIdx++;
-    }
-
-    // Add vector results with exponential decay
-    // HyDE result is typically first and most important
-    for (let i = 0; i < enhancedQuery.vectorQueries.length; i++) {
-      const weight = mergedWeights.vector;
-      sources.push({
-        results: allResults[resultIdx] ?? [],
-        weight,
-        source: 'vector',
-      });
-      resultIdx++;
-    }
-
-    // Add recent files results
+    // Phase 1 original-query results (highest weight — primary signal)
     sources.push({
-      results: allResults[resultIdx] ?? [],
+      results: phase1BM25,
+      weight: mergedWeights.bm25,
+      source: 'bm25',
+    });
+    sources.push({
+      results: phase1Vector,
+      weight: mergedWeights.vector,
+      source: 'vector',
+    });
+    sources.push({
+      results: phase1Recent,
       weight: mergedWeights.recent,
       source: 'recent',
     });
+
+    // Phase 2 enhanced-query results
+    for (let i = 0; i < phase2Results.length; i++) {
+      sources.push({
+        results: phase2Results[i] ?? [],
+        weight:
+          phase2Promises[i]!.source === 'bm25'
+            ? mergedWeights.bm25
+            : mergedWeights.vector,
+        source: phase2Promises[i]!.source,
+      });
+    }
 
     // 4. RRF Fusion with multi-source boost
     let fusedResults = this.rrfFusion(
@@ -305,7 +323,7 @@ export class RetrievalService {
       // 6. Optional reranking
       const rerankedResults = await this.rerank(
         query,
-        adjustedResults.slice(0, topK * 10),
+        adjustedResults.slice(0, topK * 5),
       ); // Rerank top 10x results to allow reranker to have enough candidates
       // 7. Take top-K results
       topResults = rerankedResults.slice(0, topK);
@@ -314,27 +332,77 @@ export class RetrievalService {
     }
 
     // 8. Optional graph expansion
-    let subgraph: GraphSubgraph | null = null;
+    let symbolExpansion: GraphExpansionResult | null = null;
     if (enableGraph && topResults.length > 0) {
       const seedChunkIds = topResults.map((r) => r.id);
-      subgraph = await this.graphTraverser.extractSubgraph(seedChunkIds, {
-        maxDepth: graphDepth,
-        maxNodes: maxGraphNodes,
-        relationTypes: ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS'],
-      });
+
+      // Symbol-level expansion via SqliteGraphStore
+      if (this.symbolGraphStore) {
+        try {
+          symbolExpansion = this.symbolGraphStore.expandFromChunks(
+            seedChunkIds,
+            {
+              maxDepth: graphDepth,
+              maxChunks: maxGraphNodes,
+            },
+          );
+        } catch (error) {
+          console.warn(`Symbol graph expansion failed: ${error}`);
+        }
+      }
+
+      // 8.5. Merge graph expansion results into topResults
+      // Load chunks discovered via graph traversal and add them with decaying scores
+      if (symbolExpansion && symbolExpansion.relatedChunkIds.length > 0) {
+        const existingIds = new Set(topResults.map((r) => r.id));
+        const newChunkIds = symbolExpansion.relatedChunkIds.filter(
+          (id) => !existingIds.has(id),
+        );
+
+        if (newChunkIds.length > 0) {
+          try {
+            const graphChunks = this.metadataStore.getChunksByIds(newChunkIds);
+
+            // Assign decaying scores based on graph distance
+            // Use the lowest score from topResults as the base, then decay
+            const baseScore =
+              topResults.length > 0
+                ? topResults[topResults.length - 1]!.fusedScore * 0.5
+                : 0.01;
+
+            const graphScoredChunks: FusedScoredChunk[] = graphChunks.map(
+              (chunk, idx) => ({
+                id: chunk.id,
+                filePath: chunk.filepath,
+                content: chunk.content,
+                startLine: chunk.startLine,
+                endLine: chunk.endLine,
+                score: baseScore * (1 / (idx + 1)),
+                rank: topResults.length + idx + 1,
+                source: 'vector' as const,
+                fusedScore: baseScore * (1 / (idx + 1)),
+                sources: ['vector' as const],
+              }),
+            );
+
+            // Append graph-discovered chunks within token budget
+            topResults.push(...graphScoredChunks);
+          } catch (error) {
+            console.warn(`Failed to load graph expansion chunks: ${error}`);
+          }
+        }
+      }
     }
 
     // 9. Build context views
     const textView = this.contextBuilder.buildTextView(topResults, maxTokens);
-    const graphView = subgraph
-      ? this.contextBuilder.buildGraphView(subgraph)
-      : null;
 
     return {
       chunks: topResults,
-      subgraph,
+      subgraph: null,
+      symbolExpansion,
       textView,
-      graphView,
+      graphView: null,
     };
   }
 
@@ -352,7 +420,11 @@ export class RetrievalService {
     try {
       const documents = results.map((c) => ({
         id: c.id,
-        content: c.content,
+        content: `
+        ${c.filePath}:${c.startLine}-${c.endLine}
+
+        ${c.content}
+        `,
       }));
 
       const rerankedScores = await this.reranker.rerank(query, documents);

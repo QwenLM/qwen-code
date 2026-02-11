@@ -18,13 +18,13 @@ import type {
   IEmbeddingService,
   IMetadataStore,
   IVectorStore,
-  IGraphStore,
+  ISymbolGraphStore,
   BuildCheckpoint,
 } from './types.js';
 import { DEFAULT_INDEX_CONFIG } from './defaults.js';
 import { FileScanner } from './fileScanner.js';
 import { ChunkingService } from './chunkingService.js';
-import { EntityExtractor } from './entityExtractor.js';
+import { SymbolExtractor } from './symbolExtractor.js';
 import { EmbeddingService, type ILlmClient } from './embeddingService.js';
 import { EmbeddingCache } from './embeddingCache.js';
 import { parseFile } from './treeSitterParser.js';
@@ -40,7 +40,7 @@ export type ProgressCallback = (progress: IndexingProgress) => void;
 
 /**
  * IndexManager coordinates the entire indexing pipeline:
- * Scanner → Chunker → EntityExtractor → Embedder → Store
+ * Scanner → Chunker → SymbolExtractor → Embedder → Store
  */
 export class IndexManager {
   private projectRoot: string;
@@ -49,11 +49,11 @@ export class IndexManager {
   // Components
   private fileScanner: IFileScanner;
   private chunkingService: IChunkingService;
-  private entityExtractor: EntityExtractor;
+  private symbolExtractor: SymbolExtractor;
   private embeddingService: IEmbeddingService;
   private metadataStore: IMetadataStore;
   private vectorStore: IVectorStore;
-  private graphStore: IGraphStore | null;
+  private symbolGraphStore: ISymbolGraphStore | null;
 
   // State
   private progress: IndexingProgress;
@@ -74,8 +74,8 @@ export class IndexManager {
     metadataStore: IMetadataStore,
     vectorStore: IVectorStore,
     llmClient: ILlmClient,
-    graphStore: IGraphStore | null = null,
     config: Partial<IndexConfig> = {},
+    symbolGraphStore: ISymbolGraphStore | null = null,
   ) {
     this.projectRoot = path.resolve(projectRoot);
     this.config = { ...DEFAULT_INDEX_CONFIG, ...config };
@@ -86,7 +86,7 @@ export class IndexManager {
       maxChunkTokens: this.config.chunkMaxTokens,
       overlapTokens: this.config.chunkOverlapTokens,
     });
-    this.entityExtractor = new EntityExtractor();
+    this.symbolExtractor = new SymbolExtractor(this.projectRoot);
 
     // Initialize embedding service with cache
     const embeddingCache = new EmbeddingCache(metadataStore);
@@ -96,7 +96,7 @@ export class IndexManager {
 
     this.metadataStore = metadataStore;
     this.vectorStore = vectorStore;
-    this.graphStore = graphStore;
+    this.symbolGraphStore = symbolGraphStore;
 
     // Initialize profiler
     this.profiler = PerformanceProfiler.getInstance();
@@ -190,6 +190,9 @@ export class IndexManager {
       // Phase 4: Store to vector database
       await this.storePhase();
 
+      // Phase 5: Resolve cross-file symbol edges by global name matching
+      this.resolveSymbolEdges();
+
       // Mark as done
       this.updateProgress({
         status: 'done',
@@ -247,6 +250,9 @@ export class IndexManager {
       if (filesToProcess.length > 0) {
         await this.processFiles(filesToProcess);
       }
+
+      // Resolve cross-file symbol edges by global name matching
+      this.resolveSymbolEdges();
 
       this.updateProgress({ status: 'done' });
     } catch (error) {
@@ -365,6 +371,9 @@ export class IndexManager {
         }
       }
 
+      // Resolve cross-file symbol edges by global name matching
+      this.resolveSymbolEdges();
+
       // Optimize vector store at the end
       this.updateProgress({ status: 'storing', phase: 4, phaseProgress: 50 });
       this.vectorStore.optimize();
@@ -422,17 +431,13 @@ export class IndexManager {
         this.metadataStore.insertChunks(chunks);
         totalChunks += chunks.length;
 
-        // Extract entities (if graph enabled) using same AST
-        if (this.graphStore && this.config.enableGraph) {
-          const { entities, relations } = await this.entityExtractor.extract(
-            file.path,
-            content,
-            undefined,
-            parseResult,
-          );
-          await this.graphStore.insertEntities(entities);
-          await this.graphStore.insertRelations(relations);
-        }
+        // Extract symbols for symbol graph (using same AST)
+        await this.extractAndStoreSymbols(
+          file.path,
+          content,
+          chunks,
+          parseResult,
+        );
 
         // Generate embeddings and store immediately
         const chunkEmbeddings = await this.embeddingService.embedChunks(chunks);
@@ -554,25 +559,17 @@ export class IndexManager {
           );
           batchChunks.push(...chunks);
 
-          // Extract entities if graph store is enabled (using same AST)
-          if (this.graphStore && this.config.enableGraph) {
-            const { entities, relations } = await this.profiler.trackAsync(
-              'EntityExtractor.extract',
-              () =>
-                this.entityExtractor.extract(
-                  file.path,
-                  content,
-                  undefined,
-                  parseResult,
-                ),
-            );
-            await this.profiler.trackAsync('GraphStore.insertEntities', () =>
-              this.graphStore!.insertEntities(entities),
-            );
-            await this.profiler.trackAsync('GraphStore.insertRelations', () =>
-              this.graphStore!.insertRelations(relations),
-            );
-          }
+          // Extract symbols for symbol graph (using same AST)
+          await this.profiler.trackAsync(
+            'SymbolExtractor.extractAndStore',
+            () =>
+              this.extractAndStoreSymbols(
+                file.path,
+                content,
+                chunks,
+                parseResult,
+              ),
+          );
 
           chunkedFiles++;
         } catch (error) {
@@ -691,6 +688,75 @@ export class IndexManager {
   // ===== Helper Methods =====
 
   /**
+   * Resolve cross-file symbol edges by global name matching.
+   * Called after all files are processed (full build or incremental update).
+   *
+   * During per-file extraction, cross-file references are stored with
+   * placeholder target IDs like `?#symbolName`. This method triggers
+   * SqliteGraphStore.resolveEdgesByName() to batch-resolve them
+   * by matching names globally against the symbols table.
+   */
+  private resolveSymbolEdges(): void {
+    if (!this.symbolGraphStore || !this.config.enableGraph) return;
+
+    try {
+      const resolved = this.symbolGraphStore.resolveEdgesByName();
+      if (resolved > 0) {
+        console.log(
+          `Resolved ${resolved} cross-file symbol edges by name matching`,
+        );
+      }
+    } catch (error) {
+      console.warn(`Cross-file symbol edge resolution failed: ${error}`);
+    }
+  }
+
+  /**
+   * Extract symbols and store them in the symbol graph store.
+   * Best-effort: failures are logged but don't block the pipeline.
+   *
+   * @param filePath - Relative file path.
+   * @param content - File content.
+   * @param chunks - Chunks produced by the chunking service (for chunk mapping).
+   * @param parseResult - Optional pre-parsed AST to avoid re-parsing.
+   */
+  private async extractAndStoreSymbols(
+    filePath: string,
+    content: string,
+    chunks: Chunk[],
+    parseResult?: Awaited<ReturnType<typeof parseFile>> | null,
+  ): Promise<void> {
+    if (!this.symbolGraphStore || !this.config.enableGraph) return;
+
+    try {
+      const symbolResult = await this.symbolExtractor.extract(
+        filePath,
+        content,
+        parseResult,
+      );
+      if (symbolResult.symbols.length > 0) {
+        this.symbolGraphStore.insertSymbols(symbolResult.symbols);
+      }
+      if (symbolResult.edges.length > 0) {
+        this.symbolGraphStore.insertEdges(symbolResult.edges);
+      }
+      if (symbolResult.imports.length > 0) {
+        this.symbolGraphStore.insertImports(symbolResult.imports);
+      }
+      // Map chunks to symbols by line range
+      const chunkMappings = chunks.map((c) => ({
+        chunkId: c.id,
+        startLine: c.startLine,
+        endLine: c.endLine,
+      }));
+      this.symbolGraphStore.updateChunkMappings(filePath, chunkMappings);
+    } catch (error) {
+      // Symbol extraction is best-effort; don't fail the file
+      console.warn(`Symbol extraction failed for ${filePath}: ${error}`);
+    }
+  }
+
+  /**
    * Process a set of files through the pipeline.
    */
   private async processFiles(files: FileMetadata[]): Promise<void> {
@@ -701,19 +767,24 @@ export class IndexManager {
       try {
         const content = await this.readFileContent(file.path);
 
+        // Parse AST once for chunking, entity extraction, and symbol extraction
+        const parseResult = await parseFile(file.path, content);
+
         // Chunk the file
-        const chunks = await this.chunkingService.chunkFile(file.path, content);
+        const chunks = await this.chunkingService.chunkFile(
+          file.path,
+          content,
+          parseResult,
+        );
         this.metadataStore.insertChunks(chunks);
 
-        // Extract entities
-        if (this.graphStore && this.config.enableGraph) {
-          const { entities, relations } = await this.entityExtractor.extract(
-            file.path,
-            content,
-          );
-          await this.graphStore.insertEntities(entities);
-          await this.graphStore.insertRelations(relations);
-        }
+        // Extract symbols for symbol graph
+        await this.extractAndStoreSymbols(
+          file.path,
+          content,
+          chunks,
+          parseResult,
+        );
 
         // Generate embeddings and store
         const chunkEmbeddings = await this.embeddingService.embedChunks(chunks);
@@ -736,9 +807,9 @@ export class IndexManager {
       // Delete from vector store
       await this.vectorStore.deleteByFilePath(filePath);
 
-      // Delete from graph store
-      if (this.graphStore) {
-        await this.graphStore.deleteByFilePath(filePath);
+      // Delete from symbol graph store
+      if (this.symbolGraphStore) {
+        this.symbolGraphStore.deleteByFilePath(filePath);
       }
     }
   }

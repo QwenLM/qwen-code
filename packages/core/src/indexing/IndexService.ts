@@ -22,13 +22,12 @@ import type {
 import { hasChanges } from './types.js';
 import { MetadataStore, getIndexDir } from './stores/metadataStore.js';
 import { VectorStore } from './stores/vectorStore.js';
-import { GraphStore } from './stores/graphStore.js';
+import { SqliteGraphStore } from './stores/sqliteGraphStore.js';
 import { DEFAULT_INDEX_CONFIG } from './defaults.js';
 import { ChangeDetector } from './changeDetector.js';
 import { BranchHandler } from './branchHandler.js';
 import { FileScanner } from './fileScanner.js';
 import { RetrievalService } from './retrievalService.js';
-import type { IGraphStore } from './types.js';
 import { EmbeddingLlmClient } from './embeddingLlmClient.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
 
@@ -773,21 +772,21 @@ export class IndexService extends EventEmitter {
       // Initialize vector store
       await vectorStore.initialize();
 
-      let graphStore: GraphStore | undefined;
+      let symbolGraphStore: SqliteGraphStore | undefined;
       if (this.config.enableGraph) {
-        graphStore = new GraphStore(this.projectHash);
-        await graphStore.initialize();
+        try {
+          symbolGraphStore = new SqliteGraphStore(this.projectHash);
+          symbolGraphStore.initialize();
+        } catch (error) {
+          console.warn('Failed to initialize SqliteGraphStore:', error);
+        }
       }
-
-      // Create dummy graph store if not enabled
-      const effectiveGraphStore = graphStore ?? this.createDummyGraphStore();
 
       const embeddingLlmClient = new EmbeddingLlmClient(this.llmClientConfig!);
 
       this.retrievalService = new RetrievalService(
         metadataStore,
         vectorStore,
-        effectiveGraphStore,
         this.baseLlmClient,
         embeddingLlmClient,
         {
@@ -806,6 +805,8 @@ export class IndexService extends EventEmitter {
             recent: 0.5,
           },
         },
+        {}, // queryEnhancerConfig
+        symbolGraphStore ?? null,
       );
 
       return this.retrievalService;
@@ -823,22 +824,6 @@ export class IndexService extends EventEmitter {
    */
   setBaseLlmClient(client: BaseLlmClient): void {
     this.baseLlmClient = client;
-  }
-
-  /**
-   * Creates a dummy graph store for when graph is disabled.
-   */
-  private createDummyGraphStore(): IGraphStore {
-    return {
-      initialize: async () => {},
-      close: async () => {},
-      insertEntities: async () => {},
-      insertRelations: async () => {},
-      getEntitiesByChunkIds: async () => [],
-      query: async () => [],
-      deleteByFilePath: async () => {},
-      getStats: async () => ({ nodeCount: 0, edgeCount: 0 }),
-    };
   }
 
   // ===== Event Emitter Type Safety =====

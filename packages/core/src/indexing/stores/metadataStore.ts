@@ -433,6 +433,49 @@ export class MetadataStore implements IMetadataStore {
   }
 
   /**
+   * Get chunks by their IDs.
+   * Used by graph expansion to load related chunks discovered via traversal.
+   * @param chunkIds Array of chunk IDs to retrieve.
+   * @returns Array of chunks found (may be fewer than requested if some IDs don't exist).
+   */
+  getChunksByIds(chunkIds: string[]): Chunk[] {
+    if (chunkIds.length === 0) return [];
+
+    const placeholders = chunkIds.map(() => '?').join(',');
+    const rows = this.db
+      .prepare(
+        `SELECT id, file_path, content, start_line, end_line, chunk_index,
+                content_hash, chunk_type, metadata_json
+         FROM chunks WHERE id IN (${placeholders})`,
+      )
+      .all(...chunkIds) as Array<{
+      id: string;
+      file_path: string;
+      content: string;
+      start_line: number;
+      end_line: number;
+      chunk_index: number;
+      content_hash: string;
+      chunk_type: string;
+      metadata_json: string;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      filepath: row.file_path,
+      content: row.content,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      index: row.chunk_index,
+      contentHash: row.content_hash,
+      type: (row.chunk_type || 'block') as import('../types.js').ChunkType,
+      metadata: row.metadata_json
+        ? JSON.parse(row.metadata_json)
+        : { language: '' },
+    }));
+  }
+
+  /**
    * Performs BM25 full-text search on chunks.
    * @param query Search query string.
    * @param limit Maximum number of results.
