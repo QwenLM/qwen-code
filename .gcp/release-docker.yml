@@ -42,11 +42,11 @@ steps:
     args:
       - '-c'
       - |-
-        export GEMINI_SANDBOX_IMAGE_TAG=$$(cat /workspace/image_tag.txt)
-        echo "Using Docker image tag for build: $$GEMINI_SANDBOX_IMAGE_TAG"
+        export QWEN_SANDBOX_IMAGE_TAG=$$(cat /workspace/image_tag.txt)
+        echo "Using Docker image tag for build: $$QWEN_SANDBOX_IMAGE_TAG"
         npm run build:sandbox -- --output-file /workspace/final_image_uri.txt
     env:
-      - 'GEMINI_SANDBOX=$_CONTAINER_TOOL'
+      - 'QWEN_SANDBOX=$_CONTAINER_TOOL'
 
   # Step 8: Publish sandbox container image
   - name: 'us-west1-docker.pkg.dev/gemini-code-dev/gemini-code-containers/gemini-code-builder'
@@ -61,7 +61,7 @@ steps:
         echo "Pushing sandbox image: $${FINAL_IMAGE_URI}"
         $_CONTAINER_TOOL push "$${FINAL_IMAGE_URI}"
     env:
-      - 'GEMINI_SANDBOX=$_CONTAINER_TOOL'
+      - 'QWEN_SANDBOX=$_CONTAINER_TOOL'
 
 options:
   defaultLogsBucketBehavior: 'REGIONAL_USER_OWNED_BUCKET'
