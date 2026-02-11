@@ -1118,6 +1118,7 @@ export default {
   // ============================================================================
   'Waiting for user confirmation...': '等待用户确认...',
   '(esc to cancel, {{time}})': '（按 esc 取消，{{time}}）',
+  '(esc to cancel)': '（按 esc 取消）',
   WITTY_LOADING_PHRASES: [
     // --- 职场搬砖系列 ---
     '正在努力搬砖，请稍候...',

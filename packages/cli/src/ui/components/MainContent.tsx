@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static } from 'ink';
+import { Box, Static, Text } from 'ink';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -13,6 +13,8 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
+import { theme } from '../semantic-colors.js';
+import { t } from '../../i18n/index.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -25,6 +27,7 @@ export const MainContent = () => {
   const uiState = useUIState();
   const {
     pendingHistoryItems,
+    pendingSlashCommandHistoryItems,
     terminalWidth,
     mainAreaWidth,
     staticAreaMaxItemHeight,
@@ -72,6 +75,11 @@ export const MainContent = () => {
               embeddedShellFocused={uiState.embeddedShellFocused}
             />
           ))}
+          {pendingSlashCommandHistoryItems.length > 0 && (
+            <Box paddingLeft={2}>
+              <Text color={theme.text.secondary}>{t('(esc to cancel)')}</Text>
+            </Box>
+          )}
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>

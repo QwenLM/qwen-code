@@ -1178,6 +1178,7 @@ export default {
   // ============================================================================
   'Waiting for user confirmation...': 'Waiting for user confirmation...',
   '(esc to cancel, {{time}})': '(esc to cancel, {{time}})',
+  '(esc to cancel)': '(esc to cancel)',
 
   // ============================================================================
   // Loading Phrases
