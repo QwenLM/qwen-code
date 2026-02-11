@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -10,31 +10,30 @@ import {
   HookType,
   createHookOutput,
   DefaultHookOutput,
-  BeforeToolHookOutput,
-  BeforeModelHookOutput,
-  AfterModelHookOutput,
-  BeforeToolSelectionHookOutput,
+  PreToolUseHookOutput,
+  PostToolUseHookOutput,
+  UserPromptSubmitHookOutput,
+  StopHookOutput,
   NotificationType,
   SessionStartSource,
   SessionEndReason,
-  PreCompressTrigger,
+  PreCompactTrigger,
 } from './types.js';
 
 describe('Hook Types', () => {
   describe('HookEventName', () => {
-    it('should contain all required event names', () => {
+    it('should contain event names', () => {
       const expectedEvents = [
-        'BeforeTool',
-        'AfterTool',
-        'BeforeAgent',
+        'PreToolUse',
+        'PostToolUse',
+        'PermissionRequest',
+        'UserPromptSubmit',
+        'Stop',
+        'SubagentStop',
         'Notification',
-        'AfterAgent',
+        'PreCompact',
         'SessionStart',
         'SessionEnd',
-        'PreCompress',
-        'BeforeModel',
-        'AfterModel',
-        'BeforeToolSelection',
       ];
 
       for (const event of expectedEvents) {
@@ -50,8 +49,11 @@ describe('Hook Types', () => {
   });
 
   describe('NotificationType', () => {
-    it('should contain ToolPermission type', () => {
-      expect(NotificationType.ToolPermission).toBe('ToolPermission');
+    it('should contain all notification types', () => {
+      expect(NotificationType.PermissionPrompt).toBe('permission_prompt');
+      expect(NotificationType.IdlePrompt).toBe('idle_prompt');
+      expect(NotificationType.AuthSuccess).toBe('auth_success');
+      expect(NotificationType.ElicitationDialog).toBe('elicitation_dialog');
     });
   });
 
@@ -60,13 +62,12 @@ describe('Hook Types', () => {
       expect(SessionStartSource.Startup).toBe('startup');
       expect(SessionStartSource.Resume).toBe('resume');
       expect(SessionStartSource.Clear).toBe('clear');
-      expect(SessionStartSource.Compress).toBe('compress');
+      expect(SessionStartSource.Compact).toBe('compact');
     });
   });
 
   describe('SessionEndReason', () => {
     it('should contain all session end reasons', () => {
-      expect(SessionEndReason.Exit).toBe('exit');
       expect(SessionEndReason.Clear).toBe('clear');
       expect(SessionEndReason.Logout).toBe('logout');
       expect(SessionEndReason.PromptInputExit).toBe('prompt_input_exit');
@@ -74,10 +75,10 @@ describe('Hook Types', () => {
     });
   });
 
-  describe('PreCompressTrigger', () => {
-    it('should contain all pre-compress triggers', () => {
-      expect(PreCompressTrigger.Manual).toBe('manual');
-      expect(PreCompressTrigger.Auto).toBe('auto');
+  describe('PreCompactTrigger', () => {
+    it('should contain all pre-compact triggers', () => {
+      expect(PreCompactTrigger.Manual).toBe('manual');
+      expect(PreCompactTrigger.Auto).toBe('auto');
     });
   });
 
@@ -167,28 +168,65 @@ describe('Hook Types', () => {
     });
   });
 
-  describe('BeforeToolHookOutput', () => {
-    it('should check compatibility permissionDecision field', () => {
-      const output = new BeforeToolHookOutput({
+  describe('PreToolUseHookOutput', () => {
+    it('should check permissionDecision field for blocking', () => {
+      const output = new PreToolUseHookOutput({
         hookSpecificOutput: {
-          permissionDecision: 'block',
+          permissionDecision: 'deny',
         },
       });
       expect(output.isBlockingDecision()).toBe(true);
+      expect(output.getPermissionDecision()).toBe('deny');
     });
 
-    it('should get compatibility permissionDecisionReason field', () => {
-      const output = new BeforeToolHookOutput({
+    it('should check decision.behavior field for blocking (PermissionRequest style)', () => {
+      const output = new PreToolUseHookOutput({
         hookSpecificOutput: {
-          permissionDecisionReason: 'Compatibility reason',
+          decision: {
+            behavior: 'deny',
+            message: 'Access denied',
+          },
         },
       });
-      expect(output.getEffectiveReason()).toBe('Compatibility reason');
+      expect(output.isBlockingDecision()).toBe(true);
+      expect(output.getEffectiveReason()).toBe('Access denied');
+    });
+
+    it('should get permissionDecisionReason field', () => {
+      const output = new PreToolUseHookOutput({
+        hookSpecificOutput: {
+          permissionDecisionReason: 'Permission denied by policy',
+        },
+      });
+      expect(output.getEffectiveReason()).toBe('Permission denied by policy');
+    });
+
+    it('should get updated tool input (PreToolUse style)', () => {
+      const updatedInput = { path: '/updated/path' };
+      const output = new PreToolUseHookOutput({
+        hookSpecificOutput: {
+          updatedInput,
+        },
+      });
+      expect(output.getUpdatedToolInput()).toEqual(updatedInput);
+    });
+
+    it('should get updated tool input (PermissionRequest style)', () => {
+      const updatedInput = { path: '/updated/path' };
+      const output = new PreToolUseHookOutput({
+        hookSpecificOutput: {
+          decision: {
+            behavior: 'allow',
+            updatedInput,
+          },
+        },
+      });
+      expect(output.getUpdatedToolInput()).toEqual(updatedInput);
     });
 
     it('should fall back to standard fields when no compatibility fields', () => {
-      const output = new BeforeToolHookOutput({
-        decision: 'deny',
+      const output = new PreToolUseHookOutput({
+        decision: 'block',
         reason: 'Standard reason',
       });
       expect(output.isBlockingDecision()).toBe(true);
@@ -196,45 +234,108 @@ describe('Hook Types', () => {
     });
   });
 
-  describe('AfterModelHookOutput', () => {
-    it('should create synthetic stop response when execution stopped', () => {
-      const output = new AfterModelHookOutput({
-        continue: false,
-        reason: 'User requested stop',
+  describe('PostToolUseHookOutput', () => {
+    it('should get additional context', () => {
+      const output = new PostToolUseHookOutput({
+        hookSpecificOutput: {
+          additionalContext: 'Additional context from hook',
+        },
       });
-      const modifiedResponse = output.getModifiedResponse();
-      expect(modifiedResponse).toBeDefined();
+      expect(output.getAdditionalContext()).toBe(
+        'Additional context from hook',
+      );
     });
 
-    it('should return undefined when not stopped and no modified response', () => {
-      const output = new AfterModelHookOutput({});
-      expect(output.getModifiedResponse()).toBeUndefined();
+    it('should return undefined when no additional context', () => {
+      const output = new PostToolUseHookOutput({});
+      expect(output.getAdditionalContext()).toBeUndefined();
+    });
+  });
+
+  describe('UserPromptSubmitHookOutput', () => {
+    it('should get additional context', () => {
+      const output = new UserPromptSubmitHookOutput({
+        hookSpecificOutput: {
+          additionalContext: 'User prompt context',
+        },
+      });
+      expect(output.getAdditionalContext()).toBe('User prompt context');
+    });
+
+    it('should return undefined when no additional context', () => {
+      const output = new UserPromptSubmitHookOutput({});
+      expect(output.getAdditionalContext()).toBeUndefined();
+    });
+  });
+
+  describe('StopHookOutput', () => {
+    it('should check if stop should be blocked (continue execution)', () => {
+      const output = new StopHookOutput({
+        decision: 'block',
+        reason: 'Continue working',
+      });
+      expect(output.shouldContinueExecution()).toBe(true);
+      expect(output.getContinueReason()).toBe('Continue working');
+    });
+
+    it('should check continue field for stopping', () => {
+      const output = new StopHookOutput({
+        continue: false,
+        reason: 'Please continue',
+      });
+      expect(output.shouldContinueExecution()).toBe(true);
+      expect(output.getContinueReason()).toBe('Please continue');
     });
   });
 
   describe('createHookOutput', () => {
-    it('should create BeforeModelHookOutput for BeforeModel event', () => {
-      const output = createHookOutput('BeforeModel', {});
-      expect(output).toBeInstanceOf(BeforeModelHookOutput);
+    it('should create PreToolUseHookOutput for PreToolUse event', () => {
+      const output = createHookOutput('PreToolUse', {});
+      expect(output).toBeInstanceOf(PreToolUseHookOutput);
     });
 
-    it('should create AfterModelHookOutput for AfterModel event', () => {
-      const output = createHookOutput('AfterModel', {});
-      expect(output).toBeInstanceOf(AfterModelHookOutput);
+    it('should create PreToolUseHookOutput for PermissionRequest event', () => {
+      const output = createHookOutput('PermissionRequest', {});
+      expect(output).toBeInstanceOf(PreToolUseHookOutput);
     });
 
-    it('should create BeforeToolSelectionHookOutput for BeforeToolSelection event', () => {
-      const output = createHookOutput('BeforeToolSelection', {});
-      expect(output).toBeInstanceOf(BeforeToolSelectionHookOutput);
+    it('should create PostToolUseHookOutput for PostToolUse event', () => {
+      const output = createHookOutput('PostToolUse', {});
+      expect(output).toBeInstanceOf(PostToolUseHookOutput);
     });
 
-    it('should create DefaultHookOutput for BeforeTool event', () => {
-      const output = createHookOutput('BeforeTool', {});
+    it('should create UserPromptSubmitHookOutput for UserPromptSubmit event', () => {
+      const output = createHookOutput('UserPromptSubmit', {});
+      expect(output).toBeInstanceOf(UserPromptSubmitHookOutput);
+    });
+
+    it('should create StopHookOutput for Stop event', () => {
+      const output = createHookOutput('Stop', {});
+      expect(output).toBeInstanceOf(StopHookOutput);
+    });
+
+    it('should create StopHookOutput for SubagentStop event', () => {
+      const output = createHookOutput('SubagentStop', {});
+      expect(output).toBeInstanceOf(StopHookOutput);
+    });
+
+    it('should create DefaultHookOutput for Notification event', () => {
+      const output = createHookOutput('Notification', {});
       expect(output).toBeInstanceOf(DefaultHookOutput);
     });
 
-    it('should create DefaultHookOutput for AfterAgent event', () => {
-      const output = createHookOutput('AfterAgent', {});
+    it('should create DefaultHookOutput for SessionStart event', () => {
+      const output = createHookOutput('SessionStart', {});
+      expect(output).toBeInstanceOf(DefaultHookOutput);
+    });
+
+    it('should create DefaultHookOutput for SessionEnd event', () => {
+      const output = createHookOutput('SessionEnd', {});
+      expect(output).toBeInstanceOf(DefaultHookOutput);
+    });
+
+    it('should create DefaultHookOutput for PreCompact event', () => {
+      const output = createHookOutput('PreCompact', {});
       expect(output).toBeInstanceOf(DefaultHookOutput);
     });
 
