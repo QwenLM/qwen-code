@@ -16,6 +16,9 @@ export * from './utils/configResolver.js';
 // Hooks
 export * from './hooks/types.js';
 export * from './hooks/aggregator.js';
+export * from './hooks/planner.js';
+export * from './hooks/registry.js';
+export * from './hooks/eventHandler.js';
 
 // Model configuration
 export {
