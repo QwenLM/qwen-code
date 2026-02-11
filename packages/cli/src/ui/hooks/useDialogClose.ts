@@ -7,7 +7,12 @@
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
 import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
-import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
+// OpenAICredentials type (previously imported from OpenAIKeyPrompt)
+interface OpenAICredentials {
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+}
 
 export interface DialogCloseOptions {
   // Theme dialog

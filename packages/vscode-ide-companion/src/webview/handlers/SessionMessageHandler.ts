@@ -247,6 +247,15 @@ export class SessionMessageHandler extends BaseMessageHandler {
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
 
+    // Guard: do not process empty or whitespace-only messages.
+    // This prevents ghost user-message bubbles when slash-command completions
+    // or model-selector interactions clear the input but still trigger a submit.
+    const trimmedText = text.replace(/\u200B/g, '').trim();
+    if (!trimmedText) {
+      console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
+
     // Format message with file context if present
     let formattedText = text;
     if (context && context.length > 0) {

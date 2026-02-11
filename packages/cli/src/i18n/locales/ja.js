@@ -679,6 +679,11 @@ export default {
   'Terms of Services and Privacy Notice for Qwen Code':
     'Qwen Code の利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
+  'Login with QwenChat account to use daily free quota.':
+    'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
+  'API-KEY': 'API-KEY',
+  'Use coding plan credentials or your own api-keys/providers.':
+    'Coding Planの認証情報またはご自身のAPIキー/プロバイダーをご利用ください。',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}':
     'ログインに失敗しました。メッセージ: {{message}}',
@@ -882,4 +887,37 @@ export default {
     'コードが壊れた?叩けば治るさ',
     'USBの差し込みに挑戦中...',
   ],
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    'モデルを手動で設定したい上級ユーザー向け。',
+  'Please configure your models in settings.json:':
+    'settings.json でモデルを設定してください：',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    '環境変数を使用して API キーを設定してください（例：OPENAI_API_KEY）',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "modelProviders['openai']（または他の認証タイプ）にモデル設定を追加してください",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    '各プロバイダーには：id、envKey（必須）、およびオプションの baseUrl、generationConfig が必要です',
+  'Use /model command to select your preferred model from the configured list':
+    '/model コマンドを使用して、設定済みリストからお好みのモデルを選択してください',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    'サポートされている認証タイプ：openai、anthropic、gemini、vertex-ai など',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    'Bailian Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
+  Custom: 'カスタム',
+  'More instructions about configuring `modelProviders` manually.':
+    '`modelProviders`を手動で設定する方法の詳細はこちら。',
+  'Select API-KEY configuration mode:': 'API-KEY設定モードを選択してください：',
+  '(Press Escape to go back)': '(Escapeキーで戻る)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enterで送信、Escapeでキャンセル)',
+  'More instructions please check:': '詳細な手順はこちらをご確認ください：',
 };

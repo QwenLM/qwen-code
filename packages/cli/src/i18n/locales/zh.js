@@ -886,6 +886,10 @@ export default {
   'Terms of Services and Privacy Notice for Qwen Code':
     'Qwen Code 的服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
+  'Login with QwenChat account to use daily free quota.':
+    '使用 QwenChat 账号登录，享受每日免费额度。',
+  'Use coding plan credentials or your own api-keys/providers.':
+    '使用 Coding Plan 凭证或您自己的 API 密钥/提供商。',
   OpenAI: 'OpenAI',
   'Failed to login. Message: {{message}}': '登录失败。消息：{{message}}',
   'Authentication is enforced to be {{enforcedType}}, but you are currently using {{currentType}}.':
@@ -1198,4 +1202,45 @@ export default {
     '正在浏览器中打开扩展页面：{{url}}',
   'Failed to open browser. Check out the extensions gallery at {{url}}':
     '打开浏览器失败。请访问扩展市场：{{url}}',
+
+  // ============================================================================
+  // Coding Plan Authentication
+  // ============================================================================
+  'Please enter your API key:': '请输入您的 API Key：',
+  'API key cannot be empty.': 'API Key 不能为空。',
+  'API key is stored in settings.env. You can migrate it to a .env file for better security.':
+    'API Key 已存储在 settings.env 中。您可以将其迁移到 .env 文件以获得更好的安全性。',
+
+  // ============================================================================
+  // Custom API-KEY Configuration
+  // ============================================================================
+  'For advanced users who want to configure models manually.':
+    '适合需要手动配置模型的高级用户。',
+  'Please configure your models in settings.json:':
+    '请在 settings.json 中配置您的模型：',
+  'Set API key via environment variable (e.g., OPENAI_API_KEY)':
+    '通过环境变量设置 API Key（例如：OPENAI_API_KEY）',
+  "Add model configuration to modelProviders['openai'] (or other auth types)":
+    "将模型配置添加到 modelProviders['openai']（或其他认证类型）",
+  'Each provider needs: id, envKey (required), plus optional baseUrl, generationConfig':
+    '每个提供商需要：id、envKey（必需），以及可选的 baseUrl、generationConfig',
+  'Use /model command to select your preferred model from the configured list':
+    '使用 /model 命令从配置列表中选择您偏好的模型',
+  'Supported auth types: openai, anthropic, gemini, vertex-ai, etc.':
+    '支持的认证类型：openai、anthropic、gemini、vertex-ai 等',
+  'More instructions please check:': '更多说明请查看：',
+
+  // ============================================================================
+  // Auth Dialog - View Titles and Labels
+  // ============================================================================
+  'API-KEY': 'API-KEY',
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of Bailian Coding Plan and you're all set!":
+    '粘贴您的百炼 Coding Plan API Key，即可完成设置！',
+  Custom: '自定义',
+  'More instructions about configuring `modelProviders` manually.':
+    '关于手动配置 `modelProviders` 的更多说明。',
+  'Select API-KEY configuration mode:': '选择 API-KEY 配置模式：',
+  '(Press Escape to go back)': '(按 Escape 键返回)',
+  '(Press Enter to submit, Escape to cancel)': '(按 Enter 提交，Escape 取消)',
 };

@@ -1,5 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import type { SubagentConfig } from '@qwen-code/qwen-code-core';
+import type {
+  SubagentConfig,
+  McpToolProgressData,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Annotation for attaching metadata to content blocks
@@ -236,12 +239,19 @@ export interface MessageStopStreamEvent {
   type: 'message_stop';
 }
 
+export interface ToolProgressStreamEvent {
+  type: 'tool_progress';
+  tool_use_id: string;
+  content: McpToolProgressData;
+}
+
 export type StreamEvent =
   | MessageStartStreamEvent
   | ContentBlockStartEvent
   | ContentBlockDeltaEvent
   | ContentBlockStopEvent
-  | MessageStopStreamEvent;
+  | MessageStopStreamEvent
+  | ToolProgressStreamEvent;
 
 export interface CLIPartialAssistantMessage {
   type: 'stream_event';

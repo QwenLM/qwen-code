@@ -17,7 +17,6 @@ import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
-import { OpenAIKeyPrompt } from './OpenAIKeyPrompt.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { PermissionsModifyTrustDialog } from './PermissionsModifyTrustDialog.js';
 import { ModelDialog } from './ModelDialog.js';
@@ -55,16 +54,6 @@ export const DialogManager = ({
   const uiActions = useUIActions();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
-
-  const getDefaultOpenAIConfig = () => {
-    const fromSettings = settings.merged.security?.auth;
-    const modelSettings = settings.merged.model;
-    return {
-      apiKey: fromSettings?.apiKey || process.env['OPENAI_API_KEY'] || '',
-      baseUrl: fromSettings?.baseUrl || process.env['OPENAI_BASE_URL'] || '',
-      model: modelSettings?.name || process.env['OPENAI_MODEL'] || '',
-    };
-  };
 
   if (uiState.showWelcomeBackDialog && uiState.welcomeBackInfo?.hasHistory) {
     return (
@@ -251,28 +240,8 @@ export const DialogManager = ({
   }
 
   if (uiState.isAuthenticating) {
-    if (uiState.pendingAuthType === AuthType.USE_OPENAI) {
-      const defaults = getDefaultOpenAIConfig();
-      return (
-        <OpenAIKeyPrompt
-          onSubmit={(apiKey, baseUrl, model) => {
-            uiActions.handleAuthSelect(AuthType.USE_OPENAI, {
-              apiKey,
-              baseUrl,
-              model,
-            });
-          }}
-          onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
-          }}
-          defaultApiKey={defaults.apiKey}
-          defaultBaseUrl={defaults.baseUrl}
-          defaultModel={defaults.model}
-        />
-      );
-    }
-
+    // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
+    // Qwen OAuth remains as a separate flow
     if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
       return (
         <QwenOAuthProgress

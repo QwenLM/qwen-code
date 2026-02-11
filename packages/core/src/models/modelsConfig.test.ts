@@ -1297,4 +1297,213 @@ describe('ModelsConfig', () => {
       });
     });
   });
+
+  describe('reloadModelProvidersConfig', () => {
+    it('should reload model providers configuration', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      });
+
+      // Verify initial model
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      expect(modelsConfig.getModel()).toBe('gpt-4');
+
+      // Reload with new config
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+      });
+
+      // After reload, old model should not exist
+      expect(
+        modelsConfig.getAllConfiguredModels().find((m) => m.id === 'gpt-4'),
+      ).toBeUndefined();
+      expect(
+        modelsConfig.getAllConfiguredModels().find((m) => m.id === 'gpt-3.5'),
+      ).toBeDefined();
+    });
+
+    it('should preserve current model selection if still available after reload', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4', name: 'GPT-4' },
+            { id: 'gpt-3.5', name: 'GPT-3.5' },
+          ],
+        },
+      });
+
+      await modelsConfig.switchModel(AuthType.USE_OPENAI, 'gpt-4');
+      expect(modelsConfig.getModel()).toBe('gpt-4');
+
+      // Reload with config that still includes gpt-4
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [
+          { id: 'gpt-4', name: 'GPT-4 Updated' },
+          { id: 'new-model', name: 'New Model' },
+        ],
+      });
+
+      // Current model should still be available
+      const availableModels = modelsConfig.getAllConfiguredModels();
+      expect(availableModels.find((m) => m.id === 'gpt-4')).toBeDefined();
+      expect(availableModels.find((m) => m.id === 'new-model')).toBeDefined();
+    });
+
+    it('should update available models after reload', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      });
+
+      const initialModels = modelsConfig.getAllConfiguredModels();
+      expect(initialModels.some((m) => m.id === 'gpt-4')).toBe(true);
+      expect(initialModels.some((m) => m.id === 'gemini-pro')).toBe(false);
+
+      // Reload with different config
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+      });
+
+      const updatedModels = modelsConfig.getAllConfiguredModels();
+      expect(updatedModels.some((m) => m.id === 'gpt-4')).toBe(false);
+      expect(updatedModels.some((m) => m.id === 'gpt-3.5')).toBe(true);
+      expect(updatedModels.some((m) => m.id === 'gemini-pro')).toBe(true);
+    });
+
+    it('should handle reload with empty config', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+          gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
+      });
+
+      expect(
+        modelsConfig
+          .getAllConfiguredModels()
+          .filter((m) => m.authType !== 'qwen-oauth').length,
+      ).toBeGreaterThan(0);
+
+      // Reload with empty config
+      modelsConfig.reloadModelProvidersConfig({});
+
+      // Only qwen-oauth models should remain
+      const models = modelsConfig.getAllConfiguredModels();
+      expect(models.every((m) => m.authType === 'qwen-oauth')).toBe(true);
+    });
+
+    it('should preserve qwen-oauth models after reload', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      });
+
+      const initialQwenModels = modelsConfig
+        .getAllConfiguredModels()
+        .filter((m) => m.authType === 'qwen-oauth');
+
+      modelsConfig.reloadModelProvidersConfig({
+        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+      });
+
+      // qwen-oauth models should still exist
+      const qwenModelsAfterReload = modelsConfig
+        .getAllConfiguredModels()
+        .filter((m) => m.authType === 'qwen-oauth');
+      expect(qwenModelsAfterReload.length).toBe(initialQwenModels.length);
+    });
+
+    it('should handle reload with undefined config', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        },
+      });
+
+      expect(
+        modelsConfig
+          .getAllConfiguredModels()
+          .filter((m) => m.authType === 'openai').length,
+      ).toBeGreaterThan(0);
+
+      modelsConfig.reloadModelProvidersConfig(undefined);
+
+      // User-configured models should be cleared
+      expect(
+        modelsConfig
+          .getAllConfiguredModels()
+          .filter((m) => m.authType === 'openai').length,
+      ).toBe(0);
+    });
+
+    it('should support multiple reloads', () => {
+      const modelsConfig = new ModelsConfig();
+
+      // First reload
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [{ id: 'model-v1', name: 'Model V1' }],
+      });
+      expect(
+        modelsConfig.getAllConfiguredModels().some((m) => m.id === 'model-v1'),
+      ).toBe(true);
+
+      // Second reload
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [{ id: 'model-v2', name: 'Model V2' }],
+      });
+      expect(
+        modelsConfig.getAllConfiguredModels().some((m) => m.id === 'model-v1'),
+      ).toBe(false);
+      expect(
+        modelsConfig.getAllConfiguredModels().some((m) => m.id === 'model-v2'),
+      ).toBe(true);
+
+      // Third reload with empty config
+      modelsConfig.reloadModelProvidersConfig({});
+      expect(
+        modelsConfig.getAllConfiguredModels().some((m) => m.id === 'model-v2'),
+      ).toBe(false);
+    });
+
+    it('should handle complex multi-authType reload', async () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [
+            { id: 'gpt-4', name: 'GPT-4' },
+            { id: 'gpt-3.5', name: 'GPT-3.5' },
+          ],
+          gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+        },
+      });
+
+      // Reload with completely different config
+      modelsConfig.reloadModelProvidersConfig({
+        openai: [{ id: 'new-openai', name: 'New OpenAI' }],
+        anthropic: [{ id: 'claude', name: 'Claude' }],
+        gemini: [{ id: 'gemini-ultra', name: 'Gemini Ultra' }],
+      });
+
+      const allModels = modelsConfig.getAllConfiguredModels();
+
+      // Old models should be gone
+      expect(allModels.some((m) => m.id === 'gpt-4')).toBe(false);
+      expect(allModels.some((m) => m.id === 'gpt-3.5')).toBe(false);
+      expect(allModels.some((m) => m.id === 'gemini-pro')).toBe(false);
+
+      // New models should exist
+      expect(allModels.some((m) => m.id === 'new-openai')).toBe(true);
+      expect(allModels.some((m) => m.id === 'claude')).toBe(true);
+      expect(allModels.some((m) => m.id === 'gemini-ultra')).toBe(true);
+    });
+  });
 });

@@ -5,7 +5,11 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ToolCallRequestInfo,
+  McpToolProgressData,
+} from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -265,6 +269,32 @@ export class StreamJsonOutputAdapter
         null,
       );
     }
+  }
+
+  /**
+   * Emits a tool progress stream event when partial messages are enabled.
+   * This overrides the no-op in BaseJsonOutputAdapter.
+   */
+  override emitToolProgress(
+    request: ToolCallRequestInfo,
+    progress: McpToolProgressData,
+  ): void {
+    if (!this.includePartialMessages) {
+      return;
+    }
+
+    const partial: CLIPartialAssistantMessage = {
+      type: 'stream_event',
+      uuid: randomUUID(),
+      session_id: this.getSessionId(),
+      parent_tool_use_id: null,
+      event: {
+        type: 'tool_progress',
+        tool_use_id: request.callId,
+        content: progress,
+      },
+    };
+    this.emitMessageImpl(partial);
   }
 
   /**

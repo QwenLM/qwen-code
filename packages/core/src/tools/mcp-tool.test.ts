@@ -8,9 +8,13 @@
 import type { Mocked } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
-import { DiscoveredMCPTool, generateValidName } from './mcp-tool.js'; // Added getStringifiedResultForDisplay
+import {
+  DiscoveredMCPTool,
+  generateValidName,
+  type McpDirectClient,
+} from './mcp-tool.js';
 import type { ToolResult } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js'; // Added ToolConfirmationOutcome
+import { ToolConfirmationOutcome } from './tools.js';
 import type { CallableTool, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 
@@ -957,6 +961,159 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe('{"param":"testValue","param2":"anotherOne"}');
+    });
+  });
+
+  describe('streaming progress for long-running MCP tools', () => {
+    it('should have canUpdateOutput set to true so the scheduler creates liveOutputCallback', () => {
+      // For long-running MCP tools (e.g., browseruse), the scheduler needs
+      // canUpdateOutput=true to create a liveOutputCallback. Without this,
+      // users see no progress during potentially minutes-long operations.
+      expect(tool.canUpdateOutput).toBe(true);
+    });
+
+    it('should forward MCP progress notifications to updateOutput callback during execution', async () => {
+      const params = { param: 'https://example.com' };
+
+      // Create a mock MCP direct client that simulates progress notifications.
+      // When callTool is called with an onprogress callback, it invokes
+      // the callback to simulate the MCP server sending progress updates.
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async (_params, _schema, options) => {
+          // Simulate 3 progress notifications from the MCP server
+          for (let i = 1; i <= 3; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            options?.onprogress?.({
+              progress: i,
+              total: 3,
+              message: `Step ${i} of 3`,
+            });
+          }
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Browser automation completed successfully.',
+              },
+            ],
+          };
+        }),
+      };
+
+      // Create a tool with the direct MCP client
+      const streamingTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined, // trust
+        undefined, // nameOverride
+        undefined, // cliConfig
+        mockMcpClient,
+      );
+
+      const invocation = streamingTool.build(params);
+      const updateOutputSpy = vi.fn();
+
+      const result = await invocation.execute(
+        new AbortController().signal,
+        updateOutputSpy,
+      );
+
+      // The final result should still be correct
+      expect(result.llmContent).toEqual([
+        { text: 'Browser automation completed successfully.' },
+      ]);
+
+      // The updateOutput callback SHOULD have been called at least once
+      // with intermediate progress, so users can see what's happening
+      // during the long wait.
+      expect(updateOutputSpy).toHaveBeenCalled();
+      expect(updateOutputSpy).toHaveBeenCalledTimes(3);
+      // Verify progress data contains structured MCP progress info
+      expect(updateOutputSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_tool_progress',
+          progress: 1,
+          total: 3,
+          message: 'Step 1 of 3',
+        }),
+      );
+      expect(updateOutputSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_tool_progress',
+          progress: 3,
+          total: 3,
+          message: 'Step 3 of 3',
+        }),
+      );
+    });
+
+    it('should show incremental progress for multi-step browser automation', async () => {
+      const params = { param: 'fill-form' };
+      const steps = [
+        'Navigating to page...',
+        'Filling username field...',
+        'Filling password field...',
+        'Clicking submit...',
+      ];
+
+      const mockMcpClient: McpDirectClient = {
+        callTool: vi.fn(async (_params, _schema, options) => {
+          for (let i = 0; i < steps.length; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            options?.onprogress?.({
+              progress: i + 1,
+              total: steps.length,
+              message: steps[i],
+            });
+          }
+          return {
+            content: [{ type: 'text', text: steps.join('\n') }],
+          };
+        }),
+      };
+
+      const streamingTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mockMcpClient,
+      );
+
+      const invocation = streamingTool.build(params);
+      const receivedUpdates: unknown[] = [];
+      const updateOutputCallback = (output: unknown) => {
+        receivedUpdates.push(output);
+      };
+
+      await invocation.execute(
+        new AbortController().signal,
+        updateOutputCallback,
+      );
+
+      // User should have received one update per step
+      expect(receivedUpdates.length).toBeGreaterThan(0);
+      expect(receivedUpdates).toHaveLength(steps.length);
+      // Each update should be structured McpToolProgressData
+      expect(receivedUpdates[0]).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: steps.length,
+        message: 'Navigating to page...',
+      });
+      expect(receivedUpdates[3]).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 4,
+        total: steps.length,
+        message: 'Clicking submit...',
+      });
     });
   });
 });

@@ -320,4 +320,215 @@ describe('ModelRegistry', () => {
       expect(models.find((m) => m.id === 'invalid-model')).toBeUndefined();
     });
   });
+
+  describe('duplicate model id handling', () => {
+    it('should skip duplicate model ids and use first registered config', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          { id: 'gpt-4', name: 'GPT-4 First', description: 'First config' },
+          { id: 'gpt-4', name: 'GPT-4 Second', description: 'Second config' },
+          { id: 'gpt-3.5', name: 'GPT-3.5' },
+        ],
+      });
+
+      const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+      expect(models.length).toBe(2);
+
+      const gpt4 = registry.getModel(AuthType.USE_OPENAI, 'gpt-4');
+      expect(gpt4).toBeDefined();
+      expect(gpt4?.name).toBe('GPT-4 First');
+      expect(gpt4?.description).toBe('First config');
+    });
+
+    it('should handle multiple duplicate ids in same authType', () => {
+      const registry = new ModelRegistry({
+        openai: [
+          { id: 'model-a', name: 'Model A First' },
+          { id: 'model-a', name: 'Model A Second' },
+          { id: 'model-b', name: 'Model B First' },
+          { id: 'model-b', name: 'Model B Second' },
+          { id: 'model-c', name: 'Model C' },
+        ],
+      });
+
+      const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+      expect(models.length).toBe(3);
+
+      expect(registry.getModel(AuthType.USE_OPENAI, 'model-a')?.name).toBe(
+        'Model A First',
+      );
+      expect(registry.getModel(AuthType.USE_OPENAI, 'model-b')?.name).toBe(
+        'Model B First',
+      );
+      expect(registry.getModel(AuthType.USE_OPENAI, 'model-c')?.name).toBe(
+        'Model C',
+      );
+    });
+
+    it('should treat same id in different authTypes as different models', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'shared-model', name: 'OpenAI Shared' }],
+        gemini: [{ id: 'shared-model', name: 'Gemini Shared' }],
+      });
+
+      const openaiModel = registry.getModel(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      const geminiModel = registry.getModel(
+        AuthType.USE_GEMINI,
+        'shared-model',
+      );
+
+      expect(openaiModel?.name).toBe('OpenAI Shared');
+      expect(geminiModel?.name).toBe('Gemini Shared');
+    });
+  });
+
+  describe('reloadModels', () => {
+    it('should reload models from new config', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
+      expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-4')).toBeDefined();
+      expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeUndefined();
+
+      registry.reloadModels({
+        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+      });
+
+      // After reload, only new models should exist
+      expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
+      expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-4')).toBeUndefined();
+      expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
+    });
+
+    it('should preserve hard-coded qwen-oauth models after reload', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
+        QWEN_OAUTH_MODELS.length,
+      );
+
+      registry.reloadModels({
+        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+      });
+
+      // qwen-oauth models should still exist
+      expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
+        QWEN_OAUTH_MODELS.length,
+      );
+      expect(
+        registry.getModel(AuthType.QWEN_OAUTH, 'coder-model'),
+      ).toBeDefined();
+    });
+
+    it('should clear user-configured models when reload with empty config', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+      });
+
+      expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(1);
+      expect(registry.getModelsForAuthType(AuthType.USE_GEMINI).length).toBe(1);
+
+      registry.reloadModels({});
+
+      // All user-configured models should be cleared
+      expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(0);
+      expect(registry.getModelsForAuthType(AuthType.USE_GEMINI).length).toBe(0);
+
+      // qwen-oauth models should still exist
+      expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
+        QWEN_OAUTH_MODELS.length,
+      );
+    });
+
+    it('should ignore qwen-oauth models in reload config', () => {
+      const registry = new ModelRegistry();
+
+      registry.reloadModels({
+        'qwen-oauth': [{ id: 'custom-qwen', name: 'Custom Qwen' }],
+      });
+
+      // qwen-oauth should still use hard-coded models
+      const qwenModels = registry.getModelsForAuthType(AuthType.QWEN_OAUTH);
+      expect(qwenModels.length).toBe(QWEN_OAUTH_MODELS.length);
+      expect(qwenModels.find((m) => m.id === 'custom-qwen')).toBeUndefined();
+    });
+
+    it('should handle reload with multiple authTypes', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      registry.reloadModels({
+        openai: [
+          { id: 'gpt-4', name: 'GPT-4 Updated' },
+          { id: 'gpt-3.5', name: 'GPT-3.5' },
+        ],
+        gemini: [{ id: 'gemini-pro', name: 'Gemini Pro' }],
+      });
+
+      const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+      expect(openaiModels.length).toBe(2);
+      expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-4')?.name).toBe(
+        'GPT-4 Updated',
+      );
+
+      const geminiModels = registry.getModelsForAuthType(AuthType.USE_GEMINI);
+      expect(geminiModels.length).toBe(1);
+    });
+
+    it('should skip invalid authType keys during reload', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      registry.reloadModels({
+        openai: [{ id: 'gpt-3.5', name: 'GPT-3.5' }],
+        'invalid-key': [{ id: 'invalid-model', name: 'Invalid Model' }],
+      } as unknown as ModelProvidersConfig);
+
+      const openaiModels = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+      expect(openaiModels.length).toBe(1);
+      expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
+    });
+
+    it('should handle reload with undefined config', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      });
+
+      registry.reloadModels(undefined);
+
+      // All user-configured models should be cleared
+      expect(registry.getModelsForAuthType(AuthType.USE_OPENAI).length).toBe(0);
+      // qwen-oauth models should still exist
+      expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
+        QWEN_OAUTH_MODELS.length,
+      );
+    });
+
+    it('should apply duplicate model id handling during reload', () => {
+      const registry = new ModelRegistry();
+
+      registry.reloadModels({
+        openai: [
+          { id: 'model-a', name: 'Model A First' },
+          { id: 'model-a', name: 'Model A Second' },
+        ],
+      });
+
+      const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+      expect(models.length).toBe(1);
+      expect(registry.getModel(AuthType.USE_OPENAI, 'model-a')?.name).toBe(
+        'Model A First',
+      );
+    });
+  });
 });

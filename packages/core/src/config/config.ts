@@ -771,6 +771,19 @@ export class Config {
   }
 
   /**
+   * Reload model providers configuration at runtime.
+   * This enables hot-reloading of modelProviders settings without restarting the CLI.
+   * Should be called before refreshAuth when settings.json has been updated.
+   *
+   * @param modelProvidersConfig - The updated model providers configuration
+   */
+  reloadModelProvidersConfig(
+    modelProvidersConfig?: ModelProvidersConfig,
+  ): void {
+    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
+  }
+
+  /**
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {

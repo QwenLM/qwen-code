@@ -1086,6 +1086,26 @@ describe('BaseJsonOutputAdapter', () => {
     });
   });
 
+  describe('emitToolProgress', () => {
+    it('should be a no-op in base class (does not emit any message)', () => {
+      const request: ToolCallRequestInfo = {
+        callId: 'tool-call-1',
+        name: 'mcp__echo-test__echo',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: '',
+      };
+      adapter.emitToolProgress(request, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 10,
+        message: 'Echo: 1',
+      });
+
+      expect(adapter.emittedMessages).toHaveLength(0);
+    });
+  });
+
   describe('buildResultMessage', () => {
     beforeEach(() => {
       adapter.startAssistantMessage();

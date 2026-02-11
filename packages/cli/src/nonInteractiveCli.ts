@@ -41,6 +41,7 @@ import {
   normalizePartList,
   extractPartsFromUserMessage,
   buildSystemMessage,
+  createToolProgressHandler,
   createTaskToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
@@ -313,31 +314,29 @@ export async function runNonInteractive(
                 ? options.controlService.permission.getToolCallUpdateCallback()
                 : undefined;
 
-            // Create output handler for Task tool (for subagent execution)
+            // Build outputUpdateHandler for this tool call.
+            // Task tool has its own complex handler (subagent messages).
+            // All other tools with canUpdateOutput=true (e.g., MCP tools)
+            // get a generic handler that emits progress via the adapter.
             const isTaskTool = finalRequestInfo.name === 'task';
-            const taskToolProgress = isTaskTool
+            const { handler: outputUpdateHandler } = isTaskTool
               ? createTaskToolProgressHandler(
                   config,
                   finalRequestInfo.callId,
                   adapter,
                 )
-              : undefined;
-            const taskToolProgressHandler = taskToolProgress?.handler;
+              : createToolProgressHandler(finalRequestInfo, adapter);
 
             const toolResponse = await executeToolCall(
               config,
               finalRequestInfo,
               abortController.signal,
-              taskToolProgressHandler || toolCallUpdateCallback
-                ? {
-                    ...(taskToolProgressHandler && {
-                      outputUpdateHandler: taskToolProgressHandler,
-                    }),
-                    ...(toolCallUpdateCallback && {
-                      onToolCallsUpdate: toolCallUpdateCallback,
-                    }),
-                  }
-                : undefined,
+              {
+                outputUpdateHandler,
+                ...(toolCallUpdateCallback && {
+                  onToolCallsUpdate: toolCallUpdateCallback,
+                }),
+              },
             );
 
             // Note: In JSON mode, subagent messages are automatically added to the main

@@ -1175,4 +1175,16 @@ export class ModelsConfig {
       this.activeRuntimeModelSnapshotId = undefined;
     }
   }
+
+  /**
+   * Reload model providers configuration at runtime.
+   * This enables hot-reloading of modelProviders settings without restarting the CLI.
+   *
+   * @param modelProvidersConfig - The updated model providers configuration
+   */
+  reloadModelProvidersConfig(
+    modelProvidersConfig?: ModelProvidersConfig,
+  ): void {
+    this.modelRegistry.reloadModels(modelProvidersConfig);
+  }
 }

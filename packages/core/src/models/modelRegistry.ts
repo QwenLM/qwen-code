@@ -82,7 +82,8 @@ export class ModelRegistry {
   }
 
   /**
-   * Register models for an authType
+   * Register models for an authType.
+   * If multiple models have the same id, the first one takes precedence.
    */
   private registerAuthTypeModels(
     authType: AuthType,
@@ -91,6 +92,13 @@ export class ModelRegistry {
     const modelMap = new Map<string, ResolvedModelConfig>();
 
     for (const config of models) {
+      // Skip if a model with the same id is already registered (first one wins)
+      if (modelMap.has(config.id)) {
+        debugLogger.warn(
+          `Duplicate model id "${config.id}" for authType "${authType}". Using the first registered config.`,
+        );
+        continue;
+      }
       const resolved = this.resolveModelConfig(config, authType);
       modelMap.set(config.id, resolved);
     }
@@ -179,6 +187,41 @@ export class ModelRegistry {
       throw new Error(
         `Model config in authType '${authType}' missing required field: id`,
       );
+    }
+  }
+
+  /**
+   * Reload models from updated configuration.
+   * Clears existing user-configured models and re-registers from new config.
+   * Preserves hard-coded qwen-oauth models.
+   */
+  reloadModels(modelProvidersConfig?: ModelProvidersConfig): void {
+    // Clear existing user-configured models (preserve qwen-oauth)
+    for (const authType of this.modelsByAuthType.keys()) {
+      if (authType !== AuthType.QWEN_OAUTH) {
+        this.modelsByAuthType.delete(authType);
+      }
+    }
+
+    // Re-register user-configured models for other authTypes
+    if (modelProvidersConfig) {
+      for (const [rawKey, models] of Object.entries(modelProvidersConfig)) {
+        const authType = validateAuthTypeKey(rawKey);
+
+        if (!authType) {
+          debugLogger.warn(
+            `Invalid authType key "${rawKey}" in modelProviders config. Expected one of: ${Object.values(AuthType).join(', ')}. Skipping.`,
+          );
+          continue;
+        }
+
+        // Skip qwen-oauth as it uses hard-coded models
+        if (authType === AuthType.QWEN_OAUTH) {
+          continue;
+        }
+
+        this.registerAuthTypeModels(authType, models);
+      }
     }
   }
 }
